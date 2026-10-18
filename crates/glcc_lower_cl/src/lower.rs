@@ -869,23 +869,13 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
         };
         if !mir_ty.is_aggregate() {
             if parts.len() == 1 {
-                let mut v = parts[0].1;
                 // Narrow scalars arrive in a wider register whose upper
                 // bits the caller leaves unspecified on every target
                 // (the cover type is register-width, e.g. a `char` in
-                // w0 on AAPCS64): reduce to the declared width at the
-                // boundary. Besides dropping caller residue, this keeps
-                // the -O0 entry spill (a declaration-sized slot) from
-                // receiving an over-wide store. A no-op where cover and
-                // declared widths agree (x86-64 exact covers).
-                if matches!(mir_ty, mir::Ty::Bool | mir::Ty::Int { .. }) {
-                    if let Some(decl) = clif_ty(mir_ty) {
-                        let got = builder.func.dfg.value_type(v);
-                        if got != decl {
-                            v = resize_int(builder, v, got, decl);
-                        }
-                    }
-                }
+                // w0 on AAPCS64). Besides dropping caller residue, the
+                // reduce keeps the -O0 entry spill (a declaration-sized
+                // slot) from receiving an over-wide store.
+                let v = narrow_to_declared(builder, parts[0].1, mir_ty);
                 body.values.insert(mir_param, v);
             } else {
                 // Scalar spanning slots (128-bit pairs) rejoins here.
@@ -2337,6 +2327,26 @@ fn resize_int(builder: &mut FunctionBuilder, v: ClifValue, from: Type, to: Type)
     } else {
         builder.ins().ireduce(to, v)
     }
+}
+
+/// Narrow an ABI cover-width value back to its declared width, the
+/// inverse of `Return`'s widening. Narrow scalars cross at register
+/// width (`int_cover`: W-register covers on AAPCS64/RISC-V, exact
+/// widths on x86-64), while bodies carry declared widths so casts and
+/// spills lower directly. Non-integer types are passed through: their
+/// covers already match.
+fn narrow_to_declared(builder: &mut FunctionBuilder, v: ClifValue, mir_ty: &mir::Ty) -> ClifValue {
+    if !matches!(mir_ty, mir::Ty::Bool | mir::Ty::Int { .. }) {
+        return v;
+    }
+    let Some(decl) = clif_ty(mir_ty) else {
+        return v;
+    };
+    let got = builder.func.dfg.value_type(v);
+    if got == decl {
+        return v;
+    }
+    resize_int(builder, v, got, decl)
 }
 
 fn emit_memcpy_offset(builder: &mut FunctionBuilder, dst_base: ClifValue, dst_off: u64, src: ClifValue, len: u64) {
@@ -4920,7 +4930,13 @@ fn map_call_results(
             // the value itself.
             let scalar = result_val.map(|v| !body.func.values[v].ty.is_aggregate()).unwrap_or(false);
             if pieces.len() == 1 && scalar {
-                return results.into_iter().next();
+                let v = results.into_iter().next()?;
+                // The callee widened the result to its slot width
+                // (`Return`); hand the body back a declared-width value,
+                // like entry params get on arrival.
+                let mir_val = result_val.expect("scalar result carries a MIR value");
+                let mir_ty = body.func.values[mir_val].ty.clone();
+                return Some(narrow_to_declared(builder, v, &mir_ty));
             }
             if scalar {
                 // Multi-piece scalar (128-bit pair) rejoins to one value.

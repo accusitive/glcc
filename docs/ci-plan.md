@@ -18,6 +18,14 @@ aarch64 host, and now derives its cross target from the host (audit
 aarch64-6). The job stopped there, so most of the tree still has to
 prove itself on arm.
 
+Revision (2026-10-18, third run): the driver-test fix held —
+`linux-x86_64` (41 s) and `windows-x86_64` (1m30s) green, and
+`linux-aarch64` ran through `glcc_frontend` (568 passing) into the
+`glcc_lower_mir` execution tests, where it failed two: narrow call
+results kept their ABI cover width instead of the declared width
+(audit aarch64-7, a real codegen bug, fixed) and one test assumed
+signed `char` (audit aarch64-8, fixed).
+
 Owner's goals, quoted:
 
 > - Test the C frontend/compiler only — never C++ / EDG (no
@@ -443,9 +451,10 @@ unix-permission usage, `std::os::unix` appears once with a Windows twin
    they cannot fail to compile.
 3. **`glcc_lower_mir` tests have no arch cfg and execute native code.**
    They are written against `Target::native()` and long-double kind
-   selection is dynamic (`crates/glcc_lower_mir/src/lower.rs:9608-9613`),
-   so they should pass on arm, but this is the largest "should" in the
-   plan. The arm job is the experiment that settles it.
+   selection is dynamic (`crates/glcc_lower_mir/src/lower.rs:9608-9613`).
+   The third run exercised them on arm: 103 of 105 passed; the two
+   failures are audit aarch64-7 (real, fixed) and aarch64-8 (test
+   assumption, fixed).
 4. **`fern` JIT tests fail on aarch64** (observed on the first CI run):
    `-p fern --test jit` — 17 of 24 fail, all panicking inside
    `cranelift-jit 0.136.2` (`compiled_blob.rs:324`,
@@ -460,6 +469,23 @@ unix-permission usage, `std::os::unix` appears once with a Windows twin
    native — and the arm runner *is* native aarch64. It now picks a
    target that is cross relative to the host. Any test that hardcodes
    "arch X is cross" breaks on an X host.
+7. **Narrow call results kept their cover width** (third run, fixed).
+   `int_cover` (`crates/glcc_lower_cl/src/abi.rs:534-549`) widens
+   sub-32-bit scalars to W-register width on AAPCS64, and
+   `map_call_results` handed that I32 back as a value whose MIR type is
+   `unsigned char`; the next widening cast then emitted `uextend.i32`
+   on an i32, which the Cranelift verifier rejects
+   (`bool_to_byte_convert_is_a_no_op`). Entries, arguments and returns
+   already normalized at their borders; results now do too
+   (`narrow_to_declared`, `crates/glcc_lower_cl/src/lower.rs`). x86-64
+   is unaffected: its covers are exact.
+8. **`switch_promotion` assumed signed `char`** (third run, fixed):
+   plain `char` is unsigned on aarch64 by ABI, and glcc models that
+   (`Target::AARCH64.char_signed == false`, `char_signedness_matches_clang`),
+   so `char c = -1` is 255 and matching `case 255` is the correct
+   result. The test now spells `signed char` for the sign-extension
+   assertion and checks the plain-`char` case against
+   `Target::native().char_signed`.
 
 ### Both
 
@@ -492,13 +518,15 @@ Implemented note: all three jobs landed together (the workflow above).
 First run (2026-10-18): `linux-x86_64` green; `linux-aarch64` and
 `windows-x86_64` failed in `fern`/`fernc` (see audit) before reaching
 the rest of the tree — cargo stops at the first failing test target.
-`fern`/`fernc` are now excluded; the second run (same day) was
-`linux-x86_64` green (33 s), `windows-x86_64` fully green (2m12s), and
-`linux-aarch64` red on one host-dependent driver test (`target_flag`,
-audit aarch64-6), fixed since. Arm still aborts early, so most crates
-have yet to run there. If Windows goes red, the cheap dial is
-`continue-on-error: true` on that matrix row; do not leave it yellow
-forever.
+`fern`/`fernc` are now excluded. Second run: `linux-x86_64` green
+(33 s), `windows-x86_64` fully green (2m12s), `linux-aarch64` red on a
+host-dependent driver test (audit aarch64-6). Third run: x86-64 and
+Windows green again; arm got through `glcc_frontend` and
+`glcc_lower_cl` and failed two `glcc_lower_mir` execution tests
+(audit aarch64-7/-8), both fixed since. `glcc_mir`, `glcc_pp` and the
+remaining targets are the last stretch unproven on arm. If Windows
+goes red, the cheap dial is `continue-on-error: true` on that matrix
+row; do not leave it yellow forever.
 
 How to validate Windows assumptions cheaply *before* merging:
 
@@ -514,10 +542,11 @@ Unknowns / risks:
 - **Windows verified green** (second run, experiments excluded): the
   whole workspace ran and passed on `windows-2025` in 2m12s. The smoke
   test (link + run) is still off; see follow-ups.
-- **aarch64 partially verified**: the second run aborted at the root
-  `glcc` test target (audit aarch64-6, fixed), so `glcc_frontend`,
-  `glcc_lower_mir`'s native JIT tests and the rest of the tree still
-  have to prove themselves on arm (audit item 3).
+- **aarch64 nearly verified**: `glcc_frontend` (568) and
+  `glcc_lower_cl` pass on arm, and `glcc_lower_mir`'s execution tests
+  found the one real bug left in that layer (audit aarch64-7, fixed).
+  `glcc_mir`, `glcc_pp` and later targets are the remaining stretch
+  (audit item 3).
 - **Runner image churn.** windows-latest moved to VS 2026 during 2026;
   arm labels are still young. Pin explicit labels (`windows-2025`,
   `ubuntu-24.04`, `ubuntu-24.04-arm`) and revisit annually.
@@ -537,9 +566,10 @@ Rough estimates (to be measured):
 | linux aarch64 | 5-8 min | 1.5-3 min | ~0.5-1 GB |
 | windows x86-64 | 8-12 min | 3-5 min | ~1-2 GB (watch this) |
 
-Measured runs (2026-10-18): `linux-x86_64` 1m24s cold, 33 s warm;
-`windows-x86_64` 2m12s; `linux-aarch64` 51 s to its single failure.
-Full-suite aarch64 timing is still unmeasured.
+Measured runs (2026-10-18): `linux-x86_64` 1m24s cold, then 33 s and
+41 s warm; `windows-x86_64` 2m12s and 1m30s; `linux-aarch64` 51 s and
+53 s to its failures. A run that finishes the arm suite is still
+unmeasured.
 
 Cost: **$0** while the repo is public — standard GitHub-hosted runners,
 including `ubuntu-24.04-arm`, are free for public repositories. For a

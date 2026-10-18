@@ -9110,11 +9110,20 @@ mod tests {
 
     #[test]
     fn switch_promotion() {
-        // Narrow controlling expressions compare post-promotion:
-        // signed `char` -1 must not match `case 255`.
+        // Narrow controlling expressions compare post-promotion: a
+        // signed `char` -1 must not match `case 255` (spelled out
+        // because plain `char` is unsigned on aarch64).
+        assert_eq!(
+            run_main("int main(){signed char c = -1; switch(c){case 255: return 1; case -1: return 2; default: return 3;}}"),
+            2
+        );
+        // Plain `char` follows the target ABI: signed on x86-64 (so -1
+        // matches `case -1`), unsigned on aarch64 (0xFF matches
+        // `case 255`).
+        let plain_char = if fe::target::Target::native().char_signed { 2 } else { 1 };
         assert_eq!(
             run_main("int main(){char c = -1; switch(c){case 255: return 1; case -1: return 2; default: return 3;}}"),
-            2
+            plain_char
         );
         assert_eq!(
             run_main("int main(){unsigned char c = 255; switch(c){case 255: return 1; case -1: return 2; default: return 3;}}"),
