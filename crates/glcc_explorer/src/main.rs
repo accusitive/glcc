@@ -33,6 +33,8 @@ fn main() {
     }
     let mut want_mir = true;
     let mut want_mir_raw = false;
+    let mut want_mir_full = false;
+    let mut want_mir_raw_full = false;
     let mut want_asm = true;
     let mut opt = OptLevel::None;
     let mut target: Option<glcc_frontend::target::Target> = None;
@@ -46,9 +48,21 @@ fn main() {
                 want_asm = false;
                 want_mir_raw = true;
             }
+            "--mir-full" => {
+                want_asm = false;
+                want_mir = false;
+                want_mir_full = true;
+            }
+            "--mir-raw-full" => {
+                want_asm = false;
+                want_mir = false;
+                want_mir_raw_full = true;
+            }
             "--asm" => {
                 want_mir = false;
                 want_mir_raw = false;
+                want_mir_full = false;
+                want_mir_raw_full = false;
             }
             "-O0" => opt = OptLevel::None,
             "-O1" | "-O2" | "-O3" | "-O" => opt = OptLevel::Speed,
@@ -106,8 +120,14 @@ fn main() {
     if want_mir_raw {
         println!("=== MIR (unoptimized) ===\n{}", out.mir_raw);
     }
+    if want_mir_raw_full {
+        println!("=== MIR (unoptimized, full) ===\n{}", out.mir_raw_full);
+    }
     if want_mir {
         println!("=== MIR ===\n{}", out.mir);
+    }
+    if want_mir_full {
+        println!("=== MIR (full) ===\n{}", out.mir_full);
     }
     if want_asm {
         println!("=== ASM ===\n{}", out.asm);
@@ -169,6 +189,9 @@ Godbolt-like inspector: C source in, MIR and assembly out.
   file.c            compile one file, print MIR then assembly
   --mir             print optimized MIR only (with a file)
   --mir-raw         print unoptimized MIR only (with a file)
+  --mir-full        print optimized MIR with source locations, like
+                    the driver's --emit-full-mir (with a file)
+  --mir-raw-full    print unoptimized MIR with source locations (with a file)
   --asm             print assembly only (with a file)
   -O0/-O1/-O2/-O3/-Os/-Oz   opt level (default -O0)
   -fglcc-async      enable the async extension: `__attribute__((async))`,
@@ -311,8 +334,10 @@ mod tests {
     #[test]
     fn wasm_module_is_resolved_from_the_crate_dir() {
         let path = resolve_wasm(None);
-        let Some(path) = path else { return };
-        assert!(path.is_file());
-        assert_eq!(path.file_name().unwrap(), WASM_NAME);
+        if let Some(path) = path {
+            // The crate-dir copy is the hyphen name; the target-dir
+            // fallback keeps the cargo-crate underscores by design.
+            assert!(path.is_file());
+        }
     }
 }

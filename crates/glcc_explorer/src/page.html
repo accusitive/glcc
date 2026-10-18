@@ -38,6 +38,8 @@
       <select id="mirview">
         <option value="opt" selected>optimized</option>
         <option value="raw">unoptimized</option>
+        <option value="opt-full">optimized · locations</option>
+        <option value="raw-full">unoptimized · locations</option>
         <option value="diff">diff raw → optimized</option>
       </select>
     </h2>
@@ -73,7 +75,7 @@ async function ensureWasm() {
   if (wasm) return;
   if (!modulePromise) {
     modulePromise = (async () => {
-      const r = await fetch('glcc-explorer.wasm');
+      const r = await fetchWithTimeout('glcc-explorer.wasm', 120000);
       if (!r.ok) throw new Error('cannot fetch glcc-explorer.wasm (' + r.status + '); run ./tools/build-wasm.sh and serve with glcc-explorer --serve');
       return WebAssembly.compile(await r.arrayBuffer());
     })();
@@ -115,6 +117,8 @@ function showMir() {
   const view = $('mirview').value;
   const raw = last.mir_raw || '';
   const opt = last.mir || '';
+  const rawFull = last.mir_raw_full || raw;
+  const optFull = last.mir_full || opt;
   if (view === 'diff') {
     $('mirHost').hidden = true;
     $('mirDiffHost').hidden = false;
@@ -140,7 +144,22 @@ function showMir() {
     }
     plainMir.raw.setValue(raw);
     plainMir.opt.setValue(opt);
-    mirEditor.setModel(view === 'raw' ? plainMir.raw : plainMir.opt);
+    plainMir['raw-full'].setValue(rawFull);
+    plainMir['opt-full'].setValue(optFull);
+    mirEditor.setModel(plainMir[view]);
+  }
+}
+
+// Local-only requests still stall now and then (a dropped connection
+// or a stuck download); without an abort the page would sit on
+// "compiling…" forever or hold a half-written asm panel.
+async function fetchWithTimeout(url, ms, opts) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, Object.assign({ signal: ctrl.signal }, opts || {}));
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -169,11 +188,15 @@ async function go() {
     return;
   }
   last = json;
-  showMir();
   err.textContent = (json.errors || []).join('\n');
+  try {
+    showMir();
+  } catch (e) {
+    err.textContent += (err.textContent ? '\n' : '') + 'MIR panel failed: ' + (e && e.stack || String(e));
+  }
   if (object.length) {
     try {
-      const r = await fetch('/disasm', { method: 'POST', body: object });
+      const r = await fetchWithTimeout('/disasm', 30000, { method: 'POST', body: object });
       asmEditor.setValue(await r.text());
     } catch (e) {
       asmEditor.setValue('disassembly request failed: ' + e + '\n(the compiler ran in wasm; only objdump is server-side)');
@@ -237,7 +260,12 @@ function registerLanguages() {
       });
       editor.onDidChangeModelContent(schedule);
       editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, go);
-      plainMir = { raw: monaco.editor.createModel('', 'mir'), opt: monaco.editor.createModel('', 'mir') };
+      plainMir = {
+        raw: monaco.editor.createModel('', 'mir'),
+        opt: monaco.editor.createModel('', 'mir'),
+        'raw-full': monaco.editor.createModel('', 'mir'),
+        'opt-full': monaco.editor.createModel('', 'mir'),
+      };
       diffMir = { raw: monaco.editor.createModel('', 'mir'), opt: monaco.editor.createModel('', 'mir') };
       asmEditor = monaco.editor.create($('asmHost'), {
         value: '', language: 'asm', theme: 'vs-dark',
@@ -252,7 +280,7 @@ function registerLanguages() {
 })();
 
 // `#mir=diff` picks the initial MIR view (handy for sharing).
-const hashView = (location.hash.match(/mir=(raw|opt|diff)/) || [])[1];
+const hashView = (location.hash.match(/mir=(raw-full|opt-full|raw|opt|diff)/) || [])[1];
 if (hashView) $('mirview').value = hashView;
 
 $('go').onclick = go;

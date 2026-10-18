@@ -160,9 +160,11 @@ fn run(opts: &Options) -> Result<(), String> {
             .add_module_pass(passes::Inline::small())
             .add_func_pass(passes::Mem2Reg)
             .add_func_pass(passes::ConstFold)
+            .add_func_pass(passes::Sccp)
             .add_func_pass(passes::InstCombine)
             .add_func_pass(passes::ConstMerge)
             .add_func_pass(passes::Cse)
+            .add_func_pass(passes::Licm)
             .add_func_pass(passes::SimplifyCfg)
             .add_func_pass(passes::DeadCodeElim);
         pm.run(&mut module);

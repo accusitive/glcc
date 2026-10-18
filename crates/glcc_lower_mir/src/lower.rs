@@ -8569,9 +8569,11 @@ mod tests {
             .add_module_pass(mir::passes::Inline::small())
             .add_func_pass(mir::passes::Mem2Reg)
             .add_func_pass(mir::passes::ConstFold)
+            .add_func_pass(mir::passes::Sccp)
             .add_func_pass(mir::passes::InstCombine)
             .add_func_pass(mir::passes::ConstMerge)
             .add_func_pass(mir::passes::Cse)
+            .add_func_pass(mir::passes::Licm)
             .add_func_pass(mir::passes::SimplifyCfg)
             .add_func_pass(mir::passes::DeadCodeElim);
         pm.run(module);

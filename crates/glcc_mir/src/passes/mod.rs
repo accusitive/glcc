@@ -1,10 +1,14 @@
 pub mod constmerge;
 pub mod cse;
 pub mod instcombine;
+pub mod licm;
+pub mod sccp;
 
 pub use constmerge::ConstMerge;
 pub use cse::Cse;
 pub use instcombine::InstCombine;
+pub use licm::Licm;
+pub use sccp::Sccp;
 
 use crate::ir::{
     Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstKind, Module, Terminator, Value,
@@ -66,6 +70,106 @@ fn eval_icmp(pred: IcmpPred, bits: u32, lhs: i128, rhs: i128) -> bool {
         IcmpPred::Sle => lhs <= rhs,
         IcmpPred::Sgt => lhs > rhs,
         IcmpPred::Sge => lhs >= rhs,
+    }
+}
+
+/// Bits-level fold helpers shared by ConstFold (which resolves `Value`
+/// operands first) and SCCP (whose operands are lattice contents). Each
+/// refuses to produce a constant where that would erase a runtime trap
+/// or read a bit pattern the backend defines: division by a wrapped
+/// zero and oversized shifts never fold.
+fn fold_int2_bits(bits: u32, x: i128, y: i128, f: impl FnOnce(i128, i128) -> i128) -> Option<Const> {
+    Some(Const::Int {
+        bits,
+        value: wrap(bits, f(x, y)),
+    })
+}
+
+/// Refuse oversized shifts (C UB, and the backend defines the hardware
+/// behavior): those stay for codegen.
+fn fold_shift_bits(
+    bits: u32,
+    x: u128,
+    s: i128,
+    f: impl FnOnce(u128, u32) -> u128,
+) -> Option<Const> {
+    if bits == 0 || bits > 128 || s < 0 || s as u128 >= bits as u128 {
+        return None;
+    }
+    let m = mask(bits);
+    Some(Const::Int {
+        bits,
+        value: wrap(bits, f(x & m, s as u32) as i128),
+    })
+}
+
+/// Refuse zero divisors so the runtime trap survives.
+fn fold_div_bits(bits: u32, x: i128, y: i128, signed: bool, is_rem: bool) -> Option<Const> {
+    if y == 0 || bits == 0 || bits > 128 {
+        return None;
+    }
+    let value = if signed {
+        wrap(
+            bits,
+            if is_rem {
+                x.wrapping_rem(y)
+            } else {
+                x.wrapping_div(y)
+            },
+        )
+    } else {
+        let m = mask(bits);
+        let xu = (x as u128) & m;
+        let yu = (y as u128) & m;
+        // `y != 0` as a wrapped value implies `yu != 0`.
+        let q = if is_rem {
+            xu.wrapping_rem(yu)
+        } else {
+            xu.wrapping_div(yu)
+        };
+        wrap(bits, q as i128)
+    };
+    Some(Const::Int { bits, value })
+}
+
+fn fold_neg_bits(bits: u32, x: i128) -> Option<Const> {
+    Some(Const::Int {
+        bits,
+        value: wrap(bits, x.wrapping_neg()),
+    })
+}
+
+fn fold_not_bits(bits: u32, x: i128) -> Option<Const> {
+    Some(Const::Int {
+        bits,
+        value: wrap(bits, !x),
+    })
+}
+
+/// An arithmetic shift right (sign-preserving Rust `>>` on the wrapped
+/// value), refusing oversized shifts like the other shifts.
+fn fold_ashr_bits(bits: u32, x: i128, s: i128) -> Option<Const> {
+    if bits == 0 || bits > 128 || s < 0 || s as u128 >= bits as u128 {
+        return None;
+    }
+    Some(Const::Int {
+        bits,
+        value: wrap(bits, x >> s as u32),
+    })
+}
+
+/// IEEE NaN semantics for one `Fcmp` over resolved float values.
+fn fold_fcmp_bits(pred: FcmpPred, l: f64, r: f64) -> bool {
+    let nan = l.is_nan() || r.is_nan();
+    match pred {
+        FcmpPred::Eq => !nan && l == r,
+        FcmpPred::Ne => nan || l != r,
+        FcmpPred::Lt => !nan && l < r,
+        FcmpPred::Le => !nan && l <= r,
+        FcmpPred::Gt => !nan && l > r,
+        FcmpPred::Ge => !nan && l >= r,
+        FcmpPred::Uno => nan,
+        FcmpPred::Ord => !nan,
     }
 }
 
@@ -236,10 +340,7 @@ impl FunctionPass for ConstFold {
 fn fold_int2(func: &Function, a: Value, b: Value, f: impl Fn(i128, i128) -> i128) -> Option<Const> {
     let (bits, x) = int_const(func, a)?;
     let (_, y) = int_const(func, b)?;
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, f(x, y)),
-    })
+    fold_int2_bits(bits, x, y, f)
 }
 
 /// Fold a bit-shifting op, refusing oversized shifts (C UB, and the
@@ -247,14 +348,7 @@ fn fold_int2(func: &Function, a: Value, b: Value, f: impl Fn(i128, i128) -> i128
 fn fold_shift(func: &Function, a: Value, b: Value, f: impl Fn(u128, u32) -> u128) -> Option<Const> {
     let (bits, x) = int_const(func, a)?;
     let (_, y) = int_const(func, b)?;
-    if bits == 0 || bits > 128 || y < 0 || y as u128 >= bits as u128 {
-        return None;
-    }
-    let m = mask(bits);
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, f((x as u128) & m, y as u32) as i128),
-    })
+    fold_shift_bits(bits, x as u128, y, f)
 }
 
 /// Fold division/remainder, refusing zero divisors so the runtime
@@ -262,62 +356,27 @@ fn fold_shift(func: &Function, a: Value, b: Value, f: impl Fn(u128, u32) -> u128
 fn fold_div(func: &Function, a: Value, b: Value, signed: bool, is_rem: bool) -> Option<Const> {
     let (bits, x) = int_const(func, a)?;
     let (_, y) = int_const(func, b)?;
-    if y == 0 || bits == 0 || bits > 128 {
-        return None;
-    }
-    let value = if signed {
-        wrap(
-            bits,
-            if is_rem {
-                x.wrapping_rem(y)
-            } else {
-                x.wrapping_div(y)
-            },
-        )
-    } else {
-        let m = mask(bits);
-        let xu = (x as u128) & m;
-        let yu = (y as u128) & m;
-        // `y != 0` as a wrapped value implies `yu != 0`.
-        let q = if is_rem {
-            xu.wrapping_rem(yu)
-        } else {
-            xu.wrapping_div(yu)
-        };
-        wrap(bits, q as i128)
-    };
-    Some(Const::Int { bits, value })
+    fold_div_bits(bits, x, y, signed, is_rem)
 }
 
 /// Fold two's-complement negation with wraparound.
 fn fold_neg(func: &Function, a: Value) -> Option<Const> {
     let (bits, x) = int_const(func, a)?;
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, x.wrapping_neg()),
-    })
+    fold_neg_bits(bits, x)
 }
 
 /// Fold bitwise complement.
 fn fold_not(func: &Function, a: Value) -> Option<Const> {
     let (bits, x) = int_const(func, a)?;
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, !x),
-    })
+    fold_not_bits(bits, x)
 }
 
 /// Fold an arithmetic shift right (sign-preserving Rust `>>` on the
 /// wrapped value), refusing oversized shifts like the other shifts.
-fn fold_ashr(func: &Function, a: Value, b: Value) -> Option<Const> {    let (bits, x) = int_const(func, a)?;
+fn fold_ashr(func: &Function, a: Value, b: Value) -> Option<Const> {
+    let (bits, x) = int_const(func, a)?;
     let (_, y) = int_const(func, b)?;
-    if bits == 0 || bits > 128 || y < 0 || y as u128 >= bits as u128 {
-        return None;
-    }
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, x >> y as u32),
-    })
+    fold_ashr_bits(bits, x, y)
 }
 
 /// Fold an int-to-int bitcast, only when the widths agree (a
@@ -367,20 +426,9 @@ fn fold_fcmp(func: &Function, pred: FcmpPred, lhs: Value, rhs: Value) -> Option<
         }
         _ => return None,
     };
-    let nan = l.is_nan() || r.is_nan();
-    let b = match pred {
-        FcmpPred::Eq => !nan && l == r,
-        FcmpPred::Ne => nan || l != r,
-        FcmpPred::Lt => !nan && l < r,
-        FcmpPred::Le => !nan && l <= r,
-        FcmpPred::Gt => !nan && l > r,
-        FcmpPred::Ge => !nan && l >= r,
-        FcmpPred::Uno => nan,
-        FcmpPred::Ord => !nan,
-    };
     Some(Const::Int {
         bits: 1,
-        value: i128::from(b),
+        value: i128::from(fold_fcmp_bits(pred, l, r)),
     })
 }
 
@@ -899,9 +947,15 @@ fn switch_targets(func: &Function) -> std::collections::HashSet<Block> {
     targets
 }
 
-/// Immediate dominators, dominator-tree children, and dominance
-/// frontiers over the blocks reachable from the entry.
+/// Immediate dominators, dominator-tree children, dominance
+/// frontiers, and predecessors over the blocks reachable from the
+/// entry. `preds`/`idom` serve loop analysis (LICM back edges, SCCP
+/// is flow-based and needs none).
 struct DomInfo {
+    /// Reachable predecessors of each block, one per branch arm.
+    preds: Vec<Vec<Block>>,
+    /// Immediate dominator of every reachable block except the entry.
+    idom: Vec<Option<Block>>,
     children: Vec<Vec<Block>>,
     df: Vec<Vec<Block>>,
 }
@@ -979,7 +1033,12 @@ impl DomInfo {
             }
         }
 
-        DomInfo { children, df }
+        DomInfo {
+            preds,
+            idom,
+            children,
+            df,
+        }
     }
 }
 

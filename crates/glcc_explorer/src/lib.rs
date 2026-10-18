@@ -76,7 +76,9 @@ impl Options {
 ///
 /// `mir` is the post-pass (optimized) dump and matches the generated
 /// assembly; `mir_raw` is the pre-pass dump straight from lowering.
-/// With `-fglcc-async` the raw dump still carries `await` instructions:
+/// The `_full` variants annotate every located instruction with its
+/// source position, like the driver's `--emit-full-mir`. With
+/// `-fglcc-async` the raw dump still carries `await` instructions:
 /// the coroutine split into start/resume pairs happens between the two
 /// views, before optimization, as in the driver.
 #[derive(Debug, Clone)]
@@ -84,6 +86,8 @@ pub struct Output {
     pub success: bool,
     pub mir: String,
     pub mir_raw: String,
+    pub mir_full: String,
+    pub mir_raw_full: String,
     pub asm: String,
     pub errors: Vec<String>,
     pub object_len: usize,
@@ -98,6 +102,8 @@ pub struct Output {
 pub struct Prepared {
     pub mir: String,
     pub mir_raw: String,
+    pub mir_full: String,
+    pub mir_raw_full: String,
     pub object: Vec<u8>,
     pub errors: Vec<String>,
 }
@@ -119,6 +125,8 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
                     success: false,
                     mir: String::new(),
                     mir_raw: String::new(),
+                    mir_full: String::new(),
+                    mir_raw_full: String::new(),
                     asm: String::new(),
                     errors: vec![e],
                     object_len: 0,
@@ -130,13 +138,15 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
         source.to_string()
     };
 
-    let (mut mir_module, mir_raw) = match lower_to_mir(&text, target, opts.async_enabled) {
+    let (mut mir_module, mir_raw, mir_raw_full) = match lower_to_mir(&text, target, opts.async_enabled) {
         Ok(v) => v,
         Err(e) => {
             return Err(Output {
                 success: false,
                 mir: e.partial_mir.clone(),
                 mir_raw: e.partial_mir,
+                mir_full: String::new(),
+                mir_raw_full: String::new(),
                 asm: String::new(),
                 errors: e.errors,
                 object_len: 0,
@@ -146,6 +156,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
     };
     run_mir_passes(&mut mir_module, opts.opt);
     let mir_text = glcc_mir::display::dump_module(&mir_module);
+    let mir_full = glcc_mir::display::dump_module_full(&mir_module);
     errors.extend(mir_module_verify_notes(&mir_module));
 
     let object_bytes = match lower_to_object(&mir_module, target, opts.opt) {
@@ -155,6 +166,8 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
                 success: false,
                 mir: mir_text,
                 mir_raw: mir_raw.clone(),
+                mir_full,
+                mir_raw_full,
                 asm: String::new(),
                 errors: [errors, vec![e]].concat(),
                 object_len: 0,
@@ -166,6 +179,8 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
     Ok(Prepared {
         mir: mir_text,
         mir_raw,
+        mir_full,
+        mir_raw_full,
         object: object_bytes,
         errors,
     })
@@ -180,6 +195,8 @@ pub fn compile(source: &str, opts: &Options) -> Output {
             asm: disassemble(&p.object),
             mir: p.mir,
             mir_raw: p.mir_raw,
+            mir_full: p.mir_full,
+            mir_raw_full: p.mir_raw_full,
             errors: p.errors,
             object_len: p.object.len(),
             object: p.object,
@@ -197,6 +214,8 @@ pub fn compile_object(source: &str, opts: &Options) -> Output {
             success: p.errors.is_empty(),
             mir: p.mir,
             mir_raw: p.mir_raw,
+            mir_full: p.mir_full,
+            mir_raw_full: p.mir_raw_full,
             asm: String::new(),
             errors: p.errors,
             object_len: p.object.len(),
@@ -294,7 +313,7 @@ fn lower_to_mir(
     source: &str,
     target: FrontendTarget,
     async_enabled: bool,
-) -> Result<(glcc_mir::Module, String), MirFailure> {
+) -> Result<(glcc_mir::Module, String, String), MirFailure> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut interner = Interner::new();
         let mut sema = Sema::with_target(target);
@@ -305,21 +324,21 @@ fn lower_to_mir(
         drop(parser);
         let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
         let text = glcc_mir::display::dump_module(&module);
+        let text_full = glcc_mir::display::dump_module_full(&module);
         // Driver-equivalent ordering: coroutines become start/resume
         // pairs before any other pass and regardless of the opt level
-        // (`await` has no lowering of its own); the pass is inert
-        // without the flag. `text` stays pre-split so the raw panel
-        // shows the awaits.
+        // (`await` has no lowering of its own); `text` stays pre-split
+        // so the raw panels show the awaits.
         glcc_mir::pass::PassManager::new()
             .add_module_pass(glcc_mir::coroutine::LowerCoroutines)
             .run(&mut module);
-        (module, text)
+        (module, text, text_full)
     }));
     match outcome {
-        Ok((module, text)) => {
+        Ok((module, text, text_full)) => {
             let verify = glcc_mir::verify::verify_module(&module);
             if verify.is_empty() {
-                Ok((module, text))
+                Ok((module, text, text_full))
             } else {
                 Err(MirFailure {
                     errors: verify,
@@ -353,9 +372,11 @@ fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
     let mut pm = pm
         .add_func_pass(glcc_mir::passes::Mem2Reg)
         .add_func_pass(glcc_mir::passes::ConstFold)
+        .add_func_pass(glcc_mir::passes::Sccp)
         .add_func_pass(glcc_mir::passes::InstCombine)
         .add_func_pass(glcc_mir::passes::ConstMerge)
         .add_func_pass(glcc_mir::passes::Cse)
+        .add_func_pass(glcc_mir::passes::Licm)
         .add_func_pass(glcc_mir::passes::SimplifyCfg)
         .add_func_pass(glcc_mir::passes::DeadCodeElim);
     pm.run(module);
@@ -529,10 +550,12 @@ pub fn output_json(o: &Output) -> String {
     }
     err.push(']');
     format!(
-        "{{\"success\":{},\"mir\":\"{}\",\"mir_raw\":\"{}\",\"asm\":\"{}\",\"errors\":{},\"object_len\":{}}}",
+        "{{\"success\":{},\"mir\":\"{}\",\"mir_raw\":\"{}\",\"mir_full\":\"{}\",\"mir_raw_full\":\"{}\",\"asm\":\"{}\",\"errors\":{},\"object_len\":{}}}",
         o.success,
         escape_json(&o.mir),
         escape_json(&o.mir_raw),
+        escape_json(&o.mir_full),
+        escape_json(&o.mir_raw_full),
         escape_json(&o.asm),
         err,
         o.object_len
@@ -640,6 +663,8 @@ mod tests {
             success: true,
             mir: "a\"b\n".to_string(),
             mir_raw: String::new(),
+            mir_full: String::new(),
+            mir_raw_full: String::new(),
             asm: String::new(),
             errors: vec![],
             object_len: 0,
@@ -647,6 +672,34 @@ mod tests {
         };
         let j = output_json(&o);
         assert!(j.contains("a\\\"b\\n"));
+    }
+
+    /// The full MIR views carry `; path:line:column` annotation on the
+    /// located instructions, like the driver's `--emit-full-mir`.
+    #[test]
+    fn full_mir_carries_source_locations() {
+        let out = compile("int add(int a, int b) {\n    return a + b;\n}\n", &opts());
+        assert!(out.success, "errors: {:?}", out.errors);
+        assert!(
+            out.mir_full.contains(" ; "),
+            "full mir was:\n{}",
+            out.mir_full
+        );
+        assert!(
+            out.mir_full.contains("<__glcc_source>:2:5"),
+            "full mir was:\n{}",
+            out.mir_full
+        );
+        assert!(
+            !out.mir.contains(" ; "),
+            "compact mir must stay bare:\n{}",
+            out.mir
+        );
+        assert!(
+            out.mir_raw_full.contains("<__glcc_source>:2:5"),
+            "raw full mir was:\n{}",
+            out.mir_raw_full
+        );
     }
 
     #[test]

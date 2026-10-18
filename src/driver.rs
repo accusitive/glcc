@@ -1209,9 +1209,11 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
         let mut pm = pm
             .add_func_pass(glcc_mir::passes::Mem2Reg)
             .add_func_pass(glcc_mir::passes::ConstFold)
+            .add_func_pass(glcc_mir::passes::Sccp)
             .add_func_pass(glcc_mir::passes::InstCombine)
             .add_func_pass(glcc_mir::passes::ConstMerge)
             .add_func_pass(glcc_mir::passes::Cse)
+            .add_func_pass(glcc_mir::passes::Licm)
             .add_func_pass(glcc_mir::passes::SimplifyCfg)
             .add_func_pass(glcc_mir::passes::DeadCodeElim);
         pm.run(&mut mir_module);
