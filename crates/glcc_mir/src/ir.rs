@@ -348,6 +348,10 @@ pub enum AtomicRmwOp {
     Or,
     Xor,
     Xchg,
+    Umin,
+    Umax,
+    Smin,
+    Smax,
 }
 
 impl InstKind {

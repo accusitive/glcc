@@ -2553,7 +2553,7 @@ impl<'a> Parser<'a> {
         let Some(text) = self.intern.resolve(*name) else {
             return;
         };
-        if text.starts_with("__builtin_") || text.starts_with("__atomic_") {
+        if text.starts_with("__builtin_") || text.starts_with("__atomic_") || text.starts_with("__c11_atomic_") {
             return;
         }
         let span = func.span();

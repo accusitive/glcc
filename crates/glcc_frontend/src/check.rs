@@ -56,6 +56,8 @@ pub enum RmwOp {
     Or,
     Xor,
     Nand,
+    Min,
+    Max,
 }
 
 /// Which floating-point classification a `FpClass` node computes.
@@ -122,6 +124,8 @@ fn typed_overflow_builtin(name: &str) -> Option<(OverflowOp, Ty)> {
 pub enum AtomicOp {
     LoadN { sized: Option<u8> },
     Load,
+    /// C11 `__c11_atomic_init(ptr, val)`: a store with no memory order.
+    Init,
     StoreN { sized: Option<u8> },
     Store,
     ExchangeN { sized: Option<u8> },
@@ -2736,6 +2740,9 @@ impl Sema {
                 if text.starts_with("__atomic_") {
                     return self.check_atomic(text, args, interner, span);
                 }
+                if text.starts_with("__c11_atomic_") {
+                    return self.check_c11_atomic(text, args, interner, span);
+                }
             }
             match interner.resolve(*name) {
                 // Type-generic bit counts (`__builtin_clzg`,
@@ -2908,10 +2915,10 @@ impl Sema {
             "exchange" => return self.check_atomic_exchange(args, interner, span),
             "compare_exchange" if is_n => return self.check_atomic_cmpxchg_n(args, interner, span, sized, name),
             "compare_exchange" => return self.check_atomic_cmpxchg(args, interner, span),
-            "fetch_add" | "fetch_sub" | "fetch_and" | "fetch_or" | "fetch_xor" | "fetch_nand" => {
+            "fetch_add" | "fetch_sub" | "fetch_and" | "fetch_or" | "fetch_xor" | "fetch_nand" | "fetch_min" | "fetch_max" => {
                 return self.check_atomic_rmw(base, true, args, interner, span, sized, name);
             }
-            "add_fetch" | "sub_fetch" | "and_fetch" | "or_fetch" | "xor_fetch" | "nand_fetch" => {
+            "add_fetch" | "sub_fetch" | "and_fetch" | "or_fetch" | "xor_fetch" | "nand_fetch" | "min_fetch" | "max_fetch" => {
                 return self.check_atomic_rmw(base, false, args, interner, span, sized, name);
             }
             "thread_fence" => return self.check_atomic_fence(args, interner, span, false, name),
@@ -2923,6 +2930,91 @@ impl Sema {
             _ => {}
         }
         Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span))
+    }
+
+    /// The clang C11 atomics (`__c11_atomic_*`), what `<stdatomic.h>`
+    /// expands to. Unlike the GCC spellings these carry no `_n`/size
+    /// suffix and `compare_exchange` drops the `weak` flag (strong vs
+    /// weak is in the name), so each maps onto the checker for the
+    /// corresponding GCC form.
+    fn check_c11_atomic(&self, name: &str, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+        let base = &name["__c11_atomic_".len()..];
+        match base {
+            "load" => return self.check_atomic_load_n(args, interner, span, None, name),
+            "store" => return self.check_atomic_store_n(args, interner, span, None, name),
+            "exchange" => return self.check_atomic_exchange_n(args, interner, span, None, name),
+            "init" => return self.check_c11_atomic_init(args, interner, span, name),
+            "compare_exchange_strong" | "compare_exchange_weak" => {
+                return self.check_c11_atomic_cmpxchg(args, interner, span, name);
+            }
+            "fetch_add" | "fetch_sub" | "fetch_and" | "fetch_or" | "fetch_xor" | "fetch_nand" | "fetch_min" | "fetch_max" => {
+                return self.check_atomic_rmw(base, true, args, interner, span, None, name);
+            }
+            "thread_fence" => return self.check_atomic_fence(args, interner, span, false, name),
+            "signal_fence" => return self.check_atomic_fence(args, interner, span, true, name),
+            "is_lock_free" => return self.check_atomic_lock_free(args, interner, span, false, name),
+            _ => {}
+        }
+        Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span))
+    }
+
+    /// C11 `void __c11_atomic_init(T *ptr, T val)`: like a store with
+    /// no memory order. `_Atomic` erases to its base type, so `ptr` is
+    /// an ordinary pointer to the object.
+    fn check_c11_atomic_init(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+        let [ptr, val] = args else {
+            return Err(CompileError::new(format!("`{what}` takes a pointer and a value"), span));
+        };
+        let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
+        let Ty::Pointer { pointee, .. } = ptr.ty.clone() else {
+            return Err(CompileError::new(format!("`{what}` needs a pointer argument"), ptr.span));
+        };
+        let op_ty = self.atomic_n_value_ty(&pointee, None, interner, what, ptr.span)?;
+        let val = self.convert_for_assignment(&op_ty, self.check_expr(val, interner)?, interner)?;
+        Ok(CheckedExpr {
+            ty: Ty::Void,
+            span,
+            kind: CheckedExprKind::Atomic {
+                op: AtomicOp::Init,
+                args: vec![ptr, val],
+            },
+        })
+    }
+
+    /// C11 `bool __c11_atomic_compare_exchange_strong|weak(T *ptr,
+    /// T *expected, T desired, int success, int failure)`: like the GCC
+    /// `_n` form without the `weak` flag (already in the name).
+    fn check_c11_atomic_cmpxchg(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+        let [ptr, expected, desired, success, failure] = args else {
+            return Err(CompileError::new(
+                format!("`{what}` takes a pointer, an expected pointer, a desired value, and two memory orders"),
+                span,
+            ));
+        };
+        let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
+        let Ty::Pointer { pointee, .. } = ptr.ty.clone() else {
+            return Err(CompileError::new(format!("`{what}` needs a pointer argument"), ptr.span));
+        };
+        let op_ty = self.atomic_n_value_ty(&pointee, None, interner, what, ptr.span)?;
+        let expected = self.decay_checked(self.check_expr(expected, interner)?);
+        let Some(esize) = self.ptr_pointee_size(&expected.ty, interner) else {
+            return Err(CompileError::new(format!("`{what}` needs an expected pointer"), expected.span));
+        };
+        let psize = self.type_size(&op_ty, interner).unwrap_or(0);
+        if esize != psize {
+            return Err(CompileError::new(format!("`{what}` expected pointer disagrees in size"), expected.span));
+        }
+        let desired = self.convert_for_assignment(&op_ty, self.check_expr(desired, interner)?, interner)?;
+        let success = self.check_atomic_order(success, interner, what)?;
+        let failure = self.check_atomic_order(failure, interner, what)?;
+        Ok(CheckedExpr {
+            ty: Ty::Bool,
+            span,
+            kind: CheckedExprKind::Atomic {
+                op: AtomicOp::CmpXchgN { sized: None },
+                args: vec![ptr, expected, desired, success, failure],
+            },
+        })
     }
 
     fn check_atomic_order(&self, e: &Expr, interner: &Interner, what: &str) -> Result<CheckedExpr, CompileError> {
@@ -3218,6 +3310,8 @@ impl Sema {
             "fetch_or" | "or_fetch" => RmwOp::Or,
             "fetch_xor" | "xor_fetch" => RmwOp::Xor,
             "fetch_nand" | "nand_fetch" => RmwOp::Nand,
+            "fetch_min" | "min_fetch" => RmwOp::Min,
+            "fetch_max" | "max_fetch" => RmwOp::Max,
             _ => return Err(CompileError::new(format!("unsupported atomic builtin `{what}`"), span)),
         };
         let [ptr, val, order] = args else {
@@ -3230,6 +3324,9 @@ impl Sema {
         let op_ty = self.atomic_n_value_ty(&pointee, sized, interner, what, ptr.span)?;
         if matches!(op_ty.unqualified(), Ty::Bool) {
             return Err(CompileError::new(format!("`{what}` must not operate on `_Bool`"), ptr.span));
+        }
+        if matches!(op, RmwOp::Min | RmwOp::Max) && !is_integer(&op_ty) {
+            return Err(CompileError::new(format!("`{what}` needs an integer target"), ptr.span));
         }
         let val = match op_ty.unqualified() {
             Ty::Pointer { .. } => {

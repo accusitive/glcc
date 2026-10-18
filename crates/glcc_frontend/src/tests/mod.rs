@@ -5385,6 +5385,38 @@ fn atomic_load_without_pointer_panics() {
 }
 
 #[test]
+fn c11_atomic_builtins_check_against_arguments() {
+    // The clang C11 spellings `<stdatomic.h>` expands to: the pointer
+    // gives the value type, the `_n`-less shapes match the GCC
+    // families, and `compare_exchange` drops the weak flag (strong vs
+    // weak is in the name).
+    let checked = check_with(&["int n;"], "__c11_atomic_load(&n, 5)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["int n;"], "__c11_atomic_store(&n, 1, 5)");
+    assert_eq!(checked.ty, Ty::Void);
+    let checked = check_with(&["int n;"], "__c11_atomic_init(&n, 1)");
+    assert_eq!(checked.ty, Ty::Void);
+    let checked = check_with(&["int n;"], "__c11_atomic_fetch_add(&n, 1, 5)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["int n;", "int e;"], "__c11_atomic_compare_exchange_strong(&n, &e, 1, 5, 5)");
+    assert_eq!(checked.ty, Ty::Bool);
+    let checked = check_with(&[], "__c11_atomic_is_lock_free(4)");
+    assert_eq!(checked.ty, Ty::Bool);
+}
+
+#[test]
+#[should_panic(expected = "`__c11_atomic_load` needs a pointer argument")]
+fn c11_atomic_load_without_pointer_panics() {
+    check_with(&["int n;"], "__c11_atomic_load(n, 5)");
+}
+
+#[test]
+#[should_panic(expected = "`__c11_atomic_fetch_min` needs an integer target")]
+fn c11_atomic_min_on_pointer_panics() {
+    check_with(&["int *p;"], "__c11_atomic_fetch_min(&p, 1, 5)");
+}
+
+#[test]
 fn declared_name_scopes_over_its_initializer() {
     // `int *p = malloc(sizeof(*p))` sees `p` (C17 §6.2.1p4: scope
     // starts after the declarator) — the sqlite idiom.

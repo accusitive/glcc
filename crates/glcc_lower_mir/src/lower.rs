@@ -4928,6 +4928,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.emit_unit(func, frame, mir::InstKind::AtomicStore { addr: ptr, val });
                 self.iconst(func, 32, 0)
             }
+            AtomicOp::Init => {
+                let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
+                let val = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                self.emit_unit(func, frame, mir::InstKind::AtomicStore { addr: ptr, val });
+                self.iconst(func, 32, 0)
+            }
             AtomicOp::Store => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let val_ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[1]);
@@ -5064,6 +5070,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
                 // The operand converts to the result width first.
                 let v = self.convert(func, frame, val, &args[1].ty, fe_ty);
+                let signed = is_signed(fe_ty, self.sema);
                 let rmw = match op {
                     fe::check::RmwOp::Add => mir::AtomicRmwOp::Add,
                     fe::check::RmwOp::Sub => mir::AtomicRmwOp::Sub,
@@ -5071,6 +5078,20 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::check::RmwOp::Or => mir::AtomicRmwOp::Or,
                     fe::check::RmwOp::Xor => mir::AtomicRmwOp::Xor,
                     fe::check::RmwOp::Nand => mir::AtomicRmwOp::Nand,
+                    fe::check::RmwOp::Min => {
+                        if signed {
+                            mir::AtomicRmwOp::Smin
+                        } else {
+                            mir::AtomicRmwOp::Umin
+                        }
+                    }
+                    fe::check::RmwOp::Max => {
+                        if signed {
+                            mir::AtomicRmwOp::Smax
+                        } else {
+                            mir::AtomicRmwOp::Umax
+                        }
+                    }
                 };
                 let old = self.emit(
                     func,
@@ -5090,6 +5111,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::check::RmwOp::Nand => {
                         let both = self.emit(func, frame, mir::InstKind::And(old, v), mir_ty.clone());
                         mir::InstKind::Not(both)
+                    }
+                    // `old op v` for the new value: min = old < v ? old : v.
+                    fe::check::RmwOp::Min | fe::check::RmwOp::Max => {
+                        let pred = match (matches!(op, fe::check::RmwOp::Min), signed) {
+                            (true, true) => mir::IcmpPred::Slt,
+                            (true, false) => mir::IcmpPred::Ult,
+                            (false, true) => mir::IcmpPred::Sgt,
+                            (false, false) => mir::IcmpPred::Ugt,
+                        };
+                        let cond = self.icmp(func, frame, pred, old, v);
+                        mir::InstKind::Select {
+                            cond,
+                            then_val: old,
+                            else_val: v,
+                        }
                     }
                 };
                 self.emit(func, frame, combined, mir_ty.clone())
@@ -10569,6 +10605,82 @@ mod tests {
                 int ok = __atomic_compare_exchange_n(&x, &e, 99, 0, 0, 0);\
                 return ok * 10000 + x * 100 + e;}"),
             1700 + 17
+        );
+    }
+
+    #[test]
+    fn atomic_c11_builtins() {
+        // The clang C11 spellings `<stdatomic.h>` expands to: the same
+        // behavior as the GCC forms, minus the `_n` suffix and the
+        // explicit weak flag.
+        assert_eq!(
+            run_main("int main(){int x = 0; __c11_atomic_store(&x, 41, 5);\
+                return __c11_atomic_load(&x, 5);}"),
+            41
+        );
+        assert_eq!(run_main("int main(){int x; __c11_atomic_init(&x, 7); return x;}"), 7);
+        assert_eq!(
+            run_main("int main(){int x = 7; int e = __c11_atomic_exchange(&x, 3, 5);\
+                return e * 100 + x;}"),
+            700 + 3
+        );
+        assert_eq!(
+            run_main("int main(){int x = 7; int old = __c11_atomic_fetch_add(&x, 10, 5);\
+                return old * 100 + x;}"),
+            700 + 17
+        );
+        assert_eq!(
+            run_main("int main(){int x = 17; int e = 17;\
+                int ok = __c11_atomic_compare_exchange_strong(&x, &e, 99, 5, 5);\
+                return ok * 10000 + x * 100 + e;}"),
+            10000 + 9900 + 17
+        );
+        assert_eq!(
+            run_main("int main(){int x = 17; int e = 18;\
+                int ok = __c11_atomic_compare_exchange_weak(&x, &e, 99, 5, 5);\
+                return ok * 10000 + x * 100 + e;}"),
+            1700 + 17
+        );
+        assert_eq!(
+            run_main("int main(){int x = 5;\
+                int a = __c11_atomic_fetch_max(&x, 9, 5); int b = __c11_atomic_fetch_min(&x, 2, 5);\
+                return a * 100 + b;}"),
+            500 + 9
+        );
+        assert_eq!(
+            run_main("int main(){int x = 2;\
+                int c = __c11_atomic_fetch_nand(&x, 1, 5); return c * 100 + (x == -1);}"),
+            200 + 1
+        );
+        assert_eq!(
+            run_main("int main(){int x = 0; __c11_atomic_thread_fence(5); __c11_atomic_signal_fence(5);\
+                return __c11_atomic_is_lock_free(sizeof(int)) + (x == 0);}"),
+            2
+        );
+    }
+
+    #[test]
+    fn atomic_min_max_signedness() {
+        // `min`/`max` compare by the target's signedness (the MIR
+        // `Smin`/`Umax` split), and the `min_fetch`/`max_fetch` forms
+        // compute the new value with a select.
+        assert_eq!(
+            run_main("int main(){int x = -5;\
+                int a = __atomic_fetch_max(&x, -9, 5); int b = __atomic_fetch_min(&x, -9, 5);\
+                return (a == -5) + (x == -9) * 2;}"),
+            1 + 2
+        );
+        assert_eq!(
+            run_main("int main(){unsigned u = 3u;\
+                unsigned c = __atomic_max_fetch(&u, 10u, 5);\
+                return (c == 10) + (u == 10) * 2;}"),
+            1 + 2
+        );
+        assert_eq!(
+            run_main("int main(){int x = -5;\
+                int r = __atomic_min_fetch(&x, -9, 5);\
+                return (r == -9) + (x == -9) * 2;}"),
+            1 + 2
         );
     }
 

@@ -2198,6 +2198,10 @@ fn emit_inst<M: Module>(
                 mir::AtomicRmwOp::Or => AtomicRmwOp::Or,
                 mir::AtomicRmwOp::Xor => AtomicRmwOp::Xor,
                 mir::AtomicRmwOp::Xchg => AtomicRmwOp::Xchg,
+                mir::AtomicRmwOp::Umin => AtomicRmwOp::Umin,
+                mir::AtomicRmwOp::Umax => AtomicRmwOp::Umax,
+                mir::AtomicRmwOp::Smin => AtomicRmwOp::Smin,
+                mir::AtomicRmwOp::Smax => AtomicRmwOp::Smax,
             };
             Some(builder.ins().atomic_rmw(ty, MemFlagsData::new(), rmw, a, v))
         }
