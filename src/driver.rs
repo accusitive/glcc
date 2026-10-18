@@ -3292,12 +3292,17 @@ mod tests {
         // Unknown targets are hard errors.
         assert!(parse_args(&args(&["--target=mips", "a.c"])).is_err());
         assert!(parse_args(&args(&["--target", "bogus", "a.c"])).is_err());
-        // Native forwards nothing; cross forwards the triple.
+        // Native forwards nothing; cross forwards the triple. The suite
+        // runs on x86_64 and aarch64 hosts, so use a target that is
+        // cross relative to this host.
         assert!(parse(&["a.c"]).target_args().is_empty());
-        assert_eq!(parse(&["--target=aarch64", "a.c"]).target_args(), ["--target=aarch64-linux-gnu"]);
-        let (_, pp) = preprocess_cmd(&parse(&["--target=riscv64", "a.c"]), OsStr::new("a.c"));
+        let cross = if Target::native() == Target::AARCH64 { Target::RISCV64 } else { Target::AARCH64 };
+        let flag = format!("--target={}", cross.name());
+        let expected = format!("--target={}", cross.triple());
+        assert_eq!(parse(&[flag.as_str(), "a.c"]).target_args(), [expected.as_str()]);
+        let (_, pp) = preprocess_cmd(&parse(&[flag.as_str(), "a.c"]), OsStr::new("a.c"));
         let s: Vec<String> = pp.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["-E", "--target=riscv64-linux-gnu", "a.c"]);
+        assert_eq!(s, ["-E", expected.as_str(), "a.c"]);
     }
 
     #[test]

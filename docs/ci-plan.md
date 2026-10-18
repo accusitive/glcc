@@ -10,6 +10,14 @@ command excludes them. The first run showed why: `fern`'s JIT tests fail
 on aarch64 inside `cranelift-jit`, and `fernc` panics lowering for Win64
 (details under "Portability audit").
 
+Revision (2026-10-18, second run): with the exclusion in place,
+`linux-x86_64` (33 s warm) and `windows-x86_64` (2m12s) are green;
+`linux-aarch64` failed exactly one test — the driver test `target_flag`
+assumed `--target=aarch64` is a cross build, which is false on an
+aarch64 host, and now derives its cross target from the host (audit
+aarch64-6). The job stopped there, so most of the tree still has to
+prove itself on arm.
+
 Owner's goals, quoted:
 
 > - Test the C frontend/compiler only — never C++ / EDG (no
@@ -445,6 +453,13 @@ unix-permission usage, `std::os::unix` appears once with a Windows twin
    relocation). Upstream JIT issue, not a glcc codegen regression; the
    crate is excluded from CI as an experiment.
 5. Bash tooling (`tools/*.bash`, `tests/*/run.sh`) is excluded anyway.
+6. **`target_flag` assumed aarch64 is a cross target** (second run,
+   fixed). The test asserted `--target=aarch64` forwards
+   `--target=aarch64-linux-gnu`, but `Job::target_args()`
+   (`src/driver.rs:504-514`) forwards nothing when the target is
+   native — and the arm runner *is* native aarch64. It now picks a
+   target that is cross relative to the host. Any test that hardcodes
+   "arch X is cross" breaks on an X host.
 
 ### Both
 
@@ -476,11 +491,14 @@ Staged rollout:
 Implemented note: all three jobs landed together (the workflow above).
 First run (2026-10-18): `linux-x86_64` green; `linux-aarch64` and
 `windows-x86_64` failed in `fern`/`fernc` (see audit) before reaching
-the rest of the tree — cargo stops at the first failing test target, so
-the next run is the first to exercise the remaining crates there.
-`fern`/`fernc` are now excluded. If Windows goes red before it is fixed,
-the cheap dial is `continue-on-error: true` on that matrix row; do not
-leave it yellow forever.
+the rest of the tree — cargo stops at the first failing test target.
+`fern`/`fernc` are now excluded; the second run (same day) was
+`linux-x86_64` green (33 s), `windows-x86_64` fully green (2m12s), and
+`linux-aarch64` red on one host-dependent driver test (`target_flag`,
+audit aarch64-6), fixed since. Arm still aborts early, so most crates
+have yet to run there. If Windows goes red, the cheap dial is
+`continue-on-error: true` on that matrix row; do not leave it yellow
+forever.
 
 How to validate Windows assumptions cheaply *before* merging:
 
@@ -493,14 +511,13 @@ How to validate Windows assumptions cheaply *before* merging:
 
 Unknowns / risks:
 
-- **Windows is partially verified.** The first run compiled the whole
-  workspace and aborted at `fernc` (see audit); the crates after it in
-  test order have not run on Win64 yet. Remaining failure surface:
-  tempdir/path quirks and the two `#[cfg(not(windows))]` asserts — all
-  look handled on inspection.
-- **aarch64 partially verified**: same shape — the first run aborted at
-  `fern`; `glcc_lower_mir`'s native JIT tests and the rest of the tree
-  still have to prove themselves on arm (audit item 3).
+- **Windows verified green** (second run, experiments excluded): the
+  whole workspace ran and passed on `windows-2025` in 2m12s. The smoke
+  test (link + run) is still off; see follow-ups.
+- **aarch64 partially verified**: the second run aborted at the root
+  `glcc` test target (audit aarch64-6, fixed), so `glcc_frontend`,
+  `glcc_lower_mir`'s native JIT tests and the rest of the tree still
+  have to prove themselves on arm (audit item 3).
 - **Runner image churn.** windows-latest moved to VS 2026 during 2026;
   arm labels are still young. Pin explicit labels (`windows-2025`,
   `ubuntu-24.04`, `ubuntu-24.04-arm`) and revisit annually.
@@ -520,9 +537,9 @@ Rough estimates (to be measured):
 | linux aarch64 | 5-8 min | 1.5-3 min | ~0.5-1 GB |
 | windows x86-64 | 8-12 min | 3-5 min | ~1-2 GB (watch this) |
 
-First measured run (2026-10-18): `linux-x86_64` green in 1m24s with no
-cache to restore; the other two aborted early (see implemented note), so
-their full-suite timings are still unmeasured.
+Measured runs (2026-10-18): `linux-x86_64` 1m24s cold, 33 s warm;
+`windows-x86_64` 2m12s; `linux-aarch64` 51 s to its single failure.
+Full-suite aarch64 timing is still unmeasured.
 
 Cost: **$0** while the repo is public — standard GitHub-hosted runners,
 including `ubuntu-24.04-arm`, are free for public repositories. For a
