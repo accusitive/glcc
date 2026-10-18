@@ -486,6 +486,15 @@ unix-permission usage, `std::os::unix` appears once with a Windows twin
    result. The test now spells `signed char` for the sign-extension
    assertion and checks the plain-`char` case against
    `Target::native().char_signed`.
+9. **The arm link line never carried `-lm`** (fourth run, fixed).
+   The aarch64/riscv64 quad trampolines in `rt/glccrt.c:650-731`
+   branch to the toolchain's `sqrtl`, so linking the staged runtime
+   needs libm on those targets. The smoke test (a plain `puts`) failed
+   with `undefined reference to 'sqrtl'`; x86-64's runtime is a
+   soft-float `ld -r` combine that references no libm symbol, which is
+   why its smoke had always passed. `quad_runtime_needs_libm`
+   (`src/driver.rs`) now appends `-lm` right after the runtime on
+   aarch64/riscv64, leaving x86-64 link lines byte-identical.
 
 ### Both
 
@@ -523,10 +532,14 @@ the rest of the tree — cargo stops at the first failing test target.
 host-dependent driver test (audit aarch64-6). Third run: x86-64 and
 Windows green again; arm got through `glcc_frontend` and
 `glcc_lower_cl` and failed two `glcc_lower_mir` execution tests
-(audit aarch64-7/-8), both fixed since. `glcc_mir`, `glcc_pp` and the
-remaining targets are the last stretch unproven on arm. If Windows
-goes red, the cheap dial is `continue-on-error: true` on that matrix
-row; do not leave it yellow forever.
+(audit aarch64-7/-8), both fixed since. Fourth run: x86-64 (36 s) and
+Windows (1m17s) green; arm's *whole* test suite passed — `cargo test`
+walked every target to the end — and only the `C driver smoke test`
+failed: the staged runtime's quad trampolines branch to libm's
+`sqrtl`, and the link line never carried `-lm` (audit aarch64-9),
+fixed since. If Windows goes red, the cheap dial is
+`continue-on-error: true` on that matrix row; do not leave it yellow
+forever.
 
 How to validate Windows assumptions cheaply *before* merging:
 
@@ -542,11 +555,9 @@ Unknowns / risks:
 - **Windows verified green** (second run, experiments excluded): the
   whole workspace ran and passed on `windows-2025` in 2m12s. The smoke
   test (link + run) is still off; see follow-ups.
-- **aarch64 nearly verified**: `glcc_frontend` (568) and
-  `glcc_lower_cl` pass on arm, and `glcc_lower_mir`'s execution tests
-  found the one real bug left in that layer (audit aarch64-7, fixed).
-  `glcc_mir`, `glcc_pp` and later targets are the remaining stretch
-  (audit item 3).
+- **aarch64 suite verified** (fourth run): every test target passed on
+  arm; the only failure left was the driver smoke link, audit
+  aarch64-9, fixed. The next run should close out the platform.
 - **Runner image churn.** windows-latest moved to VS 2026 during 2026;
   arm labels are still young. Pin explicit labels (`windows-2025`,
   `ubuntu-24.04`, `ubuntu-24.04-arm`) and revisit annually.
@@ -566,10 +577,10 @@ Rough estimates (to be measured):
 | linux aarch64 | 5-8 min | 1.5-3 min | ~0.5-1 GB |
 | windows x86-64 | 8-12 min | 3-5 min | ~1-2 GB (watch this) |
 
-Measured runs (2026-10-18): `linux-x86_64` 1m24s cold, then 33 s and
-41 s warm; `windows-x86_64` 2m12s and 1m30s; `linux-aarch64` 51 s and
-53 s to its failures. A run that finishes the arm suite is still
-unmeasured.
+Measured runs (2026-10-18): `linux-x86_64` 1m24s cold, then 33 s, 41 s
+and 36 s warm; `windows-x86_64` 2m12s, 1m30s and 1m17s; `linux-aarch64`
+51 s and 53 s to its early failures, then 1m5s with the full suite
+green and only the smoke link failing.
 
 Cost: **$0** while the repo is public — standard GitHub-hosted runners,
 including `ubuntu-24.04-arm`, are free for public repositories. For a

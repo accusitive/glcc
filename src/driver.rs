@@ -24,7 +24,7 @@ use glcc_frontend::{
     parse::Parser,
     sema::Sema,
     span::take_diagnostic_emitted,
-    target::Target,
+    target::{Arch, Target},
 };
 
 /// Preprocessor binary (`clang` unless `GLCC_PP` overrides); only used
@@ -259,6 +259,14 @@ fn wants_glcc_runtime(job: &Job) -> bool {
         OrderItem::LinkArg(a) => a == "-nostdlib" || a == "-nostartfiles",
         OrderItem::Input(_) => false,
     })
+}
+
+/// Whether the staged runtime reaches libm at link time: the aarch64
+/// and riscv64 quad trampolines branch to the toolchain's `sqrtl`
+/// (`rt/glccrt.c`), while the x86-64 soft-float combine is
+/// self-contained.
+fn quad_runtime_needs_libm(arch: Arch) -> bool {
+    matches!(arch, Arch::Aarch64 | Arch::Riscv64)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1548,6 +1556,9 @@ fn link_command(job: &Job, objects: &dyn Fn(usize) -> OsString, out: &OsStr, use
     args.push(out.to_os_string());
     if let Some(rt) = runtime {
         args.push(rt.to_os_string());
+        if quad_runtime_needs_libm(job.target.arch) {
+            args.push(OsString::from("-lm"));
+        }
     }
     for item in &job.order {
         match item {
@@ -3537,12 +3548,40 @@ mod tests {
     #[test]
     fn link_command_places_runtime_first() {
         let job = parse(&["a.c", "-lfoo"]);
+        let mut expect: Vec<String> = job.target_args().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        expect.extend(["-o", "a.out", "/r/glccrt.o"].map(String::from));
+        if quad_runtime_needs_libm(job.target.arch) {
+            expect.push("-lm".into());
+        }
+        expect.extend(["a.o", "-lfoo"].map(String::from));
         let (_, with) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("a.out"), false, Some(OsStr::new("/r/glccrt.o")), &[]);
         let s: Vec<String> = with.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["-o", "a.out", "/r/glccrt.o", "a.o", "-lfoo"]);
+        assert_eq!(s, expect);
+
         let (_, without) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("a.out"), false, None, &[]);
         let s: Vec<String> = without.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["-o", "a.out", "a.o", "-lfoo"]);
+        let mut expect: Vec<String> = job.target_args().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        expect.extend(["-o", "a.out", "a.o", "-lfoo"].map(String::from));
+        assert_eq!(s, expect);
+    }
+
+    /// AArch64 and RISC-V quad trampolines branch to libm's `sqrtl`
+    /// and get a `-lm` right after the runtime; x86-64's combined
+    /// runtime is self-contained and its link line carries none.
+    #[test]
+    fn link_command_adds_libm_for_quad_runtime() {
+        for target in ["aarch64", "riscv64"] {
+            let job = parse(&["--target", target, "a.c"]);
+            let (_, args) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("a.out"), false, Some(OsStr::new("/r/glccrt.o")), &[]);
+            let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+            let rt = s.iter().position(|a| a == "/r/glccrt.o").expect("runtime in link line");
+            assert_eq!(&s[rt + 1], "-lm", "{target} link line: {s:?}");
+        }
+
+        let job = parse(&["--target", "x86_64", "a.c"]);
+        let (_, args) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("a.out"), false, Some(OsStr::new("/r/glccrt.o")), &[]);
+        let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert!(!s.contains(&"-lm".to_string()), "x86-64 link line: {s:?}");
     }
 
     /// The MSVC link path spells gcc-shaped flags in `link.exe` terms:
