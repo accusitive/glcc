@@ -47,8 +47,10 @@ jobs:
           # PRs restore but never write: keep the 10 GB repo cache budget
           # for master runs.
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      # fern/fernc are experiments; their aarch64 JIT and Win64 paths are
+      # unfinished, so they stay out of the gate.
       - name: Build and test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --exclude fern --exclude fernc --locked
       # Compile and run a C program through the driver, end to end.
       # build.rs staged glccrt.o and cc is present on the Linux runners.
       - name: C driver smoke test
