@@ -627,7 +627,7 @@ impl<'a> Parser<'a> {
         let Some(symbol) = declarator.name() else {
             return self.fail(def_span, "declaration does not declare anything");
         };
-        self.check_inline(specifiers, &ty);
+        self.check_function_specifiers(specifiers, &ty);
         if specifiers.is_typedef() {
             return self.fail(def_span, "function definition declared `typedef`");
         }
@@ -2247,7 +2247,7 @@ impl<'a> Parser<'a> {
         }
         match self.tokens.peek().map(|located| &located.val) {
             Some(Token::Keyword(
-                pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary,
+                pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary | Keyword::_Atomic | Keyword::_Noreturn,
             )) => true,
             // A typedef name may open a declaration (`Arg a;`), as may
             // the GNU `inline` spellings (`__inline__ int f();`,
@@ -2930,7 +2930,7 @@ impl<'a> Parser<'a> {
         } else {
             BindingKind::Var
         };
-        self.check_inline(specifiers, &ty);
+        self.check_function_specifiers(specifiers, &ty);
         if kind == BindingKind::Typedef && has_init {
             return self.fail(span, "`typedef` with initializer");
         }
@@ -3131,10 +3131,16 @@ impl<'a> Parser<'a> {
             return self.fail(specifiers.span, "multiple storage class specifiers");
         }
     }
-    /// `inline` only declares functions (C17 §6.7.4p2).
-    fn check_inline(&self, specifiers: &DeclarationSpecifiers, ty: &Ty) {
-        if specifiers.is_inline() && !matches!(ty, Ty::Func { .. }) {
+    /// `inline` and `_Noreturn` only declare functions (C17 §6.7.4p2).
+    fn check_function_specifiers(&self, specifiers: &DeclarationSpecifiers, ty: &Ty) {
+        if matches!(ty, Ty::Func { .. }) {
+            return;
+        }
+        if specifiers.is_inline() {
             return self.fail(specifiers.span, "`inline` on non-function declaration");
+        }
+        if specifiers.is_noreturn() {
+            return self.fail(specifiers.span, "`_Noreturn` on non-function declaration");
         }
     }
     /// Whether a function declarator is followed by a body: `{`
@@ -3443,7 +3449,7 @@ impl<'a> Parser<'a> {
                             comma_or_ellipsis = true;
                         }
                         Some(Token::Keyword(
-                            pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary,
+                            pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary | Keyword::_Atomic | Keyword::_Noreturn,
                         )) if content == 0 => {
                             first_is_specifier = true;
                         }
@@ -3786,6 +3792,11 @@ impl<'a> Parser<'a> {
                     });
                     self.tokens.advance();
                 }
+                // `_Atomic` qualifies pointers/arrays too; its effect is
+                // erased (see `TypeSpecifier::Atomic`).
+                Some(Token::Keyword(Keyword::_Atomic)) => {
+                    self.tokens.advance();
+                }
                 _ => break,
             }
         }
@@ -3864,6 +3875,26 @@ impl<'a> Parser<'a> {
             if self.peek_gnu_inline() {
                 ds.function_specifier += 1;
                 self.tokens.advance();
+                continue;
+            }
+            // C11 `_Noreturn` function specifier; the attribute is a
+            // hint this compiler does not use, so it is only counted.
+            if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::_Noreturn))) {
+                ds.noreturn = true;
+                self.tokens.advance();
+                continue;
+            }
+            // C11 `_Atomic`: either the type specifier `_Atomic(type-name)`
+            // or the qualifier `_Atomic type`. Atomic types have the
+            // representation of their base and no atomic operations are
+            // modeled, so both spellings erase to the operand type.
+            if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::_Atomic))) {
+                self.tokens.advance();
+                if self.eat_punct(Punctuator::LParen) {
+                    let ty = self.parse_type_name();
+                    self.expect_punct(Punctuator::RParen);
+                    ds.type_specifier.push(TypeSpecifier::Atomic(ty));
+                }
                 continue;
             }
             // The builtin `va_list` and `__float128` types: opaque
@@ -5177,6 +5208,7 @@ impl<'a> Parser<'a> {
                 | Keyword::_Bool
                 | Keyword::_Complex
                 | Keyword::_Imaginary
+                | Keyword::_Atomic
                 | Keyword::Struct
                 | Keyword::Union
                 | Keyword::Enum
@@ -5204,6 +5236,9 @@ impl<'a> Parser<'a> {
         }
         if specs.is_inline() {
             return self.fail(specs.span, "`inline` in type name");
+        }
+        if specs.is_noreturn() {
+            return self.fail(specs.span, "`_Noreturn` in type name");
         }
         let declarator = self.parse_declarator();
         if declarator.name().is_some() {
@@ -6020,6 +6055,11 @@ pub enum TypeSpecifier {
     // A builtin type keyword (`__builtin_va_list`, `__float128`):
     // a whole type by itself, carrying the `Ty` it names.
     Builtin(Ty),
+    // C11 `_Atomic(type-name)`: atomic types have the size, alignment,
+    // and representation of their unqualified base and this compiler
+    // models no atomic operations, so the qualifier is erased at
+    // resolution and only the operand type survives.
+    Atomic(Ty),
     // A typedef name standing in as the type specifier, carrying the type
     // it aliases.
     TypedefName(Ty),
@@ -6125,6 +6165,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
     let mut etag = None;
     let mut builtin = None;
     let mut alias = None;
+    let mut atomic = None;
     let (mut n_signed, mut n_unsigned, mut n_short, mut n_long) = (0u8, 0u8, 0u8, 0u8);
     let (mut n_char, mut n_int, mut n_float, mut n_double) = (0u8, 0u8, 0u8, 0u8);
     let (mut n_bool, mut n_complex, mut n_void) = (0u8, 0u8, 0u8);
@@ -6145,6 +6186,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
             }
             TypeSpecifier::Builtin(ty) => builtin = Some(ty),
             TypeSpecifier::TypedefName(ty) => alias = Some(ty),
+            TypeSpecifier::Atomic(ty) => atomic = Some(ty),
             TypeSpecifier::Signed => n_signed += 1,
             TypeSpecifier::Unsigned => n_unsigned += 1,
             TypeSpecifier::Short => n_short += 1,
@@ -6180,6 +6222,12 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
     if let Some(ty) = alias {
         if specs.len() != 1 {
             bail!("typedef name with other type specifiers");
+        }
+        return ty.clone();
+    }
+    if let Some(ty) = atomic {
+        if specs.len() != 1 {
+            bail!("`_Atomic` with other type specifiers");
         }
         return ty.clone();
     }
@@ -6310,6 +6358,10 @@ pub struct DeclarationSpecifiers {
     pub(crate) type_specifier: Vec<TypeSpecifier>,
     type_qualifier: Vec<TypeQualifier>,
     function_specifier: usize, // only option is Inline
+    /// C11 `_Noreturn` function specifier: like `inline`, only a hint
+    /// and only valid on functions, so it is tracked separately and
+    /// otherwise ignored.
+    noreturn: bool,
     /// Thread-local storage (`_Thread_local`, `__thread`,
     /// `thread_local`): combines with `static`/`extern` like GCC.
     pub(crate) thread_local: bool,
@@ -6337,6 +6389,10 @@ impl DeclarationSpecifiers {
     /// `function_specifier`).
     pub fn is_inline(&self) -> bool {
         self.function_specifier > 0
+    }
+    /// Whether a `_Noreturn` function specifier was present.
+    pub fn is_noreturn(&self) -> bool {
+        self.noreturn
     }
     pub fn has_storage(&self, sc: StorageClass) -> bool {
         self.class.contains(&sc)

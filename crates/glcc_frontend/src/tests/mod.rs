@@ -9186,6 +9186,75 @@ fn imaginary_type_specifier_is_diagnosed_in_a_cast() {
     parser.parse_translation_unit();
 }
 
+// ---- C11 gap coverage: `_Atomic`, `_Noreturn` ----
+
+/// `_Atomic` is both a type specifier (`_Atomic(T)`) and a type
+/// qualifier (`_Atomic T`). Atomic types have their base's
+/// representation, which this compiler models by erasing the qualifier.
+#[test]
+fn atomic_erases_to_its_base_type() {
+    use Ty::*;
+    for (src, expected) in [
+        ("_Atomic int", Int),
+        ("_Atomic(int)", Int),
+        ("_Atomic unsigned long", UnsignedLong),
+        ("_Atomic(unsigned long)", UnsignedLong),
+        ("_Atomic _Bool", Bool),
+        ("_Atomic(long long)", LongLong),
+    ] {
+        assert_eq!(base_of(src), expected, "{src:?}");
+    }
+    assert_eq!(
+        base_of("_Atomic(int *)"),
+        Ty::Pointer {
+            qualifiers: vec![],
+            pointee: Box::new(Int),
+        }
+    );
+}
+
+#[test]
+fn atomic_declarations_parse() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Atomic int x = 0; typedef _Atomic _Bool atomic_flag;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let x = parser.intern.get_or_intern("x");
+    let id = parser.sema.lookup_symbol(x).unwrap();
+    assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::Int);
+    let flag = parser.intern.get_or_intern("atomic_flag");
+    let id = parser.sema.lookup_symbol(flag).unwrap();
+    assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::Bool);
+}
+
+/// `_Noreturn` is a function specifier: it parses and is otherwise a
+/// hint this compiler does not consume, but it only applies to functions.
+#[test]
+fn noreturn_function_specifier_parses() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Noreturn void abort(void);", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let abort = parser.intern.get_or_intern("abort");
+    let id = parser.sema.lookup_symbol(abort).unwrap();
+    assert!(matches!(parser.sema.decls[id.0 as usize].ty, Ty::Func { .. }));
+}
+
+#[test]
+#[should_panic(expected = "`_Noreturn` on non-function declaration")]
+fn noreturn_on_object_is_rejected() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Noreturn int x;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+}
+
+#[test]
+#[should_panic(expected = "`_Atomic` with other type specifiers")]
+fn atomic_specifier_combines_with_nothing() {
+    base_of("_Atomic(int) long");
+}
+
 /// A UCN may open or continue an identifier (C17 §6.4.2.1); the lexer
 /// decodes it to the named character.
 #[test]

@@ -796,6 +796,8 @@ pub enum Keyword {
     _Bool,
     _Complex,
     _Imaginary,
+    _Atomic,
+    _Noreturn,
 }
 impl Keyword {
     pub fn as_str(&self) -> &'static str {
@@ -837,6 +839,8 @@ impl Keyword {
             Keyword::_Bool => "_Bool",
             Keyword::_Complex => "_Complex",
             Keyword::_Imaginary => "_Imaginary",
+            Keyword::_Atomic => "_Atomic",
+            Keyword::_Noreturn => "_Noreturn",
         }
     }
 }
@@ -1669,6 +1673,8 @@ impl<'a> TryFrom<&'a str> for Keyword {
             "_Bool" => Keyword::_Bool,
             "_Complex" => Keyword::_Complex,
             "_Imaginary" => Keyword::_Imaginary,
+            "_Atomic" => Keyword::_Atomic,
+            "_Noreturn" => Keyword::_Noreturn,
             _ => return Err(()),
         })
     }
