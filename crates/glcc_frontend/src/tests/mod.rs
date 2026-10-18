@@ -9153,3 +9153,139 @@ fn await_yields_the_result_and_rejects_non_futures() {
         err.message
     );
 }
+
+// ---- C99 gap coverage: `_Imaginary`, universal character names, `_Pragma` ----
+
+/// `_Imaginary` names a conditional C99 type this compiler does not
+/// implement; every position that can name a type must diagnose it
+/// rather than fall through to an unrelated parse error.
+#[test]
+#[should_panic(expected = "`_Imaginary` is not supported")]
+fn imaginary_type_specifier_is_diagnosed_at_file_scope() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Imaginary float x;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+}
+
+#[test]
+#[should_panic(expected = "`_Imaginary` is not supported")]
+fn imaginary_type_specifier_is_diagnosed_in_a_block() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("void f(void) { _Imaginary double x = 0.0; }", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+}
+
+#[test]
+#[should_panic(expected = "`_Imaginary` is not supported")]
+fn imaginary_type_specifier_is_diagnosed_in_a_cast() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int f(void) { return (int)(_Imaginary float)1.0f; }", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+}
+
+/// A UCN may open or continue an identifier (C17 §6.4.2.1); the lexer
+/// decodes it to the named character.
+#[test]
+fn ucn_names_identifier_characters() {
+    let cases = [
+        ("int \\u00e9 = 1;", "é"),
+        ("int a\\u00e9b = 1;", "aéb"),
+    ];
+    for (src, want) in cases {
+        let mut interner = Interner::new();
+        let tokens = Lexer::new(src, &mut interner).lex_all();
+        let id = match &tokens.iter().nth(1).unwrap().val {
+            Token::Identifier(sym) => *sym,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(interner.resolve(id), Some(want), "{src}");
+    }
+}
+
+/// The lexer validates the UCN's spelling and range but leaves it raw in
+/// the literal; escape decoding happens downstream.
+#[test]
+fn ucn_in_literals_decodes() {
+    // Narrow string: code points at or below U+00FF narrow to one byte.
+    let mut interner = Interner::new();
+    let tokens = Lexer::new("\"\\u00e9\"", &mut interner).lex_all();
+    let lit = match &tokens.iter().next().unwrap().val {
+        Token::StringLiteral(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(crate::eval::string_bytes(&[lit], &interner), Some(vec![0xE9]));
+
+    // Wide string: the code point itself, LE in the target's `wchar_t`.
+    let mut interner = Interner::new();
+    let tokens = Lexer::new("L\"\\u00e9\"", &mut interner).lex_all();
+    let lit = match &tokens.iter().next().unwrap().val {
+        Token::StringLiteral(s) => *s,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(crate::eval::string_bytes(&[lit], &interner), Some(vec![0xE9, 0, 0, 0]));
+
+    // Narrow character constant.
+    let mut interner = Interner::new();
+    let tokens = Lexer::new("'\\u00e9'", &mut interner).lex_all();
+    let lit = match &tokens.iter().next().unwrap().val {
+        Token::Constant(Constant::Char(c)) => *c,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(crate::eval::char_constant_in(&lit, &interner, false), Some(0xE9));
+}
+
+#[test]
+#[should_panic(expected = "invalid universal character name")]
+fn ucn_with_too_few_digits_is_diagnosed() {
+    let mut interner = Interner::new();
+    let _ = Lexer::new("int \\u12 = 1;", &mut interner).lex_all();
+}
+
+#[test]
+#[should_panic(expected = "expected 4 hexadecimal digits")]
+fn ucn_with_non_hex_digits_is_diagnosed() {
+    let mut interner = Interner::new();
+    let _ = Lexer::new("\"\\uZZZZ\"", &mut interner).lex_all();
+}
+
+#[test]
+#[should_panic(expected = "is not a valid character")]
+fn ucn_surrogate_is_diagnosed() {
+    let mut interner = Interner::new();
+    let _ = Lexer::new("int \\uD800 = 1;", &mut interner).lex_all();
+}
+
+/// `_Pragma ( string-literal )` is a preprocessing operator, so the
+/// native preprocessor removes it; raw-source callers must skip it too.
+#[test]
+fn pragma_operator_is_skipped_at_file_scope() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Pragma(\"pack(1)\")\nint x;", &mut sema, &mut interner);
+    let tu = parser.parse_translation_unit();
+    assert_eq!(tu.external_declarations.len(), 1);
+}
+
+#[test]
+fn pragma_operator_is_skipped_in_a_block() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(
+        "void f(void) { _Pragma(\"pack(1)\") int x; (void)x; _Pragma(\"pack()\") }",
+        &mut sema,
+        &mut interner,
+    );
+    parser.parse_translation_unit();
+}
+
+#[test]
+#[should_panic(expected = "`_Pragma` requires a parenthesized string literal")]
+fn pragma_operator_without_operand_is_diagnosed() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("_Pragma int x;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+}

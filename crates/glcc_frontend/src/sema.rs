@@ -1052,9 +1052,14 @@ pub fn string_contents(parts: &[StringLiteral], interner: &Interner) -> Option<S
                 return None;
             }
             let (v, used) = escape_value(&tail);
-            // Same truncation as `string_bytes` (`\x` takes mod 256,
-            // like GCC); every `u8` value is a valid scalar value.
-            out.push(char::from_u32(v & 0xFF)?);
+            // A UCN names a code point directly; every other escape
+            // truncates mod 256 (like GCC), so any value is a scalar.
+            let ch = if crate::eval::is_ucn(&tail) {
+                char::from_u32(v)?
+            } else {
+                char::from_u32(v & 0xFF)?
+            };
+            out.push(ch);
             i += 1 + tail[..used].iter().map(|c| c.len_utf8()).sum::<usize>();
         }
     }

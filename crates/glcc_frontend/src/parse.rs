@@ -467,6 +467,13 @@ impl<'a> Parser<'a> {
         let start = self.mark();
         let mut external_declarations = vec![];
         while self.tokens.peek().is_some() {
+            // C99 `_Pragma ( string-literal )`: the native preprocessor
+            // lowers it to a `#pragma` line, so only raw-source callers
+            // reach the operator here. Skip it like `#pragma`.
+            if self.peek_pragma_operator() {
+                self.skip_pragma_operator();
+                continue;
+            }
             if self.peek_msvc_operator("__pragma") {
                 self.skip_msvc_operator();
                 continue;
@@ -1093,6 +1100,12 @@ impl<'a> Parser<'a> {
         self.label_scopes.push(HashMap::new());
         let mut items = Vec::new();
         loop {
+            // `_Pragma("...")` may separate block items, or sit last
+            // before the close brace; skip it like `#pragma`.
+            if self.peek_pragma_operator() {
+                self.skip_pragma_operator();
+                continue;
+            }
             match self.tokens.peek_val() {
                 Some(Token::Punctuator(Punctuator::RBrace)) => break,
                 None => {
@@ -1110,6 +1123,31 @@ impl<'a> Parser<'a> {
             items,
         }
     }
+    /// Whether the next tokens are the C99 `_Pragma ( string-literal )`
+    /// operator (C17 §6.10.9). The native preprocessor lowers the
+    /// operator to a `#pragma` line before the parser runs, so only
+    /// raw-source callers reach one; it is skipped wherever a declaration
+    /// or statement may start, like `#pragma` itself.
+    fn peek_pragma_operator(&self) -> bool {
+        matches!(self.tokens.peek_val(), Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("_Pragma"))
+    }
+
+    /// Consume a `_Pragma ( string-literal )` operator, diagnosing a
+    /// malformed operand. The pragma's effect is ignored, matching the
+    /// `#pragma` treatment (including `pack`).
+    fn skip_pragma_operator(&mut self) {
+        let start = self.mark();
+        self.tokens.advance();
+        if !self.eat_punct(Punctuator::LParen) {
+            return self.fail(self.span_since(start), "`_Pragma` requires a parenthesized string literal");
+        }
+        if !matches!(self.tokens.peek_val(), Some(Token::StringLiteral(_))) {
+            return self.fail(self.peek_span(), "`_Pragma` requires a string literal");
+        }
+        self.tokens.advance();
+        self.expect_punct(Punctuator::RParen);
+    }
+
     /// Whether the next tokens are an MSVC annotation operator:
     /// `__pragma(...)` (the inline `#pragma` spelling, `corecrt.h`
     /// writes `__pragma(pack(push, 8))`) or `__declspec(...)`.
@@ -2209,7 +2247,7 @@ impl<'a> Parser<'a> {
         }
         match self.tokens.peek().map(|located| &located.val) {
             Some(Token::Keyword(
-                pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline,
+                pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary,
             )) => true,
             // A typedef name may open a declaration (`Arg a;`), as may
             // the GNU `inline` spellings (`__inline__ int f();`,
@@ -3405,7 +3443,7 @@ impl<'a> Parser<'a> {
                             comma_or_ellipsis = true;
                         }
                         Some(Token::Keyword(
-                            pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline,
+                            pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary,
                         )) if content == 0 => {
                             first_is_specifier = true;
                         }
@@ -3951,6 +3989,14 @@ impl<'a> Parser<'a> {
                 continue;
             }
             match self.tokens.peek().map(|x| &x.val) {
+                // C99 §6.7.2 lists `_Imaginary` among the type specifiers,
+                // but imaginary types are a conditional feature this
+                // compiler does not implement (GCC rejects the keyword
+                // outright too). Diagnose it here so it never falls
+                // through to the implicit-`int` or expression paths.
+                Some(Token::Keyword(Keyword::_Imaginary)) => {
+                    return self.fail(self.peek_span(), "`_Imaginary` is not supported");
+                }
                 Some(Token::Keyword(sc @ pat_storage_class_specifier!())) => {
                     ds.class.push(match sc {
                         Keyword::Typedef => StorageClass::Typedef,
@@ -5130,6 +5176,7 @@ impl<'a> Parser<'a> {
                 | Keyword::Unsigned
                 | Keyword::_Bool
                 | Keyword::_Complex
+                | Keyword::_Imaginary
                 | Keyword::Struct
                 | Keyword::Union
                 | Keyword::Enum
@@ -5572,6 +5619,10 @@ impl<'a> Parser<'a> {
         let ret = self.function_return.clone().unwrap_or(Ty::Void);
         let mut items = Vec::new();
         loop {
+            if self.peek_pragma_operator() {
+                self.skip_pragma_operator();
+                continue;
+            }
             match self.tokens.peek_val() {
                 Some(Token::Punctuator(Punctuator::RBrace)) => break,
                 None => {

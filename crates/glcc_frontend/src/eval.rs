@@ -433,7 +433,44 @@ pub(crate) fn escape_value(chars: &[char]) -> (u32, usize) {
             }
             (value, used)
         }
+        // `\uXXXX` / `\UXXXXXXXX` name a code point (C17 §6.4.3); the
+        // lexer has already validated the spelling and range.
+        'u' | 'U' => {
+            let digits = if first == 'u' { 4 } else { 8 };
+            let mut value = 0u32;
+            let mut used = 1;
+            for c in rest.iter().take(digits) {
+                if let Some(d) = c.to_digit(16) {
+                    value = value.wrapping_mul(16).wrapping_add(d);
+                    used += 1;
+                } else {
+                    break;
+                }
+            }
+            (value, used)
+        }
         _ => (first as u32, 1),
+    }
+}
+
+/// Whether the characters after a backslash begin a universal character
+/// name (`\u` / `\U`).
+pub(crate) fn is_ucn(tail: &[char]) -> bool {
+    matches!(tail.first(), Some('u' | 'U'))
+}
+
+/// Narrow (byte) elements for a UCN's code point: values at or below
+/// U+00FF stay one byte, matching a raw source character of the same
+/// value (see `decode_source`); wider ones become their UTF-8 bytes,
+/// exactly as the raw-character path below narrows.
+fn push_narrow_codepoint(out: &mut Vec<u32>, value: u32) {
+    match char::from_u32(value) {
+        Some(c) if (c as u32) <= 0xFF => out.push(c as u32),
+        Some(c) => {
+            let mut buf = [0u8; 4];
+            out.extend(c.encode_utf8(&mut buf).bytes().map(u32::from));
+        }
+        None => out.push(value),
     }
 }
 
@@ -467,7 +504,11 @@ pub fn char_constant_in(lit: &CharLiteral, interner: &Interner, char_signed: boo
                     return None;
                 }
                 let (v, used_chars) = escape_value(tail);
-                values.push(v);
+                if is_ucn(tail) {
+                    push_narrow_codepoint(&mut values, v);
+                } else {
+                    values.push(v);
+                }
                 i += 1 + used_chars;
             } else {
                 if (chars[i] as u32) <= 0xFF {
@@ -630,7 +671,17 @@ fn string_elems(parts: &[StringLiteral], interner: &Interner) -> Option<Vec<u32>
                     return None;
                 }
                 let (v, used_chars) = escape_value(tail);
-                values.push(if part_wide { v } else { v & 0xFF });
+                if is_ucn(tail) {
+                    // A UCN names a code point: wide elements keep it
+                    // whole, narrow ones narrow it like the raw character.
+                    if part_wide || wide {
+                        values.push(v);
+                    } else {
+                        push_narrow_codepoint(&mut values, v);
+                    }
+                } else {
+                    values.push(if part_wide { v } else { v & 0xFF });
+                }
                 i += 1 + used_chars;
             } else if part_wide || wide {
                 // Code points, not bytes.

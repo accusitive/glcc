@@ -1056,6 +1056,74 @@ impl<'a> Lexer<'a> {
         buf.push(self.bump().expect("bump_into at EOF"));
     }
 
+    /// Consume the `u`/`U` and following hexadecimal digits of a
+    /// universal character name (C17 §6.4.3), appending the raw text to
+    /// `buf` and returning the named character. The leading backslash is
+    /// already consumed (identifier) or appended (literal). Malformed,
+    /// surrogate, and out-of-range names are lexer errors like the other
+    /// panics here (translation phase 1 would have diagnosed them before
+    /// tokenizing).
+    fn lex_ucn_into(&mut self, buf: &mut String) -> char {
+        let small = match self.bump() {
+            Some('u') => true,
+            Some('U') => false,
+            Some(other) => panic!("invalid universal character name: `\\{other}` does not start one"),
+            None => panic!("invalid universal character name at end of input"),
+        };
+        buf.push(if small { 'u' } else { 'U' });
+        let digits = if small { 4 } else { 8 };
+        let mut value = 0u32;
+        for _ in 0..digits {
+            let Some(d) = self.peek_char(0).and_then(|c| c.to_digit(16)) else {
+                panic!("invalid universal character name: expected {digits} hexadecimal digits");
+            };
+            buf.push(self.bump().unwrap());
+            value = value * 16 + d;
+        }
+        let Some(c) = char::from_u32(value) else {
+            panic!("universal character name \\U{value:08X} is not a valid character");
+        };
+        c
+    }
+
+    /// Consume a universal character name whose backslash is the current
+    /// character and return the named character.
+    fn lex_ucn(&mut self) -> char {
+        self.bump();
+        let mut raw = String::new();
+        self.lex_ucn_into(&mut raw)
+    }
+
+    /// Lex an identifier (or keyword, per `Keyword::try_from`) whose
+    /// first character `first` was already consumed at `start`.
+    /// Identifier-continue characters include further UCNs
+    /// (C17 §6.4.2.1).
+    fn lex_identifier(&mut self, first: char, start: Location) -> Located<Token> {
+        let mut identifier = String::from(first);
+        loop {
+            if self.peek_char(0) == Some('\\') {
+                let c = self.lex_ucn();
+                if !(c.is_alphanumeric() || c == '_' || c == '$') {
+                    panic!("universal character name `{c}` is not valid in an identifier");
+                }
+                identifier.push(c);
+                continue;
+            }
+            match self.peek_char(0) {
+                Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => identifier.push(self.bump().unwrap()),
+                _ => break,
+            }
+        }
+        Located {
+            loc: start,
+            end: self.loc,
+            val: match Keyword::try_from(identifier.as_str()) {
+                Ok(kw) => Token::Keyword(kw),
+                Err(_) => Token::Identifier(self.intern.get_or_intern(identifier)),
+            },
+        }
+    }
+
     /// Consume a run of digits (hex digits if `hex`) into `buf`.
     fn lex_digits(&mut self, buf: &mut String, hex: bool) {
         let is_digit = |d: char| {
@@ -1301,11 +1369,14 @@ impl<'a> Lexer<'a> {
                 // Keep escapes raw (`'\n'` stays backslash + `n`);
                 // consuming both keeps `'\''` from ending the constant
                 // early (the string-literal lexer below does the same for
-                // `\"`).
+                // `\"`). UCNs stay in the spelling but are validated now.
                 Some('\\') => {
                     self.bump_into(&mut buf);
-                    match self.bump() {
-                        Some(c) => buf.push(c),
+                    match self.peek_char(0) {
+                        Some('u' | 'U') => {
+                            self.lex_ucn_into(&mut buf);
+                        }
+                        Some(_) => self.bump_into(&mut buf),
                         None => panic!("unterminated character constant in {buf:?}"),
                     }
                 }
@@ -1361,10 +1432,14 @@ impl<'a> Lexer<'a> {
                 Some('\n') => panic!("unterminated string literal in {buf:?}"),
                 // Keep escapes raw (`"\n"` stays backslash + `n`);
                 // consuming both keeps `\"` from ending the literal early.
+                // UCNs stay in the spelling but are validated now.
                 Some('\\') => {
                     self.bump_into(&mut buf);
-                    match self.bump() {
-                        Some(c) => buf.push(c),
+                    match self.peek_char(0) {
+                        Some('u' | 'U') => {
+                            self.lex_ucn_into(&mut buf);
+                        }
+                        Some(_) => self.bump_into(&mut buf),
                         None => panic!("unterminated string literal in {buf:?}"),
                     }
                 }
@@ -1523,18 +1598,17 @@ impl<'a> Lexer<'a> {
                 // like `vec$I...`): accepted like GCC.
                 c if c.is_alphabetic() || c == '_' || c == '$' => {
                     let (c, start) = self.bump_at()?;
-                    let mut identifier = String::from(c);
-                    while matches!(self.peek_char(0), Some(c) if c.is_alphanumeric() || c == '_' || c == '$') {
-                        identifier.push(self.bump().unwrap());
+                    return Some(self.lex_identifier(c, start));
+                }
+                // A universal character name (C17 §6.4.2.1) can also open
+                // an identifier (`int \u00e9;`).
+                '\\' => {
+                    let start = self.loc;
+                    let c = self.lex_ucn();
+                    if !(c.is_alphabetic() || c == '_' || c == '$') {
+                        panic!("universal character name `{c}` is not valid at the start of an identifier");
                     }
-                    return Some(Located {
-                        loc: start,
-                        end: self.loc,
-                        val: match Keyword::try_from(identifier.as_str()) {
-                            Ok(kw) => Token::Keyword(kw),
-                            Err(_) => Token::Identifier(self.intern.get_or_intern(identifier)),
-                        },
-                    });
+                    return Some(self.lex_identifier(c, start));
                 }
                 // C17 §6.4.4.1/§6.4.4.2: integer and float constants
                 c if c.is_ascii_digit() => return Some(self.lex_constant()),
@@ -1546,7 +1620,7 @@ impl<'a> Lexer<'a> {
                     return Some(self.lex_punctuator());
                 }
                 c => {
-                    todo!("{c} {:?} {}", self.loc, self.intern.resolve(self.loc.file).unwrap());
+                    panic!("unexpected character {c:?} at line {}, column {}", self.loc.ln, self.loc.col);
                 }
             }
         }
