@@ -1,0 +1,25 @@
+# 1 "c99-6_10_3_4_p9.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "c99-6_10_3_4_p9.c" 2
+
+
+
+
+
+
+
+
+fprintf(stderr, "Flag");
+
+
+fprintf(stderr, "X = %d\n", x);
+
+
+puts("The first, second, and third items.");
+
+
+((x>y)?puts("x>y"): printf("x is %d but y is %d", x, y));

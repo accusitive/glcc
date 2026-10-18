@@ -1,0 +1,9 @@
+/target
+/crates/*/target
+*.o
+*.out
+/torture-failures.txt
+/ctestsuite-failures.txt
+/perf.data
+/perf.data.old
+/crates/glcc_explorer/glcc-explorer.wasm

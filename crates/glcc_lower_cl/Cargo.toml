@@ -1,0 +1,22 @@
+[package]
+name = "glcc_lower_cl"
+version = "0.1.0"
+edition = "2024"
+
+# MIR -> Cranelift lowering. Backend-agnostic MIR goes in and Clif
+# functions come out; the caller picks the Cranelift module (object for
+# the real pipeline, JIT in tests).
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }
+glcc_dwarf = { path = "../glcc_dwarf" }
+cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
+cranelift-frontend = "0.136.0"
+cranelift-module = "0.136.0"
+smallvec = "1.16.3"
+
+[dev-dependencies]
+cranelift-jit = "0.136.0"
+cranelift-native = "0.136.0"
+cranelift-object = "0.136.0"
+object = "0.40.0"

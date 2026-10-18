@@ -1,0 +1,20 @@
+# 1 "pragma-captured.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "pragma-captured.c" 2
+
+
+
+
+void test1()
+{
+#pragma clang __debug captured
+  {
+  }
+
+
+
+}

@@ -1,0 +1,14 @@
+# 1 "c99-6_10_3_4_p6.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "c99-6_10_3_4_p6.c" 2
+# 14 "c99-6_10_3_4_p6.c"
+printf("x" "1" "= %d, x" "2" "= s" x1, x2);
+fputs("strncmp(\"abc\\0d\" \"abc\", '\\4') == 0" ": @\n", s);
+
+include "vers2.h"
+"hello";
+"hello" ", world"

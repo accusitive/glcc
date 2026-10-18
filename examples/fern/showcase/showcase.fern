@@ -1,0 +1,35 @@
+-- fern showcase: an expression language, higher-kinded classes, and
+-- higher-order functions. Build and run: make && make run (driver.c
+-- links `answer` from C as `long answer(void)`).
+
+data Expr = Lit(Int) | Add(Expr, Expr) | Mul(Expr, Expr) | Neg(Expr)
+
+fun eval(e) = match e {
+    case Lit(n) => n
+    case Add(a, b) => eval(a) + eval(b)
+    case Mul(a, b) => eval(a) * eval(b)
+    case Neg(a) => -eval(a)
+}
+
+class Functor f { map : (a -> b) -> f a -> f b }
+
+instance Functor List {
+    map(f, xs) = match xs { case Nil => Nil case Cons(x, xs) => Cons(f(x), map(f, xs)) }
+}
+
+instance Functor Maybe {
+    map(f, m) = match m { case Nothing => Nothing case Just(x) => Just(f(x)) }
+}
+
+fun range(n) = if n <= 0 then Nil else Cons(n, range(n - 1))
+fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }
+
+fun pick(m, fallback) = match m { case Nothing => fallback case Just(x) => x }
+
+-- 2 * (1 - 1 + 20) + 42 + (1 + .. + 10) = 137
+fun answer() = {
+    let es = [Lit(1), Add(Lit(2), Neg(Lit(3))), Mul(Lit(4), Lit(5))];
+    let values = map(eval, es);
+    let doubled = map(x -> x * 2, values);
+    sum(doubled) + pick(map(x -> x + 1, Just(41)), 0) + sum(range(10))
+}

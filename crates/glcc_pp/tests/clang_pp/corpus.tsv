@@ -1,0 +1,70 @@
+builtin_line.c		expected/builtin_line.c.0.txt
+c99-6_10_3_3_p4.c		expected/c99-6_10_3_3_p4.c.0.txt
+c99-6_10_3_4_p5.c		expected/c99-6_10_3_4_p5.c.0.txt
+c99-6_10_3_4_p6.c		expected/c99-6_10_3_4_p6.c.0.txt
+c99-6_10_3_4_p7.c		expected/c99-6_10_3_4_p7.c.0.txt
+c99-6_10_3_4_p9.c		expected/c99-6_10_3_4_p9.c.0.txt
+comment_save_macro.c		expected/comment_save_macro.c.0.txt
+first-line-indent.c		expected/first-line-indent.c.0.txt
+hash_line.c		expected/hash_line.c.0.txt
+hash_space.c		expected/hash_space.c.0.txt
+indent_macro.c		expected/indent_macro.c.0.txt
+macro_arg_empty.c		expected/macro_arg_empty.c.0.txt
+macro_arg_keyword.c		expected/macro_arg_keyword.c.0.txt
+macro_backslash.c	-Dfoo='bar\'	expected/macro_backslash.c.0.txt
+macro_disable.c		expected/macro_disable.c.0.txt
+macro_expand.c		expected/macro_expand.c.0.txt
+macro_expand_empty.c		expected/macro_expand_empty.c.0.txt
+macro_fn_comma_swallow2.c		expected/macro_fn_comma_swallow2.c.0.txt
+macro_fn_comma_swallow2.c	-std=c99	expected/macro_fn_comma_swallow2.c.1.txt
+macro_fn_comma_swallow2.c	-std=c11	expected/macro_fn_comma_swallow2.c.2.txt
+macro_fn_comma_swallow2.c	-std=gnu99	expected/macro_fn_comma_swallow2.c.3.txt
+macro_fn_comma_swallow2.c	-DNAMED	expected/macro_fn_comma_swallow2.c.4.txt
+macro_fn_comma_swallow2.c	-std=c99 -DNAMED	expected/macro_fn_comma_swallow2.c.5.txt
+macro_fn_comma_swallow.c		expected/macro_fn_comma_swallow.c.0.txt
+macro_fn_disable_expand.c		expected/macro_fn_disable_expand.c.0.txt
+macro_fn_lparen_scan2.c		expected/macro_fn_lparen_scan2.c.0.txt
+macro_fn_lparen_scan.c		expected/macro_fn_lparen_scan.c.0.txt
+macro_fn_lparen_scan.c		expected/macro_fn_lparen_scan.c.1.txt
+macro_fn_lparen_scan.c		expected/macro_fn_lparen_scan.c.2.txt
+macro_fn_lparen_scan.c		expected/macro_fn_lparen_scan.c.3.txt
+macro_fn_placemarker.c		expected/macro_fn_placemarker.c.0.txt
+macro_fn_preexpand.c		expected/macro_fn_preexpand.c.0.txt
+macro_fn_preexpand.c		expected/macro_fn_preexpand.c.1.txt
+macro_fn_varargs_iso.c		expected/macro_fn_varargs_iso.c.0.txt
+macro_fn_varargs_iso.c		expected/macro_fn_varargs_iso.c.1.txt
+macro_fn_varargs_iso.c		expected/macro_fn_varargs_iso.c.2.txt
+macro_fn_varargs_named.c		expected/macro_fn_varargs_named.c.0.txt
+macro_fn_varargs_named.c		expected/macro_fn_varargs_named.c.1.txt
+macro_fn_varargs_named.c		expected/macro_fn_varargs_named.c.2.txt
+macro_not_define.c		expected/macro_not_define.c.0.txt
+macro_paste_commaext.c		expected/macro_paste_commaext.c.0.txt
+macro_paste_empty.c		expected/macro_paste_empty.c.0.txt
+macro_paste_hard.c		expected/macro_paste_hard.c.0.txt
+macro_paste_hard.c		expected/macro_paste_hard.c.1.txt
+macro_paste_hard.c		expected/macro_paste_hard.c.2.txt
+macro_paste_hashhash.c		expected/macro_paste_hashhash.c.0.txt
+macro_paste_none.c		expected/macro_paste_none.c.0.txt
+macro_paste_simple.c		expected/macro_paste_simple.c.0.txt
+macro_paste_spacing2.c		expected/macro_paste_spacing2.c.0.txt
+macro_paste_spacing.c		expected/macro_paste_spacing.c.0.txt
+macro_rescan2.c		expected/macro_rescan2.c.0.txt
+macro_rescan2.c		expected/macro_rescan2.c.1.txt
+macro_rescan.c		expected/macro_rescan.c.0.txt
+macro_rescan_varargs.c		expected/macro_rescan_varargs.c.0.txt
+macro_rparen_scan2.c		expected/macro_rparen_scan2.c.0.txt
+macro_rparen_scan.c		expected/macro_rparen_scan.c.0.txt
+macro_space.c		expected/macro_space.c.0.txt
+mi_opt2.c		expected/mi_opt2.c.0.txt
+pr2086.c		expected/pr2086.c.0.txt
+pragma_assume_nonnull.c		expected/pragma_assume_nonnull.c.0.txt
+pragma.c		expected/pragma.c.0.txt
+pragma-captured.c		expected/pragma-captured.c.0.txt
+pragma_diagnostic_output.c		expected/pragma_diagnostic_output.c.0.txt
+_Pragma-newline.c		expected/_Pragma-newline.c.0.txt
+_Pragma-physloc.c		expected/_Pragma-physloc.c.0.txt
+pragma_sysheader.c		expected/pragma_sysheader.c.0.txt
+print_line_empty_file.c		expected/print_line_empty_file.c.0.txt
+skipping_unclean.c		expected/skipping_unclean.c.0.txt
+stringize_misc.c	-DTEST1	expected/stringize_misc.c.0.txt
+stringize_space.c		expected/stringize_space.c.0.txt

@@ -1,0 +1,19 @@
+[package]
+name = "glcc_lower_mir"
+version = "0.1.0"
+edition = "2024"
+
+# Checked C (frontend) to MIR lowering: the new "backend frontend".
+# Walks `Sema` entities and checked bodies, emitting MIR with an -O0
+# frame (every local spilled to a slot, so control flow needs no SSA
+# plumbing). Unimplemented C features panic loudly via `todo!`.
+
+[dependencies]
+glcc_frontend = { path = "../glcc_frontend" }
+glcc_mir = { path = "../glcc_mir" }
+string-interner = { version = "0.20.0", default-features = false }
+
+[dev-dependencies]
+glcc_lower_cl = { path = "../glcc_lower_cl" }
+cranelift-jit = "0.136.0"
+cranelift-module = "0.136.0"

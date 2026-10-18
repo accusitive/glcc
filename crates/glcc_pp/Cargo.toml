@@ -1,0 +1,12 @@
+[package]
+name = "glcc_pp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+glcc_frontend = { path = "../glcc_frontend" }
+glcc_toolchain = { path = "../glcc_toolchain" }
+# Same interner backend the frontend uses (shared spellings, no conversion).
+string-interner = { version = "0.20.0", default-features = false, features = ["backends"] }
+# `localtime_r` for the `__DATE__`/`__TIME__`/`__TIMESTAMP__` formats.
+libc = "0.2"

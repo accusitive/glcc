@@ -1,0 +1,17 @@
+#!/bin/sh
+# glcc -> zig cc bridge: clang-style --target= to zig -target, musl for
+# self-contained static links (zig's bundled glibc targets need dynamic
+# linking, which has no loader under plain qemu-user).
+n=$#
+i=0
+while [ $i -lt $n ]; do
+  a="$1"; shift
+  case "$a" in
+    --target=aarch64-linux-gnu) set -- "$@" -target aarch64-linux-musl ;;
+    --target=riscv64-linux-gnu) set -- "$@" -target riscv64-linux-musl ;;
+    --target=x86_64-linux-gnu) set -- "$@" -target x86_64-linux-musl ;;
+    *) set -- "$@" "$a" ;;
+  esac
+  i=$((i + 1))
+done
+exec zig cc "$@"

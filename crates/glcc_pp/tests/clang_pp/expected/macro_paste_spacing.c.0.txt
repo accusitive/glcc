@@ -1,0 +1,27 @@
+# 1 "macro_paste_spacing.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_paste_spacing.c" 2
+
+
+
+blah
+
+xy
+
+
+
+[vw] [ vw] [vw ] [wx] [ wx] [wx ] [xy] [ xy] [xy ] [yz] [ yz] [yz ]
+
+[vw] [ vw] [vw ] [wx] [ wx] [wx ] [x] [ x] [x ] [z] [ z] [z ]
+
+[vw] [ vw] [vw ] [w] [ w] [w ] [y] [ y] [y ] [yz] [ yz] [yz ]
+
+[vw] [ vw] [vw ] [w] [ w] [w ] [] [ ] [ ] [z] [ z] [z ]
+
+
+
+[] [a] [b] [c] [ab] [ac] [bc] [abc]

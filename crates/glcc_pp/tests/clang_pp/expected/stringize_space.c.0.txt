@@ -1,0 +1,36 @@
+# 1 "stringize_space.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "stringize_space.c" 2
+
+
+
+
+-"" , - "" , -"" , - ""
+
+
+
+
+
+"a c"
+
+
+
+
+
+
+
+"-1"
+
+
+
+
+
+
+"hello1<world"
+"hello2<world"
+
+"hello3<world"

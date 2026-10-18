@@ -1,0 +1,23 @@
+# 1 "macro_paste_empty.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_paste_empty.c" 2
+
+
+
+a:Y
+
+
+
+b:Y
+
+
+
+c:YY
+
+
+
+d:FOO4(,)

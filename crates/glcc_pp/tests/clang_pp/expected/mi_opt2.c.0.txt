@@ -1,0 +1,29 @@
+# 1 "mi_opt2.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "mi_opt2.c" 2
+
+
+
+
+
+
+
+# 1 "./mi_opt2.h" 1
+
+
+
+b: 1
+# 9 "mi_opt2.c" 2
+
+
+# 1 "./mi_opt2.h" 1
+
+
+
+b: 2
+# 12 "mi_opt2.c" 2
+

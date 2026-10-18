@@ -1,0 +1,29 @@
+# 1 "stringize_misc.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "stringize_misc.c" 2
+
+
+
+
+
+"f(1, 2)" "g((x=y++, y))"
+
+
+"{a=1" "b=2;}"
+
+
+"<" "["
+
+
+"(,)" "(...)"
+
+
+
+
+{a=1 c=3; b=2;}
+# 29 "stringize_misc.c"
+"a COMMA b" "(a, b)"

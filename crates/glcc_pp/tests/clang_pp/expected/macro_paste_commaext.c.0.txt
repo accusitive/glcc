@@ -1,0 +1,17 @@
+# 1 "macro_paste_commaext.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_paste_commaext.c" 2
+# 12 "macro_paste_commaext.c"
+V);
+
+W,1, 2);
+
+X, 1, 2);
+
+Y,);
+
+Z,);

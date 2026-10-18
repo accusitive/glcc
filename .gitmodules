@@ -1,0 +1,9 @@
+[submodule "edg"]
+	path = edg
+	url = https://github.com/edgcpp/compiler.git
+[submodule "tests/c-testsuite"]
+	path = tests/c-testsuite
+	url = https://github.com/c-testsuite/c-testsuite.git
+[submodule "tests/llvm-test-suite"]
+	path = tests/llvm-test-suite
+	url = https://github.com/llvm/llvm-test-suite

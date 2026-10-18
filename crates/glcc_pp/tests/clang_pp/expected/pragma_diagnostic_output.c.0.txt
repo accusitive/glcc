@@ -1,0 +1,33 @@
+# 1 "pragma_diagnostic_output.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "pragma_diagnostic_output.c" 2
+
+
+#pragma GCC diagnostic warning "-Wall"
+
+#pragma GCC diagnostic ignored "-Wall"
+
+#pragma GCC diagnostic error "-Wall"
+
+#pragma GCC diagnostic fatal "-Wall"
+
+#pragma GCC diagnostic push
+
+#pragma GCC diagnostic pop
+
+
+#pragma clang diagnostic warning "-Wall"
+
+#pragma clang diagnostic ignored "-Wall"
+
+#pragma clang diagnostic error "-Wall"
+
+#pragma clang diagnostic fatal "-Wall"
+
+#pragma clang diagnostic push
+
+#pragma clang diagnostic pop

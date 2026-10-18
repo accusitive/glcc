@@ -1,0 +1,23 @@
+# 1 "macro_paste_hard.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_paste_hard.c" 2
+
+
+
+
+
+
+1: aaab 2
+
+
+
+
+
+2: 2 baaa
+
+
+3: 2 xx

@@ -1,0 +1,21 @@
+# 1 "macro_rescan2.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_rescan2.c" 2
+
+
+
+
+
+a: 2*f(9)
+
+
+
+
+
+
+
+b: 2*9*g

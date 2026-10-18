@@ -1,0 +1,24 @@
+[package]
+name = "abi_probe"
+version = "0.1.0"
+edition = "2021"
+
+# ABI conformance prober: lowers C modules to objects per target, links
+# against C harnesses, runs (natively or under qemu), and diffs stdout.
+# This is the executable specification of our C ABI support: ints,
+# floats, structs by value and by reference, struct returns, and
+# variadics in both directions.
+
+[[bin]]
+name = "abi-probe"
+path = "src/main.rs"
+
+[dependencies]
+glcc_frontend = { path = "../glcc_frontend" }
+glcc_mir = { path = "../glcc_mir" }
+glcc_lower_mir = { path = "../glcc_lower_mir" }
+glcc_lower_cl = { path = "../glcc_lower_cl" }
+cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64"] }
+cranelift-module = "0.136.0"
+cranelift-native = "0.136.0"
+cranelift-object = "0.136.0"

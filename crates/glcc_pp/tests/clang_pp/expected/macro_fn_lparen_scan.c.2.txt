@@ -1,0 +1,22 @@
+# 1 "macro_fn_lparen_scan.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_fn_lparen_scan.c" 2
+# 11 "macro_fn_lparen_scan.c"
+noexp: foo y
+
+
+
+
+
+expand: abc
+
+
+
+noexp2: foo nonexp
+
+
+expand2: abc

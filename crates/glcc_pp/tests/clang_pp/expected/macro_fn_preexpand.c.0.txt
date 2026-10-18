@@ -1,0 +1,18 @@
+# 1 "macro_fn_preexpand.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_fn_preexpand.c" 2
+
+
+
+
+
+pre: 1 1 X
+
+
+
+
+nopre: 1A(X)

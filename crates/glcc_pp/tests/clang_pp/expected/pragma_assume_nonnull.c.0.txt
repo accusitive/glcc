@@ -1,0 +1,25 @@
+# 1 "pragma_assume_nonnull.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "pragma_assume_nonnull.c" 2
+
+
+
+
+#pragma clang assume_nonnull begin
+
+int bar(int * ip) { return *ip; }
+# 7 "pragma_assume_nonnull.c"
+#pragma clang assume_nonnull end
+
+
+
+
+int foo(int * _Nonnull ip) { return *ip; }
+
+int main(void) {
+   return bar(0) + foo(0);
+}

@@ -1,0 +1,14 @@
+[package]
+name = "edg-sys"
+version = "0.1.0"
+edition = "2021"
+links = "edg"
+
+[features]
+# Build EDG's front end (70+ C++ TUs plus its cmake-built runtime).
+# Off by default so plain `cargo build`/`cargo test --workspace` don't pay
+# for it; glcpp's `cxx` feature turns it on.
+cxx = []
+
+[build-dependencies]
+cc = { version = "1", features = ["parallel"] }

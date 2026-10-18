@@ -1,0 +1,15 @@
+# 1 "pragma.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "pragma.c" 2
+
+
+#pragma clang __debug parser_crash
+# 3 "pragma.c"
+                                  
+#pragma clang __debug dump
+# 4 "pragma.c"
+                           Test

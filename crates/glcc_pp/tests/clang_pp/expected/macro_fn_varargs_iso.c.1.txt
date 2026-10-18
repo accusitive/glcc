@@ -1,0 +1,17 @@
+# 1 "macro_fn_varargs_iso.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_fn_varargs_iso.c" 2
+
+
+
+
+
+
+foo{a, b, c, d, e}
+
+foo2{d, C, B}
+foo2{d,e, C, B}

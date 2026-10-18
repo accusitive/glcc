@@ -1,0 +1,18 @@
+[package]
+name = "glcc_dwarf"
+version = "0.1.0"
+edition = "2024"
+
+# DWARF emission for the MIR pipeline. `glcc_lower_cl` collects the
+# lowered records (`LoweredDebug`) while it defines Clif functions and
+# data, when machine sizes, source maps, and frame offsets are at hand;
+# this crate interprets them as DWARF and appends the `.debug_*`
+# sections to a `cranelift-object` product. Nothing else in the
+# pipeline depends on gimli.
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }
+cranelift-module = "0.136.0"
+cranelift-object = "0.136.0"
+gimli = { version = "0.33.0", default-features = false, features = ["read", "write"] }
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "write", "std"] }

@@ -1,0 +1,16 @@
+# 1 "macro_rescan.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "macro_rescan.c" 2
+
+
+
+
+
+int ei_1 = (17 +1);
+
+
+int ei_2 = (M1)(17);

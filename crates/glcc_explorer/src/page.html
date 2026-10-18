@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glcc explorer</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: #1e1e1e; color: #ddd; display: flex; flex-direction: column; }
+  header { flex: none; display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #252526; border-bottom: 1px solid #333; }
+  header h1 { font-size: 15px; margin: 0; color: #9cdcfe; }
+  header .tag { font-size: 11px; color: #6a9955; border: 1px solid #3c3c3c; border-radius: 4px; padding: 1px 6px; }
+  header select, header button { background: #3c3c3c; color: #ddd; border: 1px solid #555; padding: 4px 8px; border-radius: 4px; }
+  #err { flex: none; max-height: 20vh; overflow: auto; padding: 6px 12px; color: #f48771; white-space: pre-wrap; min-height: 1em; }
+  main { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 1px; background: #333; }
+  section { display: flex; flex-direction: column; background: #1e1e1e; min-width: 0; min-height: 0; }
+  section h2 { flex: none; display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 0; padding: 6px 10px; background: #2d2d2d; color: #ccc; text-transform: uppercase; letter-spacing: .05em; }
+  section h2 select { background: #3c3c3c; color: #ddd; border: 1px solid #555; border-radius: 3px; font-size: 11px; text-transform: none; letter-spacing: 0; padding: 1px 4px; }
+  .code-host { flex: 1; min-width: 0; min-height: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>glcc explorer</h1>
+  <span class="tag" title="the compiler runs here, in wasm; only objdump is proxied">glcc-in-wasm</span>
+  <label>opt <select id="opt"><option value="0">-O0</option><option value="1">-O2</option><option value="2">-Oz</option></select></label>
+  <label>target <select id="target"><option value="0" selected>x86_64</option><option value="1">aarch64</option><option value="2">riscv64</option></select></label>
+  <label title="-fglcc-async: __attribute__((async)) coroutines, _Future(T), __builtin_await"><input type="checkbox" id="asyncflag" checked> async</label>
+  <button id="go">Compile</button>
+  <span id="status">loading Monaco…</span>
+</header>
+<div id="err"></div>
+<main>
+  <section><h2>C source</h2><div id="srcHost" class="code-host"></div></section>
+  <section>
+    <h2>MIR
+      <select id="mirview">
+        <option value="opt" selected>optimized</option>
+        <option value="raw">unoptimized</option>
+        <option value="diff">diff raw → optimized</option>
+      </select>
+    </h2>
+    <div id="mirHost" class="code-host"></div>
+    <div id="mirDiffHost" class="code-host" hidden></div>
+  </section>
+  <section><h2>Assembly</h2><div id="asmHost" class="code-host"></div></section>
+</main>
+<script>
+const DEFAULT_SOURCE = `int add(int a, int b) {
+    return a + b;
+}
+
+int main(void) {
+    return add(2, 3);
+}
+`;
+
+const err = document.getElementById('err');
+const statusEl = document.getElementById('status');
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+const $ = (id) => document.getElementById(id);
+
+// The wasm instance holds the compiler state (result buffers, panic
+// message). A trap leaves it inconsistent, so the next compile starts
+// a fresh instance from the same compiled module.
+let modulePromise = null;
+let wasm = null;
+let memory = null;
+
+async function ensureWasm() {
+  if (wasm) return;
+  if (!modulePromise) {
+    modulePromise = (async () => {
+      const r = await fetch('glcc-explorer.wasm');
+      if (!r.ok) throw new Error('cannot fetch glcc-explorer.wasm (' + r.status + '); run ./tools/build-wasm.sh and serve with glcc-explorer --serve');
+      return WebAssembly.compile(await r.arrayBuffer());
+    })();
+  }
+  const module = await modulePromise;
+  const instance = await WebAssembly.instantiate(module, {});
+  wasm = instance.exports;
+  memory = wasm.memory;
+}
+
+function wasmBytes(ptr, len) {
+  return new Uint8Array(memory.buffer, ptr, len).slice();
+}
+
+// Panic messages survive the trap in linear memory; read them before
+// discarding the instance.
+function panicMessage() {
+  try {
+    const len = wasm.glcc_panic_len();
+    return len ? decoder.decode(wasmBytes(wasm.glcc_panic_ptr(), len)) : '';
+  } catch (e) {
+    return '';
+  }
+}
+
+let editor = null;     // source editor
+let mirEditor = null;  // read-only MIR view
+let mirDiffEditor = null;
+let asmEditor = null;  // read-only assembly view
+let plainMir = null;   // MIR models for the single view
+let diffMir = null;    // separate models for the diff view
+let timer = null;
+let last = null;
+
+const schedule = () => { clearTimeout(timer); timer = setTimeout(go, 600); };
+
+function showMir() {
+  if (!last) return;
+  const view = $('mirview').value;
+  const raw = last.mir_raw || '';
+  const opt = last.mir || '';
+  if (view === 'diff') {
+    $('mirHost').hidden = true;
+    $('mirDiffHost').hidden = false;
+    diffMir.raw.setValue(raw);
+    diffMir.opt.setValue(opt);
+    if (!mirDiffEditor) {
+      mirDiffEditor = monaco.editor.createDiffEditor($('mirDiffHost'), {
+        theme: 'vs-dark', readOnly: true, originalEditable: false,
+        renderSideBySide: false, automaticLayout: true,
+        minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 12,
+      });
+      mirDiffEditor.setModel({ original: diffMir.raw, modified: diffMir.opt });
+    }
+  } else {
+    $('mirDiffHost').hidden = true;
+    $('mirHost').hidden = false;
+    if (!mirEditor) {
+      mirEditor = monaco.editor.create($('mirHost'), {
+        theme: 'vs-dark', readOnly: true, domReadOnly: true, language: 'mir',
+        automaticLayout: true, minimap: { enabled: false },
+        scrollBeyondLastLine: false, fontSize: 12,
+      });
+    }
+    plainMir.raw.setValue(raw);
+    plainMir.opt.setValue(opt);
+    mirEditor.setModel(view === 'raw' ? plainMir.raw : plainMir.opt);
+  }
+}
+
+async function go() {
+  if (!editor || !asmEditor) return; // Monaco still loading
+  statusEl.textContent = 'compiling…';
+  const t0 = performance.now();
+  let json, object;
+  try {
+    await ensureWasm();
+    const bytes = encoder.encode(editor.getValue());
+    const ptr = wasm.glcc_alloc(bytes.length);
+    try {
+      new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+      const jsonLen = wasm.glcc_compile(ptr, bytes.length, Number($('opt').value), Number($('target').value), $('asyncflag').checked ? 1 : 0);
+      json = JSON.parse(decoder.decode(wasmBytes(wasm.glcc_result_ptr(), jsonLen)));
+      object = wasmBytes(wasm.glcc_object_ptr(), wasm.glcc_object_len());
+    } finally {
+      wasm.glcc_free(ptr, bytes.length);
+    }
+  } catch (e) {
+    const msg = panicMessage();
+    wasm = null; // start fresh next time
+    statusEl.textContent = 'crashed';
+    err.textContent = (msg || String(e)).trim();
+    return;
+  }
+  last = json;
+  showMir();
+  err.textContent = (json.errors || []).join('\n');
+  if (object.length) {
+    try {
+      const r = await fetch('/disasm', { method: 'POST', body: object });
+      asmEditor.setValue(await r.text());
+    } catch (e) {
+      asmEditor.setValue('disassembly request failed: ' + e + '\n(the compiler ran in wasm; only objdump is server-side)');
+    }
+  } else {
+    asmEditor.setValue('(no object)');
+  }
+  const ms = Math.round(performance.now() - t0);
+  statusEl.textContent = (json.success ? 'ok' : 'failed') + ' · ' + ms + ' ms in wasm · ' + object.length + ' b object';
+}
+
+const MONACO = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.57.0/min/vs';
+
+function registerLanguages() {
+  monaco.languages.register({ id: 'mir' });
+  monaco.languages.setMonarchTokensProvider('mir', {
+    tokenizer: {
+      root: [
+        [/@[A-Za-z_.$][\w.$]*/, 'function'],
+        [/%\d+/, 'variable'],
+        [/\b[biuf]\d+\b/, 'type'],
+        [/^\s*b\d+(?=\s*\()/, 'type.identifier'],
+        [/(?<==\s*)[a-z][\w.]*/, 'keyword'],
+        [/\b(func|ret|br|brif|jump|call|load|store|select|phi|alloca)\b/, 'keyword'],
+        [/\b\d+\b/, 'number'],
+      ],
+    },
+  });
+  // One tokenizer for the three disassembly flavors: objdump intel
+  // (`  4:\tlea eax,...`), llvm-objdump (`       4:      \tadd x0,...`),
+  // and AT&T register spelling (`%rax`).
+  monaco.languages.register({ id: 'asm' });
+  monaco.languages.setMonarchTokensProvider('asm', {
+    tokenizer: {
+      root: [
+        [/^\s*[0-9a-f]+ <[^>]*>:/, 'type.identifier'],
+        [/^(\s*[0-9a-f]+:)(\s*)([a-z][\w.]*)/, ['number', 'white', 'keyword']],
+        [/\/\/.*$/, 'comment'],
+        [/\.[A-Za-z_]\w*/, 'variable'],
+        [/%[A-Za-z][\w$]*/, 'variable'],
+        [/\b(?:r[abcd]x|r[89]|r1[0-5])[dwb]?|\b[er]?(?:ax|bx|cx|dx|si|di|sp|bp|ip)\b|\b[abcd][hl]\b/, 'variable'],
+        [/\b(?:zero|ra|gp|tp|fp)\b|\bs(?:[0-9]|1[01])\b|\ba[0-7]\b|\bt[0-6]\b|\bx(?:[0-9]|[12][0-9]|30)\b|\bw(?:[0-9]|[12][0-9]|30)\b/, 'variable'],
+        [/-?0x[0-9a-f]+\b/, 'number'],
+        [/\b\d+\b/, 'number'],
+      ],
+    },
+  });
+}
+
+(function loadMonaco() {
+  const loader = document.createElement('script');
+  loader.src = MONACO + '/loader.js';
+  loader.onload = () => {
+    require.config({ paths: { vs: MONACO } });
+    require(['vs/editor/editor.main'], () => {
+      registerLanguages();
+      editor = monaco.editor.create($('srcHost'), {
+        value: DEFAULT_SOURCE, language: 'c', theme: 'vs-dark',
+        automaticLayout: true, minimap: { enabled: false },
+        scrollBeyondLastLine: false, fontSize: 13, tabSize: 4,
+      });
+      editor.onDidChangeModelContent(schedule);
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, go);
+      plainMir = { raw: monaco.editor.createModel('', 'mir'), opt: monaco.editor.createModel('', 'mir') };
+      diffMir = { raw: monaco.editor.createModel('', 'mir'), opt: monaco.editor.createModel('', 'mir') };
+      asmEditor = monaco.editor.create($('asmHost'), {
+        value: '', language: 'asm', theme: 'vs-dark',
+        readOnly: true, domReadOnly: true, automaticLayout: true,
+        minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 12,
+      });
+      showMir();
+      go();
+    });
+  };
+  document.head.appendChild(loader);
+})();
+
+// `#mir=diff` picks the initial MIR view (handy for sharing).
+const hashView = (location.hash.match(/mir=(raw|opt|diff)/) || [])[1];
+if (hashView) $('mirview').value = hashView;
+
+$('go').onclick = go;
+$('mirview').onchange = showMir;
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); go(); }
+});
+</script>
+</body>
+</html>

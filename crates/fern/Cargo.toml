@@ -1,0 +1,28 @@
+[package]
+name = "fern"
+version = "0.1.0"
+edition = "2024"
+
+# fern frontend: lexer/parser/defs/inference + class solving, then
+# lowering to glcc_mir. No Cranelift or driver dependencies here; the
+# `fernc` crate owns those. Tests in `tests/jit.rs` run whole programs
+# through Cranelift, so the JIT pieces are dev-dependencies.
+#
+# `c-rt` builds the C runtime (`rt/gc.c`) through glcc's own frontend,
+# so drivers can lower it into the program's object or JIT image. It is
+# what pulls the C frontend crates in, hence the feature.
+
+[features]
+default = ["c-rt"]
+c-rt = ["dep:glcc_frontend", "dep:glcc_lower_mir", "dep:glcc_pp"]
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }
+glcc_frontend = { path = "../glcc_frontend", optional = true }
+glcc_lower_mir = { path = "../glcc_lower_mir", optional = true }
+glcc_pp = { path = "../glcc_pp", optional = true }
+
+[dev-dependencies]
+glcc_lower_cl = { path = "../glcc_lower_cl" }
+cranelift-jit = "0.136.0"
+cranelift-module = "0.136.0"

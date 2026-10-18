@@ -1,0 +1,18 @@
+[package]
+name = "glcpp"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# EDG-backed C++ front end. Off by default so plain workspace builds and
+# tests skip EDG; enable with `-p glcpp --features cxx` (or
+# `--workspace --features cxx`).
+cxx = ["edg-sys/cxx"]
+
+[dependencies]
+glcc = { path = "../.." }
+edg-sys = { path = "../edg-sys" }
+
+[[bin]]
+name = "glcpp"
+required-features = ["cxx"]

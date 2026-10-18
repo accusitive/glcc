@@ -1,0 +1,180 @@
+-- brainfuck.fern — a Brainfuck machine built from immutable values.
+--
+-- The tape is a zipper of two lists around the head cell, so it is
+-- unbounded and zero-filled at both ends. A program is a list of `Op`s,
+-- loops are a stack of pending bodies, input is a list of bytes, and
+-- control flow is ordinary recursion. There is no mutable state, so no
+-- array or program counter even exists.
+--
+-- `answer()` runs five programs — Hello World, 6 * 7, nested loops, a
+-- walk off both ends of the tape, and a `cat` loop fed the input "He" —
+-- and returns a rolling checksum of every byte they emitted.
+--
+-- Build and run: make && make run (driver.c prints `answer()`).
+
+data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
+
+-- ------------------------------------------------------------- the tape --
+-- `(left, head, right)` holds the nearest cells first. Touching an
+-- unwritten cell materializes a zero.
+
+fun head(t) = match t { case (_, c, _) => c }
+fun poke(t, n) = match t { case (l, _, r) => (l, n, r) }
+
+fun right(t) = match t {
+    case (l, c, Nil) => (Cons(c, l), 0, Nil)
+    case (l, c, Cons(h, r)) => (Cons(c, l), h, r)
+}
+
+fun left(t) = match t {
+    case (Nil, c, r) => (Nil, 0, Cons(c, r))
+    case (Cons(h, l), c, r) => (l, h, Cons(c, r))
+}
+
+-- Cells are bytes; `+` and `-` wrap like a real Brainfuck.
+fun bump(n) = if n == 255 then 0 else n + 1
+fun drop(n) = if n == 0 then 255 else n - 1
+
+-- ------------------------------------------------------------ the input --
+-- `,` consumes the front of the input stream; at EOF the byte reads as
+-- 0 and the stream stays empty.
+
+fun peek(stream) = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
+fun tail(stream) = match stream { case Nil => Nil case Cons(_, more) => more }
+
+-- -------------------------------------------------------------- folding --
+class Foldable t {
+    fold : (b -> a -> b) -> b -> t a -> b
+}
+
+instance Foldable List {
+    fold(f, z, xs) = match xs {
+        case Nil => z
+        case Cons(x, xs) => fold(f, f(z, x), xs)
+    }
+}
+
+instance Foldable Maybe {
+    fold(f, z, m) = match m {
+        case Nothing => z
+        case Just(x) => f(z, x)
+    }
+}
+
+-- "Maybe a byte" from the input stream becomes a byte: `Just(b)` keeps
+-- `b`, and `Nothing` at EOF reads as 0.
+fun or_zero(m) = fold((_, b) -> b, 0, m)
+
+-- ---------------------------------------------------------- the program --
+-- `split(ops, depth)` runs with the `Open` already consumed: it cuts
+-- out the loop body up to the matching close and returns
+-- (body, program-after-that-close). `depth` counts loops still open.
+
+fun split(ops, depth) = match ops {
+    case Nil => (Nil, Nil)
+    case Cons(op, rest) => match op {
+        case Open => { let (body, after) = split(rest, depth + 1); (Cons(op, body), after) }
+        case Close => if depth == 1 then (Nil, rest) else { let (body, after) = split(rest, depth - 1); (Cons(op, body), after) }
+        case _ => { let (body, after) = split(rest, depth); (Cons(op, body), after) }
+    }
+}
+
+-- `loops` is a stack of loop bodies, one entry per `[` we are inside.
+-- A `[` with a nonzero head pushes the body and falls into it; the
+-- matching `]` jumps back to the body while the head is nonzero and
+-- pops it otherwise. A zero head at `[` skips with `split`.
+fun exec(ops, loops, tape, input, out) = match ops {
+    case Nil => (tape, input, out)
+    case Cons(op, rest) => match op {
+        case Right => exec(rest, loops, right(tape), input, out)
+        case Left => exec(rest, loops, left(tape), input, out)
+        case Inc => exec(rest, loops, poke(tape, bump(head(tape))), input, out)
+        case Dec => exec(rest, loops, poke(tape, drop(head(tape))), input, out)
+        case Emit => exec(rest, loops, tape, input, Cons(head(tape), out))
+        case Read => exec(rest, loops, poke(tape, or_zero(peek(input))), tail(input), out)
+        case Open => if head(tape) == 0 then {
+            let (_, after) = split(rest, 1);
+            exec(after, loops, tape, input, out)
+        } else {
+            exec(rest, Cons(rest, loops), tape, input, out)
+        }
+        case Close => match loops {
+            case Nil => exec(rest, loops, tape, input, out)
+            case Cons(body, more) => if head(tape) != 0 then exec(body, loops, tape, input, out)
+                                     else exec(rest, more, tape, input, out)
+        }
+    }
+}
+
+fun rev(xs, acc) = match xs { case Nil => acc case Cons(x, xs) => rev(xs, Cons(x, acc)) }
+fun reverse(xs) = rev(xs, Nil)
+
+-- One whole run, returning the emitted bytes oldest first. (`out`
+-- accumulates newest first, hence the `reverse`.)
+fun output(program, input) = {
+    let (_, _, out) = exec(program, Nil, (Nil, 0, Nil), input, Nil);
+    reverse(out)
+}
+
+-- ------------------------------------------------------------- programs --
+-- The same five demos in Brainfuck text, for reference:
+--
+--   hello   ++++++++++[>+++++++>++++++++++>+++>+<<<<-]>++.>+.+++++++..+++.
+--           >++.<<+++++++++++++++.>.+++.------.--------.>+.>.
+--   forty   ++++++[>+++++++<-]>.
+--   cubes   ++++[>++++[>++++<-]<-]>>.
+--   wander  <<+>>.
+--   cat     ,[.,]                    fed the input "He"
+
+-- `asm` expands `(op, count)` chunks into program text, so each demo
+-- below reads as run-length encoded source.
+fun rep(op, n) = if n == 0 then Nil else Cons(op, rep(op, n - 1))
+fun cats(xs, ys) = match xs { case Nil => ys case Cons(x, xs) => Cons(x, cats(xs, ys)) }
+
+fun asm(chunks) = match chunks {
+    case Nil => Nil
+    case Cons((op, n), rest) => cats(rep(op, n), asm(rest))
+}
+
+let hello = asm([
+    (Inc, 10), (Open, 1),
+    (Right, 1), (Inc, 7), (Right, 1), (Inc, 10), (Right, 1), (Inc, 3), (Right, 1), (Inc, 1),
+    (Left, 4), (Dec, 1), (Close, 1),
+    (Right, 1), (Inc, 2), (Emit, 1),
+    (Right, 1), (Inc, 1), (Emit, 1),
+    (Inc, 7), (Emit, 2), (Inc, 3), (Emit, 1),
+    (Right, 1), (Inc, 2), (Emit, 1),
+    (Left, 2), (Inc, 15), (Emit, 1),
+    (Right, 1), (Emit, 1),
+    (Inc, 3), (Emit, 1), (Dec, 6), (Emit, 1), (Dec, 8), (Emit, 1),
+    (Right, 1), (Inc, 1), (Emit, 1),
+    (Right, 1), (Emit, 1)
+])
+
+let forty = asm([
+    (Inc, 6), (Open, 1), (Right, 1), (Inc, 7), (Left, 1), (Dec, 1), (Close, 1),
+    (Right, 1), (Emit, 1)
+])
+
+let cubes = asm([
+    (Inc, 4), (Open, 1),
+    (Right, 1), (Inc, 4), (Open, 1),
+    (Right, 1), (Inc, 4), (Left, 1), (Dec, 1), (Close, 1),
+    (Left, 1), (Dec, 1), (Close, 1),
+    (Right, 2), (Emit, 1)
+])
+
+let wander = asm([(Left, 2), (Inc, 1), (Right, 2), (Emit, 1)])
+
+let cat = asm([(Read, 1), (Open, 1), (Emit, 1), (Read, 1), (Close, 1)])
+
+-- A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
+-- no `%`, so `reduce` spells the modulo by subtraction.
+fun reduce(h) = if h >= 1000000007 then reduce(h - 1000000007) else h
+fun checksum(bs) = fold((h, b) -> reduce(h * 31 + b), 7, bs)
+
+fun answer() = {
+    let spoken = cats(output(hello, Nil), cats(output(forty, Nil),
+        cats(output(cubes, Nil), cats(output(wander, Nil), output(cat, [72, 101])))));
+    checksum(spoken)
+}

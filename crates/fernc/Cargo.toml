@@ -1,0 +1,17 @@
+[package]
+name = "fernc"
+version = "0.1.0"
+edition = "2024"
+
+# fern's own driver. Deliberately separate from `glcc`'s command driver:
+# this binary only knows fern sources and emits objects (or MIR dumps)
+# through the shared glcc_mir + glcc_lower_cl pipeline.
+
+[dependencies]
+fern = { path = "../fern" }
+glcc_mir = { path = "../glcc_mir" }
+glcc_lower_cl = { path = "../glcc_lower_cl" }
+cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64"] }
+cranelift-module = "0.136.0"
+cranelift-native = "0.136.0"
+cranelift-object = "0.136.0"

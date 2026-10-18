@@ -1,0 +1,15 @@
+# 1 "comment_save_macro.c"
+# 1 "<built-in>" 1
+# 1 "<built-in>" 3
+# 413 "<built-in>" 3
+# 1 "<command line>" 1
+# 1 "<built-in>" 2
+# 1 "comment_save_macro.c" 2
+# 21 "comment_save_macro.c"
+boo bork bar
+
+( 0 );
+
+( 0,1,2 );
+
+( 0,1,2 );
