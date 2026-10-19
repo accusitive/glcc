@@ -35,8 +35,10 @@ use cranelift_codegen::ir::Value as ClifValue;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::immediates::Offset32;
 use cranelift_codegen::ir::types::{self};
-use cranelift_codegen::ir::{InstBuilder, MemFlagsData, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{InstBuilder, StackSlotData, StackSlotKind};
 use cranelift_frontend::FunctionBuilder;
+
+use crate::memflags;
 
 /// Quad exponent bias.
 #[cfg(test)]
@@ -583,8 +585,8 @@ pub(crate) fn quad_spill(builder: &mut FunctionBuilder, v: ClifValue) -> ClifVal
 /// Load a quad address as `(lo, hi)` halves (the whole 16 bytes
 /// are significant: no padding exists).
 pub(crate) fn quad_load_halves(builder: &mut FunctionBuilder, addr: ClifValue) -> (ClifValue, ClifValue) {
-    let lo = builder.ins().load(types::I64, MemFlagsData::new(), addr, Offset32::new(0));
-    let hi = builder.ins().load(types::I64, MemFlagsData::new(), addr, Offset32::new(8));
+    let lo = builder.ins().load(types::I64, memflags::trusted(), addr, Offset32::new(0));
+    let hi = builder.ins().load(types::I64, memflags::trusted(), addr, Offset32::new(8));
     (lo, hi)
 }
 
@@ -1326,13 +1328,13 @@ pub(crate) fn quad_to_f32(builder: &mut FunctionBuilder, lo: ClifValue, hi: Clif
 /// integer ops. Exact, including signed zeros and NaNs.
 pub(crate) fn quad_neg(builder: &mut FunctionBuilder, v: ClifValue) -> ClifValue {
     let addr = quad_spill(builder, v);
-    let hi = builder.ins().load(types::I64, MemFlagsData::new(), addr, Offset32::new(8));
+    let hi = builder.ins().load(types::I64, memflags::trusted(), addr, Offset32::new(8));
     let k63 = q64(builder, 63);
     let k1 = q64(builder, 1);
     let sign = builder.ins().ishl(k1, k63);
     let flipped = builder.ins().bxor(hi, sign);
-    builder.ins().store(MemFlagsData::new(), flipped, addr, Offset32::new(8));
-    builder.ins().load(types::F128, MemFlagsData::new(), addr, Offset32::new(0))
+    builder.ins().store(memflags::trusted(), flipped, addr, Offset32::new(8));
+    builder.ins().load(types::F128, memflags::trusted(), addr, Offset32::new(0))
 }
 
 /// Round halves toward an integer (see [`ref_quad_ceil`] /

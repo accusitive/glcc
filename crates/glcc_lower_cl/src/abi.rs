@@ -47,6 +47,8 @@ use cranelift_codegen::isa::CallConv;
 
 use glcc_mir as mir;
 
+use crate::memflags;
+
 /// One of the three supported compilation targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
@@ -948,8 +950,8 @@ pub fn emit_prelude(target: Target, builder: &mut cranelift_frontend::FunctionBu
 /// from there, so the `char *` walk is one contiguous slot array
 /// exactly as MSVC's `va_start`/`va_arg` expect.
 fn win64_prelude(target: Target, builder: &mut cranelift_frontend::FunctionBuilder, params: &[(cranelift_codegen::ir::Value, Slot)], layout: &SigLayout) -> VaCtx {
+    use cranelift_codegen::ir::InstBuilder;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{InstBuilder, MemFlagsData};
     // Frame-pointer layout (x86-64): [fp] saved fp, [fp+8] return
     // address, [fp+16] the first home-area byte (entry rsp + 8).
     let frame = builder.ins().get_frame_pointer(types::I64);
@@ -968,7 +970,7 @@ fn win64_prelude(target: Target, builder: &mut cranelift_frontend::FunctionBuild
             continue;
         }
         if matches!(slot.kind, SlotKind::Pad) && pos < target.gp_regs() as i64 {
-            builder.ins().store(MemFlagsData::new(), *value, home, Offset32::new((pos * 8) as i32));
+            builder.ins().store(memflags::trusted(), *value, home, Offset32::new((pos * 8) as i32));
         }
         pos += 1;
     }
@@ -983,13 +985,13 @@ fn x86_starts(layout: &SigLayout) -> (i32, i32) {
 
 /// Emit `VaStart`: fill the tag at `*ap` from prelude state.
 pub fn emit_va_start(target: Target, builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value, ctx: &VaCtx, layout: &SigLayout) {
+    use cranelift_codegen::ir::Value as ClifValue;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, Value as ClifValue};
     let store32 = |builder: &mut cranelift_frontend::FunctionBuilder, v: ClifValue, off: i32| {
-        builder.ins().store(MemFlagsData::new(), v, ap, Offset32::new(off));
+        builder.ins().store(memflags::trusted(), v, ap, Offset32::new(off));
     };
     let storeptr = |builder: &mut cranelift_frontend::FunctionBuilder, v: ClifValue, off: i32| {
-        builder.ins().store(MemFlagsData::new(), v, ap, Offset32::new(off));
+        builder.ins().store(memflags::trusted(), v, ap, Offset32::new(off));
     };
     match target.arch {
         Arch::X86_64 if target.os == Os::Windows => {
@@ -1111,10 +1113,9 @@ pub fn emit_va_arg(
                 // value: downstream treats only aggregates as
                 // addresses, so returning the slot address would spill
                 // the address bytes as the value.
-                use cranelift_codegen::ir::MemFlagsData;
                 use cranelift_codegen::ir::immediates::Offset32;
                 let ty = crate::ty::clif_ty(req_ty).expect("scalar va_arg needs a Clif type");
-                VaArgValue::Scalar(builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(0)))
+                VaArgValue::Scalar(builder.ins().load(ty, memflags::trusted(), addr, Offset32::new(0)))
             }
         }
         // Big aggregates (x86) come from the overflow area whole;
@@ -1136,10 +1137,9 @@ pub fn emit_va_arg(
                 crate::lower::emit_memcpy_pub(builder, dst, overflow, bytes);
                 VaArgValue::Addr(dst)
             } else {
-                use cranelift_codegen::ir::MemFlagsData;
                 use cranelift_codegen::ir::immediates::Offset32;
                 let ty = crate::ty::clif_ty(req_ty).expect("scalar va_arg needs a Clif type");
-                VaArgValue::Scalar(builder.ins().load(ty, MemFlagsData::new(), overflow, Offset32::new(0)))
+                VaArgValue::Scalar(builder.ins().load(ty, memflags::notrap(), overflow, Offset32::new(0)))
             }
         }
         // By-reference aggregates: the pointer itself crosses a GP path.
@@ -1224,12 +1224,12 @@ fn va_scalar(
 /// step here, and no type on this target needs one: `long double` is
 /// a plain double and larger aggregates cross by reference.
 fn win64_va_arg(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value, ty: types::Type) -> cranelift_codegen::ir::Value {
+    use cranelift_codegen::ir::InstBuilder;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{InstBuilder, MemFlagsData};
-    let ptr = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(0));
-    let value = builder.ins().load(ty, MemFlagsData::new(), ptr, Offset32::new(0));
+    let ptr = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(0));
+    let value = builder.ins().load(ty, memflags::notrap(), ptr, Offset32::new(0));
     let next = builder.ins().iadd_imm_u(ptr, 8);
-    builder.ins().store(MemFlagsData::new(), next, ap, Offset32::new(0));
+    builder.ins().store(memflags::trusted(), next, ap, Offset32::new(0));
     value
 }
 
@@ -1271,24 +1271,24 @@ fn x86_reg_arg(
     ty: types::Type,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let cur = builder.ins().load(types::I32, MemFlagsData::new(), ap, Offset32::new(off_field));
-    let reg_save = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(16));
-    let overflow = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(8));
+    let cur = builder.ins().load(types::I32, memflags::trusted(), ap, Offset32::new(off_field));
+    let reg_save = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(16));
+    let overflow = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(8));
     let bound = builder.ins().iconst(types::I32, limit as i64);
     let in_reg = builder.ins().icmp(IntCC::UnsignedLessThan, cur, bound);
     let cur_wide = builder.ins().uextend(types::I64, cur);
     let reg_addr = builder.ins().iadd(reg_save, cur_wide);
     let addr = builder.ins().select(in_reg, reg_addr, overflow);
-    let value = builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(0));
+    let value = builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(0));
     let bumped = builder.ins().iadd_imm_u(cur, step as i64);
     let new_off = builder.ins().select(in_reg, bumped, cur);
-    builder.ins().store(MemFlagsData::new(), new_off, ap, Offset32::new(off_field));
+    builder.ins().store(memflags::trusted(), new_off, ap, Offset32::new(off_field));
     let stack_step = (ty.bytes().max(8)) as i64;
     let bumped_overflow = builder.ins().iadd_imm_u(overflow, stack_step);
     let new_overflow = builder.ins().select(in_reg, overflow, bumped_overflow);
-    builder.ins().store(MemFlagsData::new(), new_overflow, ap, Offset32::new(8));
+    builder.ins().store(memflags::trusted(), new_overflow, ap, Offset32::new(8));
     value
 }
 
@@ -1360,13 +1360,13 @@ fn va_aggregate_whole(
     stack_field: i32,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let gp_cur = builder.ins().load(types::I32, MemFlagsData::new(), ap, Offset32::new(gp.cursor_field));
-    let fp_cur = builder.ins().load(types::I32, MemFlagsData::new(), ap, Offset32::new(fp.cursor_field));
-    let gp_base = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(gp.base_field));
-    let fp_base = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(fp.base_field));
-    let stack = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(stack_field));
+    let gp_cur = builder.ins().load(types::I32, memflags::trusted(), ap, Offset32::new(gp.cursor_field));
+    let fp_cur = builder.ins().load(types::I32, memflags::trusted(), ap, Offset32::new(fp.cursor_field));
+    let gp_base = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(gp.base_field));
+    let fp_base = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(fp.base_field));
+    let stack = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(stack_field));
     let gp_bytes = pieces.iter().filter(|(_, ty)| !ty.is_float()).count() as i64 * gp.stride;
     let fp_bytes = pieces.iter().filter(|(_, ty)| ty.is_float()).count() as i64 * fp.stride;
     let gp_end = builder.ins().iadd_imm_u(gp_cur, gp_bytes);
@@ -1410,18 +1410,18 @@ fn va_aggregate_whole(
         let reg_addr = builder.ins().iadd_imm_u(reg_base, piece_at);
         let stack_addr = builder.ins().iadd_imm_u(stack, *off as i64);
         let addr = builder.ins().select(in_regs, reg_addr, stack_addr);
-        let v = builder.ins().load(*ty, MemFlagsData::new(), addr, Offset32::new(0));
+        let v = builder.ins().load(*ty, memflags::trusted(), addr, Offset32::new(0));
         builder.ins().stack_store(types::I64, v, slot, *off as i32);
     }
     let bumped_gp = builder.ins().iadd_imm_u(gp_cur, gp_bytes);
     let new_gp = builder.ins().select(in_regs, bumped_gp, gp_cur);
-    builder.ins().store(MemFlagsData::new(), new_gp, ap, Offset32::new(gp.cursor_field));
+    builder.ins().store(memflags::trusted(), new_gp, ap, Offset32::new(gp.cursor_field));
     let bumped_fp = builder.ins().iadd_imm_u(fp_cur, fp_bytes);
     let new_fp = builder.ins().select(in_regs, bumped_fp, fp_cur);
-    builder.ins().store(MemFlagsData::new(), new_fp, ap, Offset32::new(fp.cursor_field));
+    builder.ins().store(memflags::trusted(), new_fp, ap, Offset32::new(fp.cursor_field));
     let bumped_stack = builder.ins().iadd_imm_u(stack, size.next_multiple_of(8) as i64);
     let new_stack = builder.ins().select(in_regs, stack, bumped_stack);
-    builder.ins().store(MemFlagsData::new(), new_stack, ap, Offset32::new(stack_field));
+    builder.ins().store(memflags::trusted(), new_stack, ap, Offset32::new(stack_field));
     builder.ins().stack_addr(types::I64, slot, 0)
 }
 
@@ -1431,11 +1431,11 @@ fn x86_overflow_next(
     ap: cranelift_codegen::ir::Value,
     bytes: u64,
 ) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
+    use cranelift_codegen::ir::InstBuilder;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{InstBuilder, MemFlagsData};
-    let overflow = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(8));
+    let overflow = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(8));
     let bumped = builder.ins().iadd_imm_u(overflow, bytes as i64);
-    builder.ins().store(MemFlagsData::new(), bumped, ap, Offset32::new(8));
+    builder.ins().store(memflags::trusted(), bumped, ap, Offset32::new(8));
     (overflow, bumped)
 }
 
@@ -1449,23 +1449,23 @@ fn arm_reg_arg(
     ty: types::Type,
 ) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let offs = builder.ins().load(types::I32, MemFlagsData::new(), ap, Offset32::new(off_field));
-    let top = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(top_field));
-    let stack = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(0));
+    let offs = builder.ins().load(types::I32, memflags::trusted(), ap, Offset32::new(off_field));
+    let top = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(top_field));
+    let stack = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(0));
     let zero = builder.ins().iconst(types::I32, 0);
     let in_reg = builder.ins().icmp(IntCC::SignedLessThan, offs, zero);
     let offs_wide = builder.ins().sextend(types::I64, offs);
     let reg_addr = builder.ins().iadd(top, offs_wide);
     let addr = builder.ins().select(in_reg, reg_addr, stack);
-    let value = builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(0));
+    let value = builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(0));
     let bumped_offs = builder.ins().iadd_imm_u(offs, step as i64);
     let new_offs = builder.ins().select(in_reg, bumped_offs, offs);
-    builder.ins().store(MemFlagsData::new(), new_offs, ap, Offset32::new(off_field));
+    builder.ins().store(memflags::trusted(), new_offs, ap, Offset32::new(off_field));
     let bumped_stack = builder.ins().iadd_imm_u(stack, 8);
     let new_stack = builder.ins().select(in_reg, stack, bumped_stack);
-    builder.ins().store(MemFlagsData::new(), new_stack, ap, Offset32::new(0));
+    builder.ins().store(memflags::trusted(), new_stack, ap, Offset32::new(0));
     value
 }
 
@@ -1476,9 +1476,9 @@ fn arm_reg_arg(
 /// only when it still has one).
 fn arm_gp_align16(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value) {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let offs = builder.ins().load(types::I32, MemFlagsData::new(), ap, Offset32::new(24));
+    let offs = builder.ins().load(types::I32, memflags::trusted(), ap, Offset32::new(24));
     let zero = builder.ins().iconst(types::I32, 0);
     let in_regs = builder.ins().icmp(IntCC::SignedLessThan, offs, zero);
     // Negative cursors round up toward zero: (offs + 15) & ~15 turns
@@ -1487,7 +1487,7 @@ fn arm_gp_align16(builder: &mut cranelift_frontend::FunctionBuilder, ap: craneli
     let mask = builder.ins().iconst(types::I32, -16);
     let rounded = builder.ins().band(rounded, mask);
     let new_offs = builder.ins().select(in_regs, rounded, offs);
-    builder.ins().store(MemFlagsData::new(), new_offs, ap, Offset32::new(24));
+    builder.ins().store(memflags::trusted(), new_offs, ap, Offset32::new(24));
 }
 
 /// RISC-V overflow-area base: named arguments that exhausted the
@@ -1509,10 +1509,10 @@ fn riscv_overflow_base(builder: &mut cranelift_frontend::FunctionBuilder, layout
 /// spill padding as argument data.
 fn riscv_va_whole(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value, ctx: &VaCtx, layout: &SigLayout, slots: usize) {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
     use cranelift_codegen::ir::types;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let ptr = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(0));
+    let ptr = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(0));
     let spill_end = builder.ins().iadd_imm_u(ctx.save_base, 64);
     let in_spill = builder.ins().icmp(IntCC::UnsignedLessThan, ptr, spill_end);
     let remaining = builder.ins().isub(spill_end, ptr);
@@ -1520,7 +1520,7 @@ fn riscv_va_whole(builder: &mut cranelift_frontend::FunctionBuilder, ap: craneli
     let redirect = builder.ins().band(in_spill, short);
     let overflow_base = riscv_overflow_base(builder, layout);
     let new_ptr = builder.ins().select(redirect, overflow_base, ptr);
-    builder.ins().store(MemFlagsData::new(), new_ptr, ap, Offset32::new(0));
+    builder.ins().store(memflags::trusted(), new_ptr, ap, Offset32::new(0));
 }
 
 /// Advance a RISC-V walking `va_list` past alignment padding: 16-byte
@@ -1532,10 +1532,10 @@ fn riscv_va_whole(builder: &mut cranelift_frontend::FunctionBuilder, ap: craneli
 /// starts at an even writer position).
 fn riscv_gp_align16(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value, ctx: &VaCtx, layout: &SigLayout) {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
     use cranelift_codegen::ir::types;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let ptr = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(0));
+    let ptr = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(0));
     let spill_end = builder.ins().iadd_imm_u(ctx.save_base, 64);
     let overflow_base = riscv_overflow_base(builder, layout);
     let in_spill = builder.ins().icmp(IntCC::UnsignedLessThan, ptr, spill_end);
@@ -1549,7 +1549,7 @@ fn riscv_gp_align16(builder: &mut cranelift_frontend::FunctionBuilder, ap: crane
     let is_odd = builder.ins().icmp(IntCC::NotEqual, low, zero);
     let bumped = builder.ins().iadd_imm_u(ptr, 8);
     let aligned = builder.ins().select(is_odd, bumped, ptr);
-    builder.ins().store(MemFlagsData::new(), aligned, ap, Offset32::new(0));
+    builder.ins().store(memflags::trusted(), aligned, ap, Offset32::new(0));
 }
 
 /// RISC-V walking-pointer read of one 8-byte slot: spill slots
@@ -1557,11 +1557,11 @@ fn riscv_gp_align16(builder: &mut cranelift_frontend::FunctionBuilder, ap: crane
 /// boundary.
 fn riscv_gp_arg(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift_codegen::ir::Value, ctx: &VaCtx, layout: &SigLayout) -> cranelift_codegen::ir::Value {
     use cranelift_codegen::ir::InstBuilder;
+    use cranelift_codegen::ir::condcodes::IntCC;
     use cranelift_codegen::ir::immediates::Offset32;
-    use cranelift_codegen::ir::{MemFlagsData, condcodes::IntCC};
-    let ptr = builder.ins().load(types::I64, MemFlagsData::new(), ap, Offset32::new(0));
+    let ptr = builder.ins().load(types::I64, memflags::trusted(), ap, Offset32::new(0));
     let spill_end = builder.ins().iadd_imm_u(ctx.save_base, 64);
-    let value = builder.ins().load(types::I64, MemFlagsData::new(), ptr, Offset32::new(0));
+    let value = builder.ins().load(types::I64, memflags::trusted(), ptr, Offset32::new(0));
     let next = builder.ins().iadd_imm_u(ptr, 8);
     // At the spill boundary, redirect onto the overflow area once.
     let skip = layout.named_gp.saturating_sub(8) as i64 * 8 + layout.named_fp.saturating_sub(8) as i64 * 8 + layout.named_stack_bytes as i64;
@@ -1569,7 +1569,7 @@ fn riscv_gp_arg(builder: &mut cranelift_frontend::FunctionBuilder, ap: cranelift
     let overflow_base = builder.ins().iadd_imm_u(frame, 16 + skip);
     let at_end = builder.ins().icmp(IntCC::Equal, next, spill_end);
     let redirected = builder.ins().select(at_end, overflow_base, next);
-    builder.ins().store(MemFlagsData::new(), redirected, ap, Offset32::new(0));
+    builder.ins().store(memflags::trusted(), redirected, ap, Offset32::new(0));
     value
 }
 

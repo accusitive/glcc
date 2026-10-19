@@ -27,6 +27,7 @@ pub mod abi;
 pub mod asm;
 mod debug;
 pub mod lower;
+mod memflags;
 pub mod quad;
 pub mod ty;
 

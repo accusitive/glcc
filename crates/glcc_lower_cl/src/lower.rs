@@ -14,6 +14,7 @@ use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 use glcc_mir as mir;
 
 use crate::abi::{self, Arch, Os, SigLayout, Target, VaCtx};
+use crate::memflags;
 use crate::ty::clif_ty;
 
 /// Windows x64 unwind record for one defined function: the serialized
@@ -914,7 +915,7 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
             // Scalar behind an address (x86-64 `long double`): load
             // the bits; values stay uniformly bitwise downstream.
             let ty = clif_ty(&mir_ty).expect("scalar address needs a Clif type");
-            let v = builder.ins().load(ty, MemFlagsData::new(), *addr, Offset32::new(0));
+            let v = builder.ins().load(ty, memflags::notrap(), *addr, Offset32::new(0));
             body.values.insert(mir_param, v);
         }
     }
@@ -1128,7 +1129,7 @@ fn store_const_bytes(builder: &mut FunctionBuilder, dst: ClifValue, content: &[u
             let mut buf = [0u8; 8];
             buf[..chunk].copy_from_slice(&content[off..off + chunk]);
             let v = builder.ins().iconst(chunk_ty, i64::from_le_bytes(buf));
-            builder.ins().store(MemFlagsData::new(), v, dst, Offset32::new(off as i32));
+            builder.ins().store(memflags::trusted(), v, dst, Offset32::new(off as i32));
             off += chunk;
         }
     }
@@ -1139,11 +1140,11 @@ fn zero_range(builder: &mut FunctionBuilder, dst: ClifValue, len: u64) {
     let splat = builder.ins().iconst(types::I64, 0);
     let words = len / 8;
     for i in 0..words {
-        builder.ins().store(MemFlagsData::new(), splat, dst, Offset32::new((i * 8) as i32));
+        builder.ins().store(memflags::trusted(), splat, dst, Offset32::new((i * 8) as i32));
     }
     let zero_byte = builder.ins().iconst(types::I8, 0);
     for i in (words * 8)..len {
-        builder.ins().store(MemFlagsData::new(), zero_byte, dst, Offset32::new(i as i32));
+        builder.ins().store(memflags::trusted(), zero_byte, dst, Offset32::new(i as i32));
     }
 }
 /// Byte copy as unrolled loads/stores. Lengths are static (struct and
@@ -1156,8 +1157,8 @@ fn emit_memcpy(builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, le
     let mut off = 0u64;
     for (chunk_ty, chunk) in [(types::I64, 8), (types::I32, 4), (types::I16, 2), (types::I8, 1)] {
         while off + chunk <= len {
-            let v = builder.ins().load(chunk_ty, MemFlagsData::new(), src, Offset32::new(off as i32));
-            builder.ins().store(MemFlagsData::new(), v, dst, Offset32::new(off as i32));
+            let v = builder.ins().load(chunk_ty, memflags::notrap(), src, Offset32::new(off as i32));
+            builder.ins().store(memflags::notrap(), v, dst, Offset32::new(off as i32));
             off += chunk;
         }
     }
@@ -1190,7 +1191,7 @@ fn f80_addr(body: &mut Body, builder: &mut FunctionBuilder, v: mir::Value) -> Cl
 
 /// Load the `F128` carrier back from a 16-byte helper out-slot.
 fn f80_result(builder: &mut FunctionBuilder, out: ClifValue) -> ClifValue {
-    builder.ins().load(types::F128, MemFlagsData::new(), out, Offset32::new(0))
+    builder.ins().load(types::F128, memflags::trusted(), out, Offset32::new(0))
 }
 
 /// One `F80` binary operation through its helper: both sides cross as
@@ -2044,7 +2045,7 @@ fn emit_inst<M: Module>(
                 if flags.volatile {
                     Some(volatile_load(builder, ty, x))
                 } else {
-                    Some(builder.ins().load(ty, MemFlagsData::new(), x, Offset32::new(0)))
+                    Some(builder.ins().load(ty, memflags::notrap(), x, Offset32::new(0)))
                 }
             }
         }
@@ -2065,7 +2066,7 @@ fn emit_inst<M: Module>(
                 if flags.volatile {
                     volatile_store(builder, ty, src, dst);
                 } else {
-                    builder.ins().store(MemFlagsData::new(), src, dst, Offset32::new(0));
+                    builder.ins().store(memflags::notrap(), src, dst, Offset32::new(0));
                 }
             }
             None
@@ -2082,7 +2083,7 @@ fn emit_inst<M: Module>(
             let mir_ty = body.func.values[agg].ty.clone();
             let (off, elem) = field_offset(&mir_ty, index);
             match clif_ty(&elem) {
-                Some(ty) => Some(builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(off as i32))),
+                Some(ty) => Some(builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(off as i32))),
                 // Nested aggregates address into the base slot.
                 None => Some(if off == 0 { addr } else { builder.ins().iadd_imm_u(addr, off as i64) }),
             }
@@ -2100,7 +2101,7 @@ fn emit_inst<M: Module>(
             if elem_ty.is_aggregate() {
                 emit_memcpy_offset(builder, dst, off, val, elem_ty.size_bytes());
             } else {
-                builder.ins().store(MemFlagsData::new(), val, dst, Offset32::new(off as i32));
+                builder.ins().store(memflags::notrap(), val, dst, Offset32::new(off as i32));
             }
             Some(dst)
         }
@@ -2117,11 +2118,11 @@ fn emit_inst<M: Module>(
             let wide = builder.ins().iconst(types::I64, splat as i64);
             let words = len / 8;
             for i in 0..words {
-                builder.ins().store(MemFlagsData::new(), wide, d, Offset32::new((i * 8) as i32));
+                builder.ins().store(memflags::notrap(), wide, d, Offset32::new((i * 8) as i32));
             }
             let fill = builder.ins().iconst(types::I8, byte as i64);
             for i in (words * 8)..len {
-                builder.ins().store(MemFlagsData::new(), fill, d, Offset32::new(i as i32));
+                builder.ins().store(memflags::notrap(), fill, d, Offset32::new(i as i32));
             }
             None
         }
@@ -2323,7 +2324,8 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
     let wrapper = clif.declare_func_in_func(wrapper, builder.func);
     let slot = builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, site.area_size as u32, 4));
     let area = builder.ins().stack_addr(types::I64, slot, 0);
-    let flags = MemFlagsData::new();
+    let area_flags = memflags::trusted();
+    let user_flags = memflags::notrap();
     let outputs = block.outputs as usize;
     for (i, op) in block.operands.iter().enumerate() {
         if i < outputs {
@@ -2331,13 +2333,13 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
             if slot.addr {
                 // A memory output's address crosses in the slot.
                 let addr = operand(body, builder, op.value);
-                builder.ins().store(flags, addr, area, Offset32::new(slot.offset as i32));
+                builder.ins().store(area_flags, addr, area, Offset32::new(slot.offset as i32));
             } else if op.constraint.contains('+') {
                 // `+` outputs start from the lvalue's current value.
                 let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
                 let addr = operand(body, builder, op.value);
-                let value = builder.ins().load(ty, flags, addr, Offset32::new(0));
-                builder.ins().store(flags, value, area, Offset32::new(slot.offset as i32));
+                let value = builder.ins().load(ty, user_flags, addr, Offset32::new(0));
+                builder.ins().store(area_flags, value, area, Offset32::new(slot.offset as i32));
             }
             continue;
         }
@@ -2355,18 +2357,18 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
                     if clif_ty(&op.ty).is_some() {
                         let value = operand(body, builder, op.value);
                         let addr = operand(body, builder, block.operands[target].value);
-                        builder.ins().store(flags, value, addr, Offset32::new(0));
+                        builder.ins().store(user_flags, value, addr, Offset32::new(0));
                     }
                 } else {
                     let value = operand(body, builder, op.value);
                     let slot = site.slots[target].expect("tied output has a slot");
-                    builder.ins().store(flags, value, area, Offset32::new(slot.offset as i32));
+                    builder.ins().store(area_flags, value, area, Offset32::new(slot.offset as i32));
                 }
             }
             None => {
                 let value = operand(body, builder, op.value);
                 let slot = site.slots[i].expect("asm input has a slot");
-                builder.ins().store(flags, value, area, Offset32::new(slot.offset as i32));
+                builder.ins().store(area_flags, value, area, Offset32::new(slot.offset as i32));
             }
         }
     }
@@ -2378,9 +2380,9 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
             continue;
         }
         let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
-        let value = builder.ins().load(ty, flags, area, Offset32::new(slot.offset as i32));
+        let value = builder.ins().load(ty, area_flags, area, Offset32::new(slot.offset as i32));
         let addr = operand(body, builder, op.value);
-        builder.ins().store(flags, value, addr, Offset32::new(0));
+        builder.ins().store(user_flags, value, addr, Offset32::new(0));
     }
     selector
 }
@@ -2603,7 +2605,7 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                         let addr = operand(body, builder, val.unwrap());
                         let mut outs = Vec::with_capacity(pieces.len());
                         for (off, ty) in pieces {
-                            outs.push(builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(off as i32)));
+                            outs.push(builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(off as i32)));
                         }
                         builder.ins().return_(&outs);
                     }
@@ -5055,14 +5057,14 @@ fn emit_call<M: Module>(
                     let v = operand(body, builder, arg);
                     let slot = stack_slot(builder, &arg_ty);
                     let addr = builder.ins().stack_addr(types::I64, slot, 0);
-                    builder.ins().store(MemFlagsData::new(), v, addr, Offset32::new(0));
+                    builder.ins().store(memflags::trusted(), v, addr, Offset32::new(0));
                     clif_args.push(addr);
                 }
                 sig_tys.push((slot.ty, slot.purpose));
             }
             abi::SlotKind::Chunk { owner, index } => {
                 let base = operand(body, builder, args[owner]);
-                let v = builder.ins().load(types::I64, MemFlagsData::new(), base, Offset32::new((index * 8) as i32));
+                let v = builder.ins().load(types::I64, memflags::notrap(), base, Offset32::new((index * 8) as i32));
                 clif_args.push(v);
                 sig_tys.push((slot.ty, slot.purpose));
             }
@@ -5241,7 +5243,7 @@ fn call_piece(body: &mut Body, builder: &mut FunctionBuilder, arg: mir::Value, o
     let mir_ty = body.func.values[arg].ty.clone();
     if mir_ty.is_aggregate() {
         let base = operand(body, builder, arg);
-        return builder.ins().load(slot_ty, MemFlagsData::new(), base, Offset32::new(offset as i32));
+        return builder.ins().load(slot_ty, memflags::notrap(), base, Offset32::new(offset as i32));
     }
     let v = operand(body, builder, arg);
     if builder.func.dfg.value_type(v) == slot_ty {
@@ -5362,7 +5364,7 @@ fn emit_call_tail(
                         let v = operand(body, builder, arg);
                         let slot = stack_slot(builder, &mir_ty);
                         let addr = builder.ins().stack_addr(types::I64, slot, 0);
-                        builder.ins().store(MemFlagsData::new(), v, addr, Offset32::new(0));
+                        builder.ins().store(memflags::trusted(), v, addr, Offset32::new(0));
                         addr
                     };
                     clif_args.push(base);
@@ -5374,7 +5376,7 @@ fn emit_call_tail(
                     }
                     let base = operand(body, builder, arg);
                     for k in 0..bytes.div_ceil(8) {
-                        let v = builder.ins().load(types::I64, MemFlagsData::new(), base, Offset32::new((k * 8) as i32));
+                        let v = builder.ins().load(types::I64, memflags::notrap(), base, Offset32::new((k * 8) as i32));
                         clif_args.push(v);
                         sig_tys.push((types::I64, ArgumentPurpose::Normal));
                     }
@@ -5420,7 +5422,7 @@ fn push_pieces(
 ) {
     for (off, ty) in pieces {
         let base = operand(body, builder, arg);
-        let v = builder.ins().load(*ty, MemFlagsData::new(), base, Offset32::new(*off as i32));
+        let v = builder.ins().load(*ty, memflags::notrap(), base, Offset32::new(*off as i32));
         let (v, ty) = if target.arch == Arch::Riscv64 && ty.is_float() {
             (riscv_fp_bits(builder, v, *ty), types::I64)
         } else {
