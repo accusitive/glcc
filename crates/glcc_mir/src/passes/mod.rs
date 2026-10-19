@@ -373,6 +373,68 @@ fn fold_fcmp(func: &Function, pred: FcmpPred, lhs: Value, rhs: Value) -> Option<
     })
 }
 
+/// Collapse `store dst, load src` into one `Memcpy`.
+///
+/// Aggregates have no Clif value: lowering `load` copies into a fresh
+/// stack slot, and the following `store` copies it out again. When the
+/// load's only use is the immediately following store, copying straight
+/// from the source to the destination is equivalent for the plain,
+/// non-volatile accesses lowered this way, and avoids the temporary.
+#[derive(Default)]
+pub struct ForwardAggregateCopy;
+
+impl FunctionPass for ForwardAggregateCopy {
+    fn name(&self) -> &'static str {
+        "forward-aggregate-copy"
+    }
+
+    fn run(&mut self, func: &mut Function) -> bool {
+        let counts = func.count_resident_uses();
+        let mut changed = false;
+        for block_idx in 0..func.blocks.len() {
+            let block = Block::from_usize(block_idx);
+            let insts = func.blocks[block].insts.clone();
+            let mut removed = Vec::new();
+            for pair in insts.windows(2) {
+                let (load_inst, store_inst) = (pair[0], pair[1]);
+                let InstKind::Load { addr: src, flags: load_flags } = &func.insts[load_inst].kind else {
+                    continue;
+                };
+                let InstKind::Store {
+                    addr: dst,
+                    val,
+                    flags: store_flags,
+                } = &func.insts[store_inst].kind
+                else {
+                    continue;
+                };
+                let Some(result) = func.insts[load_inst].result else {
+                    continue;
+                };
+                if *val != result || counts.get(&result).copied().unwrap_or(0) != 1 {
+                    continue;
+                }
+                if load_flags.volatile || store_flags.volatile {
+                    continue;
+                }
+                let ty = &func.values[result].ty;
+                if !ty.is_aggregate() {
+                    continue;
+                }
+                let len = ty.size_bytes();
+                func.insts[load_inst].kind = InstKind::Memcpy { dst: *dst, src: *src, len };
+                func.insts[load_inst].result = None;
+                removed.push(store_inst);
+                changed = true;
+            }
+            if !removed.is_empty() {
+                func.blocks[block].insts.retain(|inst| !removed.contains(inst));
+            }
+        }
+        changed
+    }
+}
+
 /// Remove pure instructions whose result is never used.
 #[derive(Default)]
 pub struct DeadCodeElim;
@@ -2052,6 +2114,67 @@ mod tests {
         };
         assert_eq!(func.const_value(val), Some(&Const::Undef));
         assert_eq!(func.values[val].ty, ptr_ty);
+    }
+
+    fn aggregate_copy_func(volatile: bool) -> (Function, crate::ir::Inst, crate::ir::Inst) {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let sig = Signature::new(vec![Ty::ptr(ty.clone()), Ty::ptr(ty.clone())], Ty::Void);
+        let (mut func, entry) = Function::new("copy", sig);
+        let dst = func.values.push(crate::ir::ValueData {
+            ty: Ty::ptr(ty.clone()),
+            def: Def::Param(entry, 0),
+        });
+        let src = func.values.push(crate::ir::ValueData {
+            ty: Ty::ptr(ty.clone()),
+            def: Def::Param(entry, 1),
+        });
+        func.blocks[entry].params.extend([dst, src]);
+        let flags = if volatile { crate::ir::MemFlags::vol() } else { crate::ir::MemFlags::plain() };
+        let result = func.values.push(crate::ir::ValueData {
+            ty: ty.clone(),
+            def: Def::Inst(Inst::from_usize(0)),
+        });
+        let load = func.insts.push(crate::ir::InstData {
+            block: entry,
+            kind: InstKind::Load { addr: src, flags },
+            result: Some(result),
+            loc: None,
+        });
+        func.values[result].def = Def::Inst(load);
+        func.blocks[entry].insts.push(load);
+        let store = func.insts.push(crate::ir::InstData {
+            block: entry,
+            kind: InstKind::Store { addr: dst, val: result, flags },
+            result: None,
+            loc: None,
+        });
+        func.blocks[entry].insts.push(store);
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+        (func, load, store)
+    }
+
+    #[test]
+    fn forwards_adjacent_aggregate_load_store() {
+        let (mut func, load, store) = aggregate_copy_func(false);
+        let mut pass = ForwardAggregateCopy;
+        assert!(pass.run(&mut func));
+        assert!(matches!(func.insts[load].kind, InstKind::Memcpy { len: 16, .. }));
+        assert_eq!(func.insts[load].result, None);
+        assert!(!func.blocks[func.entry].insts.contains(&store));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(!pass.run(&mut func), "second run is a no-op");
+    }
+
+    #[test]
+    fn keeps_volatile_aggregate_copies() {
+        let (mut func, load, _) = aggregate_copy_func(true);
+        let mut pass = ForwardAggregateCopy;
+        assert!(!pass.run(&mut func));
+        assert!(matches!(func.insts[load].kind, InstKind::Load { .. }));
     }
 
     #[test]
