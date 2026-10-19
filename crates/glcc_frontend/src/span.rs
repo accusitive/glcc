@@ -7,10 +7,11 @@
 //! …) are covered by the span of the parent struct that contains them.
 //!
 //! [`CompileError`] is the structured diagnostic payload: a message plus
-//! one primary and any number of secondary labeled spans. The parser
-//! renders it through codespan-reporting (see `Parser::emit`) and then
-//! panics with the plain message, so `#[should_panic(expected = ...)]`
-//! tests keep matching while humans get the full report.
+//! one primary and any number of secondary labeled spans, tagged with a
+//! [`Severity`]. The parser renders errors through codespan-reporting
+//! (see `Parser::emit`), accumulates them instead of aborting, and
+//! exposes the whole set via `Parser::diagnostics`; a machine-readable
+//! (JSON) form drives editor integrations (`Parser::diagnostics_json`).
 
 use alloc::{
     format,
@@ -171,6 +172,27 @@ pub fn take_diagnostic_emitted() -> bool {
     }
 }
 
+/// The severity of a [`CompileError`]. Warnings share the payload shape
+/// (message + labeled spans + notes) so both render through the same
+/// codespan path and serialize through the same machine-readable form;
+/// only the severity tag differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl Severity {
+    /// Lowercase spelling used by the machine-readable (JSON) form and
+    /// accepted by Monaco's marker severities.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        }
+    }
+}
+
 /// One labeled span inside a [`CompileError`]: the range plus the text
 /// rendered beside the underline (`""` for a bare underline).
 #[derive(Debug, Clone)]
@@ -184,6 +206,7 @@ pub struct SpanLabel {
 /// redeclaration conflicts).
 #[derive(Debug, Clone)]
 pub struct CompileError {
+    pub severity: Severity,
     pub message: String,
     pub primary: SpanLabel,
     pub secondary: Vec<SpanLabel>,
@@ -192,7 +215,18 @@ pub struct CompileError {
 
 impl CompileError {
     pub fn new(message: impl Into<String>, span: Span) -> Self {
+        Self::at(Severity::Error, message, span)
+    }
+
+    /// A non-fatal diagnostic: rendered and serialized like an error,
+    /// but parsing/checking continues.
+    pub fn warning(message: impl Into<String>, span: Span) -> Self {
+        Self::at(Severity::Warning, message, span)
+    }
+
+    fn at(severity: Severity, message: impl Into<String>, span: Span) -> Self {
         Self {
+            severity,
             message: message.into(),
             primary: SpanLabel { span, message: String::new() },
             secondary: Vec::new(),
@@ -208,6 +242,11 @@ impl CompileError {
     pub fn with_note(mut self, note: impl Into<String>) -> Self {
         self.notes.push(note.into());
         self
+    }
+
+    /// Whether this diagnostic is fatal (blocks codegen); warnings do not.
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
     }
 }
 

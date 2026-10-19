@@ -90,6 +90,10 @@ pub struct Output {
     pub mir_raw_full: String,
     pub asm: String,
     pub errors: Vec<String>,
+    /// Machine-readable diagnostics (the frontend's JSON object:
+    /// `{"diagnostics":[...]}`), for the editor integration. Empty
+    /// string when the failure happened before the frontend ran.
+    pub diagnostics: String,
     pub object_len: usize,
     /// Emitted object (relocatable ELF) bytes. Empty when codegen did
     /// not run; the wasm build ships these to the disassembly endpoint.
@@ -106,6 +110,7 @@ pub struct Prepared {
     pub mir_raw_full: String,
     pub object: Vec<u8>,
     pub errors: Vec<String>,
+    pub diagnostics: String,
 }
 
 /// Compile C source to MIR + object bytes. Never panics: frontend and
@@ -129,6 +134,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
                     mir_raw_full: String::new(),
                     asm: String::new(),
                     errors: vec![e],
+                    diagnostics: String::new(),
                     object_len: 0,
                     object: Vec::new(),
                 });
@@ -138,7 +144,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
         source.to_string()
     };
 
-    let (mut mir_module, mir_raw, mir_raw_full) = match lower_to_mir(&text, target, opts.async_enabled) {
+    let (mut mir_module, mir_raw, mir_raw_full, diagnostics) = match lower_to_mir(&text, target, opts.async_enabled) {
         Ok(v) => v,
         Err(e) => {
             return Err(Output {
@@ -149,6 +155,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
                 mir_raw_full: String::new(),
                 asm: String::new(),
                 errors: e.errors,
+                diagnostics: e.diagnostics,
                 object_len: 0,
                 object: Vec::new(),
             });
@@ -170,6 +177,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
                 mir_raw_full,
                 asm: String::new(),
                 errors: [errors, vec![e]].concat(),
+                diagnostics: diagnostics.clone(),
                 object_len: 0,
                 object: Vec::new(),
             });
@@ -183,6 +191,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
         mir_raw_full,
         object: object_bytes,
         errors,
+        diagnostics,
     })
 }
 
@@ -198,6 +207,7 @@ pub fn compile(source: &str, opts: &Options) -> Output {
             mir_full: p.mir_full,
             mir_raw_full: p.mir_raw_full,
             errors: p.errors,
+            diagnostics: p.diagnostics,
             object_len: p.object.len(),
             object: p.object,
         },
@@ -218,6 +228,7 @@ pub fn compile_object(source: &str, opts: &Options) -> Output {
             mir_raw_full: p.mir_raw_full,
             asm: String::new(),
             errors: p.errors,
+            diagnostics: p.diagnostics,
             object_len: p.object.len(),
             object: p.object,
         },
@@ -248,6 +259,7 @@ pub fn opt_from_code(code: u32) -> OptLevel {
 struct MirFailure {
     errors: Vec<String>,
     partial_mir: String,
+    diagnostics: String,
 }
 
 fn needs_preprocess(source: &str) -> bool {
@@ -304,14 +316,27 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
     Ok(glcc_frontend::decode_source(&out.stdout))
 }
 
-fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String), MirFailure> {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String, String), MirFailure> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(glcc_mir::Module, String, String, String), (Vec<String>, String)> {
         let mut interner = Interner::new();
         let mut sema = Sema::with_target(target);
         sema.async_enabled = async_enabled;
         let tokens = Lexer::new(source, &mut interner).lex_all();
         let mut parser = Parser::new(source, tokens, &mut sema, &mut interner);
+        // The explorer reports diagnostics through `Output::errors` and
+        // `Output::diagnostics`, not codespan's stderr rendering.
+        parser.emit_human = false;
         let tu = parser.parse_translation_unit();
+        let diagnostics = parser.diagnostics_json();
+        if parser.has_errors() {
+            let errors = parser
+                .diagnostics()
+                .into_iter()
+                .filter(|d| d.is_error())
+                .map(|d| d.message)
+                .collect();
+            return Err((errors, diagnostics));
+        }
         drop(parser);
         let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
         let text = glcc_mir::display::dump_module(&module);
@@ -321,23 +346,30 @@ fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Re
         // (`await` has no lowering of its own); `text` stays pre-split
         // so the raw panels show the awaits.
         glcc_mir::pass::PassManager::new().add_module_pass(glcc_mir::coroutine::LowerCoroutines).run(&mut module);
-        (module, text, text_full)
+        Ok((module, text, text_full, diagnostics))
     }));
     match outcome {
-        Ok((module, text, text_full)) => {
+        Ok(Ok((module, text, text_full, diagnostics))) => {
             let verify = glcc_mir::verify::verify_module(&module);
             if verify.is_empty() {
-                Ok((module, text, text_full))
+                Ok((module, text, text_full, diagnostics))
             } else {
                 Err(MirFailure {
                     errors: verify,
                     partial_mir: text,
+                    diagnostics: String::new(),
                 })
             }
         }
+        Ok(Err((errors, diagnostics))) => Err(MirFailure {
+            errors,
+            partial_mir: String::new(),
+            diagnostics,
+        }),
         Err(payload) => Err(MirFailure {
             errors: vec![format!("frontend error: {}", panic_message(&payload))],
             partial_mir: String::new(),
+            diagnostics: String::new(),
         }),
     }
 }
@@ -520,8 +552,13 @@ pub fn output_json(o: &Output) -> String {
         err.push('"');
     }
     err.push(']');
+    let diagnostics = if o.diagnostics.is_empty() {
+        "{\"diagnostics\":[]}"
+    } else {
+        &o.diagnostics
+    };
     format!(
-        "{{\"success\":{},\"mir\":\"{}\",\"mir_raw\":\"{}\",\"mir_full\":\"{}\",\"mir_raw_full\":\"{}\",\"asm\":\"{}\",\"errors\":{},\"object_len\":{}}}",
+        "{{\"success\":{},\"mir\":\"{}\",\"mir_raw\":\"{}\",\"mir_full\":\"{}\",\"mir_raw_full\":\"{}\",\"asm\":\"{}\",\"errors\":{},\"diagnostics\":{},\"object_len\":{}}}",
         o.success,
         escape_json(&o.mir),
         escape_json(&o.mir_raw),
@@ -529,6 +566,7 @@ pub fn output_json(o: &Output) -> String {
         escape_json(&o.mir_raw_full),
         escape_json(&o.asm),
         err,
+        diagnostics,
         o.object_len
     )
 }
@@ -631,11 +669,27 @@ mod tests {
             mir_raw_full: String::new(),
             asm: String::new(),
             errors: vec![],
+            diagnostics: String::new(),
             object_len: 0,
             object: Vec::new(),
         };
         let j = output_json(&o);
         assert!(j.contains("a\\\"b\\n"));
+        assert!(j.contains("\"diagnostics\":{\"diagnostics\":[]}"), "{j}");
+    }
+
+    /// A frontend failure is reported through both the plain `errors`
+    /// list and the machine-readable diagnostics object, so an editor
+    /// gets positions without parsing the message text.
+    #[test]
+    fn frontend_error_carries_structured_diagnostics() {
+        let out = compile("int x = ;", &opts());
+        assert!(!out.success);
+        assert!(out.errors.iter().any(|e| e.contains("expected expression")), "errors: {:?}", out.errors);
+        assert!(out.diagnostics.contains("\"severity\":\"error\""), "diagnostics: {}", out.diagnostics);
+        assert!(out.diagnostics.contains("\"line\":1"), "diagnostics: {}", out.diagnostics);
+        let json = output_json(&out);
+        assert!(json.contains("\"diagnostics\":{\"diagnostics\":["), "{json}");
     }
 
     /// The full MIR views carry `; path:line:column` annotation on the

@@ -388,7 +388,31 @@ pub struct Job {
     /// `_Future(T)`, `__builtin_await`). Off by default so no existing
     /// code can accidentally compile as coroutines.
     pub async_enabled: bool,
+    /// `--error-format=json|human`: how frontend diagnostics are
+    /// reported. `human` (the default) renders them through codespan to
+    /// stderr; `json` prints the machine-readable form for editors.
+    pub error_format: ErrorFormat,
     pub warnings: Vec<String>,
+}
+
+/// Diagnostic rendering selected by `--error-format`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ErrorFormat {
+    /// codespan-rendered diagnostics on stderr (the default).
+    #[default]
+    Human,
+    /// One JSON object with a `diagnostics` array, for editor integration.
+    Json,
+}
+
+impl ErrorFormat {
+    fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "human" => Ok(ErrorFormat::Human),
+            "json" => Ok(ErrorFormat::Json),
+            _ => Err(format!("invalid argument to '--error-format' (expected 'human' or 'json')")),
+        }
+    }
 }
 
 /// Where `-save-temps` files go: `Off` discards them (the default),
@@ -484,6 +508,7 @@ impl Default for Job {
             ext_clang: None,
             pp_native: None,
             async_enabled: false,
+            error_format: ErrorFormat::Human,
             warnings: Vec::new(),
         }
     }
@@ -842,6 +867,11 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                         "clang" => job.pp_native = Some(false),
                         _ => return Err(format!("invalid argument to '--pp' (expected 'native' or 'clang')")),
                     }
+                } else if s == "--error-format" {
+                    let val = attached_or_next(args, &mut pos, s.len(), "--error-format")?;
+                    job.error_format = ErrorFormat::parse(&val.to_string_lossy())?;
+                } else if let Some(rest) = s.strip_prefix("--error-format=") {
+                    job.error_format = ErrorFormat::parse(rest)?;
                 } else if s.starts_with("-std=") || s == "-ansi" {
                     if s == "-ansi" {
                         // `-ansi` means C90, like gcc.
@@ -1150,10 +1180,11 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
 }
 
 /// Frontend and optimization pipeline: preprocessed C in, verified
-/// MIR plus the per-TU assembler text out. Frontend diagnostics
-/// surface as panics after rendering, so callers catch panics and
-/// report them as `Quiet`.
-fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts) -> (glcc_mir::Module, String) {
+/// MIR plus the per-TU assembler text out. Frontend diagnostics are
+/// accumulated by the parser and reported (codespan or JSON, per
+/// `error_format`) before returning `Err`; a later codegen/verification
+/// panic is caught by the callers and reported as `Quiet`.
+fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(glcc_mir::Module, String), ()> {
     // The driver owns the interner, the lexer output, and the
     // sema: the lexer fills spellings, the parser borrows all of
     // it, and `(sema, interner)` thread on into MIR lowering.
@@ -1168,7 +1199,17 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
     sema.weak_extern_inline = flavor == Flavor::Cpp;
     let tokens = Lexer::new(src, &mut interner).lex_all();
     let mut parser = Parser::new(src, tokens, &mut sema, &mut interner);
+    // `json` consumers render `Parser::diagnostics_json` themselves.
+    parser.emit_human = error_format == ErrorFormat::Human;
     let tu = parser.parse_translation_unit();
+    let has_errors = parser.has_errors();
+    if error_format == ErrorFormat::Json && (!parser.diagnostics().is_empty()) {
+        // Warnings are useful even when compilation succeeds.
+        eprintln!("{}", parser.diagnostics_json());
+    }
+    if has_errors {
+        return Err(());
+    }
     drop(parser);
     // File-scope asm becomes assembler text for the per-TU `.s`
     // pipeline: the Cranelift object cannot carry raw text.
@@ -1215,18 +1256,18 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
         }
         panic!("mir verification failed");
     }
-    (mir_module, asm_text)
+    Ok((mir_module, asm_text))
 }
 
 /// Compile one preprocessed TU to object bytes through the new
 /// pipeline: frontend check, MIR lowering and verification, then
 /// Clif lowering to a native (or `--target=`) object. Frontend
-/// diagnostics surface as panics after rendering, so any panic here
-/// is `Quiet`: the panic hook or the rendered diagnostic already
-/// spoke.
-fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_level: OptLevel, async_enabled: bool, lang: LangOpts) -> std::result::Result<(Vec<u8>, String), ()> {
+/// diagnostics are reported by `lower_source_to_mir`; any panic here
+/// (codegen or MIR verification) is `Quiet`: the panic hook or the
+/// rendered diagnostic already spoke.
+fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (mir_module, mut asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang);
+        let (mir_module, mut asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
         let cl_target = match target.arch {
             glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
             glcc_frontend::target::Arch::Aarch64 => glcc_lower_cl::Arch::Aarch64,
@@ -1270,7 +1311,7 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         builder.unwind_info(true);
         let mut obj = cranelift_object::ObjectModule::new(builder);
         let mut unwind = Vec::new();
-        if debug {
+        Ok(if debug {
             let (_, lowered) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
             let mut product = obj.finish();
             if let Err(e) = winunwind::emit(&mut product, &unwind) {
@@ -1284,10 +1325,11 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
                 eprintln!("glcc: warning: {e}");
             }
             (product.emit().expect("object emit"), asm_text)
-        }
+        })
     }));
     match outcome {
-        Ok(compiled) => Ok(compiled),
+        Ok(Ok(compiled)) => Ok(compiled),
+        Ok(Err(())) => Err(()),
         Err(_) => Err(()),
     }
 }
@@ -1295,23 +1337,24 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
 /// MIR text for `--emit-mir`/`--emit-full-mir`, sharing
 /// `compile_source`'s panic handling: the frontend speaks for itself,
 /// so a caught panic becomes `Quiet` instead of double-reporting.
-fn dump_mir_source(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, full: bool) -> std::result::Result<String, ()> {
+fn dump_mir_source(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat, full: bool) -> std::result::Result<String, ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang);
-        if full {
+        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
+        Ok::<String, ()>(if full {
             glcc_mir::display::dump_module_full(&module)
         } else {
             glcc_mir::display::dump_module(&module)
-        }
+        })
     }));
     match outcome {
-        Ok(text) => Ok(text),
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(())) => Err(()),
         Err(_) => Err(()),
     }
 }
 
 /// Parse and check only (`-fsyntax-only`).
-fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts) -> std::result::Result<(), ()> {
+fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut interner = Interner::new();
         let mut sema = Sema::with_target(target);
@@ -1319,10 +1362,20 @@ fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts) 
         sema.async_enabled = async_enabled;
         let tokens = Lexer::new(src, &mut interner).lex_all();
         let mut parser = Parser::new(src, tokens, &mut sema, &mut interner);
+        parser.emit_human = error_format == ErrorFormat::Human;
         let _ = parser.parse_translation_unit();
+        let has_errors = parser.has_errors();
+        if error_format == ErrorFormat::Json && !parser.diagnostics().is_empty() {
+            eprintln!("{}", parser.diagnostics_json());
+        }
+        if has_errors {
+            return Err(());
+        }
+        Ok(())
     }));
     match outcome {
-        Ok(()) => Ok(()),
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(())) => Err(()),
         Err(_) => Err(()),
     }
 }
@@ -1882,7 +1935,7 @@ fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path
         }
         save_temp_file(&dir, &format!("{stem}.i"), &bytes);
     }
-    let (bytes, asm_text) = compile_source(&c, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job)).map_err(|()| {
+    let (bytes, asm_text) = compile_source(&c, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
         take_diagnostic_emitted();
         Fail::Quiet
     })?;
@@ -2034,7 +2087,7 @@ fn compile_input_to_bytes(ctx: &Ctx, job: &Job, input: &Input, obj_out: Option<&
         Lang::Assembler => unreachable!("assembler inputs are assembled, not compiled"),
         Lang::Cpp | Lang::EdgC => unreachable!("EDG inputs are handled by compile_edg_input"),
     };
-    compile_source(&text, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job)).map_err(|()| {
+    compile_source(&text, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
         // Drain the flag so a caught diagnostic never silences a
         // later, unrelated panic in the hook.
         take_diagnostic_emitted();
@@ -2080,7 +2133,7 @@ fn do_syntax_only(ctx: &Ctx, job: &Job) -> Outcome<()> {
                 if ctx.dry_run {
                     continue;
                 }
-                check_source(&text, job.target, job.async_enabled, language(job)).map_err(|()| Fail::Quiet)?;
+                check_source(&text, job.target, job.async_enabled, language(job), job.error_format).map_err(|()| Fail::Quiet)?;
             }
             Lang::Cpp | Lang::EdgC => {
                 if ctx.dry_run {
@@ -2140,7 +2193,7 @@ fn do_emit_mir(ctx: &Ctx, job: &Job, full: bool) -> Outcome<()> {
         if ctx.dry_run {
             continue;
         }
-        let mir = dump_mir_source(&text, job.flavor, job.target, job.opt_level, job.async_enabled, language(job), full).map_err(|()| {
+        let mir = dump_mir_source(&text, job.flavor, job.target, job.opt_level, job.async_enabled, language(job), job.error_format, full).map_err(|()| {
             take_diagnostic_emitted();
             Fail::Quiet
         })?;
@@ -2477,6 +2530,10 @@ Extensions (glcc-specific):
                      return a `_Future(T)` handle, `__builtin_await` suspends
                      on one; needs the `glcc_async` runtime (frame hooks are
                      weak, see docs/async-abi.md)
+  --error-format=human|json
+                     frontend diagnostics: codespan on stderr (default), or
+                     one JSON object with 1-based line/column and byte
+                     offsets, for editors (Monaco and friends)
 Language level:
   -std=<std>, -ansi  set the version the frontend parses (e.g. `-std=c11`
                      requires `_Static_assert`, C89 rejects it); the same
@@ -2794,8 +2851,8 @@ mod tests {
     #[test]
     fn full_mir_annotates_instructions_with_source_locations() {
         let src = "# 1 \"t.c\"\nint add(int a, int b) { return a + b; }\nint main() { return add(2, 3); }\n";
-        let plain = dump_mir_source(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), false).expect("plain dump");
-        let full = dump_mir_source(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), true).expect("full dump");
+        let plain = dump_mir_source(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, false).expect("plain dump");
+        let full = dump_mir_source(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, true).expect("full dump");
         assert!(!plain.contains("t.c:"), "{plain}");
         assert!(full.contains("; t.c:"), "{full}");
         // The full dump is the compact text plus location suffixes:
@@ -2854,7 +2911,7 @@ mod tests {
     fn debug_flag_controls_debug_sections() {
         let src = "int add(int a, int b) { return a + b; }\nint main() { return add(2, 3); }\n";
         let compile = |debug| {
-            compile_source(src, Flavor::C, Target::LP64, debug, OptLevel::None, false, LangOpts::default())
+            compile_source(src, Flavor::C, Target::LP64, debug, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
                 .expect("compiles")
                 .0
         };
@@ -2872,7 +2929,7 @@ mod tests {
         assert!(has_section(&without, b".eh_frame"), "missing .eh_frame with -g0");
         // Optimized builds still carry debug info through the MIR
         // passes (locations ride on instructions).
-        let optimized = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, false, LangOpts::default())
+        let optimized = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&optimized, b".debug_info"), "missing .debug_info at -O2 -g");
@@ -2884,7 +2941,7 @@ mod tests {
         // A function with no statements still gets a subprogram and an
         // (empty) line sequence rather than failing emission.
         let src = "void e() {}\nint main() { e(); return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b".debug_info"));
@@ -2898,7 +2955,7 @@ mod tests {
     #[test]
     fn debug_extern_declaration_has_no_location() {
         let src = "extern int x;\nint main() { return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let (dies, _) = read_dies(&bytes);
@@ -2935,7 +2992,7 @@ mod tests {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
         let src = "int f(int x) { return x + 1; }\nint g(void) { return f(2); }\nint main(void) { return g(); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::WINDOWS_X86_64, false, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::WINDOWS_X86_64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -2997,7 +3054,7 @@ mod tests {
         }
 
         // Other targets must not grow the sections.
-        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -3150,7 +3207,7 @@ mod tests {
                  return total + p.x + bs.a + col + g;\n\
              }\n\
              int main() { g = 1; return add(2, 3); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"orig.c"), "line program lost the original file name");
@@ -3256,6 +3313,19 @@ mod tests {
     }
 
     #[test]
+    fn error_format_selects_human_or_json() {
+        assert_eq!(parse(&["a.c"]).error_format, ErrorFormat::Human);
+        assert_eq!(parse(&["--error-format=json", "a.c"]).error_format, ErrorFormat::Json);
+        assert_eq!(parse(&["--error-format", "human", "a.c"]).error_format, ErrorFormat::Human);
+        // Last wins, like other repeated options.
+        assert_eq!(
+            parse(&["--error-format=json", "--error-format=human", "a.c"]).error_format,
+            ErrorFormat::Human
+        );
+        assert!(parse_args(&args(&["--error-format=bogus", "a.c"])).is_err());
+    }
+
+    #[test]
     fn save_temps_flags() {
         // Off by default; bare and `=cwd` write to the working
         // directory, `=obj` beside each `-c` object. Last wins.
@@ -3319,7 +3389,7 @@ mod tests {
     #[test]
     fn file_scope_asm_becomes_assembler_text() {
         let src = "asm(\".globl x\\nx:\\n  ret\\n\");\nint f(void){return 0;}\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default()).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert_eq!(asm_text, ".globl x\nx:\n  ret\n\n");
     }
@@ -3328,7 +3398,7 @@ mod tests {
     fn inline_asm_wrappers_become_assembler_text() {
         let src = "int f(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n\
                    int g(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default()).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("addl $1, %eax"), "{asm_text}");
         // Identical blocks share one content-addressed wrapper.
@@ -3338,7 +3408,7 @@ mod tests {
     #[test]
     fn asm_goto_wrapper_returns_a_selector() {
         let src = "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default()).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("jnz .Lasm"), "{asm_text}");
         assert!(asm_text.contains("movq $1,"), "{asm_text}");
@@ -3564,7 +3634,7 @@ mod tests {
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { add1(1); return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"add1$resume"), "resume symbol");
@@ -3579,7 +3649,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -3595,7 +3665,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, true, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -3609,7 +3679,7 @@ int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { return add1(1); }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default())
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(!has_section(&bytes, b"$resume"), "no split without the flag");

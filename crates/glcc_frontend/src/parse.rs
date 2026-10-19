@@ -1,6 +1,4 @@
-#[cfg(feature = "std")]
-use codespan_reporting::diagnostic::Severity;
-use codespan_reporting::diagnostic::{Diagnostic, Label};
+use codespan_reporting::diagnostic::{Diagnostic, Label, Severity};
 use codespan_reporting::files::{self as csfiles, Error as FilesError, Files};
 #[cfg(feature = "std")]
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
@@ -16,7 +14,7 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{fmt, mem, ops::Range};
+use core::{cell::{Cell, RefCell}, fmt, mem, ops::Range};
 
 use string_interner::symbol::SymbolU32;
 
@@ -25,7 +23,7 @@ use crate::{
     lang::Std,
     lexer::{IntLiteral, IntSuffix, Interner, Keyword, Located, Location, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
     sema::{Binding, BindingKind, DeclId, EnumId, Enumerator, Linkage, Member, Sema, StructId},
-    span::{CompileError, HasSpan, Span, byte_range, mark_diagnostic_emitted},
+    span::{CompileError, HasSpan, Span, byte_range},
 };
 
 /// The preprocessed TU viewed as many files sharing one buffer.
@@ -216,6 +214,181 @@ pub struct Parser<'a> {
     /// Counter for the unique spellings local labels intern under
     /// (spellings cannot collide: identifiers have no dots).
     pub(crate) label_gen: u64,
+    /// Structured diagnostics collected during lexing, parsing, and
+    /// checking, in source order. Recovery records **one** error per
+    /// construct: `failed` latches until the enclosing loop
+    /// resynchronizes, so a single bad declaration doesn't cascade.
+    pub(crate) diagnostics: RefCell<Vec<CompileError>>,
+    /// Set once an error was recorded for the construct currently being
+    /// parsed; suppresses further errors until the next resync point.
+    pub(crate) failed: Cell<bool>,
+    /// Render diagnostics to stderr as they are recorded. Machine
+    /// consumers (the driver's `--error-format=json`, the explorer's
+    /// JSON) turn this off and render [`Parser::diagnostics`] themselves.
+    pub emit_human: bool,
+}
+
+/// A poison value produced when a parse/check step fails. Recovery uses
+/// these to keep the surrounding construct structurally valid while the
+/// enclosing loop resynchronizes; compilation stops before codegen once
+/// any error diagnostic exists, so poison values never reach the
+/// backend.
+pub trait Recover: Sized {
+    fn recover() -> Self;
+}
+
+impl Recover for () {
+    fn recover() -> Self {}
+}
+
+impl Recover for String {
+    fn recover() -> Self {
+        String::new()
+    }
+}
+
+impl Recover for u64 {
+    fn recover() -> Self {
+        0
+    }
+}
+
+impl<T> Recover for Vec<T> {
+    fn recover() -> Self {
+        Vec::new()
+    }
+}
+
+impl<T> Recover for Option<T> {
+    fn recover() -> Self {
+        None
+    }
+}
+
+impl Recover for DeclId {
+    fn recover() -> Self {
+        DeclId(u32::MAX)
+    }
+}
+
+impl Recover for StructId {
+    fn recover() -> Self {
+        StructId(u32::MAX)
+    }
+}
+
+impl Recover for EnumId {
+    fn recover() -> Self {
+        EnumId(u32::MAX)
+    }
+}
+
+impl Recover for Ty {
+    fn recover() -> Self {
+        Ty::Void
+    }
+}
+
+impl Recover for TypeSpecifier {
+    fn recover() -> Self {
+        TypeSpecifier::Void
+    }
+}
+
+impl Recover for Expr {
+    fn recover() -> Self {
+        Expr::SizeofTy {
+            ty: Ty::Void,
+            span: Span::dummy(),
+        }
+    }
+}
+
+impl Recover for Stmt {
+    fn recover() -> Self {
+        Stmt::Empty { span: Span::dummy() }
+    }
+}
+
+impl Recover for Initializer {
+    fn recover() -> Self {
+        Initializer::List {
+            items: Vec::new(),
+            span: Span::dummy(),
+        }
+    }
+}
+
+impl Recover for CheckedExpr {
+    fn recover() -> Self {
+        CheckedExpr {
+            ty: Ty::Void,
+            span: Span::dummy(),
+            kind: CheckedExprKind::Str(Vec::new()),
+        }
+    }
+}
+
+impl Recover for Compound {
+    fn recover() -> Self {
+        Compound {
+            span: Span::dummy(),
+            items: Vec::new(),
+        }
+    }
+}
+
+impl Recover for TranslationUnit {
+    fn recover() -> Self {
+        TranslationUnit {
+            external_declarations: Vec::new(),
+            span: Span::dummy(),
+        }
+    }
+}
+
+impl Recover for DeclarationSpecifiers {
+    fn recover() -> Self {
+        DeclarationSpecifiers::default()
+    }
+}
+
+impl Recover for GnuAttributes {
+    fn recover() -> Self {
+        GnuAttributes::default()
+    }
+}
+
+impl Recover for ArrayDeclarator {
+    fn recover() -> Self {
+        ArrayDeclarator::default()
+    }
+}
+
+impl Recover for FunctionDeclarator {
+    fn recover() -> Self {
+        FunctionDeclarator::default()
+    }
+}
+
+impl Recover for Param {
+    fn recover() -> Self {
+        Param {
+            name: None,
+            ty: Ty::Void,
+            body_ty: None,
+            vla_bound: None,
+            span: Span::dummy(),
+            star: false,
+            proto: None,
+        }
+    }
+}
+
+impl Recover for (Vec<Enumerator>, Ty) {
+    fn recover() -> Self {
+        (Vec::new(), Ty::Void)
+    }
 }
 
 macro_rules! pat_storage_class_specifier {
@@ -251,6 +424,7 @@ macro_rules! pat_basic_type_specifier {
 
 impl<'a> Parser<'a> {
     pub fn new(source: &str, tokens: TokenStream, sema: &'a mut Sema, interner: &'a mut Interner) -> Self {
+        let diagnostics: Vec<CompileError> = tokens.diagnostics().to_vec();
         let bof = tokens.peek().map(|t| t.loc).unwrap_or_else(|| Location {
             ln: 1,
             col: 0,
@@ -298,6 +472,9 @@ impl<'a> Parser<'a> {
             pending_gotos: Vec::new(),
             label_scopes: Vec::new(),
             label_gen: 0,
+            diagnostics: RefCell::new(diagnostics),
+            failed: Cell::new(false),
+            emit_human: true,
         }
     }
     /// Start of the upcoming token, if any.
@@ -334,17 +511,6 @@ impl<'a> Parser<'a> {
             _ => Span::point(start),
         }
     }
-    /// Render a span with its filename for diagnostics.
-    fn span_str(&self, span: Span) -> String {
-        if span.is_dummy() {
-            return "unknown location".to_string();
-        }
-        let pos = span.short();
-        match span.file.and_then(|f| self.intern.resolve(f)) {
-            Some(name) => format!("{name}:{pos}"),
-            None => pos,
-        }
-    }
     /// The codespan file id for a span, falling back to `this` (the
     /// bof file) for dummy spans and for synthesized files that were
     /// unseen when `SourceFiles` was built.
@@ -369,24 +535,30 @@ impl<'a> Parser<'a> {
             }
             labels.push(Label::secondary(self.file_id(secondary.span), byte_range(source, secondary.span)).with_message(secondary.message.clone()));
         }
-        Diagnostic::error().with_message(err.message.clone()).with_labels(labels).with_notes(err.notes.clone())
+        let diag = Diagnostic::error().with_message(err.message.clone()).with_labels(labels).with_notes(err.notes.clone());
+        match err.severity {
+            crate::span::Severity::Error => diag,
+            crate::span::Severity::Warning => Diagnostic {
+                severity: Severity::Warning,
+                ..diag
+            },
+        }
     }
     /// Emit to standard error, with colors when attached to a terminal.
-    /// `std`-only: `no_std` builds skip rendering (the panic payload in
-    /// `unwrap_diag`/`fail` still carries the message).
+    /// `std`-only: `no_std` builds skip rendering (callers still receive
+    /// the diagnostic through [`Parser::diagnostics`]).
     #[cfg(feature = "std")]
     pub(crate) fn emit(&self, err: &CompileError) {
         let diag = self.diagnostic(err);
         let mut writer = StandardStream::stderr(ColorChoice::Auto);
         // Rendering is infallible for a valid diagnostic; ignore I/O
-        // errors so a broken pipe cannot mask the real one (the callers
-        // `unwrap_diag`/`fail` still panic with the message).
+        // errors so a broken pipe cannot mask the real one.
         let _ = term::emit_to_write_style(&mut writer, &Config::default(), &self.files, &diag);
     }
     /// `no_std` fallback: no stderr to write to, so render into a
     /// scratch string and drop it. This keeps the diagnostic builder
-    /// compile-tested without `std`; the panic in
-    /// `unwrap_diag`/`fail` still carries the message.
+    /// compile-tested without `std`; callers still receive the
+    /// diagnostic through [`Parser::diagnostics`].
     #[cfg(not(feature = "std"))]
     pub(crate) fn emit(&self, err: &CompileError) {
         let _ = term::emit_into_string(&Config::default(), &self.files, &self.diagnostic(err));
@@ -397,69 +569,272 @@ impl<'a> Parser<'a> {
     pub(crate) fn emit_to_string(&self, err: &CompileError) -> String {
         term::emit_into_string(&Config::default(), &self.files, &self.diagnostic(err)).unwrap_or_default()
     }
-    /// Unwrap a [`Sema`] result: on error, emit the full diagnostic and
-    /// then panic with the plain message (preserving the historic
-    /// `#[should_panic]` prefixes).
-    fn unwrap_diag<T>(&self, result: Result<T, CompileError>) -> T {
+    /// Record the first error in the construct currently being parsed.
+    /// Later errors are suppressed until the enclosing loop calls
+    /// [`Parser::resync`], which keeps one mistake from cascading into a
+    /// wall of follow-on diagnostics.
+    pub(crate) fn report(&self, err: CompileError) {
+        if self.failed.get() {
+            return;
+        }
+        self.failed.set(true);
+        if self.emit_human {
+            self.emit(&err);
+            // A rendered error was printed: a later panic (e.g. MIR
+            // verification) should not also print an internal-error
+            // banner on top of it.
+            crate::span::mark_diagnostic_emitted();
+        }
+        self.diagnostics.borrow_mut().push(err);
+    }
+    /// Record a warning: rendered and serialized like an error, but it
+    /// does not latch or stop parsing.
+    pub(crate) fn report_warning(&self, err: CompileError) {
+        if self.emit_human {
+            self.emit(&err);
+        }
+        self.diagnostics.borrow_mut().push(err);
+    }
+    /// Unwrap a checker result: on error, record it and return a poison
+    /// value so the surrounding construct stays structurally valid.
+    fn unwrap_diag<T: Recover>(&self, result: Result<T, CompileError>) -> T {
         match result {
             Ok(value) => value,
             Err(err) => {
-                let message = err.message.clone();
-                let span = err.primary.span;
-                self.emit(&err);
-                mark_diagnostic_emitted();
-                panic!("{} at {}", message, self.span_str(span))
+                self.report(err);
+                T::recover()
             }
         }
     }
-    /// Abort with a located diagnostic: emit the codespan-rendered error,
-    /// then panic with the plain message so `#[should_panic(expected =
-    /// ...)]` tests still match.
-    fn fail<T>(&self, span: Span, msg: impl fmt::Display) -> T {
-        let message = msg.to_string();
-        self.emit(&CompileError::new(message.clone(), span));
-        mark_diagnostic_emitted();
-        panic!("{} at {}", message, self.span_str(span))
+    /// Unwrap a checker result, yielding `None` after recording an error:
+    /// used where a poison id must never be constructed (it would index
+    /// `Sema`'s arenas).
+    fn unwrap_diag_opt<T>(&self, result: Result<T, CompileError>) -> Option<T> {
+        match result {
+            Ok(value) => Some(value),
+            Err(err) => {
+                self.report(err);
+                None
+            }
+        }
+    }
+    /// Semantic checks for parsed expressions. When the construct already
+    /// failed to parse, its AST holds poison nodes; checking them would
+    /// produce follow-on diagnostics (or inspect meaningless types) for a
+    /// mistake the user already saw reported. The latch is cleared at the
+    /// enclosing construct's resynchronization point.
+    fn checked_expr(&self, expr: &Expr) -> CheckedExpr {
+        if self.failed() {
+            return CheckedExpr::recover();
+        }
+        self.unwrap_diag(self.sema.check_expr(expr, &self.intern))
+    }
+    fn checked_condition(&self, expr: &Expr) -> CheckedExpr {
+        if self.failed() {
+            return CheckedExpr::recover();
+        }
+        self.unwrap_diag(self.sema.check_condition(expr, &self.intern))
+    }
+    fn checked_integer_expr(&self, expr: &Expr, what: &str) -> CheckedExpr {
+        if self.failed() {
+            return CheckedExpr::recover();
+        }
+        self.unwrap_diag(self.sema.check_integer_expr(expr, &self.intern, what))
+    }
+    fn checked_asm_output(&self, expr: &Expr) -> CheckedExpr {
+        if self.failed() {
+            return CheckedExpr::recover();
+        }
+        self.unwrap_diag(self.sema.check_asm_output(expr, &self.intern))
+    }
+    fn checked_return(&self, ret: &Ty, expr: &Expr) -> CheckedExpr {
+        if self.failed() {
+            return CheckedExpr::recover();
+        }
+        self.unwrap_diag(self.sema.check_return(ret, expr, &self.intern))
+    }
+    fn checked_initializer(&self, target: &Ty, init: &Initializer) -> Initializer {
+        if self.failed() {
+            return Initializer::recover();
+        }
+        self.unwrap_diag(self.sema.check_initializer(target, init, &self.intern))
+    }
+    /// Record a located error and return a poison value for the
+    /// enclosing construct.
+    fn fail<T: Recover>(&self, span: Span, msg: impl fmt::Display) -> T {
+        self.report(CompileError::new(msg.to_string(), span));
+        T::recover()
     }
     /// Emit a non-fatal diagnostic (a warning): rendered like an error
-    /// but parsing continues and no panic follows. GCC-equivalent
-    /// warnings with no error counterpart use this (an overlong string
-    /// initializer); constraint violations still panic via `fail`.
-    /// Warnings print everywhere; tests cannot assert on them, only on
-    /// continued parsing.
+    /// but parsing continues. GCC-equivalent warnings with no error
+    /// counterpart use this (an overlong string initializer); constraint
+    /// violations still use `fail`.
     fn warn(&self, span: Span, msg: impl fmt::Display) {
-        #[cfg(feature = "std")]
-        {
-            let mut diag = self.diagnostic(&CompileError::new(msg.to_string(), span));
-            diag.severity = Severity::Warning;
-            let mut writer = StandardStream::stderr(ColorChoice::Auto);
-            let _ = term::emit_to_write_style(&mut writer, &Config::default(), &self.files, &diag);
-        }
-        #[cfg(not(feature = "std"))]
-        {
-            // No stderr in `no_std`: warnings are dropped. The span and
-            // message are only referenced to keep the `std` and `no_std`
-            // signatures identical.
-            let _ = span;
-            let _ = &msg;
-        }
+        self.report_warning(CompileError::warning(msg.to_string(), span));
     }
     /// Render warnings collected during checking (see `Sema::warnings`)
     /// and clear them. Called after each declaration and at end of
     /// translation unit, so every checked initializer is covered no
     /// matter which entry point parsed it.
     fn emit_warnings(&mut self) {
-        for warning in self.sema.warnings.borrow_mut().drain(..) {
-            #[cfg(feature = "std")]
-            {
-                let mut diag = self.diagnostic(&warning);
-                diag.severity = Severity::Warning;
-                let mut writer = StandardStream::stderr(ColorChoice::Auto);
-                let _ = term::emit_to_write_style(&mut writer, &Config::default(), &self.files, &diag);
+        let warnings: Vec<CompileError> = self.sema.warnings.borrow_mut().drain(..).collect();
+        for mut warning in warnings {
+            warning.severity = crate::span::Severity::Warning;
+            self.report_warning(warning);
+        }
+    }
+    /// All diagnostics collected so far (lexing, parsing, and checking).
+    pub fn diagnostics(&self) -> Vec<CompileError> {
+        self.diagnostics.borrow().clone()
+    }
+    /// Take the collected diagnostics, leaving the sink empty.
+    pub fn take_diagnostics(&self) -> Vec<CompileError> {
+        mem::take(&mut *self.diagnostics.borrow_mut())
+    }
+    /// Machine-readable (JSON) rendering of the collected diagnostics for
+    /// editor integration (Monaco and friends): 1-based lines and columns
+    /// plus byte offsets into the preprocessed translation-unit buffer.
+    pub fn diagnostics_json(&self) -> String {
+        let mut out = String::from("{\"diagnostics\":[");
+        for (i, err) in self.diagnostics.borrow().iter().enumerate() {
+            if i > 0 {
+                out.push(',');
             }
-            #[cfg(not(feature = "std"))]
-            {
-                let _ = warning;
+            out.push_str("{\"severity\":\"");
+            out.push_str(err.severity.as_str());
+            out.push_str("\",\"message\":\"");
+            push_escaped(&mut out, &err.message);
+            out.push('"');
+            out.push_str(",\"primary\":");
+            self.push_span_json(&mut out, &err.primary);
+            out.push_str(",\"labels\":[");
+            for (j, label) in err.secondary.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                self.push_span_json(&mut out, label);
+            }
+            out.push_str("],\"notes\":[");
+            for (j, note) in err.notes.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push('"');
+                push_escaped(&mut out, note);
+                out.push('"');
+            }
+            out.push_str("]}");
+        }
+        out.push_str("]}");
+        out
+    }
+    fn push_span_json(&self, out: &mut String, label: &crate::span::SpanLabel) {
+        out.push_str("{\"message\":\"");
+        push_escaped(out, &label.message);
+        out.push('"');
+        let span = label.span;
+        if span.is_dummy() {
+            out.push_str(",\"file\":null,\"line\":null,\"column\":null,\"endLine\":null,\"endColumn\":null,\"start\":null,\"end\":null}");
+            return;
+        }
+        let file_id = self.file_id(span);
+        out.push_str(",\"file\":");
+        match self.files.name(file_id) {
+            Ok(name) => {
+                out.push('"');
+                push_escaped(out, name);
+                out.push('"');
+            }
+            Err(_) => out.push_str("null"),
+        }
+        let line = self
+            .files
+            .line_number(file_id, span.start_ln.saturating_sub(1) as usize)
+            .unwrap_or(span.start_ln as usize);
+        let end_line = self
+            .files
+            .line_number(file_id, span.end_ln.saturating_sub(1) as usize)
+            .unwrap_or(span.end_ln as usize);
+        let byte = byte_range(self.files.source_text(), span);
+        out.push_str(&format!(
+            ",\"line\":{line},\"column\":{},\"endLine\":{end_line},\"endColumn\":{},\"start\":{},\"end\":{}",
+            span.start_col + 1,
+            span.end_col + 1,
+            byte.start,
+            byte.end
+        ));
+        out.push('}');
+    }
+    /// Whether any collected diagnostic is an error (warnings don't
+    /// count): codegen must not run when this is true.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics.borrow().iter().any(CompileError::is_error)
+    }
+    /// Whether the current construct already produced an error.
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.get()
+    }
+    /// Clear the per-construct error latch after resynchronizing.
+    pub(crate) fn clear_failure(&self) {
+        self.failed.set(false);
+    }
+    /// Skip to the next declaration boundary after an error: consume
+    /// through the next `;` at brace depth zero. A closing `}` at depth
+    /// zero is consumed too, so file-scope garbage can never spin the
+    /// translation-unit loop.
+    pub(crate) fn resync_declaration(&mut self) {
+        // A construct that already consumed its `;` (or closed its `}`)
+        // ends at a declaration boundary: resyncing would skip the next,
+        // unrelated declaration.
+        if matches!(
+            self.tokens.prev().map(|t| &t.val),
+            Some(Token::Punctuator(Punctuator::Semi | Punctuator::RBrace))
+        ) {
+            return;
+        }
+        let mut depth = 0i32;
+        while let Some(tok) = self.tokens.advance() {
+            match tok.val {
+                Token::Punctuator(Punctuator::LParen | Punctuator::LBracket) => depth += 1,
+                Token::Punctuator(Punctuator::RParen | Punctuator::RBracket) => depth = (depth - 1).max(0),
+                Token::Punctuator(Punctuator::Semi) if depth == 0 => break,
+                Token::Punctuator(Punctuator::RBrace) if depth == 0 => break,
+                _ => {}
+            }
+        }
+    }
+    /// Skip to the next statement boundary: consume through the next
+    /// `;` at bracket depth zero, or stop *before* a closing `}` so the
+    /// enclosing compound-statement loop can see it.
+    pub(crate) fn resync_statement(&mut self) {
+        // A statement that already consumed its `;` (or a block that
+        // closed) is at a boundary: resyncing would skip the next one.
+        if matches!(
+            self.tokens.prev().map(|t| &t.val),
+            Some(Token::Punctuator(Punctuator::Semi | Punctuator::LBrace | Punctuator::RBrace))
+        ) {
+            return;
+        }
+        let mut depth = 0i32;
+        loop {
+            let Some(tok) = self.tokens.peek() else { return };
+            match tok.val {
+                Token::Punctuator(Punctuator::RParen | Punctuator::RBracket) => {
+                    self.tokens.advance();
+                    depth = (depth - 1).max(0);
+                }
+                Token::Punctuator(Punctuator::RBrace) if depth == 0 => return,
+                Token::Punctuator(Punctuator::LBrace | Punctuator::LParen | Punctuator::LBracket) => {
+                    self.tokens.advance();
+                    depth += 1;
+                }
+                Token::Punctuator(Punctuator::Semi) if depth == 0 => {
+                    self.tokens.advance();
+                    return;
+                }
+                _ => {
+                    self.tokens.advance();
+                }
             }
         }
     }
@@ -467,21 +842,23 @@ impl<'a> Parser<'a> {
         let start = self.mark();
         let mut external_declarations = vec![];
         while self.tokens.peek().is_some() {
+            if self.failed() {
+                self.resync_declaration();
+                self.clear_failure();
+                continue;
+            }
+            let before = self.tokens.position();
             // C99 `_Pragma ( string-literal )`: the native preprocessor
             // lowers it to a `#pragma` line, so only raw-source callers
             // reach the operator here. Skip it like `#pragma`.
             if self.peek_pragma_operator() {
                 self.skip_pragma_operator();
-                continue;
-            }
-            if self.peek_msvc_operator("__pragma") {
+            } else if self.peek_msvc_operator("__pragma") {
                 self.skip_msvc_operator();
-                continue;
-            }
             // Top-level assembler (`__asm__(".symver ...");` in system
             // headers): collected into the per-TU assembler text. Only
             // basic asm is valid at file scope (GCC), so no operands.
-            if self.peek_is_asm_keyword() {
+            } else if self.peek_is_asm_keyword() {
                 let asm_start = self.mark();
                 self.tokens.advance();
                 while self.tokens.peek_val().is_some_and(|t| self.asm_qualifier(t).is_some()) {
@@ -491,16 +868,30 @@ impl<'a> Parser<'a> {
                     self.tokens.advance();
                     let template = self.parse_asm_string("template");
                     if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon))) {
-                        return self.fail(self.peek_span(), "file-scope asm cannot have operands");
+                        self.fail::<()>(self.peek_span(), "file-scope asm cannot have operands");
+                    } else {
+                        self.expect_punct(Punctuator::RParen);
+                        let span = self.span_since(asm_start);
+                        self.sema.toplevel_asm.push((template, span));
                     }
-                    self.expect_punct(Punctuator::RParen);
-                    let span = self.span_since(asm_start);
-                    self.sema.toplevel_asm.push((template, span));
                 }
                 self.expect_punct(Punctuator::Semi);
-                continue;
+            } else {
+                external_declarations.extend(self.parse_external_declaration());
             }
-            external_declarations.extend(self.parse_external_declaration());
+            if self.failed() {
+                self.resync_declaration();
+                self.clear_failure();
+                if self.tokens.position() == before {
+                    // The failing construct ended at a boundary (or
+                    // resync was a no-op): still guarantee progress.
+                    self.tokens.advance();
+                }
+            } else if self.tokens.position() == before {
+                // Recovery guarantee: never spin on a construct that
+                // consumed nothing.
+                self.tokens.advance();
+            }
         }
         // Tentative definitions become real definitions at end of TU
         // (C17 §6.9.2p2): `int x;` with no initializer elsewhere emits
@@ -579,7 +970,7 @@ impl<'a> Parser<'a> {
             let span = self.span_since(decl_start);
             match specifiers.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs[id.0 as usize].tag.is_none() {
+                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -599,6 +990,9 @@ impl<'a> Parser<'a> {
         let ty = self.spec_to_ty(&specifiers, &first);
         if matches!(ty, Ty::Func { .. }) && self.is_function_definition_ahead(&first) {
             let id = self.parse_function_definition(&specifiers, first, ty, &suffix);
+            if self.failed() {
+                return vec![];
+            }
             return vec![ExternalDeclaration::Func(id)];
         }
         // Otherwise an init-declarator-list (`int a = 1, *b, f(void);`):
@@ -607,6 +1001,7 @@ impl<'a> Parser<'a> {
         let ids = self.parse_init_declarator_list(&specifiers, first, suffix);
         self.emit_warnings();
         ids.into_iter()
+            .filter(|id| id.0 != u32::MAX && (id.0 as usize) < self.sema.decls.len())
             .map(|id| match self.sema.decls[id.0 as usize].kind {
                 BindingKind::Func => ExternalDeclaration::Func(id),
                 _ => ExternalDeclaration::Var(id),
@@ -770,6 +1165,9 @@ impl<'a> Parser<'a> {
             },
         );
         let id = self.unwrap_diag(declared);
+        if self.failed() {
+            return id;
+        }
         // The merged binding knows about a `naked` prototype even when
         // this definition's attributes omit it.
         self.naked_function = self.sema.decls[id.0 as usize].naked;
@@ -818,6 +1216,9 @@ impl<'a> Parser<'a> {
                     },
                 );
                 let new = self.unwrap_diag(declared);
+                if self.failed() {
+                    break;
+                }
                 // VLA bounds in later parameters were checked against
                 // the prototype-scope binding; point them at the
                 // body's binding instead, or the backend would lower a
@@ -996,7 +1397,7 @@ impl<'a> Parser<'a> {
             let span = self.span_since(decl_start);
             match specs.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs[id.0 as usize].tag.is_none() {
+                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -1067,7 +1468,11 @@ impl<'a> Parser<'a> {
                     span: decl_span,
                 },
             );
-            out.insert(name, (ty, decl_span, self.unwrap_diag(declared)));
+            let id = self.unwrap_diag(declared);
+            if self.failed() {
+                return;
+            }
+            out.insert(name, (ty, decl_span, id));
             match self.tokens.peek_val() {
                 Some(Token::Punctuator(Punctuator::Comma)) => {
                     self.tokens.advance();
@@ -1094,6 +1499,7 @@ impl<'a> Parser<'a> {
         self.sema.push_scope();
         self.label_scopes.push(HashMap::new());
         let mut items = Vec::new();
+        let mut unterminated = false;
         loop {
             // `_Pragma("...")` may separate block items, or sit last
             // before the close brace; skip it like `#pragma`.
@@ -1104,13 +1510,29 @@ impl<'a> Parser<'a> {
             match self.tokens.peek_val() {
                 Some(Token::Punctuator(Punctuator::RBrace)) => break,
                 None => {
-                    let span = self.span_since(start);
-                    return self.fail(span, "unterminated compound statement");
+                    unterminated = true;
+                    break;
                 }
-                _ => items.push(self.parse_block_item(ret)),
+                _ => {
+                    let before = self.tokens.position();
+                    items.push(self.parse_block_item(ret));
+                    if self.failed() {
+                        self.resync_statement();
+                        self.clear_failure();
+                        if self.tokens.position() == before {
+                            self.tokens.advance();
+                        }
+                    } else if self.tokens.position() == before {
+                        self.tokens.advance();
+                    }
+                }
             }
         }
-        self.expect_punct(Punctuator::RBrace);
+        if unterminated {
+            self.fail::<()>(self.span_since(start), "unterminated compound statement");
+        } else {
+            self.expect_punct(Punctuator::RBrace);
+        }
         self.sema.pop_scope();
         self.label_scopes.pop();
         Compound {
@@ -1361,9 +1783,9 @@ impl<'a> Parser<'a> {
             self.expect_punct(Punctuator::LParen);
             let expr = self.parse_expression();
             let expr = if outputs {
-                self.unwrap_diag(self.sema.check_asm_output(&expr, &self.intern))
+                self.checked_asm_output(&expr)
             } else {
-                self.unwrap_diag(self.sema.check_expr(&expr, &self.intern))
+                self.checked_expr(&expr)
             };
             self.expect_punct(Punctuator::RParen);
             let span = self.span_since(start);
@@ -1531,7 +1953,7 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
                 let cond = self.parse_expression();
-                let cond = self.unwrap_diag(self.sema.check_condition(&cond, &self.intern));
+                let cond = self.checked_condition(&cond);
                 self.expect_punct(Punctuator::RParen);
                 let mut then = self.parse_statement(ret);
                 let mut els = if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Else))) {
@@ -1552,7 +1974,7 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
                 let cond = self.parse_expression();
-                let cond = self.unwrap_diag(self.sema.check_condition(&cond, &self.intern));
+                let cond = self.checked_condition(&cond);
                 self.expect_punct(Punctuator::RParen);
                 let body = self.parse_statement(ret);
                 Stmt::While {
@@ -1567,7 +1989,7 @@ impl<'a> Parser<'a> {
                 self.expect_keyword(Keyword::While);
                 self.expect_punct(Punctuator::LParen);
                 let cond = self.parse_expression();
-                let cond = self.unwrap_diag(self.sema.check_condition(&cond, &self.intern));
+                let cond = self.checked_condition(&cond);
                 self.expect_punct(Punctuator::RParen);
                 self.expect_punct(Punctuator::Semi);
                 Stmt::DoWhile {
@@ -1589,7 +2011,7 @@ impl<'a> Parser<'a> {
                     ForInit::Decl(self.parse_declaration())
                 } else {
                     let expr = self.parse_expression();
-                    let expr = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                    let expr = self.checked_expr(&expr);
                     self.expect_punct(Punctuator::Semi);
                     ForInit::Expr(expr)
                 };
@@ -1598,7 +2020,7 @@ impl<'a> Parser<'a> {
                     None
                 } else {
                     let expr = self.parse_expression();
-                    let expr = self.unwrap_diag(self.sema.check_condition(&expr, &self.intern));
+                    let expr = self.checked_condition(&expr);
                     self.expect_punct(Punctuator::Semi);
                     Some(expr)
                 };
@@ -1606,7 +2028,7 @@ impl<'a> Parser<'a> {
                     None
                 } else {
                     let expr = self.parse_expression();
-                    let expr = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                    let expr = self.checked_expr(&expr);
                     Some(expr)
                 };
                 self.expect_punct(Punctuator::RParen);
@@ -1624,7 +2046,7 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
                 let cond = self.parse_expression();
-                let cond = self.unwrap_diag(self.sema.check_integer_expr(&cond, &self.intern, "switch controlling expression"));
+                let cond = self.checked_integer_expr(&cond, "switch controlling expression");
                 self.expect_punct(Punctuator::RParen);
                 let body = self.parse_statement(ret);
                 self.check_switch_cases(&cond, &body);
@@ -1640,7 +2062,7 @@ impl<'a> Parser<'a> {
                     None
                 } else {
                     let expr = self.parse_expression();
-                    let expr = self.unwrap_diag(self.sema.check_return(ret, &expr, &self.intern));
+                    let expr = self.checked_return(ret, &expr);
                     Some(expr)
                 };
                 self.expect_punct(Punctuator::Semi);
@@ -1666,7 +2088,7 @@ impl<'a> Parser<'a> {
                     // expression holding a label address.
                     self.tokens.advance();
                     let expr = self.parse_expression();
-                    let expr = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                    let expr = self.checked_expr(&expr);
                     self.expect_punct(Punctuator::Semi);
                     return Stmt::GotoComputed {
                         expr,
@@ -1693,7 +2115,7 @@ impl<'a> Parser<'a> {
                 // integer constant expression (checked by folding, like
                 // enumerator values).
                 let expr = self.parse_conditional_expression();
-                let checked = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                let checked = self.checked_expr(&expr);
                 if !matches!(crate::eval::eval_const(&checked, self.sema, &self.intern), Some(crate::eval::Value::Int(_))) {
                     return self.fail(checked.span, "case label is not an integer constant expression");
                 }
@@ -1702,7 +2124,7 @@ impl<'a> Parser<'a> {
                 let hi = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Ellipsis))) {
                     self.tokens.advance();
                     let expr = self.parse_conditional_expression();
-                    let checked = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                    let checked = self.checked_expr(&expr);
                     if !matches!(crate::eval::eval_const(&checked, self.sema, &self.intern), Some(crate::eval::Value::Int(_))) {
                         return self.fail(checked.span, "case range bound is not an integer constant expression");
                     }
@@ -1754,7 +2176,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let expr = self.parse_expression();
-                let expr = self.unwrap_diag(self.sema.check_expr(&expr, &self.intern));
+                let expr = self.checked_expr(&expr);
                 self.expect_punct(Punctuator::Semi);
                 Stmt::Expr {
                     expr,
@@ -1765,12 +2187,9 @@ impl<'a> Parser<'a> {
     }
     /// Abort like `fail` but with a secondary label pointing at the
     /// previous declaration (duplicate `default`, duplicate `case`).
-    fn fail_secondary<T>(&self, span: Span, msg: impl fmt::Display, prev: Span, prev_msg: &str) -> T {
-        let message = msg.to_string();
-        let err = CompileError::new(message.clone(), span).with_secondary(prev, prev_msg);
-        self.emit(&err);
-        mark_diagnostic_emitted();
-        panic!("{} at {}", message, self.span_str(span))
+    fn fail_secondary<T: Recover>(&self, span: Span, msg: impl fmt::Display, prev: Span, prev_msg: &str) -> T {
+        self.report(CompileError::new(msg.to_string(), span).with_secondary(prev, prev_msg));
+        T::recover()
     }
     /// Duplicate `case` values (and a second `default`) in one `switch`
     /// are constraint violations (C17 §6.8.4.2p3): walk the body,
@@ -1894,7 +2313,9 @@ impl<'a> Parser<'a> {
     /// Record the VLA objects among `ids` in flow scope `scope`.
     fn record_vla_decls(&self, ids: &[DeclId], scope: usize, fv: &mut FlowVla) {
         for id in ids {
-            let binding = &self.sema.decls[id.0 as usize];
+            let Some(binding) = self.sema.decls.get(id.0 as usize) else {
+                continue;
+            };
             if binding.kind == BindingKind::Var && self.is_vla_object_ty(&binding.ty) {
                 fv.record_vla(scope);
             }
@@ -2340,7 +2761,7 @@ impl<'a> Parser<'a> {
             self.parse_type_name()
         } else {
             let expr = self.parse_expression();
-            self.unwrap_diag(self.sema.check_expr(&expr, &self.intern)).ty
+            self.checked_expr(&expr).ty
         };
         self.expect_punct(Punctuator::RParen);
         ty
@@ -2761,7 +3182,7 @@ impl<'a> Parser<'a> {
             let span = self.span_since(decl_start);
             match specifiers.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs[id.0 as usize].tag.is_none() {
+                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -2828,11 +3249,16 @@ impl<'a> Parser<'a> {
                 return self.fail(span, "declaration does not declare anything");
             }
             let id = self.declare_one(specifiers, &declarator, ty, has_init, &suffix);
+            if self.failed() {
+                if has_init {
+                    let _ = self.parse_initializer();
+                }
+                break;
+            }
             if has_init {
                 let init = self.parse_initializer();
                 let ty = self.sema.decls[id.0 as usize].ty.clone();
-                let checked = self.sema.check_initializer(&ty, &init, &self.intern);
-                let checked = self.unwrap_diag(checked);
+                let checked = self.checked_initializer(&ty, &init);
                 // An array of unknown size takes its size from the
                 // initializer (see `complete_array_bound`).
                 self.complete_array_bound(id, &checked);
@@ -3209,7 +3635,7 @@ impl<'a> Parser<'a> {
             self.parse_brace_list()
         } else {
             let expr = self.parse_assignment_expression();
-            Initializer::Expr(self.unwrap_diag(self.sema.check_expr(&expr, &self.intern)))
+            Initializer::Expr(self.checked_expr(&expr))
         }
     }
 
@@ -3294,7 +3720,7 @@ impl<'a> Parser<'a> {
                         self.parse_brace_list()
                     } else {
                         let expr = self.parse_assignment_expression();
-                        Initializer::Expr(self.unwrap_diag(self.sema.check_expr(&expr, &self.intern)))
+                        Initializer::Expr(self.checked_expr(&expr))
                     };
                     return vec![InitItem {
                         designators,
@@ -3306,7 +3732,7 @@ impl<'a> Parser<'a> {
                     let open = self.mark();
                     self.tokens.advance();
                     let index = self.parse_assignment_expression();
-                    let index = self.unwrap_diag(self.sema.check_expr(&index, &self.intern));
+                    let index = self.checked_expr(&index);
                     if !is_integer(&index.ty) {
                         return self.fail(index.span, "array designator must have integer type");
                     }
@@ -3316,7 +3742,7 @@ impl<'a> Parser<'a> {
                     if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Ellipsis))) {
                         self.tokens.advance();
                         let last = self.parse_assignment_expression();
-                        let last = self.unwrap_diag(self.sema.check_expr(&last, &self.intern));
+                        let last = self.checked_expr(&last);
                         if !is_integer(&last.ty) {
                             return self.fail(last.span, "array designator must have integer type");
                         }
@@ -3346,7 +3772,7 @@ impl<'a> Parser<'a> {
             self.parse_brace_list()
         } else {
             let expr = self.parse_assignment_expression();
-            Initializer::Expr(self.unwrap_diag(self.sema.check_expr(&expr, &self.intern)))
+            Initializer::Expr(self.checked_expr(&expr))
         };
         let item = InitItem {
             designators,
@@ -3579,7 +4005,7 @@ impl<'a> Parser<'a> {
             // a GNU extension.
             _ => {
                 let bound = self.parse_assignment_expression();
-                let bound = self.unwrap_diag(self.sema.check_expr(&bound, &self.intern));
+                let bound = self.checked_expr(&bound);
                 if !is_integer(&bound.ty) {
                     return self.fail(bound.span, "array bound must have integer type");
                 }
@@ -3722,7 +4148,7 @@ impl<'a> Parser<'a> {
                         span: param.span,
                     },
                 );
-                Some(self.unwrap_diag(declared))
+                self.unwrap_diag_opt(declared)
             } else {
                 None
             };
@@ -4171,12 +4597,18 @@ impl<'a> Parser<'a> {
             };
             let span = kw_span.merge(tag_span);
             let referred = self.sema.reference_tag(tag, is_union, span);
-            return TypeSpecifier::Struct(self.unwrap_diag(referred));
+            return match self.unwrap_diag_opt(referred) {
+                Some(id) => TypeSpecifier::Struct(id),
+                None => TypeSpecifier::recover(),
+            };
         }
         let id = match tag {
             Some((tag, tag_span)) => {
                 let defined = self.sema.define_tag(tag, is_union, kw_span.merge(tag_span));
-                self.unwrap_diag(defined)
+                match self.unwrap_diag_opt(defined) {
+                    Some(id) => id,
+                    None => return TypeSpecifier::recover(),
+                }
             }
             None => self.sema.new_anonymous_struct(is_union, kw_span),
         };
@@ -4336,7 +4768,7 @@ impl<'a> Parser<'a> {
         self.tokens.advance();
         self.expect_punct(Punctuator::LParen);
         let arg = self.parse_assignment_expression();
-        let checked = self.unwrap_diag(self.sema.check_expr(&arg, &self.intern));
+        let checked = self.checked_expr(&arg);
         let value = crate::eval::eval_const(&checked, self.sema, &self.intern);
         let msg = if self.eat_punct(Punctuator::Comma) {
             let Some(Token::StringLiteral(lit)) = self.tokens.peek_val() else {
@@ -4394,7 +4826,7 @@ impl<'a> Parser<'a> {
             }
         } else {
             let arg = self.parse_assignment_expression();
-            let checked = self.unwrap_diag(self.sema.check_expr(&arg, &self.intern));
+            let checked = self.checked_expr(&arg);
             match crate::eval::eval_const(&checked, self.sema, &self.intern) {
                 Some(crate::eval::Value::Int(0)) => 0,
                 Some(crate::eval::Value::Int(n)) if n > 0 => u64::try_from(n).unwrap_or(u64::MAX),
@@ -4515,7 +4947,7 @@ impl<'a> Parser<'a> {
                         65535
                     } else {
                         let arg = self.parse_assignment_expression();
-                        let checked = self.unwrap_diag(self.sema.check_expr(&arg, &self.intern));
+                        let checked = self.checked_expr(&arg);
                         match crate::eval::eval_const(&checked, self.sema, &self.intern) {
                             Some(crate::eval::Value::Int(n)) if n >= 0 => u64::try_from(n).unwrap_or(u64::MAX),
                             _ => {
@@ -4532,7 +4964,7 @@ impl<'a> Parser<'a> {
                 } else if normalized == "aligned" {
                     self.tokens.advance();
                     let arg = self.parse_assignment_expression();
-                    let checked = self.unwrap_diag(self.sema.check_expr(&arg, &self.intern));
+                    let checked = self.checked_expr(&arg);
                     match crate::eval::eval_const(&checked, self.sema, &self.intern) {
                         Some(crate::eval::Value::Int(n)) if n > 0 => {
                             let n = u64::try_from(n).unwrap_or(u64::MAX);
@@ -4629,12 +5061,18 @@ impl<'a> Parser<'a> {
             };
             let span = kw_span.merge(tag_span);
             let referred = self.sema.reference_enum_tag(tag, span);
-            return TypeSpecifier::Enum(self.unwrap_diag(referred));
+            return match self.unwrap_diag_opt(referred) {
+                Some(id) => TypeSpecifier::Enum(id),
+                None => TypeSpecifier::recover(),
+            };
         }
         let id = match tag {
             Some((tag, tag_span)) => {
                 let defined = self.sema.define_enum_tag(tag, kw_span.merge(tag_span));
-                self.unwrap_diag(defined)
+                match self.unwrap_diag_opt(defined) {
+                    Some(id) => id,
+                    None => return TypeSpecifier::recover(),
+                }
             }
             None => self.sema.new_anonymous_enum(kw_span),
         };
@@ -4682,7 +5120,7 @@ impl<'a> Parser<'a> {
             let value = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Assign))) {
                 self.tokens.advance();
                 let expr = self.parse_assignment_expression();
-                Some(self.unwrap_diag(self.sema.check_expr(&expr, &self.intern)))
+                Some(self.checked_expr(&expr))
             } else {
                 None
             };
@@ -4826,7 +5264,7 @@ impl<'a> Parser<'a> {
                 let bitfield = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon))) {
                     self.tokens.advance();
                     let width = self.parse_assignment_expression();
-                    Some(self.unwrap_diag(self.sema.check_integer_expr(&width, &self.intern, "bit-field width")))
+                    Some(self.checked_integer_expr(&width, "bit-field width"))
                 } else {
                     None
                 };
@@ -5158,7 +5596,7 @@ impl<'a> Parser<'a> {
             return self.fail(self.span_since(start), "compound literal has function type");
         }
         let brace = self.parse_brace_list();
-        let init = self.unwrap_diag(self.sema.check_initializer(&ty, &brace, &self.intern));
+        let init = self.checked_initializer(&ty, &brace);
         Expr::CompoundLiteral {
             ty,
             init: Box::new(init),
@@ -5635,7 +6073,7 @@ impl<'a> Parser<'a> {
                     let open = self.mark();
                     self.tokens.advance();
                     let index = self.parse_assignment_expression();
-                    let index = self.unwrap_diag(self.sema.check_expr(&index, &self.intern));
+                    let index = self.checked_expr(&index);
                     self.expect_punct(Punctuator::RBracket);
                     designators.push(Designator::Index {
                         index,
@@ -5784,8 +6222,11 @@ impl<'a> Parser<'a> {
     }
 
     pub fn spec_to_ty(&self, specs: &DeclarationSpecifiers, decl: &Declarator) -> Ty {
+        if self.failed() {
+            return Ty::recover();
+        }
         let span = specs.span().merge(decl.span());
-        let base = resolve_type_specifiers(&specs.type_specifier, span);
+        let base = self.unwrap_diag(resolve_type_specifiers(&specs.type_specifier, span));
         // Base qualifiers (`const int`) wrap the base type; declarator
         // operators build outside them, so `const int *p` is a pointer
         // to const int. `restrict` in the specifiers must land on a
@@ -6113,6 +6554,24 @@ fn asm_label_refs(template: &str) -> Vec<String> {
     refs
 }
 
+/// Append `s` to `out` with JSON string escaping (`"`/`\`/control
+/// characters); non-ASCII passes through as UTF-8.
+fn push_escaped(out: &mut String, s: &str) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+}
+
 /// Pointer to `pointee`, unqualified: the implicit-declaration
 /// prototypes name parameter pointers without qualifiers and let
 /// argument conversion add them.
@@ -6164,11 +6623,11 @@ fn binary_binding_power(punct: Punctuator) -> Option<u8> {
 // Order-independent: `unsigned long int` and `int unsigned long` agree.
 // Anything outside the standard combinations fails with the declaration's
 // span attached.
-pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
+pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Result<Ty, CompileError> {
     // Local shorthand: every complaint carries the specifiers' span.
     macro_rules! bail {
         ($($arg:tt)*) => {
-            panic!("{} at {}", format!($($arg)*), span.short())
+            return Err(CompileError::new(format!($($arg)*), span))
         };
     }
     if specs.is_empty() {
@@ -6221,31 +6680,31 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         if specs.len() != 1 {
             bail!("`struct`/`union` with other type specifiers");
         }
-        return Ty::Struct(id);
+        return Ok(Ty::Struct(id));
     }
     if let Some(id) = etag {
         if specs.len() != 1 {
             bail!("`enum` with other type specifiers");
         }
-        return Ty::Enum(id);
+        return Ok(Ty::Enum(id));
     }
     if let Some(ty) = builtin {
         if specs.len() != 1 {
             bail!("builtin type with other type specifiers");
         }
-        return ty.clone();
+        return Ok(ty.clone());
     }
     if let Some(ty) = alias {
         if specs.len() != 1 {
             bail!("typedef name with other type specifiers");
         }
-        return ty.clone();
+        return Ok(ty.clone());
     }
     if let Some(ty) = atomic {
         if specs.len() != 1 {
             bail!("`_Atomic` with other type specifiers");
         }
-        return ty.clone();
+        return Ok(ty.clone());
     }
     if n_signed == 1 && n_unsigned == 1 {
         bail!("both `signed` and `unsigned` in declaration specifiers");
@@ -6271,14 +6730,14 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         if n_int128 > 1 || n_short > 0 || n_long > 0 || n_char > 0 || n_int > 0 || n_float > 0 || n_double > 0 || n_bool > 0 || n_complex > 0 || n_void > 0 {
             bail!("`__int128` with other type specifiers");
         }
-        return if n_unsigned == 1 { Ty::UnsignedInt128 } else { Ty::Int128 };
+        return Ok(if n_unsigned == 1 { Ty::UnsignedInt128 } else { Ty::Int128 });
     }
     let unsigned = n_unsigned == 1;
     if n_void == 1 {
         if specs.len() != 1 {
             bail!("`void` with other type specifiers");
         }
-        return Ty::Void;
+        return Ok(Ty::Void);
     }
     if n_bool == 1 {
         if specs.len() != 1 {
@@ -6287,7 +6746,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         if n_complex == 1 {
             bail!("both `complex` and `_Bool` in declaration specifiers");
         }
-        return Ty::Bool;
+        return Ok(Ty::Bool);
     }
     if n_char == 1 {
         if n_short == 1 || n_long > 0 || n_int == 1 || n_float == 1 || n_double == 1 {
@@ -6300,22 +6759,22 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         } else {
             Ty::Char
         };
-        return if n_complex == 1 { Ty::Complex(Box::new(base)) } else { base };
+        return Ok(if n_complex == 1 { Ty::Complex(Box::new(base)) } else { base });
     }
     if n_float == 1 {
         if n_signed == 1 || unsigned || n_short == 1 || n_long > 0 || n_int == 1 || n_double == 1 {
             bail!("`float` with other type specifiers");
         }
-        return if n_complex == 1 { Ty::Complex(Box::new(Ty::Float)) } else { Ty::Float };
+        return Ok(if n_complex == 1 { Ty::Complex(Box::new(Ty::Float)) } else { Ty::Float });
     }
     if n_double == 1 {
         if n_signed == 1 || unsigned || n_short == 1 || n_int == 1 || n_long > 1 {
             bail!("invalid `double` combination");
         }
         if n_complex == 1 {
-            return Ty::Complex(Box::new(if n_long == 1 { Ty::LongDouble } else { Ty::Double }));
+            return Ok(Ty::Complex(Box::new(if n_long == 1 { Ty::LongDouble } else { Ty::Double })));
         }
-        return if n_long == 1 { Ty::LongDouble } else { Ty::Double };
+        return Ok(if n_long == 1 { Ty::LongDouble } else { Ty::Double });
     }
     // Leftover: `[signed|unsigned] [short|long[long]] [int]`, each
     // optionally complex (bare `_Complex` is `double _Complex`).
@@ -6323,7 +6782,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         (false, 0) => {
             if n_int == 0 && n_signed == 0 && !unsigned {
                 if n_complex == 1 {
-                    return Ty::Complex(Box::new(Ty::Double));
+                    return Ok(Ty::Complex(Box::new(Ty::Double)));
                 }
                 bail!("no type specifier");
             }
@@ -6352,7 +6811,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         }
         _ => bail!("`short` with `long`"),
     };
-    if n_complex == 1 { Ty::Complex(Box::new(base)) } else { base }
+    Ok(if n_complex == 1 { Ty::Complex(Box::new(base)) } else { base })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeQualifier {

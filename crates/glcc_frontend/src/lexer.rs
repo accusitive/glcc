@@ -1,10 +1,10 @@
-use alloc::{string::String, vec::Vec};
+use alloc::{format, string::String, vec::Vec};
 use core::str::Chars;
 
 use peekmore::{PeekMore, PeekMoreIterator};
 use string_interner::{backend::BufferBackend, symbol::SymbolU32};
 
-use crate::span::{HasSpan, Span};
+use crate::span::{CompileError, HasSpan, Span};
 
 pub type Interner = string_interner::StringInterner<BufferBackend<SymbolU32>>;
 
@@ -104,6 +104,10 @@ pub struct Lexer<'a> {
     chars: Prelexer<'a>,
     loc: Location,
     intern: &'a mut Interner,
+    /// Lexical errors recovered while lexing. `lex_all` carries them on
+    /// the returned [`TokenStream`]; they never abort lexing, so a bad
+    /// literal produces a token plus a diagnostic instead of a panic.
+    diagnostics: Vec<CompileError>,
     /// Physical offset just past the last consumed char, and the offset
     /// of that char itself. Splices count: `pp_next` sees the spliced
     /// stream, but clang's spelling offsets live in the raw buffer.
@@ -166,9 +170,15 @@ impl<'a> Lexer<'a> {
             chars: PrelexerIter::new(source.chars()).peekmore(),
             loc: Location { ln: 1, col: 0, file },
             intern: interner,
+            diagnostics: Vec::new(),
             raw: 0,
             char_off: 0,
         }
+    }
+
+    /// Record a recovered lexical error without aborting the lex.
+    fn error(&mut self, start: Location, end: Location, msg: impl Into<String>) {
+        self.diagnostics.push(CompileError::new(msg, Span::new(start, end)));
     }
 
     /// Lex the entire input into a [`TokenStream`]. The driver passes
@@ -178,7 +188,7 @@ impl<'a> Lexer<'a> {
         while let Some(tok) = self.next_token() {
             tokens.push(tok);
         }
-        TokenStream::new(tokens)
+        TokenStream::with_diagnostics(tokens, self.diagnostics)
     }
 
     /// Next spliced char for PP lexing, folding vanished (spliced-away)
@@ -574,11 +584,33 @@ impl<'a> Lexer<'a> {
 pub struct TokenStream {
     tokens: Vec<Located<Token>>,
     pos: usize,
+    /// Lexical errors recovered during lexing, in source order. The
+    /// parser adopts them so callers see them alongside parse/check
+    /// diagnostics.
+    diagnostics: Vec<CompileError>,
 }
 
 impl TokenStream {
     pub fn new(tokens: Vec<Located<Token>>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn with_diagnostics(tokens: Vec<Located<Token>>, diagnostics: Vec<CompileError>) -> Self {
+        Self {
+            tokens,
+            pos: 0,
+            diagnostics,
+        }
+    }
+
+    /// Lexical errors that lexing recovered from (unterminated literals,
+    /// malformed UCNs, stray characters).
+    pub fn diagnostics(&self) -> &[CompileError] {
+        &self.diagnostics
     }
 
     /// Peek the next token without consuming.
@@ -1073,24 +1105,33 @@ impl<'a> Lexer<'a> {
     /// panics here (translation phase 1 would have diagnosed them before
     /// tokenizing).
     fn lex_ucn_into(&mut self, buf: &mut String) -> char {
+        let start = self.loc;
         let small = match self.bump() {
             Some('u') => true,
             Some('U') => false,
-            Some(other) => panic!("invalid universal character name: `\\{other}` does not start one"),
-            None => panic!("invalid universal character name at end of input"),
+            Some(other) => {
+                self.error(start, self.loc, format!("invalid universal character name: `\\{other}` does not start one"));
+                return char::REPLACEMENT_CHARACTER;
+            }
+            None => {
+                self.error(start, self.loc, "invalid universal character name at end of input");
+                return char::REPLACEMENT_CHARACTER;
+            }
         };
         buf.push(if small { 'u' } else { 'U' });
         let digits = if small { 4 } else { 8 };
         let mut value = 0u32;
         for _ in 0..digits {
             let Some(d) = self.peek_char(0).and_then(|c| c.to_digit(16)) else {
-                panic!("invalid universal character name: expected {digits} hexadecimal digits");
+                self.error(start, self.loc, format!("invalid universal character name: expected {digits} hexadecimal digits"));
+                return char::REPLACEMENT_CHARACTER;
             };
             buf.push(self.bump().unwrap());
             value = value * 16 + d;
         }
         let Some(c) = char::from_u32(value) else {
-            panic!("universal character name \\U{value:08X} is not a valid character");
+            self.error(start, self.loc, format!("universal character name \\U{value:08X} is not a valid character"));
+            return char::REPLACEMENT_CHARACTER;
         };
         c
     }
@@ -1113,7 +1154,9 @@ impl<'a> Lexer<'a> {
             if self.peek_char(0) == Some('\\') {
                 let c = self.lex_ucn();
                 if !(c.is_alphanumeric() || c == '_' || c == '$') {
-                    panic!("universal character name `{c}` is not valid in an identifier");
+                    self.error(start, self.loc, format!("universal character name `{c}` is not valid in an identifier"));
+                    identifier.push(c);
+                    continue;
                 }
                 identifier.push(c);
                 continue;
@@ -1370,7 +1413,10 @@ impl<'a> Lexer<'a> {
         }
         loop {
             match self.peek_char(0) {
-                None => panic!("unterminated character constant in {buf:?}"),
+                None => {
+                    self.error(start, self.loc, format!("unterminated character constant in {buf:?}"));
+                    break;
+                }
                 Some('\'') => {
                     self.bump_into(&mut buf);
                     break;
@@ -1386,7 +1432,10 @@ impl<'a> Lexer<'a> {
                             self.lex_ucn_into(&mut buf);
                         }
                         Some(_) => self.bump_into(&mut buf),
-                        None => panic!("unterminated character constant in {buf:?}"),
+                        None => {
+                            self.error(start, self.loc, format!("unterminated character constant in {buf:?}"));
+                            break;
+                        }
                     }
                 }
                 Some(_) => self.bump_into(&mut buf),
@@ -1429,7 +1478,10 @@ impl<'a> Lexer<'a> {
         }
         loop {
             match self.peek_char(0) {
-                None => panic!("unterminated string literal in {buf:?}"),
+                None => {
+                    self.error(start, self.loc, format!("unterminated string literal in {buf:?}"));
+                    break;
+                }
                 Some('"') => {
                     self.bump_into(&mut buf);
                     break;
@@ -1438,7 +1490,10 @@ impl<'a> Lexer<'a> {
                 // here means the literal was never closed on its line.
                 // (Backslash-newline splices are already deleted in
                 // translation phase 2, so they never reach this arm.)
-                Some('\n') => panic!("unterminated string literal in {buf:?}"),
+                Some('\n') => {
+                    self.error(start, self.loc, format!("unterminated string literal in {buf:?}"));
+                    break;
+                }
                 // Keep escapes raw (`"\n"` stays backslash + `n`);
                 // consuming both keeps `\"` from ending the literal early.
                 // UCNs stay in the spelling but are validated now.
@@ -1449,7 +1504,10 @@ impl<'a> Lexer<'a> {
                             self.lex_ucn_into(&mut buf);
                         }
                         Some(_) => self.bump_into(&mut buf),
-                        None => panic!("unterminated string literal in {buf:?}"),
+                        None => {
+                            self.error(start, self.loc, format!("unterminated string literal in {buf:?}"));
+                            break;
+                        }
                     }
                 }
                 Some(_) => self.bump_into(&mut buf),
@@ -1563,11 +1621,15 @@ impl<'a> Lexer<'a> {
                     continue;
                 }
                 '/' if self.peek_char(1) == Some('*') => {
+                    let start = self.loc;
                     self.bump();
                     self.bump();
                     loop {
                         match self.peek_char(0) {
-                            None => panic!("unterminated block comment"),
+                            None => {
+                                self.error(start, self.loc, "unterminated block comment");
+                                break;
+                            }
                             Some('*') if self.peek_char(1) == Some('/') => {
                                 self.bump();
                                 self.bump();
@@ -1615,7 +1677,7 @@ impl<'a> Lexer<'a> {
                     let start = self.loc;
                     let c = self.lex_ucn();
                     if !(c.is_alphabetic() || c == '_' || c == '$') {
-                        panic!("universal character name `{c}` is not valid at the start of an identifier");
+                        self.error(start, self.loc, format!("universal character name `{c}` is not valid at the start of an identifier"));
                     }
                     return Some(self.lex_identifier(c, start));
                 }
@@ -1629,7 +1691,9 @@ impl<'a> Lexer<'a> {
                     return Some(self.lex_punctuator());
                 }
                 c => {
-                    panic!("unexpected character {c:?} at line {}, column {}", self.loc.ln, self.loc.col);
+                    let start = self.loc;
+                    self.bump();
+                    self.error(start, self.loc, format!("unexpected character {c:?} at line {}, column {}", start.ln, start.col));
                 }
             }
         }

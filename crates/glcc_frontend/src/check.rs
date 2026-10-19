@@ -1000,7 +1000,7 @@ impl Sema {
             // diagnosed by GCC and clang (`-Wincompatible-pointer-types`,
             // `-Wdiscarded-qualifiers`), and `-w` silences them: every
             // pointer is one machine word, so the bits move untouched.
-            self.warnings.borrow_mut().push(CompileError::new("incompatible pointer types in assignment", span));
+            self.warnings.borrow_mut().push(CompileError::warning("incompatible pointer types in assignment", span));
             return Ok(self.convert(expr, target.clone()));
         }
         // Windows `va_list` is a plain `char *` (MSVC's own headers
@@ -1050,7 +1050,7 @@ impl Sema {
             PointeeConversion::No => false,
             PointeeConversion::Yes => true,
             PointeeConversion::Warns => {
-                self.warnings.borrow_mut().push(CompileError::new("assignment from incompatible pointer type", span));
+                self.warnings.borrow_mut().push(CompileError::warning("assignment from incompatible pointer type", span));
                 true
             }
         }
@@ -1816,7 +1816,7 @@ impl Sema {
                         // Drop the element rather than carrying it: the
                         // backend lowers items by offset with no bound of
                         // its own, so keeping it writes past the object.
-                        self.warnings.borrow_mut().push(CompileError::new("excess elements in array initializer", item.span));
+                        self.warnings.borrow_mut().push(CompileError::warning("excess elements in array initializer", item.span));
                         i += 1;
                         continue;
                     }
@@ -2201,7 +2201,7 @@ impl Sema {
                 return Ok(());
             }
             Ty::Void => {
-                self.warnings.borrow_mut().push(CompileError::new("invalid application of `sizeof` to a void type", span));
+                self.warnings.borrow_mut().push(CompileError::warning("invalid application of `sizeof` to a void type", span));
                 return Ok(());
             }
             _ => {}
@@ -2307,7 +2307,7 @@ impl Sema {
                 // `char *` and the `&` is usually redundant.
                 let operand = operand;
                 if matches!(operand.kind, CheckedExprKind::Str(_)) {
-                    self.warnings.borrow_mut().push(CompileError::new("taking the address of a string literal", span));
+                    self.warnings.borrow_mut().push(CompileError::warning("taking the address of a string literal", span));
                 }
                 let is_str = matches!(operand.kind, CheckedExprKind::Str(_));
                 if !is_func && !is_str && !self.is_lvalue(&operand) {
@@ -2646,14 +2646,14 @@ impl Sema {
             let take_then = fwd == PointeeConversion::Yes || (fwd == PointeeConversion::Warns && rev != PointeeConversion::Yes);
             if take_then && fwd != PointeeConversion::No {
                 if fwd == PointeeConversion::Warns {
-                    self.warnings.borrow_mut().push(CompileError::new("pointer type mismatch in conditional expression", span));
+                    self.warnings.borrow_mut().push(CompileError::warning("pointer type mismatch in conditional expression", span));
                 }
                 let ty = then.ty.clone();
                 return Ok(self.conditional_node(cond, then, els, ty, span, elvis));
             }
             if rev != PointeeConversion::No {
                 if rev == PointeeConversion::Warns {
-                    self.warnings.borrow_mut().push(CompileError::new("pointer type mismatch in conditional expression", span));
+                    self.warnings.borrow_mut().push(CompileError::warning("pointer type mismatch in conditional expression", span));
                 }
                 let ty = els.ty.clone();
                 return Ok(self.conditional_node(cond, then, els, ty, span, elvis));

@@ -7,7 +7,7 @@ use crate::parse::{
     UnaryOp, resolve_type_specifiers,
 };
 use crate::sema::Sema;
-use crate::span::{CompileError, Span, byte_range};
+use crate::span::{CompileError, Severity, Span, byte_range};
 
 /// Parse driver for unit tests, mirroring any real driver: the test
 /// owns the sema and the interner, builds the lexer, and hands the
@@ -15,6 +15,103 @@ use crate::span::{CompileError, Span, byte_range};
 fn test_parser<'a>(src: &str, sema: &'a mut Sema, interner: &'a mut Interner) -> Parser<'a> {
     let tokens = Lexer::new(src, &mut *interner).lex_all();
     Parser::new(src, tokens, sema, interner)
+}
+
+/// Assert that `parser` recorded an error whose message contains
+/// `expected`. The parser accumulates diagnostics and recovers instead of
+/// aborting, so error tests inspect the collected diagnostics rather than
+/// relying on a panic.
+fn assert_parse_error(parser: &Parser, expected: &str) {
+    let diagnostics = parser.diagnostics();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.is_error() && d.message.contains(expected)),
+        "expected an error containing {expected:?}, got: {:#?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// Panic with the parser's first error, for helpers that must not
+/// silently return a value from a source that failed to parse.
+fn finish(parser: &Parser) {
+    if let Some(err) = parser.diagnostics().iter().find(|d| d.is_error()) {
+        panic!("{}", err.message);
+    }
+}
+
+/// Assert that `diagnostics` contains an error whose message contains
+/// `expected`.
+fn assert_diag_contains(diagnostics: &[CompileError], expected: &str) {
+    assert!(
+        diagnostics.iter().any(|d| d.is_error() && d.message.contains(expected)),
+        "expected an error containing {expected:?}, got: {:#?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
+    );
+}
+
+/// The diagnostics from lexing `src`, without panicking.
+fn lex_diagnostics(src: &str) -> Vec<CompileError> {
+    let mut interner = Interner::new();
+    Lexer::new(src, &mut interner).lex_all().diagnostics().to_vec()
+}
+
+/// The diagnostics from parsing `src` as one expression.
+fn expr_diagnostics(src: &str) -> Vec<CompileError> {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    let _ = parser.parse_expression();
+    parser.diagnostics()
+}
+
+/// The diagnostics from parsing `src` as one declarator.
+fn declarator_diagnostics(src: &str) -> Vec<CompileError> {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    let _ = parser.parse_declarator();
+    parser.diagnostics()
+}
+
+/// The diagnostics from parsing `src` as a whole translation unit.
+fn tu_diagnostics(src: &str) -> Vec<CompileError> {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    parser.diagnostics()
+}
+
+/// The diagnostics from lowering `src` (a declarator after `int`) to a
+/// type, covering both parse-time and `resolve_type_specifiers` errors.
+fn lower_to_ty_diagnostics(src: &str) -> Vec<CompileError> {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(&format!("int {src}"), &mut sema, &mut interner);
+    let specs = parser.parse_declaration_specifiers();
+    let d = parser.parse_declarator();
+    let _ = parser.spec_to_ty(&specs, &d);
+    parser.diagnostics()
+}
+
+/// Assert that resolving `src` as declaration specifiers reports an error
+/// containing `expected` (from the parser or `resolve_type_specifiers`).
+fn assert_base_error(src: &str, expected: &str) {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    let specs = parser.parse_declaration_specifiers();
+    let diagnostics = parser.diagnostics();
+    let resolved = resolve_type_specifiers(&specs.type_specifier, specs.span);
+    let parse_hit = diagnostics.iter().any(|d| d.is_error() && d.message.contains(expected));
+    let resolve_hit = resolved.as_ref().err().is_some_and(|e| e.message.contains(expected));
+    assert!(
+        parse_hit || resolve_hit,
+        "expected an error containing {expected:?}, got parse {:#?} and resolve {:?}",
+        diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>(),
+        resolved.err().map(|e| e.message)
+    );
 }
 
 /// Lex `src` and collect every punctuator spelling; panics on any
@@ -170,6 +267,7 @@ fn lex_raw(src: &str) -> Vec<String> {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
+    finish(&parser);
     let mut out = Vec::new();
     while let Some(t) = parser.tokens.advance() {
         match &t.val {
@@ -495,9 +593,8 @@ fn strings_mix_with_other_tokens() {
 }
 
 #[test]
-#[should_panic(expected = "unterminated string literal")]
 fn string_rejects_raw_newline() {
-    lex_raw("\"ab\ncd\"");
+    assert_diag_contains(&lex_diagnostics("\"ab\ncd\""), "unterminated string literal");
 }
 
 /// Parse `src` as a single declarator; panics if tokens remain.
@@ -506,6 +603,7 @@ fn parse_one_declarator(src: &str) -> crate::parse::Declarator {
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let d = parser.parse_declarator();
+    finish(&parser);
     assert!(parser.tokens.is_empty(), "trailing tokens in {src:?}");
     d
 }
@@ -572,9 +670,8 @@ fn declarator_arrays() {
 }
 
 #[test]
-#[should_panic(expected = "`[*]` outside function prototype scope")]
 fn star_outside_prototype_panics() {
-    parse_one_declarator("a[*]");
+    assert_diag_contains(&declarator_diagnostics("a[*]"), "`[*]` outside function prototype scope");
 }
 
 #[test]
@@ -723,7 +820,9 @@ fn lower_to_ty(src: &str) -> Ty {
     let specs = parser.parse_declaration_specifiers();
     let d = parser.parse_declarator();
     assert!(parser.tokens.is_empty(), "trailing tokens in {src:?}");
-    parser.spec_to_ty(&specs, &d)
+    let ty = parser.spec_to_ty(&specs, &d);
+    finish(&parser);
+    ty
 }
 
 #[test]
@@ -835,21 +934,18 @@ fn array_parameter_decays_to_pointer() {
 }
 
 #[test]
-#[should_panic(expected = "`void` must be the only parameter and unnamed")]
 fn void_parameter_must_be_alone() {
-    lower_to_ty("f(void, int)");
+    assert_diag_contains(&lower_to_ty_diagnostics("f(void, int)"), "`void` must be the only parameter and unnamed");
 }
 
 #[test]
-#[should_panic(expected = "`void` must be the only parameter and unnamed")]
 fn named_void_parameter_rejected() {
-    lower_to_ty("f(void x)");
+    assert_diag_contains(&lower_to_ty_diagnostics("f(void x)"), "`void` must be the only parameter and unnamed");
 }
 
 #[test]
-#[should_panic(expected = "storage class specifier in parameter")]
 fn storage_class_in_parameter_rejected() {
-    lower_to_ty("f(static int)");
+    assert_diag_contains(&lower_to_ty_diagnostics("f(static int)"), "storage class specifier in parameter");
 }
 
 #[test]
@@ -867,7 +963,10 @@ fn base_of(src: &str) -> Ty {
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
     assert!(parser.tokens.is_empty(), "trailing tokens in {src:?}");
-    resolve_type_specifiers(&specs.type_specifier, specs.span)
+    match resolve_type_specifiers(&specs.type_specifier, specs.span) {
+        Ok(ty) => ty,
+        Err(err) => panic!("{}", err.message),
+    }
 }
 
 #[test]
@@ -984,6 +1083,10 @@ fn parse_decl(parser: &mut Parser) -> DeclId {
 }
 
 fn declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -> crate::sema::DeclId {
+    try_declare_var(sema, intern, name, ty).unwrap()
+}
+
+fn try_declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -> Result<crate::sema::DeclId, CompileError> {
     let symbol = intern.get_or_intern(name);
     sema.declare(
         symbol,
@@ -1010,7 +1113,6 @@ fn declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -> cr
             span: Span::dummy(),
         },
     )
-    .unwrap()
 }
 
 #[test]
@@ -1031,12 +1133,12 @@ fn sema_redeclare_same_type_merges() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
-fn sema_redeclare_conflicting_type_panics() {
+fn sema_redeclare_conflicting_type_reports() {
     let mut intern = Interner::new();
     let mut sema = Sema::new();
-    declare_var(&mut sema, &mut intern, "x", Ty::Int);
-    declare_var(&mut sema, &mut intern, "x", Ty::Float);
+    try_declare_var(&mut sema, &mut intern, "x", Ty::Int).unwrap();
+    let err = try_declare_var(&mut sema, &mut intern, "x", Ty::Float).unwrap_err();
+    assert!(err.message.contains("conflicting redeclaration"), "{:?}", err.message);
 }
 
 #[test]
@@ -1239,14 +1341,14 @@ fn stmt_case_ranges_parse_and_check() {
 }
 
 #[test]
-#[should_panic(expected = "duplicate `case` value in `switch`")]
-fn stmt_case_range_endpoint_duplicate_panics() {
+fn stmt_case_range_endpoint_duplicate_reports() {
     // Both range endpoints count as covered values for the duplicate
     // check, so `case 5:` after `case 1 ... 5:` is caught.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x) { switch (x) { case 1 ... 5: break; case 5: break; } }", &mut sema, &mut interner);
-    parse_one_body("duplicate case range", &mut parser);
+    parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate `case` value in `switch`");
 }
 
 #[test]
@@ -1375,12 +1477,12 @@ fn struct_can_reference_itself_in_body() {
 }
 
 #[test]
-#[should_panic(expected = "struct member 'v' has incomplete type")]
 fn struct_embedding_itself_by_value_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct S v; int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "struct member 'v' has incomplete type");
 }
 
 /// A `Sema` with one family (or the standard level) turned off.
@@ -1406,24 +1508,21 @@ fn no_gnu_extensions_reject_gnu_spellings() {
         });
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parser.parse_translation_unit())).is_err(),
-            "expected failure for {src:?}"
-        );
+        parser.parse_translation_unit();
+        assert!(parser.has_errors(), "expected an error for {src:?}");
     }
 }
 
 #[test]
-#[should_panic(expected = "declaration for parameter 'f'")]
 fn no_ms_extensions_filter_declspec() {
     let mut sema = gated_sema(LangOpts { ms: false, ..LangOpts::default() });
     let mut interner = Interner::new();
     let mut parser = test_parser("__declspec(noreturn) int f(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "declaration for parameter 'f'");
 }
 
 #[test]
-#[should_panic(expected = "no type specifier")]
 fn c89_static_assert_keyword() {
     let mut sema = gated_sema(LangOpts {
         std: Std::C89,
@@ -1432,10 +1531,10 @@ fn c89_static_assert_keyword() {
     let mut interner = Interner::new();
     let mut parser = test_parser("_Static_assert(1, \"x\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "no type specifier");
 }
 
 #[test]
-#[should_panic(expected = "expected `;`, got Keyword(Int)")]
 fn c89_thread_local_standard_spelling() {
     let mut sema = gated_sema(LangOpts {
         std: Std::C89,
@@ -1444,6 +1543,7 @@ fn c89_thread_local_standard_spelling() {
     let mut interner = Interner::new();
     let mut parser = test_parser("_Thread_local int y;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected `;`, got Keyword(Int)");
 }
 
 #[test]
@@ -1461,30 +1561,30 @@ fn gnu_spellings_survive_at_standard_level() {
 }
 
 #[test]
-#[should_panic(expected = "struct member 'v' has incomplete type")]
 fn struct_member_of_never_defined_type_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct T v; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "struct member 'v' has incomplete type");
 }
 
 #[test]
-#[should_panic(expected = "struct member 'v' has incomplete type")]
 fn mutually_recursive_structs_by_value_panic() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct A { struct B v; }; struct B { int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "struct member 'v' has incomplete type");
 }
 
 #[test]
-#[should_panic(expected = "union member 'v' has incomplete type")]
 fn union_embedding_itself_by_value_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { union U v; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "union member 'v' has incomplete type");
 }
 
 #[test]
@@ -1616,72 +1716,71 @@ fn struct_specifier_resolves_to_tag_type() {
 }
 
 #[test]
-#[should_panic(expected = "type specifiers")]
 fn struct_specifier_cannot_mix_with_primitives() {
-    base_of("unsigned struct S");
+    assert_base_error("unsigned struct S", "type specifiers");
 }
 
 #[test]
-#[should_panic(expected = "redefinition of struct/union tag")]
 fn struct_redefinition_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x; }; struct S { int y; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition of struct/union tag");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn struct_union_kind_mismatch_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; union S;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "declaration does not declare anything")]
 fn anonymous_struct_requires_a_name() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct { int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "declaration does not declare anything");
 }
 
 #[test]
-#[should_panic(expected = "declaration does not declare anything")]
 fn declaration_without_declarator_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "declaration does not declare anything");
 }
 
 #[test]
-#[should_panic(expected = "anonymous struct/union without a body")]
 fn anonymous_struct_needs_a_body() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "anonymous struct/union without a body");
 }
 
 #[test]
-#[should_panic(expected = "storage class specifier in struct member")]
 fn storage_class_in_member_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { static int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "storage class specifier in struct member");
 }
 
 #[test]
-#[should_panic(expected = "function member")]
 fn function_member_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int f(); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "function member");
 }
 
 #[test]
@@ -1745,12 +1844,12 @@ fn member_without_declarator_declares_nothing() {
 }
 
 #[test]
-#[should_panic(expected = "bit-field has non-integer type")]
 fn aggregate_bit_field_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct { int x; } : 3; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "bit-field has non-integer type");
 }
 
 #[test]
@@ -1781,12 +1880,12 @@ fn bit_field_members_parse() {
 }
 
 #[test]
-#[should_panic(expected = "bit-field width must have integer type")]
 fn bit_field_width_must_be_integer() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a : 1.5; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "bit-field width must have integer type");
 }
 
 #[test]
@@ -1911,54 +2010,53 @@ fn inner_enum_definition_shadows_outer() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn enum_struct_tag_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; enum S { A };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn struct_enum_tag_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E { A }; struct E;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "redefinition of enum tag")]
 fn enum_redefinition_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E { A }; enum E { B };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition of enum tag");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn enumerator_redeclaration_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A }; enum { A };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "assignment to a non-lvalue")]
 fn enumerator_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A }; int f(void) { A = 1; return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment to a non-lvalue");
 }
 
 #[test]
-#[should_panic(expected = "`enum` with other type specifiers")]
 fn enum_specifier_cannot_mix_with_primitives() {
-    base_of("unsigned enum E");
+    assert_base_error("unsigned enum E", "`enum` with other type specifiers");
 }
 
 // ---- tag scoping (directly on Sema) ----
@@ -2051,21 +2149,21 @@ fn typedef_tag_is_usable_both_ways() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn typedef_redeclaration_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; typedef float T;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn typedef_and_object_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; int T;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 // ---- GNU extensions (system headers) ----
@@ -2298,22 +2396,22 @@ fn alias_attribute_resolves_to_the_target_declaration() {
 }
 
 #[test]
-#[should_panic(expected = "aliased to undefined symbol 'a'")]
 fn alias_target_must_be_declared() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int b __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     parser.parse_declaration();
+    assert_parse_error(&parser, "aliased to undefined symbol 'a'");
 }
 
 #[test]
-#[should_panic(expected = "alias target has an incompatible type")]
 fn alias_target_type_must_match() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a; extern long b __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     parser.parse_declaration();
     parser.parse_declaration();
+    assert_parse_error(&parser, "alias target has an incompatible type");
 }
 
 #[test]
@@ -2522,9 +2620,8 @@ fn gnu_int128_parses() {
 }
 
 #[test]
-#[should_panic(expected = "`__int128` with other type specifiers")]
 fn int128_with_long_panics() {
-    base_of("long __int128");
+    assert_base_error("long __int128", "`__int128` with other type specifiers");
 }
 
 #[test]
@@ -2636,9 +2733,8 @@ fn builtin_float128_is_a_type() {
 }
 
 #[test]
-#[should_panic(expected = "builtin type with other type specifiers")]
 fn builtin_type_cannot_combine() {
-    base_of("unsigned __float128");
+    assert_base_error("unsigned __float128", "builtin type with other type specifiers");
 }
 
 // ---- conversions and string initializers ----
@@ -2734,7 +2830,6 @@ fn qualified_struct_assignment_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "incompatible types in assignment")]
 fn distinct_struct_assignment_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -2744,6 +2839,7 @@ fn distinct_struct_assignment_rejected() {
         &mut interner,
     );
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "incompatible types in assignment");
 }
 
 #[test]
@@ -2784,12 +2880,12 @@ fn char_array_from_string_literal() {
 }
 
 #[test]
-#[should_panic(expected = "incompatible types in assignment")]
 fn string_literal_for_non_char_array_still_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[2] = \"ab\";", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "incompatible types in assignment");
 }
 
 // ---- compound literals ----
@@ -2940,31 +3036,31 @@ fn compound_literal_is_assignable_lvalue() {
 }
 
 #[test]
-#[should_panic(expected = "compound literal has function type")]
 fn compound_literal_function_type_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int F(void); void f(void) { (F){ 0 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "compound literal has function type");
 }
 
 #[test]
-#[should_panic(expected = "variable-sized object may not be initialized")]
 fn compound_literal_vla_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { (int[n]){ 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variable-sized object may not be initialized");
 }
 
 #[test]
-#[should_panic(expected = "compound literal of incomplete type")]
 fn compound_literal_uncompletable_rejected() {
     // A non-constant designator leaves `(int[])` without a size.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; void f(void) { (int[]){ [x] = 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "compound literal of incomplete type");
 }
 
 #[test]
@@ -3059,12 +3155,12 @@ fn literal_types_follow_values() {
 }
 
 #[test]
-#[should_panic(expected = "integer constant out of range")]
 fn integer_constant_out_of_range_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 0x10000000000000000;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "integer constant out of range");
 }
 
 #[test]
@@ -3090,31 +3186,31 @@ fn enumerator_values_fold() {
 }
 
 #[test]
-#[should_panic(expected = "not an integer constant expression")]
 fn enumerator_rejects_non_constant() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; enum { A = x };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not an integer constant expression");
 }
 
 #[test]
-#[should_panic(expected = "not an integer constant expression")]
 fn enumerator_rejects_division_by_zero() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { Z = 1 / 0 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not an integer constant expression");
 }
 
 #[test]
-#[should_panic(expected = "not an integer constant expression")]
 fn enumerator_rejects_bad_shift() {
     // Shifting by the width or more is undefined.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { S = 1 << 40 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not an integer constant expression");
 }
 
 #[test]
@@ -3133,21 +3229,21 @@ fn enumerator_takes_smallest_fitting_type() {
 }
 
 #[test]
-#[should_panic(expected = "not representable")]
 fn enumerator_rejects_beyond_unsigned_long() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A = (unsigned __int128)1 << 100 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not representable");
 }
 
 #[test]
-#[should_panic(expected = "not an integer constant expression")]
 fn float_enumerator_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { F = 1.5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not an integer constant expression");
 }
 
 #[test]
@@ -3230,21 +3326,21 @@ fn static_assert_checks_and_disappears() {
 }
 
 #[test]
-#[should_panic(expected = "static assertion failed: \"boom\"")]
 fn static_assert_failure_reports_message() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { _Static_assert(0, \"boom\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "static assertion failed: \"boom\"");
 }
 
 #[test]
-#[should_panic(expected = "needs an integer constant expression")]
 fn static_assert_rejects_non_constant() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { _Static_assert(n, \"var\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "needs an integer constant expression");
 }
 
 #[test]
@@ -3641,30 +3737,30 @@ fn sizeof_folds_in_constants() {
 }
 
 #[test]
-#[should_panic(expected = "negative bit-field width")]
 fn negative_bit_field_width_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : -1; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "negative bit-field width");
 }
 
 #[test]
-#[should_panic(expected = "bit-field width exceeds its type")]
 fn over_wide_bit_field_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { char c : 9; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "bit-field width exceeds its type");
 }
 
 #[test]
-#[should_panic(expected = "zero width for bit-field")]
 fn named_zero_width_bit_field_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : 0; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "zero width for bit-field");
 }
 
 #[test]
@@ -3886,21 +3982,21 @@ fn union_designated_items_may_repeat() {
 }
 
 #[test]
-#[should_panic(expected = "excess elements in union initializer")]
 fn union_second_bare_item_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { int a; float b; } u = { 1, 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "excess elements in union initializer");
 }
 
 #[test]
-#[should_panic(expected = "too many initializers for struct")]
 fn too_many_bare_initializers_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a; } s = { 1, 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "too many initializers for struct");
 }
 
 #[test]
@@ -3960,21 +4056,21 @@ fn braced_list_initializes_anonymous_member_itself() {
 }
 
 #[test]
-#[should_panic(expected = "ambiguous member")]
 fn ambiguous_designator_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct O { union { int x; }; union { int x; }; } o = { .x = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "ambiguous member");
 }
 
 #[test]
-#[should_panic(expected = "field designator in array initializer")]
 fn designator_into_array_without_index_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int arr[3]; } s = { .arr.x = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "field designator in array initializer");
 }
 
 #[test]
@@ -4002,23 +4098,23 @@ fn designator_chain_selects_into_nested_arrays() {
 // ---- array bounds and case labels are constant ----
 
 #[test]
-#[should_panic(expected = "negative array bound")]
 fn negative_array_bound_panics() {
     // A folded negative bound is rejected ...
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[-1];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "negative array bound");
 }
 
 #[test]
-#[should_panic(expected = "negative array bound")]
 fn negative_folded_array_bound_panics() {
     // ... even when the negativity only shows after folding ...
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[1 - 2];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "negative array bound");
 }
 
 #[test]
@@ -4057,59 +4153,59 @@ fn prototype_params_scope_over_later_bounds() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn duplicate_prototype_param_names_panic() {
     // Verified against gcc ("redefinition of parameter").
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "variably modified type at file scope")]
 fn file_scope_vla_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; int a[n];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified type at file scope");
 }
 
 #[test]
-#[should_panic(expected = "`[*]` outside function prototype scope")]
 fn file_scope_star_bound_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[*];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`[*]` outside function prototype scope");
 }
 
 #[test]
-#[should_panic(expected = "`[*]` outside function prototype scope")]
 fn block_scope_star_bound_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a[*]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`[*]` outside function prototype scope");
 }
 
 #[test]
-#[should_panic(expected = "variably modified struct member")]
 fn vla_struct_member_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; struct S { int a[n]; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified struct member");
 }
 
 #[test]
-#[should_panic(expected = "`[*]` outside function prototype scope")]
 fn star_struct_member_panics() {
     // `[*]` needs prototype scope wherever it appears.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a[*]; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`[*]` outside function prototype scope");
 }
 
 #[test]
@@ -4124,12 +4220,12 @@ fn vla_function_pointer_member_parses() {
 }
 
 #[test]
-#[should_panic(expected = "variable-sized object may not be initialized")]
 fn vla_initializer_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { int a[n] = { 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variable-sized object may not be initialized");
 }
 
 #[test]
@@ -4261,21 +4357,21 @@ fn fixed_array_to_vla_param_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "variably modified object with static storage duration")]
 fn vla_static_storage_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { static int a[n]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified object with static storage duration");
 }
 
 #[test]
-#[should_panic(expected = "variably modified object with linkage")]
 fn vla_linkage_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { extern int a[n]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified object with linkage");
 }
 
 #[test]
@@ -4290,7 +4386,6 @@ fn pointer_to_vla_with_static_storage_parses() {
 }
 
 #[test]
-#[should_panic(expected = "variably modified object with static storage duration")]
 fn nested_vla_type_static_storage_panics() {
     // An array whose element type is a VLA is itself a VLA type, so
     // static storage stays rejected even though the outer bound is
@@ -4299,10 +4394,10 @@ fn nested_vla_type_static_storage_panics() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { static int a[3][n]; (void)a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified object with static storage duration");
 }
 
 #[test]
-#[should_panic(expected = "jump into scope of identifier with variably modified type")]
 fn goto_over_vla_panics() {
     // Jumping past a VLA declaration into its scope would leave
     // storage unallocated (C11 §6.8.6.1p1).
@@ -4310,16 +4405,17 @@ fn goto_over_vla_panics() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { goto l; int a[n]; l:; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "jump into scope of identifier with variably modified type");
 }
 
 #[test]
-#[should_panic(expected = "jump into scope of identifier with variably modified type")]
 fn switch_over_vla_panics() {
     // The dispatch jumps over the declaration like a goto.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n, int x) { switch (x) { int a[n]; case 1: break; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "jump into scope of identifier with variably modified type");
 }
 
 #[test]
@@ -4363,13 +4459,13 @@ fn array_initializer_excess_warns_not_fails() {
 }
 
 #[test]
-#[should_panic(expected = "array index in initializer exceeds array bounds")]
 fn array_designator_out_of_range_panics() {
     // Out-of-range `[i]` is a hard error under both compilers.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3] = { [5] = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "array index in initializer exceeds array bounds");
 }
 
 #[test]
@@ -4738,12 +4834,12 @@ fn single_underscore_attribute_parses() {
 }
 
 #[test]
-#[should_panic(expected = "invalid application of `__alignof__` to an incomplete type")]
 fn alignof_incomplete_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; int x = __alignof__(struct S);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "invalid application of `__alignof__` to an incomplete type");
 }
 
 #[test]
@@ -4754,22 +4850,22 @@ fn attribute_forward_declaration_carries_nothing() {
 }
 
 #[test]
-#[should_panic(expected = "not a power of 2")]
 fn attribute_aligned_non_power_of_two_panics() {
     // Verified against gcc (a hard error there too).
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct N { char c; int x __attribute__((aligned(3))); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "not a power of 2");
 }
 
 #[test]
-#[should_panic(expected = "needs an integer constant")]
 fn attribute_aligned_non_constant_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; struct N { char c; int x __attribute__((aligned(n))); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "needs an integer constant");
 }
 
 #[test]
@@ -4800,12 +4896,12 @@ fn case_labels_fold() {
 }
 
 #[test]
-#[should_panic(expected = "case label is not an integer constant expression")]
 fn non_constant_case_label_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int y) { switch (x) { case y: return 1; default: return 0; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "case label is not an integer constant expression");
 }
 
 #[test]
@@ -4832,7 +4928,6 @@ fn switch_distinct_cases_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "duplicate `case` value in `switch`")]
 fn duplicate_case_value_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -4842,10 +4937,10 @@ fn duplicate_case_value_panics() {
         &mut interner,
     );
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate `case` value in `switch`");
 }
 
 #[test]
-#[should_panic(expected = "duplicate `case` value in `switch`")]
 fn duplicate_case_after_conversion_panics() {
     // Labels compare after conversion to the promoted controlling
     // type (verified against gcc): `-1` duplicates `4294967295u`
@@ -4858,10 +4953,10 @@ fn duplicate_case_after_conversion_panics() {
         &mut interner,
     );
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate `case` value in `switch`");
 }
 
 #[test]
-#[should_panic(expected = "duplicate `default` in `switch`")]
 fn duplicate_default_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -4871,6 +4966,7 @@ fn duplicate_default_panics() {
         &mut interner,
     );
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate `default` in `switch`");
 }
 
 #[test]
@@ -4889,16 +4985,15 @@ fn builtin_va_arg_takes_a_type() {
 }
 
 #[test]
-#[should_panic(expected = "`va_arg` needs a `va_list` argument")]
 fn va_arg_without_va_list_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int x = __builtin_va_arg(0, int); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`va_arg` needs a `va_list` argument");
 }
 
 #[test]
-#[should_panic(expected = "invalid type in `va_arg`")]
 fn va_arg_with_void_type_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -4908,6 +5003,7 @@ fn va_arg_with_void_type_panics() {
         &mut interner,
     );
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "invalid type in `va_arg`");
 }
 
 #[test]
@@ -4932,21 +5028,21 @@ fn generic_selection_resolves() {
 }
 
 #[test]
-#[should_panic(expected = "no matching generic association")]
 fn generic_without_match_or_default_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = _Generic(0L, int: 1);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "no matching generic association");
 }
 
 #[test]
-#[should_panic(expected = "duplicate `default` in `_Generic`")]
 fn generic_duplicate_default_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = _Generic(0, default: 1, default: 2);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate `default` in `_Generic`");
 }
 
 #[test]
@@ -5378,9 +5474,8 @@ fn atomic_builtins_check_against_arguments() {
 }
 
 #[test]
-#[should_panic(expected = "`__atomic_load_n` needs a pointer argument")]
 fn atomic_load_without_pointer_panics() {
-    check_with(&["int n;"], "__atomic_load_n(n, 0)");
+    assert!(check_with_err(&["int n;"], "__atomic_load_n(n, 0)").contains("`__atomic_load_n` needs a pointer argument"));
 }
 
 #[test]
@@ -5404,15 +5499,13 @@ fn c11_atomic_builtins_check_against_arguments() {
 }
 
 #[test]
-#[should_panic(expected = "`__c11_atomic_load` needs a pointer argument")]
 fn c11_atomic_load_without_pointer_panics() {
-    check_with(&["int n;"], "__c11_atomic_load(n, 5)");
+    assert!(check_with_err(&["int n;"], "__c11_atomic_load(n, 5)").contains("`__c11_atomic_load` needs a pointer argument"));
 }
 
 #[test]
-#[should_panic(expected = "`__c11_atomic_fetch_min` needs an integer target")]
 fn c11_atomic_min_on_pointer_panics() {
-    check_with(&["int *p;"], "__c11_atomic_fetch_min(&p, 1, 5)");
+    assert!(check_with_err(&["int *p;"], "__c11_atomic_fetch_min(&p, 1, 5)").contains("`__c11_atomic_fetch_min` needs an integer target"));
 }
 
 #[test]
@@ -5444,12 +5537,12 @@ fn builtin_offsetof_folds() {
 }
 
 #[test]
-#[should_panic(expected = "`offsetof` of bit-field")]
 fn offsetof_bit_field_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : 3; }; int y = __builtin_offsetof(struct S, x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`offsetof` of bit-field");
 }
 
 #[test]
@@ -5468,19 +5561,17 @@ fn statement_expression_value_is_last_item() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return ({ int y = 1; }), y; }", &mut sema, &mut interner);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parser.parse_translation_unit();
-    }));
-    assert!(result.is_err());
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
 }
 
 #[test]
-#[should_panic(expected = "braced-group within expression allowed only inside a function")]
 fn file_scope_statement_expression_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ({ 1; });", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "braced-group within expression allowed only inside a function");
 }
 
 // ---- control-flow validity ----
@@ -5504,21 +5595,21 @@ fn label_named_like_a_typedef_resolves_as_label() {
 }
 
 #[test]
-#[should_panic(expected = "label 'missing' used but not defined")]
 fn undefined_label_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { goto missing; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "label 'missing' used but not defined");
 }
 
 #[test]
-#[should_panic(expected = "duplicate label 'l'")]
 fn duplicate_label_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { l: goto l; l: ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "duplicate label 'l'");
 }
 
 #[test]
@@ -5560,7 +5651,6 @@ fn label_inside_statement_expression_resolves() {
 }
 
 #[test]
-#[should_panic(expected = "label 'l' used but not defined")]
 fn label_inside_statement_expression_is_local() {
     // Jumping into a statement expression from outside resolves to
     // nothing, like GCC.
@@ -5568,6 +5658,7 @@ fn label_inside_statement_expression_is_local() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { goto l; ({ l: ; }); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "label 'l' used but not defined");
 }
 
 #[test]
@@ -5582,22 +5673,22 @@ fn gnu_label_declaration_is_consumed() {
 }
 
 #[test]
-#[should_panic(expected = "break statement not within loop or switch")]
 fn break_outside_loop_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { if (1) break; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "break statement not within loop or switch");
 }
 
 #[test]
-#[should_panic(expected = "continue statement not within a loop")]
 fn continue_outside_loop_panics() {
     // ... including directly in a `switch` (which is not a loop).
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { switch (x) { case 1: continue; default: return 0; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "continue statement not within a loop");
 }
 
 #[test]
@@ -5614,12 +5705,12 @@ fn break_in_switch_and_loops_parses() {
 }
 
 #[test]
-#[should_panic(expected = "case label not within a switch statement")]
 fn case_outside_switch_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { case 1: ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "case label not within a switch statement");
 }
 
 #[test]
@@ -5644,12 +5735,12 @@ fn statement_expression_jumps_stay_scoped() {
 }
 
 #[test]
-#[should_panic(expected = "used but not defined")]
 fn jump_into_statement_expression_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { goto inner; int y = ({ inner: 1; 0; }); return y; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "used but not defined");
 }
 
 /// The type of the first valued statement (`return expr;` or a lone
@@ -5839,76 +5930,76 @@ fn typedef_const_distributes() {
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only variable 'x'")]
 fn const_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x = 6; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only variable 'x'");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only variable 'x'")]
 fn const_compound_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x += 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only variable 'x'");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only variable 'x'")]
 fn const_increment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x++; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only variable 'x'");
 }
 
 #[test]
-#[should_panic(expected = "operand of `++`/`--` must be an lvalue")]
 fn array_increment_panics() {
     // Arrays decay to pointers but are never modifiable lvalues.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; void f(void) { a++; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "operand of `++`/`--` must be an lvalue");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only location")]
 fn const_pointer_target_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int *p; void f(void) { *p = 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only location");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only location")]
 fn const_struct_member_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int m; }; const struct S s = { 1 }; void f(void) { s.m = 2; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only location");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only location")]
 fn const_struct_pointer_member_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int m; }; void f(const struct S *p) { p->m = 2; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only location");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only location")]
 fn const_array_element_assignment_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int a[3] = { 1, 2, 3 }; void f(void) { a[0] = 5; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only location");
 }
 
 #[test]
@@ -6054,13 +6145,13 @@ fn enum_pointer_mixes_with_its_repr() {
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only variable 'x'")]
 fn const_function_parameter_is_readonly() {
     // Parameters carry qualifiers like any object.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(const int x) { x = 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "assignment of read-only variable 'x'");
 }
 
 #[test]
@@ -6082,12 +6173,12 @@ fn generic_qualified_control_selects_unqualified() {
 }
 
 #[test]
-#[should_panic(expected = "variably modified type at file scope")]
 fn file_scope_vla_typedef_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; typedef int B[n];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "variably modified type at file scope");
 }
 
 #[test]
@@ -6100,22 +6191,22 @@ fn block_scope_vla_typedef_parses() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn const_qualifier_mismatch_redeclaration_panics() {
     // Verified against gcc ("conflicting type qualifiers").
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x; int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "invalid use of 'restrict'")]
 fn restrict_on_base_type_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("restrict int *p;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "invalid use of 'restrict'");
 }
 
 #[test]
@@ -6219,12 +6310,12 @@ fn function_redeclaration_compares_parameter_types_only() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn function_parameter_type_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(float);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
@@ -6353,21 +6444,21 @@ fn unprototyped_merges_with_prototype() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn prototyped_arity_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void); int f(int);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn prototyped_variadic_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(int, ...);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
@@ -6426,21 +6517,21 @@ fn declaration_then_definition_merges() {
 }
 
 #[test]
-#[should_panic(expected = "redefinition of function")]
 fn two_definitions_panic() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) {} int f(void) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition of function");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn definition_with_conflicting_prototype_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) {} int f(int);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
@@ -6464,12 +6555,12 @@ fn static_extern_linkage_merges() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn extern_then_static_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int f(void); static int f(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
@@ -6498,13 +6589,13 @@ fn old_style_definition_parses_and_defines() {
 }
 
 #[test]
-#[should_panic(expected = "parameter list without types")]
 fn old_style_prototype_panics() {
     // Identifier-lists are definitions only.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "parameter list without types");
 }
 
 #[test]
@@ -6597,66 +6688,66 @@ fn kr_merges_with_prior_prototype() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn kr_arity_mismatch_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int, int, int); int f(a, b) int a, b; { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "no such parameter")]
 fn kr_extra_declaration_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a; int b; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "no such parameter");
 }
 
 #[test]
-#[should_panic(expected = "redefinition of parameter")]
 fn kr_duplicate_ident_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, a) int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition of parameter");
 }
 
 #[test]
-#[should_panic(expected = "redefinition of parameter")]
 fn kr_duplicate_declaration_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a; int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition of parameter");
 }
 
 #[test]
-#[should_panic(expected = "initializer in parameter declaration")]
 fn kr_initializer_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a = 1; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "initializer in parameter declaration");
 }
 
 #[test]
-#[should_panic(expected = "storage class specifier in parameter")]
 fn kr_storage_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) static int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "storage class specifier in parameter");
 }
 
 #[test]
-#[should_panic(expected = "declaration of `void` object")]
 fn kr_void_param_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) void a; { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "declaration of `void` object");
 }
 
 #[test]
@@ -6744,12 +6835,12 @@ fn tentative_and_definitions() {
 }
 
 #[test]
-#[should_panic(expected = "redefinition")]
 fn two_initialized_definitions_panic() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 1; int x = 2;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "redefinition");
 }
 
 #[test]
@@ -6796,85 +6887,85 @@ fn file_scope_static_uses_linkage_not_block_static() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn object_extern_then_static_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int x; static int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn var_and_func_conflict() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; int x(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "`auto`/`register` at file scope")]
 fn auto_at_file_scope_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("auto int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`auto`/`register` at file scope");
 }
 
 #[test]
-#[should_panic(expected = "multiple storage class")]
 fn multiple_storage_classes_panic() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("static extern int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "multiple storage class");
 }
 
 #[test]
-#[should_panic(expected = "`inline` on non-function")]
 fn inline_on_object_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("inline int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`inline` on non-function");
 }
 
 #[test]
-#[should_panic(expected = "declaration of `void` object")]
 fn void_object_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "declaration of `void` object");
 }
 
 #[test]
-#[should_panic(expected = "function with initializer")]
 fn function_initializer_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) = 1;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "function with initializer");
 }
 
 #[test]
-#[should_panic(expected = "function returning function")]
 fn function_returning_function_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void)(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "function returning function");
 }
 
 #[test]
-#[should_panic(expected = "function definition with multiple declarators")]
 fn function_definition_with_comma_panics() {
     // A definition takes exactly one declarator (C17 §6.9.1p2).
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int g, f(void) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "function definition with multiple declarators");
 }
 
 #[test]
@@ -6944,8 +7035,7 @@ fn block_extern_reuses_file_entity() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
-fn block_extern_after_local_panics() {
+fn block_extern_after_local_reports() {
     // gcc: "extern declaration follows declaration with no linkage".
     let mut intern = Interner::new();
     let mut sema = Sema::new();
@@ -6977,32 +7067,34 @@ fn block_extern_after_local_panics() {
         },
     )
     .unwrap();
-    sema.declare(
-        x,
-        Binding {
-            name: Some(x),
-            ty: Ty::Int,
-            kind: BindingKind::Var,
-            linkage: Linkage::External,
-            block_static: false,
-            tls: false,
-            defined: false,
-            tentative: false,
-            constructor: None,
-            destructor: None,
-            weak: false,
-            alias: None,
-            inline: false,
-            align: None,
-            naked: false,
-            noinline: false,
-            is_async: false,
-            section: None,
-            asm_label: None,
-            span: Span::dummy(),
-        },
-    )
-    .unwrap();
+    let err = sema
+        .declare(
+            x,
+            Binding {
+                name: Some(x),
+                ty: Ty::Int,
+                kind: BindingKind::Var,
+                linkage: Linkage::External,
+                block_static: false,
+                tls: false,
+                defined: false,
+                tentative: false,
+                constructor: None,
+                destructor: None,
+                weak: false,
+                alias: None,
+                inline: false,
+                align: None,
+                naked: false,
+                noinline: false,
+                is_async: false,
+                section: None,
+                asm_label: None,
+                span: Span::dummy(),
+            },
+        )
+        .unwrap_err();
+    assert!(err.message.contains("conflicting redeclaration"), "{:?}", err.message);
 }
 
 // ---- spans (see `crate::span`) ----
@@ -7095,20 +7187,14 @@ fn span_merged_declaration_keeps_first_site() {
 
 #[test]
 fn error_message_carries_location() {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let mut sema = Sema::new();
-        let mut interner = Interner::new();
-        let mut parser = test_parser("int f(int); int f(float);", &mut sema, &mut interner);
-        parser.parse_translation_unit();
-    }));
-    let err = result.expect_err("should panic");
-    let msg = err
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
-        .unwrap_or_default();
-    assert!(msg.contains("conflicting redeclaration"), "{msg:?}");
-    assert!(msg.contains("1:"), "{msg:?}");
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int f(int); int f(float);", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let diagnostics = parser.diagnostics();
+    let err = diagnostics.iter().find(|d| d.is_error()).expect("an error is reported");
+    assert!(err.message.contains("conflicting redeclaration"), "{:?}", err.message);
+    assert_eq!(err.primary.span.start_ln, 1);
 }
 
 // ---- codespan-rendered diagnostics ----
@@ -7330,6 +7416,7 @@ fn diagnostic_labels_span_files() {
 /// Parse one function definition and return its stored body.
 fn parse_one_body(src: &str, parser: &mut Parser) -> (DeclId, crate::parse::FuncBody) {
     let tu = parser.parse_translation_unit();
+    finish(parser);
     assert!(parser.tokens.is_empty(), "trailing tokens for {src:?}");
     let [ExternalDeclaration::Func(id)] = tu.external_declarations.as_slice() else {
         panic!("expected one Func for {src:?}");
@@ -7441,12 +7528,12 @@ fn body_block_may_shadow_param() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn body_duplicate_params_panic() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int x) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
@@ -7512,39 +7599,39 @@ fn body_for_with_declaration_init() {
 }
 
 #[test]
-#[should_panic(expected = "unterminated compound statement")]
 fn body_unterminated_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "unterminated compound statement");
 }
 
 #[test]
-#[should_panic(expected = "unterminated statement")]
 fn body_unterminated_statement_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { if (1)", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "unterminated statement");
 }
 
 #[test]
-#[should_panic(expected = "expected `;`")]
 fn body_truncated_expression_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return 0", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected `;`");
 }
 
 #[test]
-#[should_panic(expected = "expected `;`")]
 fn body_missing_semi_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { int x }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected `;`");
 }
 
 // ---- expressions ----
@@ -7555,6 +7642,7 @@ fn parse_one_expr(src: &str) -> Expr {
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let expr = parser.parse_expression();
+    finish(&parser);
     assert!(parser.tokens.is_empty(), "trailing tokens in {src:?}");
     expr
 }
@@ -7754,27 +7842,23 @@ fn expr_compound_assignment_ops() {
 }
 
 #[test]
-#[should_panic(expected = "expected expression")]
 fn expr_truncated_binary_panics() {
-    parse_one_expr("a +");
+    assert_diag_contains(&expr_diagnostics("a +"), "expected expression");
 }
 
 #[test]
-#[should_panic(expected = "expected `:`")]
 fn expr_ternary_missing_colon_panics() {
-    parse_one_expr("a ? b");
+    assert_diag_contains(&expr_diagnostics("a ? b"), "expected `:`");
 }
 
 #[test]
-#[should_panic(expected = "expected expression")]
 fn expr_empty_call_arg_panics() {
-    parse_one_expr("f(a,)");
+    assert_diag_contains(&expr_diagnostics("f(a,)"), "expected expression");
 }
 
 #[test]
-#[should_panic(expected = "expected member name")]
 fn expr_member_missing_name_panics() {
-    parse_one_expr("s.");
+    assert_diag_contains(&expr_diagnostics("s."), "expected member name");
 }
 
 // ---- statements ----
@@ -7900,40 +7984,40 @@ fn init_brace_lists_and_designators() {
 }
 
 #[test]
-#[should_panic(expected = "designator in scalar initializer")]
 fn init_designated_scalar_panics() {
     // Designators need an aggregate; gcc rejects this the same way.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = { [0] = 5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "designator in scalar initializer");
 }
 
 #[test]
-#[should_panic(expected = "expected `,` or `}` in initializer")]
 fn init_missing_comma_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = { 1 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected `,` or `}` in initializer");
 }
 
 #[test]
-#[should_panic(expected = "expected `=`, got")]
 fn init_designator_missing_assign_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a; }; struct S s = { .a 5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected `=`, got");
 }
 
 #[test]
-#[should_panic(expected = "expected expression")]
 fn init_empty_value_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "expected expression");
 }
 
 // ---- array types ----
@@ -8000,49 +8084,49 @@ fn array_redeclarations_merge() {
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn array_bound_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; int a[4];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "conflicting redeclaration")]
 fn array_element_conflict_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; float a[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "conflicting redeclaration");
 }
 
 #[test]
-#[should_panic(expected = "array of functions")]
 fn array_of_functions_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void); int g[3](void);", &mut sema, &mut interner);
     // `g[3](void)`: array of functions (C17 §6.7.6.1p1).
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "array of functions");
 }
 
 #[test]
-#[should_panic(expected = "function returning array")]
 fn function_returning_array_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void)[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "function returning array");
 }
 
 #[test]
-#[should_panic(expected = "`[*]` outside function prototype scope")]
 fn star_in_definition_params_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int a[*]) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`[*]` outside function prototype scope");
 }
 
 #[test]
@@ -8516,21 +8600,21 @@ fn check_casts_and_sizeof() {
 // ---- statement/initializer checking (checked inline during parsing) ----
 
 #[test]
-#[should_panic(expected = "use of undeclared identifier 'x'")]
 fn body_undeclared_expression_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "use of undeclared identifier 'x'");
 }
 
 #[test]
-#[should_panic(expected = "use of undeclared identifier 'y'")]
 fn body_undeclared_return_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return y; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "use of undeclared identifier 'y'");
 }
 
 #[test]
@@ -8543,12 +8627,12 @@ fn void_function_returns_void_call() {
 }
 
 #[test]
-#[should_panic(expected = "return with a value in void function")]
 fn void_function_returns_value_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void g(void) { return 3; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "return with a value in void function");
 }
 
 #[test]
@@ -8562,39 +8646,39 @@ fn cast_to_union_initializes_member() {
 }
 
 #[test]
-#[should_panic(expected = "condition must have scalar type")]
 fn body_struct_condition_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { struct S { int m; }; struct S s; if (s) {} }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "condition must have scalar type");
 }
 
 #[test]
-#[should_panic(expected = "switch controlling expression must have integer type")]
 fn body_float_switch_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { switch (1.5) {} }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "switch controlling expression must have integer type");
 }
 
 #[test]
-#[should_panic(expected = "case label is not an integer constant expression")]
 fn body_float_case_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x) { switch (x) { case 1.5: break; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "case label is not an integer constant expression");
 }
 
 #[test]
-#[should_panic(expected = "use of undeclared identifier 'y'")]
 fn init_undeclared_name_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = y;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "use of undeclared identifier 'y'");
 }
 
 #[test]
@@ -8690,6 +8774,7 @@ fn body_of_f(src: &str) -> Vec<BlockItem> {
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     parser.parse_translation_unit();
+    finish(&parser);
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
     parser.sema.bodies[&fid].block.items.clone()
@@ -8765,21 +8850,18 @@ fn asm_goto_labels_recorded() {
 }
 
 #[test]
-#[should_panic(expected = "asm output is not an lvalue")]
 fn asm_output_must_be_lvalue() {
-    body_of_f("void f(void){ __asm__(\"\" : \"=r\"(1)); }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ __asm__(\"\" : \"=r\"(1)); }"), "asm output is not an lvalue");
 }
 
 #[test]
-#[should_panic(expected = "output operand constraint lacks '='")]
 fn asm_output_constraint_needs_direction() {
-    body_of_f("void f(int x){ asm(\"\" : \"r\"(x)); }");
+    assert_diag_contains(&tu_diagnostics("void f(int x){ asm(\"\" : \"r\"(x)); }"), "output operand constraint lacks '='");
 }
 
 #[test]
-#[should_panic(expected = "asm operand number out of range")]
 fn asm_tie_must_reference_an_output() {
-    body_of_f("void f(int x){ asm(\"\" : \"=r\"(x) : \"3\"(x)); }");
+    assert_diag_contains(&tu_diagnostics("void f(int x){ asm(\"\" : \"=r\"(x) : \"3\"(x)); }"), "asm operand number out of range");
 }
 
 #[test]
@@ -8803,45 +8885,38 @@ fn asm_goto_template_accepted() {
 }
 
 #[test]
-#[should_panic(expected = "undefined named operand 'baz'")]
 fn asm_goto_reference_must_be_listed() {
-    body_of_f("void f(int x){ asm goto(\"jmp %l[baz]\" : : \"r\"(x) : : lab); lab: ; }");
+    assert_diag_contains(&tu_diagnostics("void f(int x){ asm goto(\"jmp %l[baz]\" : : \"r\"(x) : : lab); lab: ; }"), "undefined named operand 'baz'");
 }
 
 #[test]
-#[should_panic(expected = "undefined named operand 'lab'")]
 fn asm_label_reference_needs_goto() {
-    body_of_f("void f(void){ asm(\"jmp %l[lab]\" ::: ); lab: ; }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ asm(\"jmp %l[lab]\" ::: ); lab: ; }"), "undefined named operand 'lab'");
 }
 
 #[test]
-#[should_panic(expected = "asm goto needs at least one label")]
 fn asm_goto_needs_a_label_list() {
-    body_of_f("void f(void){ asm goto(\"nop\" :::); }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ asm goto(\"nop\" :::); }"), "asm goto needs at least one label");
 }
 
 #[test]
-#[should_panic(expected = "asm label list requires asm goto")]
 fn asm_labels_require_goto() {
-    body_of_f("void f(void){ asm(\"nop\" ::: : lab); lab: ; }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ asm(\"nop\" ::: : lab); lab: ; }"), "asm label list requires asm goto");
 }
 
 #[test]
-#[should_panic(expected = "label 'missing' used but not defined")]
 fn asm_goto_label_must_exist() {
-    body_of_f("void f(int x){ asm goto(\"jmp %l[missing]\" : : \"r\"(x) : : missing); }");
+    assert_diag_contains(&tu_diagnostics("void f(int x){ asm goto(\"jmp %l[missing]\" : : \"r\"(x) : : missing); }"), "label 'missing' used but not defined");
 }
 
 #[test]
-#[should_panic(expected = "memory input is not directly addressable")]
 fn asm_memory_input_needs_address() {
-    body_of_f("void f(int x){ asm(\"\" : : \"m\"(x + 1)); }");
+    assert_diag_contains(&tu_diagnostics("void f(int x){ asm(\"\" : : \"m\"(x + 1)); }"), "memory input is not directly addressable");
 }
 
 #[test]
-#[should_panic(expected = "cannot take address of bit-field")]
 fn asm_memory_bitfield_rejected() {
-    body_of_f("void f(void){ struct S { unsigned b : 3; } s; asm(\"\" : : \"m\"(s.b)); }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ struct S { unsigned b : 3; } s; asm(\"\" : : \"m\"(s.b)); }"), "cannot take address of bit-field");
 }
 
 #[test]
@@ -8868,7 +8943,6 @@ fn asm_memory_letters_follow_the_target() {
 }
 
 #[test]
-#[should_panic(expected = "memory input is not directly addressable")]
 fn asm_aarch64_memory_letter_needs_an_lvalue() {
     // ... but not on AArch64, where `"Q"` is memory.
     use crate::target::Target;
@@ -8876,12 +8950,12 @@ fn asm_aarch64_memory_letter_needs_an_lvalue() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x){ asm(\"\" : : \"Q\"(x + 1)); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "memory input is not directly addressable");
 }
 
 #[test]
-#[should_panic(expected = "assignment of read-only variable 'x'")]
 fn asm_output_readonly_rejected() {
-    body_of_f("void f(void){ const int x = 1; __asm__(\"\" : \"=r\"(x)); }");
+    assert_diag_contains(&tu_diagnostics("void f(void){ const int x = 1; __asm__(\"\" : \"=r\"(x)); }"), "assignment of read-only variable 'x'");
 }
 
 #[test]
@@ -8895,12 +8969,12 @@ fn file_scope_asm_collected() {
 }
 
 #[test]
-#[should_panic(expected = "file-scope asm cannot have operands")]
 fn file_scope_asm_rejects_operands() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("asm(\"nop\" : : \"memory\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "file-scope asm cannot have operands");
 }
 
 #[test]
@@ -8950,21 +9024,21 @@ fn naked_prototype_attribute_reaches_definition() {
 }
 
 #[test]
-#[should_panic(expected = "naked function body may only contain basic asm statements")]
 fn naked_body_rejects_c_code() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) int f(void) { return 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "naked function body may only contain basic asm statements");
 }
 
 #[test]
-#[should_panic(expected = "naked function body may only contain basic asm statements")]
 fn naked_body_rejects_extended_asm() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) void f(void) { __asm__(\"\" ::: \"memory\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "naked function body may only contain basic asm statements");
 }
 
 // ---- the async extension (`-fglcc-async`) ----
@@ -8977,21 +9051,21 @@ fn async_parser<'a>(src: &str, sema: &'a mut Sema, interner: &'a mut Interner) -
 }
 
 #[test]
-#[should_panic(expected = "`_Future` requires the glcc async extension")]
 fn future_specifier_needs_the_flag() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(_Future(int) x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Future` requires the glcc async extension");
 }
 
 #[test]
-#[should_panic(expected = "`__builtin_await` requires the glcc async extension")]
 fn await_builtin_needs_the_flag() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return __builtin_await(0); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`__builtin_await` requires the glcc async extension");
 }
 
 #[test]
@@ -9009,39 +9083,39 @@ fn async_attribute_without_the_flag_is_inert() {
 }
 
 #[test]
-#[should_panic(expected = "`__builtin_await` is only valid inside an async function")]
 fn await_outside_a_coroutine_is_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = async_parser("int f(void) { return __builtin_await(0); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`__builtin_await` is only valid inside an async function");
 }
 
 #[test]
-#[should_panic(expected = "async function cannot be variadic")]
 fn variadic_coroutines_are_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int f(int x, ...) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "async function cannot be variadic");
 }
 
 #[test]
-#[should_panic(expected = "async function `main` is not supported")]
 fn async_main_is_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int main(void) { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "async function `main` is not supported");
 }
 
 #[test]
-#[should_panic(expected = "async function cannot be naked")]
 fn naked_coroutines_are_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) __attribute__((naked)) void f(void) { }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "async function cannot be naked");
 }
 
 #[test]
@@ -9116,30 +9190,30 @@ fn await_yields_the_result_and_rejects_non_futures() {
 /// implement; every position that can name a type must diagnose it
 /// rather than fall through to an unrelated parse error.
 #[test]
-#[should_panic(expected = "`_Imaginary` is not supported")]
 fn imaginary_type_specifier_is_diagnosed_at_file_scope() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Imaginary float x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Imaginary` is not supported");
 }
 
 #[test]
-#[should_panic(expected = "`_Imaginary` is not supported")]
 fn imaginary_type_specifier_is_diagnosed_in_a_block() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { _Imaginary double x = 0.0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Imaginary` is not supported");
 }
 
 #[test]
-#[should_panic(expected = "`_Imaginary` is not supported")]
 fn imaginary_type_specifier_is_diagnosed_in_a_cast() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return (int)(_Imaginary float)1.0f; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Imaginary` is not supported");
 }
 
 // ---- C11 gap coverage: `_Atomic`, `_Noreturn` ----
@@ -9197,18 +9271,17 @@ fn noreturn_function_specifier_parses() {
 }
 
 #[test]
-#[should_panic(expected = "`_Noreturn` on non-function declaration")]
 fn noreturn_on_object_is_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Noreturn int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Noreturn` on non-function declaration");
 }
 
 #[test]
-#[should_panic(expected = "`_Atomic` with other type specifiers")]
 fn atomic_specifier_combines_with_nothing() {
-    base_of("_Atomic(int) long");
+    assert_base_error("_Atomic(int) long", "`_Atomic` with other type specifiers");
 }
 
 /// A UCN may open or continue an identifier (C17 §6.4.2.1); the lexer
@@ -9260,24 +9333,18 @@ fn ucn_in_literals_decodes() {
 }
 
 #[test]
-#[should_panic(expected = "invalid universal character name")]
 fn ucn_with_too_few_digits_is_diagnosed() {
-    let mut interner = Interner::new();
-    let _ = Lexer::new("int \\u12 = 1;", &mut interner).lex_all();
+    assert_diag_contains(&lex_diagnostics("int \\u12 = 1;"), "invalid universal character name");
 }
 
 #[test]
-#[should_panic(expected = "expected 4 hexadecimal digits")]
 fn ucn_with_non_hex_digits_is_diagnosed() {
-    let mut interner = Interner::new();
-    let _ = Lexer::new("\"\\uZZZZ\"", &mut interner).lex_all();
+    assert_diag_contains(&lex_diagnostics("\"\\uZZZZ\""), "expected 4 hexadecimal digits");
 }
 
 #[test]
-#[should_panic(expected = "is not a valid character")]
 fn ucn_surrogate_is_diagnosed() {
-    let mut interner = Interner::new();
-    let _ = Lexer::new("int \\uD800 = 1;", &mut interner).lex_all();
+    assert_diag_contains(&lex_diagnostics("int \\uD800 = 1;"), "is not a valid character");
 }
 
 /// `_Pragma ( string-literal )` is a preprocessing operator, so the
@@ -9300,10 +9367,125 @@ fn pragma_operator_is_skipped_in_a_block() {
 }
 
 #[test]
-#[should_panic(expected = "`_Pragma` requires a parenthesized string literal")]
 fn pragma_operator_without_operand_is_diagnosed() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Pragma int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Pragma` requires a parenthesized string literal");
+}
+
+// ---- error tolerance and machine-readable diagnostics ----
+
+/// A parse error in one file-scope declaration must not stop the parser:
+/// the following declaration is still parsed and the diagnostics list
+/// holds one error per broken construct.
+#[test]
+fn recovery_reports_each_broken_declaration() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int x = ; long y = ;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let errors = parser.diagnostics().iter().filter(|d| d.is_error()).count();
+    assert_eq!(errors, 2, "{:#?}", parser.diagnostics());
+}
+
+/// Recovery keeps going inside a function body, where statements (not
+/// declarations) are the unit that resynchronizes.
+#[test]
+fn recovery_reports_each_broken_statement() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("void f(void) { int x = ; int y = ; }", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let errors = parser.diagnostics().iter().filter(|d| d.is_error()).count();
+    assert_eq!(errors, 2, "{:#?}", parser.diagnostics());
+}
+
+/// After a bad declarator, resynchronization reaches the next
+/// declaration, so a later valid one is still recorded in `Sema`.
+#[test]
+fn recovery_declares_the_next_declaration() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int x = ; int ok;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
+    let ok = parser.intern.get_or_intern("ok");
+    assert!(parser.sema.lookup_symbol(ok).is_some());
+}
+
+/// Lexical diagnostics are folded into the parser's list (they share the
+/// accumulation sink), so a caller sees one ordered stream.
+#[test]
+fn lexer_diagnostics_reach_the_parser_sink() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int \\u12 = 1;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert_parse_error(&parser, "invalid universal character name");
+}
+
+/// Warnings are collected alongside errors but tagged so consumers can
+/// tell them apart (and they never latch recovery).
+#[test]
+fn warnings_are_tagged_and_do_not_latch() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int x = sizeof(void); int y = ;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let diagnostics = parser.diagnostics();
+    assert!(
+        diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("sizeof")),
+        "{diagnostics:#?}"
+    );
+    assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
+}
+
+/// The JSON form is what an editor consumes: a `diagnostics` array with
+/// severity, message, and 1-based line/column plus byte offsets.
+#[test]
+fn diagnostics_json_shape() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let json = parser.diagnostics_json();
+    assert!(json.starts_with("{\"diagnostics\":["), "{json}");
+    assert!(json.contains("\"severity\":\"error\""), "{json}");
+    assert!(json.contains("\"file\":\"<__glcc_source>\""), "{json}");
+    assert!(json.contains("\"line\":1"), "{json}");
+    assert!(json.contains("\"column\":"), "{json}");
+    assert!(json.contains("\"start\":"), "{json}");
+    assert!(json.contains("\"end\":"), "{json}");
+}
+
+/// Span rendering and JSON agree on the file name and 1-based line for a
+/// diagnostic that carries a real (non-dummy) span.
+#[test]
+fn diagnostics_json_positions_match_the_source() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let err = parser.diagnostics().into_iter().find(|d| d.is_error()).expect("an error");
+    assert_eq!(err.primary.span.start_ln, 1);
+    let json = parser.diagnostics_json();
+    assert!(json.contains("\"line\":1"));
+    assert!(json.contains("\"column\":9"), "{json}");
+}
+
+/// A single TU can carry a lexical, a syntactic, and a semantic error;
+/// recovery keeps parsing so all three are reported instead of only the
+/// first one encountered.
+#[test]
+fn recovery_reports_lexer_parser_and_sema_errors_together() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int a = \\u12;\nint b = ;\nint c = missing;\n", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let messages: Vec<String> = parser.diagnostics().into_iter().map(|d| d.message).collect();
+    assert!(messages.iter().any(|m| m.contains("universal character name")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("expected expression")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("missing")), "{messages:?}");
 }
