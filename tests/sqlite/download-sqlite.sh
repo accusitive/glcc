@@ -16,10 +16,6 @@ if [ ! -x "$GLCC" ]; then
   echo "glcc not found at $GLCC (run 'cargo build' or set GLCC=...)" >&2
   exit 1
 fi
-if ! command -v clang >/dev/null 2>&1; then
-  echo "clang not found; glcc's native preprocessor is not ready for SQLite" >&2
-  exit 1
-fi
 
 TCLSH=$(command -v tclsh8.6 || command -v tclsh || true)
 if [ -z "$TCLSH" ]; then
@@ -37,11 +33,9 @@ fi
 
 cd "$SRC"
 
-CC_GLCC="$GLCC --pp=clang"
+CC="$GLCC" ./configure --with-tclsh="$TCLSH"
 LOG=veryquick.log
 JOBS=$(nproc 2>/dev/null || echo 4)
-
-CC="$GLCC" ./configure --with-tclsh="$TCLSH"
 
 # symlink.test leaves its scratch dirs x/y/z/w in testdir/. The later
 # zipfile-25.0 test assumes nothing named "x" exists; fopen() on a
@@ -68,13 +62,13 @@ fi
 make clean >/dev/null 2>&1 || true
 
 echo "Building testfixture and testprogs with $GLCC"
-make -j"$JOBS" CC="$CC_GLCC" testfixture testprogs
+make -j"$JOBS" CC="$GLCC" testfixture testprogs
 
 # Leave no scratch state behind for the next run.
 rm -rf testdir
 
 echo "Running the veryquick suite"
-make tcltest CC="$CC_GLCC" 2>&1 | tee "$LOG" || true
+make tcltest CC="$GLCC" 2>&1 | tee "$LOG" || true
 
 if grep -q '^0 errors out of' "$LOG"; then
   grep '^0 errors out of' "$LOG"
