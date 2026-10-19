@@ -1155,7 +1155,7 @@ pub(crate) fn emit_memcpy_pub(builder: &mut FunctionBuilder, dst: ClifValue, src
 
 fn emit_memcpy(builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, len: u64) {
     let mut off = 0u64;
-    for (chunk_ty, chunk) in [(types::I64, 8), (types::I32, 4), (types::I16, 2), (types::I8, 1)] {
+    for (chunk_ty, chunk) in [(types::F128, 16), (types::I64, 8), (types::I32, 4), (types::I16, 2), (types::I8, 1)] {
         while off + chunk <= len {
             let v = builder.ins().load(chunk_ty, memflags::notrap(), src, Offset32::new(off as i32));
             builder.ins().store(memflags::notrap(), v, dst, Offset32::new(off as i32));

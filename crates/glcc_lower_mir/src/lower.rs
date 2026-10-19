@@ -5817,6 +5817,65 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         (global, elem_mir, len)
     }
 
+    /// Whether an initializer writes every byte that can affect the
+    /// object's value, making the zero-fill before it redundant.
+    ///
+    /// Only positional, recursively complete lists qualify: named
+    /// designators and bit-field structs keep the zero-fill because
+    /// they touch only part of the object (bit-fields read-modify-write
+    /// their unnamed neighbors).
+    fn initializer_covers_object(&self, fe_ty: &fe::parse::Ty, mir_ty: &mir::Ty, init: &fe::parse::Initializer) -> bool {
+        match init {
+            fe::parse::Initializer::Expr(e) => match mir_ty {
+                mir::Ty::Array { elem: mir_elem, .. } => {
+                    let fe::check::CheckedExprKind::Str(parts) = &e.kind else {
+                        return false;
+                    };
+                    let Some(lit_elem) = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()) else {
+                        return false;
+                    };
+                    if lower_ty(&lit_elem, self.sema, self.interner) != **mir_elem {
+                        return false;
+                    }
+                    let lit_len = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar())
+                        .expect("checked string folds to bytes")
+                        .len() as u64
+                        + mir_elem.size_bytes();
+                    lit_len >= mir_ty.size_bytes()
+                }
+                // An expression initializer for a scalar or aggregate
+                // value copies the complete object.
+                _ => true,
+            },
+            fe::parse::Initializer::List { items, .. } => {
+                if items.iter().any(|item| !item.designators.is_empty()) {
+                    return false;
+                }
+                match (fe_ty.unqualified(), mir_ty) {
+                    (fe::parse::Ty::Array { elem, .. }, mir::Ty::Array { elem: mir_elem, len }) => {
+                        items.len() as u64 == *len && items.iter().all(|item| self.initializer_covers_object(elem, mir_elem, &item.init))
+                    }
+                    (fe::parse::Ty::Struct(id), mir::Ty::Struct { fields, .. }) => {
+                        let def = &self.sema.structs[id.0 as usize];
+                        if def.is_union || def.members.iter().any(|member| member.bitfield.is_some()) {
+                            return false;
+                        }
+                        items.len() == fields.len()
+                            && items
+                                .iter()
+                                .zip(fields)
+                                .zip(&def.members)
+                                .all(|((item, field), member)| self.initializer_covers_object(&member.ty, field, &item.init))
+                    }
+                    // `int x = {1}` is a one-element list around a
+                    // scalar initializer.
+                    _ if items.len() == 1 => self.initializer_covers_object(fe_ty, mir_ty, &items[0].init),
+                    _ => false,
+                }
+            }
+        }
+    }
+
     /// Initialize a local slot from an initializer: zero the whole
     /// object first (C's remainder rule, covering padding too), then
     /// store each provided element.
@@ -5848,7 +5907,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             .len() as u64
                             + elem.size_bytes();
                         let len = mir_ty.size_bytes();
-                        self.emit_unit(func, frame, mir::InstKind::Memset { dst: slot, byte: 0, len });
+                        if !self.initializer_covers_object(fe_ty, &mir_ty, init) {
+                            self.emit_unit(func, frame, mir::InstKind::Memset { dst: slot, byte: 0, len });
+                        }
                         let src = self.string_literal(module, func, frame, parts);
                         let src_addr = self.emit(
                             func,
@@ -5876,15 +5937,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.store(func, frame, slot, narrowed, ty_is_volatile(fe_ty));
             }
             fe::parse::Initializer::List { items, .. } => {
-                self.emit_unit(
-                    func,
-                    frame,
-                    mir::InstKind::Memset {
-                        dst: slot,
-                        byte: 0,
-                        len: mir_ty.size_bytes(),
-                    },
-                );
+                if !self.initializer_covers_object(fe_ty, &mir_ty, init) {
+                    self.emit_unit(
+                        func,
+                        frame,
+                        mir::InstKind::Memset {
+                            dst: slot,
+                            byte: 0,
+                            len: mir_ty.size_bytes(),
+                        },
+                    );
+                }
                 match fe_ty.unqualified() {
                     fe::parse::Ty::Array { elem, .. } => {
                         let mut index = 0u64;
@@ -7732,6 +7795,29 @@ mod tests {
         // A nested array still initializes its first row from the
         // string; the braces are not redundant there.
         assert_eq!(run_main("char m[2][3] = { \"ab\" }; int main(){ return m[0][1] == 'b' && m[1][0] == 0; }"), 1);
+    }
+
+    #[test]
+    fn full_initializers_skip_the_redundant_zero_fill() {
+        let main_body = |src| {
+            let dump = mir::display::dump_module(&lower_module(src));
+            dump.split("func @main").nth(1).expect("main is lowered").to_string()
+        };
+
+        let full = main_body("int main(){ long long a[16] = {1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}; return (int)a[15]; }");
+        assert!(!full.contains("memset"), "{full}");
+
+        let partial = main_body("int main(){ long long a[16] = {1}; return (int)a[15]; }");
+        assert!(partial.contains("memset"), "{partial}");
+
+        let designated = main_body("struct S{int a,b;}; int main(){ struct S s = {.a = 1}; return s.a; }");
+        assert!(designated.contains("memset"), "{designated}");
+
+        let full_string = main_body("int main(){ char s[4] = \"abc\"; return s[3]; }");
+        assert!(!full_string.contains("memset"), "{full_string}");
+
+        let partial_string = main_body("int main(){ char s[8] = \"abc\"; return s[7]; }");
+        assert!(partial_string.contains("memset"), "{partial_string}");
     }
 
     #[test]
