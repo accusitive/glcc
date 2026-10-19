@@ -435,6 +435,455 @@ impl FunctionPass for ForwardAggregateCopy {
     }
 }
 
+/// A later write that may cover an earlier one.
+struct MemoryWrite {
+    addr: Value,
+    len: u64,
+}
+
+/// A later read that may observe an earlier write.
+struct MemoryRead {
+    addr: Value,
+    len: u64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemoryObject {
+    Stack(Value),
+    Global(Value),
+}
+
+#[derive(Clone, Copy)]
+struct AddressInfo {
+    object: MemoryObject,
+    offset: Option<u64>,
+}
+
+fn add_offset(offset: Option<u64>, delta: Option<(u32, i128)>) -> Option<u64> {
+    let offset = offset?;
+    let delta = delta?.1;
+    let result = offset as i128 + delta;
+    (0..=u64::MAX as i128).contains(&result).then_some(result as u64)
+}
+
+fn sub_offset(offset: Option<u64>, delta: Option<(u32, i128)>) -> Option<u64> {
+    let offset = offset?;
+    let delta = delta?.1;
+    let result = offset as i128 - delta;
+    (0..=u64::MAX as i128).contains(&result).then_some(result as u64)
+}
+
+/// Track the stack/global object a pointer or address integer derives
+/// from, plus a constant byte offset when the arithmetic is known.
+/// `PtrToInt`/`IntToPtr` are address algebra here; escape analysis below
+/// is what decides whether the address actually leaves the function.
+fn address_info(func: &Function, value: Value) -> Option<AddressInfo> {
+    let Def::Inst(inst) = func.values[value].def else {
+        return None;
+    };
+    match &func.insts[inst].kind {
+        InstKind::Alloca { .. } => Some(AddressInfo {
+            object: MemoryObject::Stack(value),
+            offset: Some(0),
+        }),
+        InstKind::GlobalAddr { .. } => Some(AddressInfo {
+            object: MemoryObject::Global(value),
+            offset: Some(0),
+        }),
+        InstKind::GetElementPtr { base, indices } => {
+            let mut info = address_info(func, *base)?;
+            let mut ty = match &func.values[*base].ty {
+                Ty::Ptr(inner) => (**inner).clone(),
+                _ => return Some(info),
+            };
+            for index in indices.iter() {
+                match index {
+                    crate::ty::GepIndex::Field(field) => {
+                        let Ty::Struct { fields, offsets, .. } = &ty else {
+                            info.offset = None;
+                            continue;
+                        };
+                        let (Some(next), Some(field_offset)) = (fields.get(*field as usize), offsets.get(*field as usize)) else {
+                            info.offset = None;
+                            continue;
+                        };
+                        info.offset = info.offset.and_then(|off| off.checked_add(*field_offset));
+                        ty = next.clone();
+                    }
+                    crate::ty::GepIndex::ConstIndex(index) => {
+                        let (step, next) = match &ty {
+                            Ty::Array { elem, .. } => (elem.size_bytes(), (**elem).clone()),
+                            other => (other.size_bytes(), other.clone()),
+                        };
+                        info.offset = info.offset.and_then(|off| index.checked_mul(step).and_then(|delta| off.checked_add(delta)));
+                        ty = next;
+                    }
+                    crate::ty::GepIndex::Index(index) => {
+                        let (step, next) = match &ty {
+                            Ty::Array { elem, .. } => (elem.size_bytes(), (**elem).clone()),
+                            other => (other.size_bytes(), other.clone()),
+                        };
+                        info.offset = match (info.offset, int_const(func, *index)) {
+                            (Some(off), Some((_, index))) => u64::try_from(index).ok().and_then(|index| index.checked_mul(step)).and_then(|delta| off.checked_add(delta)),
+                            _ => None,
+                        };
+                        ty = next;
+                    }
+                }
+            }
+            Some(info)
+        }
+        InstKind::Bitcast(inner) => address_info(func, *inner),
+        InstKind::PtrToInt(inner) => {
+            if matches!(func.values[value].ty, Ty::Int { bits: 64 }) {
+                address_info(func, *inner)
+            } else {
+                None
+            }
+        }
+        InstKind::IntToPtr(inner) => {
+            if matches!(func.values[*inner].ty, Ty::Int { bits: 64 }) {
+                address_info(func, *inner)
+            } else {
+                None
+            }
+        }
+        InstKind::Add(a, b) => match (address_info(func, *a), address_info(func, *b)) {
+            (Some(info), None) => Some(AddressInfo {
+                offset: add_offset(info.offset, int_const(func, *b)),
+                ..info
+            }),
+            (None, Some(info)) => Some(AddressInfo {
+                offset: add_offset(info.offset, int_const(func, *a)),
+                ..info
+            }),
+            _ => None,
+        },
+        InstKind::Sub(a, b) => match (address_info(func, *a), address_info(func, *b)) {
+            (Some(info), None) => Some(AddressInfo {
+                offset: sub_offset(info.offset, int_const(func, *b)),
+                ..info
+            }),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn address_object(func: &Function, value: Value) -> Option<MemoryObject> {
+    address_info(func, value).map(|info| info.object)
+}
+
+fn escape_root(func: &Function, value: Value, escaped: &mut std::collections::HashSet<Value>) {
+    if let Some(MemoryObject::Stack(root)) = address_object(func, value) {
+        escaped.insert(root);
+    }
+}
+
+fn escape_value(func: &Function, value: Value, escaped: &mut std::collections::HashSet<Value>) {
+    if !func.values[value].ty.is_aggregate() {
+        escape_root(func, value, escaped);
+    }
+}
+
+/// Stack slots whose address never leaves this function. Unknown
+/// pointers cannot point at these slots, so a read through a parameter
+/// need not be treated as aliasing them.
+fn non_escaping_stack_slots(func: &Function) -> std::collections::HashSet<Value> {
+    use std::collections::HashSet;
+
+    let mut escaped = HashSet::new();
+    for inst in func.insts.iter() {
+        let result_ty = inst.result.map(|value| &func.values[value].ty);
+        match &inst.kind {
+            InstKind::Load { .. }
+            | InstKind::Memcpy { .. }
+            | InstKind::Memset { .. }
+            | InstKind::AtomicLoad { .. }
+            | InstKind::VaStart { .. }
+            | InstKind::VaArg { .. }
+            | InstKind::VaEnd { .. }
+            | InstKind::VaCopy { .. }
+            | InstKind::Alloca { .. }
+            | InstKind::GlobalAddr { .. }
+            | InstKind::FuncAddr { .. }
+            | InstKind::ExternAddr { .. }
+            | InstKind::GetFramePointer
+            | InstKind::AtomicFence => {}
+            InstKind::Store { val, .. } => escape_value(func, *val, &mut escaped),
+            InstKind::GetElementPtr { .. } => {}
+            InstKind::Bitcast(inner) => {
+                let pointer_bitcast = result_ty.is_some_and(|ty| matches!(ty, Ty::Ptr(_))) && matches!(func.values[*inner].ty, Ty::Ptr(_));
+                if !pointer_bitcast {
+                    escape_root(func, *inner, &mut escaped);
+                }
+            }
+            InstKind::PtrToInt(_) | InstKind::IntToPtr(_) => {}
+            InstKind::Add(a, b) | InstKind::Sub(a, b) => {
+                if address_info(func, *a).is_some() && address_info(func, *b).is_some() {
+                    escape_root(func, *a, &mut escaped);
+                    escape_root(func, *b, &mut escaped);
+                }
+            }
+            InstKind::Icmp { .. } | InstKind::Fcmp { .. } => {}
+            InstKind::Select { then_val, else_val, .. } => {
+                escape_root(func, *then_val, &mut escaped);
+                escape_root(func, *else_val, &mut escaped);
+            }
+            InstKind::ExtractValue { .. } => {}
+            InstKind::InsertValue { elem, .. } => escape_value(func, *elem, &mut escaped),
+            InstKind::AtomicStore { val, .. } | InstKind::AtomicRmw { val, .. } => {
+                escape_value(func, *val, &mut escaped);
+            }
+            InstKind::AtomicCas { expected, replacement, .. } => {
+                escape_value(func, *expected, &mut escaped);
+                escape_value(func, *replacement, &mut escaped);
+            }
+            InstKind::Call { args, .. } | InstKind::CallExtern { args, .. } => {
+                for &arg in args.iter() {
+                    escape_root(func, arg, &mut escaped);
+                }
+            }
+            InstKind::CallIndirect { callee, args, .. } => {
+                escape_root(func, *callee, &mut escaped);
+                for &arg in args.iter() {
+                    escape_root(func, arg, &mut escaped);
+                }
+            }
+            InstKind::Await { fut } => escape_root(func, *fut, &mut escaped),
+            InstKind::InlineAsm { block } => {
+                for operand in &block.operands {
+                    escape_root(func, operand.value, &mut escaped);
+                }
+            }
+            kind if kind.is_pure() => {
+                kind.for_each_operand(&mut |value| escape_root(func, value, &mut escaped));
+            }
+            other => {
+                other.for_each_operand(&mut |value| escape_root(func, value, &mut escaped));
+            }
+        }
+    }
+    for block in func.blocks.iter() {
+        let Some(term) = &block.term else {
+            continue;
+        };
+        match term {
+            Terminator::Return { val: Some(val) } => escape_value(func, *val, &mut escaped),
+            Terminator::Br { args, .. } => {
+                for &arg in args.iter() {
+                    escape_root(func, arg, &mut escaped);
+                }
+            }
+            Terminator::CondBr { then_args, else_args, .. } => {
+                for &arg in then_args.iter().chain(else_args.iter()) {
+                    escape_root(func, arg, &mut escaped);
+                }
+            }
+            Terminator::Return { val: None } | Terminator::Switch { .. } | Terminator::Unreachable => {}
+        }
+    }
+
+    func.insts
+        .iter()
+        .filter_map(|inst| match (&inst.kind, inst.result) {
+            (InstKind::Alloca { .. }, Some(slot)) if !escaped.contains(&slot) => Some(slot),
+            _ => None,
+        })
+        .collect()
+}
+
+fn range_contains(start: u64, len: u64, inner_start: u64, inner_len: u64) -> bool {
+    let (Some(end), Some(inner_end)) = (start.checked_add(len), inner_start.checked_add(inner_len)) else {
+        return false;
+    };
+    start <= inner_start && inner_end <= end
+}
+
+fn ranges_overlap(start: u64, len: u64, other_start: u64, other_len: u64) -> bool {
+    if len == 0 || other_len == 0 {
+        return false;
+    }
+    let (Some(end), Some(other_end)) = (start.checked_add(len), other_start.checked_add(other_len)) else {
+        return true;
+    };
+    start < other_end && other_start < end
+}
+
+fn ranges_may_overlap(func: &Function, non_escaping: &std::collections::HashSet<Value>, a_addr: Value, a_len: u64, b_addr: Value, b_len: u64) -> bool {
+    if a_len == 0 || b_len == 0 {
+        return false;
+    }
+    if a_addr == b_addr {
+        return true;
+    }
+    match (address_info(func, a_addr), address_info(func, b_addr)) {
+        (Some(a), Some(b)) => {
+            let may_alias = match (a.object, b.object) {
+                (MemoryObject::Stack(a), MemoryObject::Stack(b)) => a == b,
+                (MemoryObject::Stack(_), MemoryObject::Global(_)) | (MemoryObject::Global(_), MemoryObject::Stack(_)) => false,
+                (MemoryObject::Global(_), MemoryObject::Global(_)) => true,
+            };
+            if !may_alias {
+                return false;
+            }
+            match (a.offset, b.offset) {
+                (Some(a), Some(b)) => ranges_overlap(a, a_len, b, b_len),
+                _ => true,
+            }
+        }
+        (
+            Some(AddressInfo {
+                object: MemoryObject::Stack(stack),
+                ..
+            }),
+            None,
+        )
+        | (
+            None,
+            Some(AddressInfo {
+                object: MemoryObject::Stack(stack),
+                ..
+            }),
+        ) => !non_escaping.contains(&stack),
+        _ => true,
+    }
+}
+
+fn write_covers(func: &Function, write_addr: Value, write_len: u64, addr: Value, len: u64) -> bool {
+    if write_addr == addr {
+        return write_len >= len;
+    }
+    let Some(write) = address_info(func, write_addr) else {
+        return false;
+    };
+    let Some(target) = address_info(func, addr) else {
+        return false;
+    };
+    if write.object != target.object {
+        return false;
+    }
+    match (write.offset, target.offset) {
+        (Some(write_offset), Some(target_offset)) => range_contains(write_offset, write_len, target_offset, len),
+        _ => false,
+    }
+}
+
+fn covered_by_later_write(writes: &[MemoryWrite], func: &Function, addr: Value, len: u64) -> bool {
+    writes.iter().any(|write| write_covers(func, write.addr, write.len, addr, len))
+}
+
+fn read_after_write(reads: &[MemoryRead], func: &Function, non_escaping: &std::collections::HashSet<Value>, addr: Value, len: u64) -> bool {
+    reads
+        .iter()
+        .any(|read| read.len > 0 && ranges_may_overlap(func, non_escaping, read.addr, read.len, addr, len))
+}
+
+/// A write makes later reads of the same bytes read the new value, so
+/// those reads no longer keep earlier writes alive.
+fn forget_covered_reads(reads: &mut Vec<MemoryRead>, func: &Function, addr: Value, len: u64) {
+    reads.retain(|read| !write_covers(func, addr, len, read.addr, read.len));
+}
+
+/// Remove a memory write whose bytes are fully overwritten by a later
+/// write in the same block, when no intervening read may observe it.
+///
+/// Writes are tracked backwards through the block. A read from a
+/// different known object cannot alias; a read from an unknown pointer
+/// may, so it keeps the write live. Calls and volatile/atomic accesses
+/// are barriers: they may read anything, so earlier writes stay.
+#[derive(Default)]
+pub struct DeadStoreElim;
+
+impl FunctionPass for DeadStoreElim {
+    fn name(&self) -> &'static str {
+        "dse"
+    }
+
+    fn run(&mut self, func: &mut Function) -> bool {
+        let non_escaping = non_escaping_stack_slots(func);
+        let mut dead = std::collections::HashSet::new();
+        for index in 0..func.blocks.len() {
+            let block = Block::from_usize(index);
+            eliminate_dead_stores_in_block(func, block, &non_escaping, &mut dead);
+        }
+        if dead.is_empty() {
+            return false;
+        }
+        for block in func.blocks.iter_mut() {
+            block.insts.retain(|inst| !dead.contains(inst));
+        }
+        true
+    }
+}
+
+fn eliminate_dead_stores_in_block(func: &Function, block: Block, non_escaping: &std::collections::HashSet<Value>, dead: &mut std::collections::HashSet<Inst>) {
+    let insts = func.blocks[block].insts.clone();
+    let mut writes: Vec<MemoryWrite> = Vec::new();
+    let mut reads: Vec<MemoryRead> = Vec::new();
+    for &inst in insts.iter().rev() {
+        let data = &func.insts[inst];
+        match &data.kind {
+            InstKind::Load { addr, flags } => {
+                if flags.volatile {
+                    return;
+                }
+                let len = data.result.map(|value| func.values[value].ty.size_bytes()).unwrap_or(0);
+                if len > 0 {
+                    reads.push(MemoryRead { addr: *addr, len });
+                }
+            }
+            InstKind::Store { addr, val, flags } => {
+                if flags.volatile {
+                    return;
+                }
+                let len = func.values[*val].ty.size_bytes();
+                if len == 0 {
+                    continue;
+                }
+                if covered_by_later_write(&writes, func, *addr, len) && !read_after_write(&reads, func, non_escaping, *addr, len) {
+                    dead.insert(inst);
+                }
+                forget_covered_reads(&mut reads, func, *addr, len);
+                writes.push(MemoryWrite { addr: *addr, len });
+            }
+            InstKind::Memcpy { dst, src, len } => {
+                if *len == 0 {
+                    continue;
+                }
+                let is_dead = covered_by_later_write(&writes, func, *dst, *len) && !read_after_write(&reads, func, non_escaping, *dst, *len);
+                if is_dead {
+                    dead.insert(inst);
+                }
+                forget_covered_reads(&mut reads, func, *dst, *len);
+                if !is_dead {
+                    reads.push(MemoryRead { addr: *src, len: *len });
+                }
+                writes.push(MemoryWrite { addr: *dst, len: *len });
+            }
+            InstKind::Memset { dst, len, .. } => {
+                if *len == 0 {
+                    continue;
+                }
+                if covered_by_later_write(&writes, func, *dst, *len) && !read_after_write(&reads, func, non_escaping, *dst, *len) {
+                    dead.insert(inst);
+                }
+                forget_covered_reads(&mut reads, func, *dst, *len);
+                writes.push(MemoryWrite { addr: *dst, len: *len });
+            }
+            InstKind::ExtractValue { agg, .. } | InstKind::InsertValue { agg, .. } => {
+                let len = func.values[*agg].ty.size_bytes();
+                if len > 0 {
+                    reads.push(MemoryRead { addr: *agg, len });
+                }
+            }
+            kind if kind.is_pure() => {}
+            InstKind::Udiv(..) | InstKind::Sdiv(..) | InstKind::Urem(..) | InstKind::Srem(..) => {}
+            _ => return,
+        }
+    }
+}
+
 /// Remove pure instructions whose result is never used.
 #[derive(Default)]
 pub struct DeadCodeElim;
@@ -2175,6 +2624,319 @@ mod tests {
         let mut pass = ForwardAggregateCopy;
         assert!(!pass.run(&mut func));
         assert!(matches!(func.insts[load].kind, InstKind::Load { .. }));
+    }
+
+    fn stack_slot(func: &mut Function, block: Block, ty: Ty) -> Value {
+        let mut builder = FunctionBuilder::new(func, block);
+        builder.alloca(ty, 1)
+    }
+
+    fn push_unit(func: &mut Function, block: Block, kind: InstKind) -> Inst {
+        let inst = func.insts.push(crate::ir::InstData {
+            block,
+            kind,
+            result: None,
+            loc: None,
+        });
+        func.blocks[block].insts.push(inst);
+        inst
+    }
+
+    fn push_scalar_load(func: &mut Function, block: Block, addr: Value, ty: Ty) -> Value {
+        let mut builder = FunctionBuilder::new(func, block);
+        builder.load(addr, ty)
+    }
+
+    fn entry_param(func: &mut Function, block: Block, ty: Ty, index: u32) -> Value {
+        let value = func.values.push(crate::ir::ValueData {
+            ty,
+            def: Def::Param(block, index),
+        });
+        func.blocks[block].params.push(value);
+        value
+    }
+
+    fn push_value(func: &mut Function, block: Block, kind: InstKind, ty: Ty) -> Value {
+        let result = func.values.push(crate::ir::ValueData {
+            ty,
+            def: Def::Inst(Inst::from_usize(0)),
+        });
+        let inst = func.insts.push(crate::ir::InstData {
+            block,
+            kind,
+            result: Some(result),
+            loc: None,
+        });
+        func.values[result].def = Def::Inst(inst);
+        func.blocks[block].insts.push(inst);
+        result
+    }
+
+    #[test]
+    fn removes_store_overwritten_in_the_same_block() {
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        let slot = stack_slot(&mut func, entry, Ty::int(32));
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let first = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: one,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let second = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: two,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn removes_store_overwritten_before_a_later_load() {
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        let slot = stack_slot(&mut func, entry, Ty::int(32));
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let first = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: one,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let second = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: two,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let loaded = push_scalar_load(&mut func, entry, slot, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn keeps_store_read_before_the_overwrite() {
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        let slot = stack_slot(&mut func, entry, Ty::int(32));
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let first = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: one,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let loaded = push_scalar_load(&mut func, entry, slot, Ty::int(32));
+        let second = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: two,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut pass = DeadStoreElim;
+        assert!(!pass.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn removes_overwritten_copy_from_a_different_object() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        let dst = stack_slot(&mut func, entry, ty.clone());
+        let first_src = stack_slot(&mut func, entry, ty.clone());
+        let second_src = stack_slot(&mut func, entry, ty.clone());
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 16 });
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 16 });
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn removes_copy_from_unknown_source_for_local_destination() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let sig = Signature::new(vec![Ty::ptr(ty.clone()), Ty::ptr(ty.clone())], Ty::Void);
+        let (mut func, entry) = Function::new("dse", sig);
+        let first_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 0);
+        let second_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 1);
+        let dst = stack_slot(&mut func, entry, ty);
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 16 });
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 16 });
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn removes_copy_overwritten_before_field_load() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::Array {
+                elem: Box::new(Ty::int(64)),
+                len: 4,
+            }],
+            offsets: vec![0],
+            size: 32,
+        };
+        let sig = Signature::new(vec![Ty::ptr(ty.clone()), Ty::ptr(ty.clone())], Ty::int(64));
+        let (mut func, entry) = Function::new("dse", sig);
+        let first_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 0);
+        let second_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 1);
+        let dst = stack_slot(&mut func, entry, ty);
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 32 });
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 32 });
+        let field = push_value(
+            &mut func,
+            entry,
+            InstKind::GetElementPtr {
+                base: dst,
+                indices: vec![crate::ty::GepIndex::Field(0), crate::ty::GepIndex::ConstIndex(0)].into_iter().collect(),
+            },
+            Ty::ptr(Ty::int(64)),
+        );
+        let as_int = push_value(&mut func, entry, InstKind::PtrToInt(field), Ty::int(64));
+        let as_ptr = push_value(&mut func, entry, InstKind::IntToPtr(as_int), Ty::ptr(Ty::int(64)));
+        let loaded = push_scalar_load(&mut func, entry, as_ptr, Ty::int(64));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn keeps_copy_when_address_is_stored_as_integer() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let sig = Signature::new(vec![Ty::ptr(Ty::int(64)), Ty::ptr(ty.clone()), Ty::ptr(ty.clone())], Ty::Void);
+        let (mut func, entry) = Function::new("dse", sig);
+        let sink = entry_param(&mut func, entry, Ty::ptr(Ty::int(64)), 0);
+        let first_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 1);
+        let second_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 2);
+        let dst = stack_slot(&mut func, entry, ty);
+        let address = push_value(&mut func, entry, InstKind::PtrToInt(dst), Ty::int(64));
+        push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: sink,
+                val: address,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 16 });
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 16 });
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(!pass.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn keeps_copy_when_local_address_escapes() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let sig = Signature::new(vec![Ty::ptr(Ty::ptr(ty.clone())), Ty::ptr(ty.clone()), Ty::ptr(ty.clone())], Ty::Void);
+        let (mut func, entry) = Function::new("dse", sig);
+        let sink = entry_param(&mut func, entry, Ty::ptr(Ty::ptr(ty.clone())), 0);
+        let first_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 1);
+        let second_src = entry_param(&mut func, entry, Ty::ptr(ty.clone()), 2);
+        let dst = stack_slot(&mut func, entry, ty);
+        push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: sink,
+                val: dst,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 16 });
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 16 });
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(!pass.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
+    }
+
+    #[test]
+    fn keeps_copy_read_before_the_overwrite() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(64), Ty::int(64)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        let dst = stack_slot(&mut func, entry, ty.clone());
+        let first_src = stack_slot(&mut func, entry, ty.clone());
+        let second_src = stack_slot(&mut func, entry, ty.clone());
+        let first = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: first_src, len: 16 });
+        let loaded = push_scalar_load(&mut func, entry, dst, Ty::int(64));
+        let second = push_unit(&mut func, entry, InstKind::Memcpy { dst, src: second_src, len: 16 });
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut pass = DeadStoreElim;
+        assert!(!pass.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
     }
 
     #[test]

@@ -7358,6 +7358,7 @@ mod tests {
             .add_func_pass(mir::passes::ConstFold)
             .add_func_pass(mir::passes::Sccp)
             .add_func_pass(mir::passes::ForwardAggregateCopy)
+            .add_func_pass(mir::passes::DeadStoreElim)
             .add_func_pass(mir::passes::InstCombine)
             .add_func_pass(mir::passes::ConstMerge)
             .add_func_pass(mir::passes::Cse)
