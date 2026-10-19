@@ -5620,6 +5620,24 @@ fn c11_atomic_builtins_check_against_arguments() {
 }
 
 #[test]
+fn interlocked_compare_exchange_checks_against_arguments() {
+    // MSVC `<intrin.h>` atomics: the pointee gives the operand type
+    // and the result is the object's initial value, so the `8`/`16`/
+    // `64`/`Pointer` widths share the shape.
+    let checked = check_with(&["int n;"], "_InterlockedCompareExchange(&n, 1, 0)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["char n;"], "_InterlockedCompareExchange8(&n, 1, 0)");
+    assert_eq!(checked.ty, Ty::Char);
+    let checked = check_with(&["int *p;"], "_InterlockedCompareExchangePointer((void *volatile *)&p, 0, 0)");
+    assert!(matches!(checked.ty, Ty::Pointer { .. }));
+}
+
+#[test]
+fn interlocked_compare_exchange_without_pointer_panics() {
+    assert!(check_with_err(&["int n;"], "_InterlockedCompareExchange(n, 1, 0)").contains("needs a pointer argument"));
+}
+
+#[test]
 fn c11_atomic_load_without_pointer_panics() {
     assert!(check_with_err(&["int n;"], "__c11_atomic_load(n, 5)").contains("`__c11_atomic_load` needs a pointer argument"));
 }

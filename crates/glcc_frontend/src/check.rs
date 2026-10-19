@@ -140,6 +140,10 @@ pub enum AtomicOp {
         sized: Option<u8>,
     },
     CmpXchg,
+    /// MSVC `_InterlockedCompareExchange*(ptr, exchange, comparand)`:
+    /// a strong compare-exchange taking values (not pointers) and
+    /// yielding the initial value.
+    InterlockedCmpxchg,
     Rmw {
         op: RmwOp,
         fetch: bool,
@@ -2712,6 +2716,11 @@ impl Sema {
                 if text.starts_with("__c11_atomic_") {
                     return self.check_c11_atomic(text, args, interner, span);
                 }
+                // MSVC atomics from `<intrin.h>` (the `8`/`16`/`64`/
+                // `Pointer` widths share the one shape).
+                if text.starts_with("_InterlockedCompareExchange") {
+                    return self.check_interlocked_cmpxchg(args, interner, span, text);
+                }
             }
             match interner.resolve(*name) {
                 // Type-generic bit counts (`__builtin_clzg`,
@@ -3227,6 +3236,32 @@ impl Sema {
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::CmpXchgN { sized },
                 args: vec![ptr, expected, desired, weak, success, failure],
+            },
+        })
+    }
+
+    /// MSVC `T _InterlockedCompareExchange*(T volatile *dest, T exchange,
+    /// T comparand)`: a strong compare-exchange that takes the expected
+    /// value directly (not a pointer) and returns the object's initial
+    /// value. The pointer's pointee gives the operand type, so the
+    /// `...8`/`16`/`64`/`Pointer` variants need no special casing.
+    fn check_interlocked_cmpxchg(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+        let [ptr, exchange, comparand] = args else {
+            return Err(CompileError::new(format!("`{what}` takes a pointer, an exchange value, and a comparand"), span));
+        };
+        let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
+        let Ty::Pointer { pointee, .. } = ptr.ty.clone() else {
+            return Err(CompileError::new(format!("`{what}` needs a pointer argument"), ptr.span));
+        };
+        let op_ty = self.atomic_n_value_ty(&pointee, None, interner, what, ptr.span)?;
+        let exchange = self.convert_for_assignment(&op_ty, self.check_expr(exchange, interner)?, interner)?;
+        let comparand = self.convert_for_assignment(&op_ty, self.check_expr(comparand, interner)?, interner)?;
+        Ok(CheckedExpr {
+            ty: op_ty,
+            span,
+            kind: CheckedExprKind::Atomic {
+                op: AtomicOp::InterlockedCmpxchg,
+                args: vec![ptr, exchange, comparand],
             },
         })
     }

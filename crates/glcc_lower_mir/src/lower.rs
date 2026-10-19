@@ -4436,6 +4436,24 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 );
                 self.convert_bool(func, frame, ok, mir_ty)
             }
+            AtomicOp::InterlockedCmpxchg => {
+                let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
+                let desired = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                let expected = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                let pointed = Self::atomic_pointee_of(&args[0]);
+                let pointed_mir = lower_ty(&pointed, self.sema, self.interner);
+                let old = self.emit(
+                    func,
+                    frame,
+                    mir::InstKind::AtomicCas {
+                        addr: ptr,
+                        expected,
+                        replacement: desired,
+                    },
+                    pointed_mir,
+                );
+                self.convert(func, frame, old, &pointed, fe_ty)
+            }
             AtomicOp::CmpXchg => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let expected_ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[1]);
@@ -4711,10 +4729,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             },
             Some("__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll") => Some(ScalarBuiltin::Popcnt),
             Some("__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64") => Some(ScalarBuiltin::Bswap),
+            // MSVC's `<intrin.h>` spellings of the same byte swaps.
+            Some("_byteswap_ushort" | "_byteswap_ulong" | "_byteswap_uint64") => Some(ScalarBuiltin::Bswap),
             Some("__builtin_ceil" | "__builtin_ceill") => Some(ScalarBuiltin::Ceil),
             Some("__builtin_floor" | "__builtin_floorl") => Some(ScalarBuiltin::Floor),
             Some("__builtin_trap") => Some(ScalarBuiltin::Trap),
-            Some("__sync_synchronize") => Some(ScalarBuiltin::Sync),
+            Some("__sync_synchronize" | "_ReadWriteBarrier") => Some(ScalarBuiltin::Sync),
             // The `abs` family and the libm rounding builtins expand
             // inline, like GCC: a program may still define the names,
             // but direct calls use the builtin. A declaration with a
@@ -9341,6 +9361,29 @@ mod tests {
     }
 
     #[test]
+    fn interlocked_compare_exchange_returns_initial_value() {
+        // MSVC `<intrin.h>` atomics lower to the same compare-exchange,
+        // differing only in taking the comparand by value and returning
+        // the object's initial value (not a success flag).
+        assert_eq!(
+            run_main(
+                "int _InterlockedCompareExchange(int volatile *, int, int);\
+                 int main(){int x = 5; int r = _InterlockedCompareExchange(&x, 9, 5);\
+                 return (r == 5) + (x == 9) * 2;}"
+            ),
+            1 + 2
+        );
+        assert_eq!(
+            run_main(
+                "int _InterlockedCompareExchange(int volatile *, int, int);\
+                 int main(){int y = 1; int r = _InterlockedCompareExchange(&y, 7, 0);\
+                 return (r == 1) + (y == 1) * 2;}"
+            ),
+            1 + 2
+        );
+    }
+
+    #[test]
     fn atomic_min_max_signedness() {
         // `min`/`max` compare by the target's signedness (the MIR
         // `Smin`/`Umax` split), and the `min_fetch`/`max_fetch` forms
@@ -9470,6 +9513,17 @@ mod tests {
         assert_eq!(run_main("int main(){return __builtin_ctz(8) + __builtin_popcount(7);}"), 6);
         assert_eq!(run_main("int main(){return (int)__builtin_ceil(1.5) * 10 + (int)__builtin_floor(1.5);}"), 21);
         assert_eq!(run_main("int main(){return (__builtin_bswap32(0x12345678U) == 0x78563412U);}"), 1);
+        // MSVC's `<intrin.h>` names are the same instructions, so they
+        // lower inline too rather than needing a library symbol.
+        let msvc = "unsigned short _byteswap_ushort(unsigned short);\
+                    unsigned int _byteswap_ulong(unsigned int);\
+                    unsigned long long _byteswap_uint64(unsigned long long);\
+                    void _ReadWriteBarrier(void);\
+                    int main(){ _ReadWriteBarrier();\
+                      return (_byteswap_ushort(0x1234) == 0x3412)\
+                           + (_byteswap_ulong(0x12345678U) == 0x78563412U)\
+                           + (_byteswap_uint64(0x123456789ABCDEF0ULL) == 0xF0DEBC9A78563412ULL); }";
+        assert_eq!(jit_run_main(lower_module_ms(msvc)), 3);
     }
 
     #[test]
