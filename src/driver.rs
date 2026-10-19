@@ -24,7 +24,7 @@ use glcc_frontend::{
     parse::Parser,
     sema::Sema,
     span::take_diagnostic_emitted,
-    target::{Arch, Target},
+    target::{Arch, Os, Target},
 };
 
 /// Preprocessor binary (`clang` unless `GLCC_PP` overrides); only used
@@ -1158,7 +1158,11 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         // The default system search (resource headers, libc) comes from
         // the same clang seed; `-nostdinc` keeps only the `-I` paths.
         if !opts.no_std_includes {
-            opts.include_paths.extend(glcc_pp::native_include_paths(Some(job.target.triple()), opts.std.as_deref()));
+            let native = glcc_pp::native_include_paths(Some(job.target.triple()), opts.std.as_deref());
+            if job.target.os == Os::Windows {
+                opts.clang_resource_dir = glcc_pp::clang_resource_dir(&native);
+            }
+            opts.include_paths.extend(native);
         }
         return glcc_pp::preprocess(&text, &input.to_string_lossy(), &opts)
             .map(String::into_bytes)

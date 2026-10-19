@@ -685,8 +685,23 @@ pub struct PpOptions {
     /// Target for `#if` constant evaluation (char signedness, type
     /// sizes); `None` means native.
     pub target: Option<glcc_frontend::target::Target>,
+    /// Clang's resource include directory when it appears in
+    /// `include_paths` (see [`clang_resource_dir`]). Windows targets
+    /// skip it for `*intrin.h`: clang's copies expand to
+    /// `__builtin_ia32_*` operations glcc does not implement, while the
+    /// MSVC SDK provides the same header names for its target.
+    pub clang_resource_dir: Option<PathBuf>,
     /// Input name used in diagnostics.
     pub filename: String,
+}
+
+/// The clang resource include directory of a seeded search list: clang
+/// searches it first, and it alone ships clang's builtin headers such as
+/// `__stddef_max_align_t.h`. `None` when the first entry is not a clang
+/// resource directory (e.g. clang was unavailable and a GCC sysroot
+/// supplied the fallback list).
+pub fn clang_resource_dir(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths.first().filter(|p| p.join("__stddef_max_align_t.h").is_file()).cloned()
 }
 
 /// Preprocessor failure. The `String` payload already carries the
@@ -753,10 +768,23 @@ impl Ctx {
             }
             let cand = p.join(name);
             if cand.is_file() {
+                if self.skips_clang_intrinsic(p, name) {
+                    continue;
+                }
                 return Ok((cand, FoundKind::Index(i)));
             }
         }
         Err(err(format!("{loc}: #include '{name}' not found")))
+    }
+
+    /// Windows/MSVC programs include `<intrin.h>` for the SDK's own
+    /// intrinsic declarations. Clang's resource copy is compiler
+    /// builtins for clang, so let the later MSVC/system directories
+    /// provide `intrin.h` and the `*intrin.h` files it includes.
+    fn skips_clang_intrinsic(&self, dir: &Path, name: &str) -> bool {
+        name.ends_with("intrin.h")
+            && self.opts.clang_resource_dir.as_deref() == Some(dir)
+            && matches!(self.opts.target, Some(t) if t.os == glcc_frontend::target::Os::Windows)
     }
 
     pub fn record_once(&mut self, path: &Path) {
@@ -1195,6 +1223,27 @@ mod tests {
         let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &o).unwrap();
         assert_eq!(got, "int sub = 1;\n\nint sys = 2;\n\nint m = sub + sys;\n");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_target_skips_clang_intrinsics_for_sdk() {
+        use glcc_frontend::target::Target;
+        let resource = test_dir("intrin-resource");
+        let sdk = test_dir("intrin-sdk");
+        write_file(&resource.join("intrin.h"), "clang-intrin\n");
+        write_file(&sdk.join("intrin.h"), "sdk-intrin\n");
+        let with_target = |target| PpOptions {
+            include_paths: vec![resource.clone(), sdk.clone()],
+            clang_resource_dir: Some(resource.clone()),
+            target: Some(target),
+            ..opts()
+        };
+        let windows = preprocess("#include <intrin.h>\n", "t.c", &with_target(Target::WINDOWS_X86_64)).unwrap();
+        assert!(windows.contains("sdk-intrin"), "was: {windows}");
+        let linux = preprocess("#include <intrin.h>\n", "t.c", &with_target(Target::X86_64)).unwrap();
+        assert!(linux.contains("clang-intrin"), "was: {linux}");
+        let _ = std::fs::remove_dir_all(&resource);
+        let _ = std::fs::remove_dir_all(&sdk);
     }
 
     #[test]
