@@ -164,6 +164,12 @@ fn original_lines(source: &str, line_starts: &[usize]) -> Vec<usize> {
     out
 }
 
+/// Error budget for one parse. Recovery is useful up to a point; past
+/// this many errors the source is almost certainly not just missing one
+/// construct, and continuing only produces cascades (sqlite's shell.c
+/// used to print thousands of lines for one unsupported attribute).
+pub(crate) const MAX_ERRORS: usize = 10;
+
 pub struct Parser<'a> {
     pub(crate) tokens: TokenStream,
     pub(crate) files: SourceFiles,
@@ -222,6 +228,12 @@ pub struct Parser<'a> {
     /// Set once an error was recorded for the construct currently being
     /// parsed; suppresses further errors until the next resync point.
     pub(crate) failed: Cell<bool>,
+    /// Errors reported through [`Parser::report`]. Lexer diagnostics
+    /// were already recovered from and do not count against the budget.
+    pub(crate) error_count: Cell<usize>,
+    /// Set once [`MAX_ERRORS`] errors were reported: parsing stops at the
+    /// next construct boundary so cascades cannot flood the output.
+    pub(crate) cancelled: Cell<bool>,
     /// Render diagnostics to stderr as they are recorded. Machine
     /// consumers (the driver's `--error-format=json`, the explorer's
     /// JSON) turn this off and render [`Parser::diagnostics`] themselves.
@@ -474,6 +486,8 @@ impl<'a> Parser<'a> {
             label_gen: 0,
             diagnostics: RefCell::new(diagnostics),
             failed: Cell::new(false),
+            error_count: Cell::new(0),
+            cancelled: Cell::new(false),
             emit_human: true,
         }
     }
@@ -572,12 +586,15 @@ impl<'a> Parser<'a> {
     /// Record the first error in the construct currently being parsed.
     /// Later errors are suppressed until the enclosing loop calls
     /// [`Parser::resync`], which keeps one mistake from cascading into a
-    /// wall of follow-on diagnostics.
+    /// wall of follow-on diagnostics. Once [`MAX_ERRORS`] errors have
+    /// been reported, parsing is cancelled outright: the final diagnostic
+    /// says so, and the enclosing loops stop at their next boundary.
     pub(crate) fn report(&self, err: CompileError) {
-        if self.failed.get() {
+        if self.failed.get() || self.cancelled.get() {
             return;
         }
         self.failed.set(true);
+        let span = err.primary.span;
         if self.emit_human {
             self.emit(&err);
             // A rendered error was printed: a later panic (e.g. MIR
@@ -586,6 +603,23 @@ impl<'a> Parser<'a> {
             crate::span::mark_diagnostic_emitted();
         }
         self.diagnostics.borrow_mut().push(err);
+        let errors = self.error_count.get() + 1;
+        self.error_count.set(errors);
+        if errors >= MAX_ERRORS {
+            self.cancel(span);
+        }
+    }
+    /// Stop parsing after [`MAX_ERRORS`] errors. The token cursor is left
+    /// untouched; loops check [`Parser::cancelled`] at their next
+    /// boundary, so the construct that hit the limit can still unwind
+    /// without further diagnostics.
+    fn cancel(&self, span: Span) {
+        self.cancelled.set(true);
+        let stop = CompileError::new("too many errors emitted, stopping now", span);
+        if self.emit_human {
+            self.emit(&stop);
+        }
+        self.diagnostics.borrow_mut().push(stop);
     }
     /// Record a warning: rendered and serialized like an error, but it
     /// does not latch or stop parsing.
@@ -778,6 +812,10 @@ impl<'a> Parser<'a> {
     pub(crate) fn clear_failure(&self) {
         self.failed.set(false);
     }
+    /// Whether parsing was cancelled after hitting [`MAX_ERRORS`].
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancelled.get()
+    }
     /// Skip to the next declaration boundary after an error: consume
     /// through the next `;` at brace depth zero. A closing `}` at depth
     /// zero is consumed too, so file-scope garbage can never spin the
@@ -841,7 +879,7 @@ impl<'a> Parser<'a> {
     pub fn parse_translation_unit(&mut self) -> TranslationUnit {
         let start = self.mark();
         let mut external_declarations = vec![];
-        while self.tokens.peek().is_some() {
+        while !self.cancelled() && self.tokens.peek().is_some() {
             if self.failed() {
                 self.resync_declaration();
                 self.clear_failure();
@@ -878,6 +916,9 @@ impl<'a> Parser<'a> {
                 self.expect_punct(Punctuator::Semi);
             } else {
                 external_declarations.extend(self.parse_external_declaration());
+            }
+            if self.cancelled() {
+                break;
             }
             if self.failed() {
                 self.resync_declaration();
@@ -1501,6 +1542,9 @@ impl<'a> Parser<'a> {
         let mut items = Vec::new();
         let mut unterminated = false;
         loop {
+            if self.cancelled() {
+                break;
+            }
             // `_Pragma("...")` may separate block items, or sit last
             // before the close brace; skip it like `#pragma`.
             if self.peek_pragma_operator() {
@@ -1516,6 +1560,9 @@ impl<'a> Parser<'a> {
                 _ => {
                     let before = self.tokens.position();
                     items.push(self.parse_block_item(ret));
+                    if self.cancelled() {
+                        break;
+                    }
                     if self.failed() {
                         self.resync_statement();
                         self.clear_failure();
@@ -1528,10 +1575,12 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        if unterminated {
-            self.fail::<()>(self.span_since(start), "unterminated compound statement");
-        } else {
-            self.expect_punct(Punctuator::RBrace);
+        if !self.cancelled() {
+            if unterminated {
+                self.fail::<()>(self.span_since(start), "unterminated compound statement");
+            } else {
+                self.expect_punct(Punctuator::RBrace);
+            }
         }
         self.sema.pop_scope();
         self.label_scopes.pop();
@@ -3224,6 +3273,9 @@ impl<'a> Parser<'a> {
         let mut next = Some((first, first_suffix));
         let mut is_first = true;
         loop {
+            if self.cancelled() {
+                break;
+            }
             let (declarator, mut suffix) = next.take().unwrap_or_else(|| (self.parse_declarator(), GnuAttributes::default()));
             // Suffix attributes (`__attribute__((constructor))` on a
             // function declarator) ride into the binding below. The
@@ -3288,11 +3340,13 @@ impl<'a> Parser<'a> {
             break;
         }
         // No body allowed for plain declarations.
-        if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
-            let span = self.peek_span();
-            return self.fail(span, "expected `;`");
+        if !self.cancelled() {
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
+                let span = self.peek_span();
+                return self.fail(span, "expected `;`");
+            }
+            self.expect_punct(Punctuator::Semi);
         }
-        self.expect_punct(Punctuator::Semi);
         ids
     }
     /// Complete an array of unknown size from its initializer (C17
@@ -3647,6 +3701,9 @@ impl<'a> Parser<'a> {
         self.expect_punct(Punctuator::LBrace);
         let mut items = Vec::new();
         loop {
+            if self.cancelled() {
+                break;
+            }
             match self.tokens.peek_val() {
                 Some(Token::Punctuator(Punctuator::RBrace)) => break,
                 None => {
@@ -3671,7 +3728,9 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        self.expect_punct(Punctuator::RBrace);
+        if !self.cancelled() {
+            self.expect_punct(Punctuator::RBrace);
+        }
         Initializer::List {
             items,
             span: self.span_since(start),
@@ -4105,6 +4164,9 @@ impl<'a> Parser<'a> {
         suffix.has_params = true;
         let mut params = Vec::new();
         loop {
+            if self.cancelled() {
+                break;
+            }
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Ellipsis))) {
                 // The grammar lets the ellipsis follow only a
                 // parameter-list, but a bare `f(...)` is a GNU
@@ -4615,7 +4677,9 @@ impl<'a> Parser<'a> {
         attrs.merge(self.parse_gnu_annotations());
         self.expect_punct(Punctuator::LBrace);
         let members = self.parse_struct_declaration_list();
-        self.expect_punct(Punctuator::RBrace);
+        if !self.cancelled() {
+            self.expect_punct(Punctuator::RBrace);
+        }
         // Trailing attributes (`struct S {...} __attribute__((packed))`):
         // verified against GCC, these apply to the type even when a
         // declarator follows (only attributes *after* the declarator
@@ -5078,7 +5142,9 @@ impl<'a> Parser<'a> {
         };
         self.expect_punct(Punctuator::LBrace);
         let (enumerators, repr) = self.parse_enumerator_list();
-        self.expect_punct(Punctuator::RBrace);
+        if !self.cancelled() {
+            self.expect_punct(Punctuator::RBrace);
+        }
         self.skip_gnu_suffixes();
         let completed = self.sema.complete_enum_tag(id, enumerators, repr);
         self.unwrap_diag(completed);
@@ -5103,6 +5169,9 @@ impl<'a> Parser<'a> {
         let mut repr = Ty::Int;
         let mut all_nonnegative = true;
         loop {
+            if self.cancelled() {
+                break;
+            }
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBrace))) {
                 break;
             }
@@ -5232,7 +5301,8 @@ impl<'a> Parser<'a> {
     pub fn parse_struct_declaration_list(&mut self) -> Vec<Member> {
         let mut members = Vec::new();
         self.struct_depth += 1;
-        while let Some(tok) = self.tokens.peek_val() {
+        while !self.cancelled() {
+            let Some(tok) = self.tokens.peek_val() else { break };
             if matches!(tok, Token::Punctuator(Punctuator::RBrace)) {
                 break;
             }

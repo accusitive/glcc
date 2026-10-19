@@ -9390,6 +9390,28 @@ fn recovery_reports_each_broken_declaration() {
     assert_eq!(errors, 2, "{:#?}", parser.diagnostics());
 }
 
+/// Past the error budget the parser stops instead of cascading: the
+/// remaining declarations are never parsed, and one final diagnostic
+/// says why.
+#[test]
+fn recovery_stops_after_error_limit() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut src = String::new();
+    for i in 0..(crate::parse::MAX_ERRORS + 5) {
+        src.push_str(&format!("int x{i} = ;\n"));
+    }
+    src.push_str("int ok;\n");
+    let mut parser = test_parser(&src, &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let diagnostics = parser.diagnostics();
+    let errors = diagnostics.iter().filter(|d| d.is_error()).count();
+    assert_eq!(errors, crate::parse::MAX_ERRORS + 1, "{diagnostics:#?}");
+    assert!(diagnostics.iter().any(|d| d.message.contains("too many errors")), "{diagnostics:#?}");
+    let ok = parser.intern.get_or_intern("ok");
+    assert!(parser.sema.lookup_symbol(ok).is_none());
+}
+
 /// Recovery keeps going inside a function body, where statements (not
 /// declarations) are the unit that resynchronizes.
 #[test]
