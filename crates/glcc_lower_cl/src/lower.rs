@@ -8,7 +8,7 @@ use cranelift_codegen::ir::{
     StackSlotKind, TrapCode,
 };
 use cranelift_codegen::ir::{Block as ClifBlock, Value as ClifValue};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
 use glcc_mir as mir;
@@ -2557,6 +2557,37 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                 builder.ins().jump(default_target, &[]);
                 return;
             }
+            for (_, dest) in &cases {
+                if body.func.blocks[*dest].params.len() != 0 {
+                    panic!("switch target takes block params");
+                }
+            }
+            // Non-negative cases map directly onto Cranelift's switch
+            // helper, which uses jump tables for dense runs and a binary
+            // search over sparse ones. Negative or high-bit cases keep
+            // the compare chain below.
+            let max_case = match width.bits() {
+                64 => i64::MAX as i128,
+                bits => (1i128 << (bits - 1)) - 1,
+            };
+            if cases.iter().all(|(value, _)| *value >= 0 && *value <= max_case) {
+                let base = cases.iter().map(|(value, _)| *value).min().expect("non-empty cases");
+                let mut switch = Switch::new();
+                for (value, dest) in &cases {
+                    switch.set_entry((*value - base) as u128, body.blocks[dest]);
+                }
+                let index = if base == 0 {
+                    scrut
+                } else {
+                    let delta = builder.ins().iconst(width, base as i64);
+                    builder.ins().isub(scrut, delta)
+                };
+                switch.emit(builder, index, default_target);
+                // The helper creates and switches to its own dispatch
+                // blocks, so the next source block must force a switch.
+                body.current = None;
+                return;
+            }
             // If-else chain: one test block per case, falling through to
             // the next test and finally the default.
             let mut tests = Vec::new();
@@ -2568,9 +2599,6 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
             for (i, (value, dest)) in cases.into_iter().enumerate() {
                 switch_to(&mut *body, &mut *builder, tests[i]);
                 let target = body.blocks[&dest];
-                if body.func.blocks[dest].params.len() != 0 {
-                    panic!("switch target takes block params");
-                }
                 let probe = builder.ins().iconst(width, value as i64);
                 let same = builder.ins().icmp(IntCC::Equal, scrut, probe);
                 let otherwise = if i + 1 < tests.len() { tests[i + 1] } else { default_target };
@@ -2983,6 +3011,38 @@ mod tests {
         assert_eq!(run_i32(&jit, &ids, 0, 0), 10);
         assert_eq!(run_i32(&jit, &ids, 0, 1), 20);
         assert_eq!(run_i32(&jit, &ids, 0, 99), 30);
+    }
+
+    #[test]
+    fn dense_switches_lower_to_a_jump_table() {
+        use cranelift_codegen::ir::Opcode;
+
+        let mut module = mir::Module::new();
+        let (mut f, entry) = mir::Function::new("f", i32_sig(1));
+        let x = param(&mut f, entry, mir::Ty::int(32), 0);
+        let mut cases = Vec::new();
+        let default = f.push_block(vec![]);
+        for value in 0..4 {
+            let block = f.push_block(vec![]);
+            cases.push((value, block));
+            let c = iconst(&mut f, 32, 10 + value as i128);
+            f.blocks[block].term = Some(mir::Terminator::Return { val: Some(c) });
+        }
+        f.blocks[entry].term = Some(mir::Terminator::Switch { scrutinee: x, cases, default });
+        let fallback = iconst(&mut f, 32, 0);
+        f.blocks[default].term = Some(mir::Terminator::Return { val: Some(fallback) });
+        module.push_func(f);
+
+        let mut sink = RecordingModule::new();
+        lower_module(&module, &mut sink, crate::abi::Target::native());
+        let func = &sink.funcs[0];
+        let opcodes: Vec<_> = func
+            .layout
+            .blocks()
+            .flat_map(|block| func.layout.block_insts(block))
+            .map(|inst| func.dfg.insts[inst].opcode())
+            .collect();
+        assert!(opcodes.contains(&Opcode::BrTable), "{opcodes:?}");
     }
 
     #[test]
