@@ -99,10 +99,11 @@ fn msvc_tool(name: &str) -> OsString {
 }
 
 /// `link.exe` command line for one final link. The MSVC CRT supplies
-/// startup (`mainCRTStartup` calls `main`) and the C library; glcc's own
-/// codegen may still need helpers the CRT does not provide (builtin
-/// setjmp/longjmp, inline quad arithmetic), which the staged Win64
-/// runtime library supplies, appended last.
+/// startup (`mainCRTStartup` calls `main`) and the C library, and the
+/// Win32 import libraries cover common API calls (`user32` holds e.g.
+/// `CharUpperW`); glcc's own codegen may still need helpers the CRT does
+/// not provide (builtin setjmp/longjmp, inline quad arithmetic), which
+/// the staged Win64 runtime library supplies, appended last.
 fn msvc_link_command(job: &Job, objects: &dyn Fn(usize) -> OsString, out: &OsStr, asm_objects: &[PathBuf]) -> (OsString, Vec<OsString>) {
     // Library search paths: `LIB` when a Developer Command Prompt set
     // it, else the discovered MSVC + Windows SDK layout.
@@ -162,6 +163,7 @@ fn msvc_link_command_with(
     if wants_glcc_runtime(job) {
         args.push(OsString::from("libcmt.lib"));
         args.push(OsString::from("kernel32.lib"));
+        args.push(OsString::from("user32.lib"));
     }
     (linker, args)
 }
@@ -3697,7 +3699,8 @@ mod tests {
                 "/libpath:dir",
                 "/entry:winstart",
                 "libcmt.lib",
-                "kernel32.lib"
+                "kernel32.lib",
+                "user32.lib"
             ]
         );
     }
@@ -3709,7 +3712,7 @@ mod tests {
         let job = parse(&["--target=x86_64-windows", "-shared", "a.c"]);
         let (_, args) = msvc_link_command_with(&job, &|_| OsString::from("a.obj"), OsStr::new("a.dll"), &[], OsString::from("link.exe"), &[]);
         let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["/nologo", "/dll", "/out:a.dll", "/subsystem:windows", "a.obj", "libcmt.lib", "kernel32.lib"]);
+        assert_eq!(s, ["/nologo", "/dll", "/out:a.dll", "/subsystem:windows", "a.obj", "libcmt.lib", "kernel32.lib", "user32.lib"]);
         let bare = parse(&["--target=x86_64-windows", "-nostdlib", "a.c"]);
         let (_, args) = msvc_link_command_with(&bare, &|_| OsString::from("a.obj"), OsStr::new("a.exe"), &[], OsString::from("link.exe"), &[]);
         assert!(!args.iter().any(|a| a == OsStr::new("libcmt.lib")));
