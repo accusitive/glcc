@@ -5199,6 +5199,16 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         (out, obj)
     }
 
+    /// The negated index of a pointer subtraction `p - i`, as an
+    /// `i64`. The operand is widened with its own signedness before
+    /// negation: negating a narrow unsigned index first (`unsigned i`
+    /// -> `i32` `0xFFFFFFE4`) and zero-extending that loses the sign
+    /// and adds 2^32 to the address.
+    fn pointer_sub_index(&self, func: &mut mir::Function, frame: &mut Frame, index: mir::Value, index_ty: &fe::parse::Ty) -> mir::Value {
+        let wide = self.convert(func, frame, index, index_ty, &fe::parse::Ty::LongLong);
+        self.emit(func, frame, mir::InstKind::Neg(wide), mir::Ty::int(64))
+    }
+
     /// `scaled_index_addr` with a runtime stride: a VLA row's byte size
     /// is a value, not a layout constant.
     fn scaled_index_addr_dyn(
@@ -6974,15 +6984,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
                 _ => self.sema.type_size(pointee, self.interner).expect("sized pointee"),
             };
-            let index = if matches!(op, fe::parse::AssignOp::Sub) {
-                self.emit(func, frame, mir::InstKind::Neg(y), lower_ty(rhs_ty, self.sema, self.interner))
+            let (index, index_ty) = if matches!(op, fe::parse::AssignOp::Sub) {
+                (self.pointer_sub_index(func, frame, y, rhs_ty), fe::parse::Ty::LongLong)
             } else {
-                y
+                (y, rhs_ty.clone())
             };
             let mir::Ty::Ptr { pointee: obj, .. } = mir_ty.clone() else {
                 panic!("compound pointer assignment without a pointer result");
             };
-            let (addr, _) = self.scaled_index_addr(func, frame, x, index, rhs_ty, scale, obj.as_ref().clone());
+            let (addr, _) = self.scaled_index_addr(func, frame, x, index, &index_ty, scale, obj.as_ref().clone());
             return addr;
         }
         let bin_op = compound_bin_op(op);
@@ -7103,15 +7113,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 let base = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                 let index = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
-                let neg = self.emit(func, frame, mir::InstKind::Neg(index), lower_ty(&rhs.ty, self.sema, self.interner));
+                let neg = self.pointer_sub_index(func, frame, index, &rhs.ty);
                 let mir::Ty::Ptr { pointee: obj, .. } = mir_ty.clone() else {
                     panic!("pointer subtraction without a pointer result");
                 };
                 let (diff, _) = if Self::ty_is_vm(pointee) {
                     let scale = self.pointee_stride(module, func, frame, funcs, externs, globals, lhs, pointee);
-                    self.scaled_index_addr_dyn(func, frame, base, neg, &rhs.ty, scale, obj.as_ref().clone())
+                    self.scaled_index_addr_dyn(func, frame, base, neg, &fe::parse::Ty::LongLong, scale, obj.as_ref().clone())
                 } else {
-                    self.scaled_index_addr(func, frame, base, neg, &rhs.ty, self.pointee_size(pointee), obj.as_ref().clone())
+                    self.scaled_index_addr(func, frame, base, neg, &fe::parse::Ty::LongLong, self.pointee_size(pointee), obj.as_ref().clone())
                 };
                 diff
             }
@@ -9972,6 +9982,20 @@ mod tests {
         );
         assert_eq!(run_main("int main(){int a[4]; int *p = &a[0]; int *q = &a[3]; return q-p;}"), 3);
         assert_eq!(run_main("int main(){int a[3] = {10,20,30}; int *p = a+1; return *p + *(p+1);}"), 50);
+        // Subtracting a narrow unsigned index must widen it with its
+        // own signedness *before* negating: negating first and then
+        // zero-extending the `i32` bit pattern adds 2^32 to the
+        // address. SQLite's `fts3MIBufferFree()` recomputes a base
+        // pointer with `p - (u32)`, so zero-extension there crashes.
+        let high = "char *p = (char*)0x211E22B8B5Cull;";
+        assert_eq!(
+            run_main(&format!("int main(){{{high} unsigned int u = 28; char *q = p - u; return q == (char*)0x211E22B8B40ull ? 0 : 1;}}")),
+            0
+        );
+        assert_eq!(
+            run_main(&format!("int main(){{{high} unsigned int u = 28; p -= u; return p == (char*)0x211E22B8B40ull ? 0 : 1;}}")),
+            0
+        );
     }
 
     #[test]
