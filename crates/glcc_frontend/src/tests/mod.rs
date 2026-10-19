@@ -1566,6 +1566,34 @@ fn ptr_size_attributes_set_pointer_width() {
 }
 
 #[test]
+fn unaligned_requires_ms_extensions() {
+    let mut sema = gated_sema(LangOpts { ms: false, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int __unaligned *p;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
+}
+
+#[test]
+fn unaligned_qualifier_is_erased() {
+    // `UNALIGNED` in the Windows headers expands to `__unaligned`. Our
+    // accesses are already unaligned-safe, so it leaves no trace on the
+    // type, in either the base-type or the pointer-qualifier position.
+    let mut sema = gated_sema(LangOpts { ms: true, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("unsigned short __unaligned *p; unsigned short * __unaligned q;", &mut sema, &mut interner);
+    let p = parse_decl(&mut parser);
+    let q = parse_decl(&mut parser);
+    let plain = Ty::Pointer {
+        qualifiers: vec![],
+        size: PtrSize::Default,
+        pointee: Box::new(Ty::UnsignedShort),
+    };
+    assert_eq!(parser.sema.decls[p.0 as usize].ty, plain);
+    assert_eq!(parser.sema.decls[q.0 as usize].ty, plain);
+}
+
+#[test]
 fn c89_static_assert_keyword() {
     let mut sema = gated_sema(LangOpts {
         std: Std::C89,

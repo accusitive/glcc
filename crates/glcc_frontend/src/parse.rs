@@ -2772,6 +2772,13 @@ impl<'a> Parser<'a> {
             None
         }
     }
+    /// MSVC's `__unaligned` type qualifier (`UNALIGNED` in the Windows
+    /// headers). It only promises the object need not be naturally
+    /// aligned; our codegen already emits every access unaligned-safe,
+    /// so it is accepted in MS mode and erased like `_Atomic`.
+    fn peek_ms_unaligned(&self) -> bool {
+        self.peek_is_gnu("__unaligned")
+    }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
     /// This includes GCC's predefined typedef spellings
@@ -4333,6 +4340,12 @@ impl<'a> Parser<'a> {
     pub fn parse_type_qualifier_list(&mut self) -> Vec<TypeQualifier> {
         let mut qualifiers = Vec::new();
         loop {
+            // `__unaligned` modifies pointer types too; its effect is
+            // erased (see `peek_ms_unaligned`).
+            if self.peek_ms_unaligned() {
+                self.tokens.advance();
+                continue;
+            }
             if let Some(q) = self.peek_gnu_qualifier() {
                 qualifiers.push(q);
                 self.tokens.advance();
@@ -4621,6 +4634,11 @@ impl<'a> Parser<'a> {
                 }
                 Some(Token::Keyword(Keyword::Enum)) => {
                     ds.type_specifier.push(self.parse_enum_specifier());
+                }
+                // `__unaligned` rides among the declaration specifiers
+                // (`WCHAR UNALIGNED *`) but affects nothing here.
+                Some(Token::Identifier(_)) if self.peek_ms_unaligned() => {
+                    self.tokens.advance();
                 }
                 // A typedef name acts as the type specifier itself
                 // (`Arg a;`), but only while no type specifier has been

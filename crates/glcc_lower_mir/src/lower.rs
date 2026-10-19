@@ -9418,6 +9418,20 @@ mod tests {
     }
 
     #[test]
+    fn unaligned_qualifier_lowers_away() {
+        // `__unaligned` is accepted in MS mode and has no codegen
+        // effect: accesses are already emitted unaligned-safe.
+        assert_eq!(
+            jit_run_main(lower_module_ms(
+                "int main(){ unsigned short x = 7;\
+                 unsigned short __unaligned *p = (unsigned short __unaligned *)&x;\
+                 return *p; }"
+            )),
+            7
+        );
+    }
+
+    #[test]
     fn va_arg_reads_overflow_aggregates_whole() {
         // A 9-byte struct spans two eightbytes, so the third struct
         // vararg (after two register pairs) cannot fit its registers
