@@ -25,11 +25,24 @@ use crate::{
     check::CheckedExpr,
     eval::{Value, eval_const},
     lexer::Interner,
-    parse::{ArrayBound, Ty},
+    parse::{ArrayBound, PtrSize, Ty},
     sema::{Member, Sema, StructDef, StructId},
 };
 
 use string_interner::symbol::SymbolU32;
+
+use crate::target::Target;
+
+/// Byte width of a pointer, honoring MSVC's `__ptr32`/`__ptr64`. On the
+/// targets glcc supports the default is always 8, so `__ptr64` is the
+/// identity there.
+fn pointer_size_bytes(t: &Target, size: PtrSize) -> u64 {
+    match size {
+        PtrSize::Default => t.pointer_size,
+        PtrSize::Ptr32 => 4,
+        PtrSize::Ptr64 => 8,
+    }
+}
 
 /// Layout of one named member: the byte offset of its storage (for a
 /// bit-field, of the storage unit holding its first bit) and, for
@@ -135,7 +148,7 @@ impl Sema {
             Ty::Double => Some(t.double_size),
             Ty::LongDouble => Some(t.long_double_size),
             Ty::Complex(inner) => self.type_size(inner, interner)?.checked_mul(2),
-            Ty::Pointer { .. } => Some(t.pointer_size),
+            Ty::Pointer { size, .. } => Some(pointer_size_bytes(&t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;
                 self.type_size(&repr, interner)
@@ -172,7 +185,7 @@ impl Sema {
             Ty::Double => Some(t.double_align),
             Ty::LongDouble => Some(t.long_double_align),
             Ty::Complex(inner) => self.type_align(inner, interner),
-            Ty::Pointer { .. } => Some(t.pointer_align),
+            Ty::Pointer { size, .. } => Some(pointer_size_bytes(&t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;
                 self.type_align(&repr, interner)

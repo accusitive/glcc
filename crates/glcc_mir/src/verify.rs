@@ -77,8 +77,8 @@ fn check_inst_types(func: &Function, inst: crate::ir::Inst, kind: &InstKind, err
         | InstKind::GetFramePointer => {}
         InstKind::GetElementPtr { base, indices } => {
             let mut cur = ty_of(*base);
-            if let Ty::Ptr(inner) = cur {
-                cur = inner.as_ref().clone();
+            if let Ty::Ptr { pointee, .. } = cur {
+                cur = pointee.as_ref().clone();
             } else {
                 errors.push(format!("{}: gep on non-pointer {inst:?}", func.name));
                 return;

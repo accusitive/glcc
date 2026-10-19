@@ -24,7 +24,7 @@ use string_interner::symbol::SymbolU32;
 
 use crate::{
     lexer::{CharPrefix, FloatSuffix, Interner},
-    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, Ty, TypeQualifier, UnaryOp},
+    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, Ty, TypeQualifier, UnaryOp},
     sema::{Binding, BindingKind, Member, Sema, StructId, types_compatible},
     span::{CompileError, HasSpan, Span},
     target::{Arch, Os},
@@ -498,6 +498,7 @@ fn void_ptr_composite(a: &Ty, b: &Ty) -> Ty {
     quals.sort_by_key(|q| *q as u8);
     Ty::Pointer {
         qualifiers: Vec::new(),
+        size: PtrSize::Default,
         pointee: Box::new(Ty::qualified(quals, Ty::Void)),
     }
 }
@@ -870,10 +871,12 @@ impl Sema {
         let ty = match &expr.ty {
             Ty::Array { elem, quals, .. } => Ty::Pointer {
                 qualifiers: quals.clone(),
+                size: PtrSize::Default,
                 pointee: elem.clone(),
             },
             Ty::Func { .. } => Ty::Pointer {
                 qualifiers: Vec::new(),
+                size: PtrSize::Default,
                 pointee: Box::new(self.as_callable_ty(expr.ty.clone(), &expr.kind)),
             },
             _ => return expr,
@@ -964,10 +967,10 @@ impl Sema {
         // (`char *const` converts like `char *`); only qualifiers at
         // or below the pointee participate in compatibility.
         let expr = match expr.ty {
-            Ty::Pointer { pointee, .. } => {
+            Ty::Pointer { pointee, size, .. } => {
                 let (span, kind) = (expr.span, expr.kind);
                 CheckedExpr {
-                    ty: Ty::Pointer { qualifiers: Vec::new(), pointee },
+                    ty: Ty::Pointer { qualifiers: Vec::new(), size, pointee },
                     span,
                     kind,
                 }
@@ -1061,7 +1064,7 @@ impl Sema {
     /// composition needs both directions silently to prefer an exact
     /// (`Yes`) fit over a warning one.
     fn ptr_compat_kind(&self, target: &Ty, source: &Ty) -> PointeeConversion {
-        let (Ty::Pointer { qualifiers: qt, pointee: pt }, Ty::Pointer { qualifiers: qs, pointee: ps }) = (target, source) else {
+        let (Ty::Pointer { qualifiers: qt, pointee: pt, .. }, Ty::Pointer { qualifiers: qs, pointee: ps, .. }) = (target, source) else {
             return PointeeConversion::No;
         };
         if !qs.iter().all(|q| qt.contains(q)) {
@@ -1086,7 +1089,7 @@ impl Sema {
     /// may only be added, and silently only at the outermost level.
     fn pointee_conversion(&self, target: &Ty, source: &Ty, depth: usize) -> PointeeConversion {
         match (target, source) {
-            (Ty::Pointer { qualifiers: qt, pointee: pt }, Ty::Pointer { qualifiers: qs, pointee: ps }) => {
+            (Ty::Pointer { qualifiers: qt, pointee: pt, .. }, Ty::Pointer { qualifiers: qs, pointee: ps, .. }) => {
                 if !qs.iter().all(|q| qt.contains(q)) {
                     return PointeeConversion::No;
                 }
@@ -2180,6 +2183,7 @@ impl Sema {
             Expr::LabelAddr { label, .. } => Ok(CheckedExpr {
                 ty: Ty::Pointer {
                     qualifiers: Vec::new(),
+                    size: PtrSize::Default,
                     pointee: Box::new(Ty::Void),
                 },
                 span,
@@ -2322,6 +2326,7 @@ impl Sema {
                 self.note_address_taken(&operand);
                 let ty = Ty::Pointer {
                     qualifiers: Vec::new(),
+                    size: PtrSize::Default,
                     pointee: Box::new(self.as_callable_ty(operand.ty.clone(), &operand.kind)),
                 };
                 Ok(CheckedExpr {
@@ -3668,6 +3673,7 @@ impl Sema {
         Ok(CheckedExpr {
             ty: Ty::Pointer {
                 qualifiers: Vec::new(),
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::Void),
             },
             span,
@@ -3695,6 +3701,7 @@ impl Sema {
         Ok(CheckedExpr {
             ty: Ty::Pointer {
                 qualifiers: Vec::new(),
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::Void),
             },
             span,

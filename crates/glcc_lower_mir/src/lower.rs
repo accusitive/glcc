@@ -743,7 +743,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Pointer targets fold through the image path
                     // below: a null folds to zero bytes, an address to
                     // a reloc.
-                    Some(folded) if !matches!(mir_ty, mir::Ty::Ptr(_)) => (Some(self.const_of_folded(&folded, &mir_ty)), Vec::new()),
+                    Some(folded) if !matches!(mir_ty, mir::Ty::Ptr { .. }) => (Some(self.const_of_folded(&folded, &mir_ty)), Vec::new()),
                     _ => {
                         let mut image = vec![0u8; size];
                         let mut relocs = Vec::new();
@@ -1101,7 +1101,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // type (its MIR form is a pointer): initializing one
                 // extends the object, so elements fold by element
                 // stride past the struct.
-                (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr(_)) => {
+                (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr { .. }) => {
                     let elem_mir = lower_ty(elem, self.sema, self.interner);
                     let elem_size = elem_mir.size_bytes();
                     for (i, item) in items.iter().enumerate() {
@@ -2472,7 +2472,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // through byte arithmetic: the MIR pointee is
                     // erased (structs become `void`), so a GEP element
                     // step cannot know the stride.
-                    if matches!(inner_ty, mir::Ty::Ptr(_)) {
+                    if matches!(inner_ty, mir::Ty::Ptr { .. }) {
                         let fe::parse::Ty::Pointer { pointee, .. } = inner.ty.unqualified().clone() else {
                             panic!("pointer step without a pointer");
                         };
@@ -2480,7 +2480,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
                             _ => self.sema.type_size(&pointee, self.interner).expect("step over sized pointee"),
                         };
-                        let mir::Ty::Ptr(pointee_mir) = &inner_ty else {
+                        let mir::Ty::Ptr { pointee: pointee_mir, .. } = &inner_ty else {
                             panic!("pointer step without a pointer");
                         };
                         let pointee_mir = pointee_mir.as_ref().clone();
@@ -2606,7 +2606,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                         let zero = match &operand_ty {
                             mir::Ty::Bool | mir::Ty::Int { .. } => self.iconst(func, int_bits(&operand_ty), 0),
-                            mir::Ty::Ptr(_) => self.iconst(func, 64, 0),
+                            mir::Ty::Ptr { .. } => self.iconst(func, 64, 0),
                             mir::Ty::Float(kind) => func.push_const(mir::Const::Float { kind: *kind, bits: 0 }),
                             _ => todo!("logical negation lowering"),
                         };
@@ -2715,8 +2715,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     return self.expr_value(module, func, frame, funcs, externs, globals, rhs);
                 }
                 let lhs_ty = lower_ty(&lhs.ty, self.sema, self.interner);
-                let lhs_ptr = matches!(lhs_ty, mir::Ty::Ptr(_));
-                let rhs_ptr = matches!(lower_ty(&rhs.ty, self.sema, self.interner), mir::Ty::Ptr(_));
+                let lhs_ptr = matches!(lhs_ty, mir::Ty::Ptr { .. });
+                let rhs_ptr = matches!(lower_ty(&rhs.ty, self.sema, self.interner), mir::Ty::Ptr { .. });
                 if lhs_ptr || rhs_ptr {
                     return self.pointer_binary(module, func, frame, funcs, externs, globals, op, lhs, rhs, &mir_ty);
                 }
@@ -5726,7 +5726,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn bool_of_value(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, fe_ty: &fe::parse::Ty) -> mir::Value {
         match lower_ty(fe_ty, self.sema, self.interner) {
             mir::Ty::Bool | mir::Ty::Int { bits: 1 } => value,
-            mir::Ty::Ptr(_) => {
+            mir::Ty::Ptr { .. } => {
                 let null = self.iconst(func, 64, 0);
                 self.emit(
                     func,
@@ -6114,7 +6114,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // initializers reuse this address as their base, and both
             // verification and lowering resolve steps against the base
             // value's type.
-            let mir::Ty::Ptr(inner) = func.values[slot].ty.clone() else {
+            let mir::Ty::Ptr { pointee: inner, .. } = func.values[slot].ty.clone() else {
                 panic!("array initializer slot is not an address");
             };
             let (addr, _) = self.gep(func, frame, slot, inner.as_ref(), vec![mir::GepIndex::ConstIndex(cursor)]);
@@ -6364,7 +6364,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // A flexible array member decays to a pointer in
                     // MIR, but its elements still address by element
                     // stride from the member's offset.
-                    if let (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr(_)) = (fe.unqualified(), &mi) {
+                    if let (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr { .. }) = (fe.unqualified(), &mi) {
                         let elem_size = self.sema.type_size(elem, self.interner).expect("sized array element");
                         off += (k as u64) * elem_size;
                         fe = elem.as_ref().clone();
@@ -6511,7 +6511,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mir::InstKind::Fptrunc(from)
                 }
             }
-            (mir::Ty::Ptr(_), mir::Ty::Bool) => {
+            (mir::Ty::Ptr { .. }, mir::Ty::Bool) => {
                 // Null test, not a truncation of the address (which
                 // would misread addresses like 0x100 as null): nonzero
                 // counts as true, like `bool_of`.
@@ -6527,9 +6527,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     to_mir,
                 );
             }
-            (mir::Ty::Ptr(_), mir::Ty::Int { .. }) => mir::InstKind::PtrToInt(from),
-            (mir::Ty::Ptr(_), mir::Ty::Ptr(_)) => mir::InstKind::Bitcast(from),
-            (mir::Ty::Int { .. } | mir::Ty::Bool, mir::Ty::Ptr(_)) => {
+            (mir::Ty::Ptr { .. }, mir::Ty::Int { .. }) => mir::InstKind::PtrToInt(from),
+            (mir::Ty::Ptr { .. }, mir::Ty::Ptr { .. }) => mir::InstKind::Bitcast(from),
+            (mir::Ty::Int { .. } | mir::Ty::Bool, mir::Ty::Ptr { .. }) => {
                 // MIR integer types are signless, so the source's
                 // signedness applies here (C17 6.3.2.3p5-6): widen
                 // narrow sources to pointer width (LP64), sign- or
@@ -6923,7 +6923,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             } else {
                 y
             };
-            let mir::Ty::Ptr(obj) = mir_ty.clone() else {
+            let mir::Ty::Ptr { pointee: obj, .. } = mir_ty.clone() else {
                 panic!("compound pointer assignment without a pointer result");
             };
             let (addr, _) = self.scaled_index_addr(func, frame, x, index, rhs_ty, scale, obj.as_ref().clone());
@@ -7009,7 +7009,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 let base = self.expr_value(module, func, frame, funcs, externs, globals, ptr_expr);
                 let index = self.expr_value(module, func, frame, funcs, externs, globals, idx_expr);
-                let mir::Ty::Ptr(obj) = mir_ty.clone() else {
+                let mir::Ty::Ptr { pointee: obj, .. } = mir_ty.clone() else {
                     panic!("pointer addition without a pointer result");
                 };
                 let (sum, _) = if Self::ty_is_vm(pointee) {
@@ -7048,7 +7048,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let base = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                 let index = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
                 let neg = self.emit(func, frame, mir::InstKind::Neg(index), lower_ty(&rhs.ty, self.sema, self.interner));
-                let mir::Ty::Ptr(obj) = mir_ty.clone() else {
+                let mir::Ty::Ptr { pointee: obj, .. } = mir_ty.clone() else {
                     panic!("pointer subtraction without a pointer result");
                 };
                 let (diff, _) = if Self::ty_is_vm(pointee) {
@@ -7289,7 +7289,7 @@ fn compound_bin_op(op: &fe::parse::AssignOp) -> fe::parse::BinaryOp {
 /// scalar instructions): integers, bools, floats, and pointers.
 /// Aggregates copy plain bytes instead.
 fn is_mir_scalar(ty: &mir::Ty) -> bool {
-    matches!(ty, mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Ptr(_))
+    matches!(ty, mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Ptr { .. })
 }
 
 fn float_bits(value: fe::eval::FloatValue, ty: &mir::Ty) -> u128 {

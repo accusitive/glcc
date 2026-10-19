@@ -28,7 +28,12 @@ pub enum Ty {
     },
     Float(FloatKind),
     /// Code or data address. `pointee` is structural, not a runtime check.
-    Ptr(Box<Ty>),
+    /// `bits` is the pointer's own width (MSVC `__ptr32`/`__ptr64`); on
+    /// every supported target the ordinary width is 64.
+    Ptr {
+        pointee: Box<Ty>,
+        bits: u32,
+    },
     /// C `va_list`: opaque at MIR level, sized per target at lowering.
     /// Only addressable, never loaded by value; manipulated through
     /// the `Va*` instructions.
@@ -53,7 +58,25 @@ impl Ty {
     }
 
     pub fn ptr(pointee: Ty) -> Self {
-        Ty::Ptr(Box::new(pointee))
+        Ty::Ptr {
+            pointee: Box::new(pointee),
+            bits: 64,
+        }
+    }
+
+    pub fn ptr_bits(pointee: Ty, bits: u32) -> Self {
+        Ty::Ptr {
+            pointee: Box::new(pointee),
+            bits,
+        }
+    }
+
+    /// Width in bits of a pointer type, `None` for anything else.
+    pub fn ptr_width(&self) -> Option<u32> {
+        match self {
+            Ty::Ptr { bits, .. } => Some(*bits),
+            _ => None,
+        }
     }
 
     pub fn is_void(&self) -> bool {
@@ -65,7 +88,7 @@ impl Ty {
     }
 
     pub fn is_scalar(&self) -> bool {
-        matches!(self, Ty::Bool | Ty::Int { .. } | Ty::Float(_) | Ty::Ptr(_))
+        matches!(self, Ty::Bool | Ty::Int { .. } | Ty::Float(_) | Ty::Ptr { .. })
     }
 
     /// Byte size under LP64 (signed `char`), matching the frontend target
@@ -81,7 +104,7 @@ impl Ty {
                 FloatKind::F64 => 8,
                 FloatKind::F80 | FloatKind::F128 => 16,
             },
-            Ty::Ptr(_) => 8,
+            Ty::Ptr { bits, .. } => (*bits as u64).max(8) / 8,
             Ty::BuiltinVaList { size, .. } => *size,
             Ty::Array { elem, len } => elem.size_bytes() * len,
             Ty::Struct { size, .. } => *size,
@@ -111,8 +134,8 @@ impl Signature {
         match (ty, index) {
             (Ty::Struct { fields, .. }, GepIndex::Field(i)) => fields.get(*i as usize).cloned(),
             (Ty::Array { elem, .. }, GepIndex::Index(_) | GepIndex::ConstIndex(_)) => Some(elem.as_ref().clone()),
-            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::ConstIndex(_)) => Some(ty.clone()),
-            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::Index(_)) => Some(ty.clone()),
+            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr { .. }, GepIndex::ConstIndex(_)) => Some(ty.clone()),
+            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr { .. }, GepIndex::Index(_)) => Some(ty.clone()),
             _ => None,
         }
     }
@@ -164,7 +187,7 @@ pub fn ty_align(ty: &Ty) -> u64 {
             // Quad and x87 extended both align to 16 bytes.
             FloatKind::F128 | FloatKind::F80 => 16,
         },
-        Ty::Ptr(_) => 8,
+        Ty::Ptr { bits, .. } => ((*bits as u64).max(8) / 8).min(16),
         Ty::BuiltinVaList { align, .. } => *align,
         Ty::Array { elem, .. } => ty_align(elem),
         Ty::Struct { fields, .. } => fields.iter().map(ty_align).max().unwrap_or(1),

@@ -49,7 +49,7 @@ pub(crate) fn declare(module: &mut mir::Module) -> Runtime {
 
 /// Whether a value of this MIR type can point into the heap.
 pub(crate) fn is_ptr(ty: &mir::Ty) -> bool {
-    matches!(ty, mir::Ty::Ptr(_))
+    matches!(ty, mir::Ty::Ptr { .. })
 }
 
 impl<'l, 'd> FnCtx<'l, 'd> {

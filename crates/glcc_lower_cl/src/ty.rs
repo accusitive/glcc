@@ -22,8 +22,8 @@ pub fn clif_ty(ty: &mir::Ty) -> Option<Type> {
             mir::FloatKind::F64 => types::F64,
             mir::FloatKind::F80 | mir::FloatKind::F128 => types::F128,
         }),
-        // LP64: every address is 64 bits.
-        mir::Ty::Ptr(_) => Some(types::I64),
+        // Addresses are 64 bits unless MSVC's `__ptr32` narrowed them.
+        mir::Ty::Ptr { bits, .. } => Some(if *bits <= 32 { types::I32 } else { types::I64 }),
         // MSVC's `va_list` is a plain 8-byte pointer and loads and
         // stores like one. SysV's array-of-tag `va_list` never crosses
         // as a value (only its address does).

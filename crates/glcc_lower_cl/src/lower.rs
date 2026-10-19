@@ -550,7 +550,7 @@ fn uses_f80(mir_module: &mir::Module) -> bool {
     fn ty_uses(ty: &mir::Ty) -> bool {
         match ty {
             mir::Ty::Float(mir::FloatKind::F80) => true,
-            mir::Ty::Ptr(inner) => ty_uses(inner),
+            mir::Ty::Ptr { pointee, .. } => ty_uses(pointee),
             mir::Ty::Array { elem, .. } => ty_uses(elem),
             mir::Ty::Struct { fields, .. } => fields.iter().any(ty_uses),
             _ => false,
@@ -570,7 +570,7 @@ fn uses_f128(mir_module: &mir::Module) -> bool {
     fn ty_uses(ty: &mir::Ty) -> bool {
         match ty {
             mir::Ty::Float(mir::FloatKind::F128) => true,
-            mir::Ty::Ptr(inner) => ty_uses(inner),
+            mir::Ty::Ptr { pointee, .. } => ty_uses(pointee),
             mir::Ty::Array { elem, .. } => ty_uses(elem),
             mir::Ty::Struct { fields, .. } => fields.iter().any(ty_uses),
             _ => false,
@@ -1026,6 +1026,18 @@ fn operand(body: &mut Body, builder: &mut FunctionBuilder, mir_value: mir::Value
     let lowered = materialize_const(builder, &c, &ty);
     body.consts.insert((block, mir_value), lowered);
     lowered
+}
+
+/// Operand value used as a machine address: a 32-bit pointer widens to
+/// the target's 64-bit address width (sign-extended, MSVC's default for
+/// `__ptr32`). Ordinary addresses pass through untouched.
+fn addr_operand(body: &mut Body, builder: &mut FunctionBuilder, v: mir::Value) -> ClifValue {
+    let val = operand(body, builder, v);
+    let ty = body.func.values[v].ty.clone();
+    match clif_ty(&ty) {
+        Some(t) if t == types::I32 => builder.ins().sextend(types::I64, val),
+        _ => val,
+    }
 }
 
 /// One volatile scalar load. C requires every volatile access to touch
@@ -1722,9 +1734,17 @@ fn emit_inst<M: Module>(
         }
         mir::InstKind::Bitcast(a) => {
             let dst = result_clif(&result_ty);
-            let flags = MemFlagsData::new();
             let lowered = operand(body, builder, a);
-            Some(builder.ins().bitcast(dst, flags, lowered))
+            let from = builder.func.dfg.value_type(lowered);
+            if from.bytes() == dst.bytes() {
+                Some(builder.ins().bitcast(dst, MemFlagsData::new(), lowered))
+            } else if from.bytes() < dst.bytes() {
+                // A narrow pointer widens back to the machine address
+                // width, sign-extended like MSVC's default for `__ptr32`.
+                Some(builder.ins().sextend(dst, lowered))
+            } else {
+                Some(builder.ins().ireduce(dst, lowered))
+            }
         }
         mir::InstKind::SItoF(a) => {
             let dst_ty = result_ty.clone().expect("sitof needs a result type");
@@ -2044,13 +2064,32 @@ fn emit_inst<M: Module>(
         mir::InstKind::PtrToInt(a) => {
             let dst = result_clif(&result_ty);
             let x = operand(body, builder, a);
-            Some(resize_int(builder, x, types::I64, dst))
+            let from = builder.func.dfg.value_type(x);
+            Some(if from == dst {
+                x
+            } else if from.bytes() == dst.bytes() {
+                builder.ins().bitcast(dst, MemFlagsData::new(), x)
+            } else if from.bytes() < dst.bytes() {
+                // A narrow pointer sign-extends into an integer, its
+                // default `__ptr32` semantics.
+                builder.ins().sextend(dst, x)
+            } else {
+                builder.ins().ireduce(dst, x)
+            })
         }
         mir::InstKind::IntToPtr(a) => {
+            let dst = result_clif(&result_ty);
             let x = operand(body, builder, a);
-            let src_ty = body.func.values[a].ty.clone();
-            let src_clif = clif_ty(&src_ty).expect("int source has a Clif type");
-            Some(resize_int(builder, x, src_clif, types::I64))
+            let from = builder.func.dfg.value_type(x);
+            Some(if from == dst {
+                x
+            } else if from.bytes() == dst.bytes() {
+                builder.ins().bitcast(dst, MemFlagsData::new(), x)
+            } else if from.bytes() < dst.bytes() {
+                builder.ins().sextend(dst, x)
+            } else {
+                builder.ins().ireduce(dst, x)
+            })
         }
         mir::InstKind::Select { cond, then_val, else_val } => {
             let c = operand(body, builder, cond);
@@ -2077,7 +2116,7 @@ fn emit_inst<M: Module>(
             // load is fair game for alias analysis (RLE, forwarding).
             // Volatile MIR accesses lower to atomic ops instead, which
             // the analysis never rewrites; see `volatile_load`.
-            let x = operand(body, builder, addr);
+            let x = addr_operand(body, builder, addr);
             let Some(mir_ty) = result_ty.clone() else {
                 panic!("load needs a result type");
             };
@@ -2106,7 +2145,7 @@ fn emit_inst<M: Module>(
             }
         }
         mir::InstKind::Store { addr, val, flags } => {
-            let dst = operand(body, builder, addr);
+            let dst = addr_operand(body, builder, addr);
             let src = operand(body, builder, val);
             let mir_ty = body.func.values[val].ty.clone();
             if mir_ty.is_aggregate() {
@@ -2128,11 +2167,15 @@ fn emit_inst<M: Module>(
             None
         }
         mir::InstKind::GetElementPtr { base, indices } => {
-            let base_addr = operand(body, builder, base);
-            let mir::Ty::Ptr(pointee) = body.func.values[base].ty.clone() else {
+            let base_addr = addr_operand(body, builder, base);
+            let mir::Ty::Ptr { pointee, .. } = body.func.values[base].ty.clone() else {
                 panic!("gep base is not a pointer");
             };
-            Some(gep_addr(body, builder, base_addr, &pointee, &indices))
+            let addr = gep_addr(body, builder, base_addr, &pointee, &indices);
+            // A `__ptr32` result keeps its narrow width in the value.
+            let want = result_clif(&result_ty);
+            let got = builder.func.dfg.value_type(addr);
+            Some(if got == want { addr } else { builder.ins().ireduce(want, addr) })
         }
         mir::InstKind::ExtractValue { agg, index } => {
             let addr = operand(body, builder, agg);
@@ -2162,13 +2205,13 @@ fn emit_inst<M: Module>(
             Some(dst)
         }
         mir::InstKind::Memcpy { dst, src, len } => {
-            let d = operand(body, builder, dst);
-            let s = operand(body, builder, src);
+            let d = addr_operand(body, builder, dst);
+            let s = addr_operand(body, builder, src);
             emit_copy(body, builder, d, s, len);
             None
         }
         mir::InstKind::Memset { dst, byte, len } => {
-            let d = operand(body, builder, dst);
+            let d = addr_operand(body, builder, dst);
             // Splat the byte across 8-byte stores, then mop up the tail.
             let splat = (byte as u64).wrapping_mul(0x0101010101010101);
             let wide = builder.ins().iconst(types::I64, splat as i64);
@@ -2248,7 +2291,7 @@ fn emit_inst<M: Module>(
         mir::InstKind::Await { .. } => panic!("`await` instruction survived coroutine lowering"),
         mir::InstKind::CallIndirect { callee, args, sig } => {
             let layout = abi::layout_sig(body.target, &sig.params, &sig.ret, sig.variadic);
-            let addr = operand(body, builder, callee);
+            let addr = addr_operand(body, builder, callee);
             emit_call(
                 body,
                 builder,
@@ -2267,13 +2310,13 @@ fn emit_inst<M: Module>(
             )
         }
         mir::InstKind::VaStart { ap } => {
-            let ap_addr = operand(body, builder, ap);
+            let ap_addr = addr_operand(body, builder, ap);
             let va = body.va.expect("va_start outside a variadic function");
             abi::emit_va_start(body.target, builder, ap_addr, &va, &body.layout);
             None
         }
         mir::InstKind::VaArg { ap } => {
-            let ap_addr = operand(body, builder, ap);
+            let ap_addr = addr_operand(body, builder, ap);
             let Some(mir_ty) = result_ty.clone() else {
                 panic!("va_arg needs a result type");
             };
@@ -2305,25 +2348,25 @@ fn emit_inst<M: Module>(
         }
         mir::InstKind::VaEnd { .. } => None,
         mir::InstKind::VaCopy { dst, src } => {
-            let d = operand(body, builder, dst);
-            let s = operand(body, builder, src);
+            let d = addr_operand(body, builder, dst);
+            let s = addr_operand(body, builder, src);
             abi::emit_va_copy(body.target, builder, d, s);
             None
         }
         mir::InstKind::AtomicLoad { addr } => {
             let ty = result_clif(&result_ty);
-            let a = operand(body, builder, addr);
+            let a = addr_operand(body, builder, addr);
             Some(builder.ins().atomic_load(ty, MemFlagsData::new(), a))
         }
         mir::InstKind::AtomicStore { addr, val } => {
-            let a = operand(body, builder, addr);
+            let a = addr_operand(body, builder, addr);
             let v = operand(body, builder, val);
             builder.ins().atomic_store(MemFlagsData::new(), v, a);
             None
         }
         mir::InstKind::AtomicRmw { op, addr, val } => {
             let ty = result_clif(&result_ty);
-            let a = operand(body, builder, addr);
+            let a = addr_operand(body, builder, addr);
             let v = operand(body, builder, val);
             let rmw = match op {
                 mir::AtomicRmwOp::Add => AtomicRmwOp::Add,
@@ -2342,7 +2385,7 @@ fn emit_inst<M: Module>(
         }
         mir::InstKind::AtomicCas { addr, expected, replacement } => {
             let _ty = result_clif(&result_ty);
-            let a = operand(body, builder, addr);
+            let a = addr_operand(body, builder, addr);
             let e = operand(body, builder, expected);
             let r = operand(body, builder, replacement);
             Some(builder.ins().atomic_cas(MemFlagsData::new(), a, e, r))
@@ -2388,12 +2431,12 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
             let Some(slot) = site.slots[i] else { continue };
             if slot.addr {
                 // A memory output's address crosses in the slot.
-                let addr = operand(body, builder, op.value);
+                let addr = addr_operand(body, builder, op.value);
                 builder.ins().store(area_flags, addr, area, Offset32::new(slot.offset as i32));
             } else if op.constraint.contains('+') {
                 // `+` outputs start from the lvalue's current value.
                 let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
-                let addr = operand(body, builder, op.value);
+                let addr = addr_operand(body, builder, op.value);
                 let value = builder.ins().load(ty, user_flags, addr, Offset32::new(0));
                 builder.ins().store(area_flags, value, area, Offset32::new(slot.offset as i32));
             }
@@ -2521,7 +2564,7 @@ fn gep_addr(body: &mut Body, builder: &mut FunctionBuilder, base: ClifValue, poi
                 }
                 // Element step over a pointed-to scalar: `p++` scales by
                 // the pointee size, not by bytes.
-                mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr(_) => {
+                mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } => {
                     fixed += (*k * ty.size_bytes()) as i64;
                 }
                 _ => panic!("constant step into aggregate"),
@@ -2530,7 +2573,7 @@ fn gep_addr(body: &mut Body, builder: &mut FunctionBuilder, base: ClifValue, poi
                 let (scale, next) = match &ty {
                     mir::Ty::Array { elem, .. } => (elem.size_bytes(), elem.as_ref().clone()),
                     // Pointer arithmetic over a single element.
-                    mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr(_) => (ty.size_bytes(), ty.clone()),
+                    mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } => (ty.size_bytes(), ty.clone()),
                     _ => panic!("dynamic step into aggregate"),
                 };
                 let idx = operand(body, builder, *v);

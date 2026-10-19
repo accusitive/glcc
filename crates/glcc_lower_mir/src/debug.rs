@@ -311,7 +311,7 @@ fn lower_ty_debug(
     match ty {
         Ty::Void => None,
         Ty::Qualified { .. } => unreachable!("handled above"),
-        Ty::Pointer { qualifiers, pointee } => {
+        Ty::Pointer { qualifiers, pointee, .. } => {
             // `void *` carries no pointee type, like gcc.
             let pointee_id = match pointee.unqualified() {
                 Ty::Void => None,

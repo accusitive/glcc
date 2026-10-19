@@ -968,7 +968,7 @@ fn ty_size(ty: &mir::Ty) -> u64 {
         mir::Ty::Float(mir::FloatKind::F32) => 4,
         mir::Ty::Float(mir::FloatKind::F64) => 8,
         mir::Ty::Float(_) => 16,
-        mir::Ty::Ptr(_) => 8,
+        mir::Ty::Ptr { .. } => ty.size_bytes(),
         mir::Ty::Array { .. } | mir::Ty::Struct { .. } => ty.size_bytes(),
         mir::Ty::BuiltinVaList { size, .. } => *size,
         mir::Ty::Void => panic!("void asm operand"),

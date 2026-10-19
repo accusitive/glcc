@@ -11,7 +11,7 @@ use crate::eval::escape_value;
 use crate::lang::LangOpts;
 use crate::layout::StructLayout;
 use crate::lexer::{Interner, StringLiteral, StringPrefix};
-use crate::parse::{ArrayBound, BlockItem, Designator, ForInit, FuncBody, Initializer, Stmt, Ty};
+use crate::parse::{ArrayBound, BlockItem, Designator, ForInit, FuncBody, Initializer, PtrSize, Stmt, Ty};
 use crate::span::{CompileError, HasSpan, Span};
 use crate::target::Target;
 
@@ -396,6 +396,7 @@ impl Sema {
         }
         let ptr = || Ty::Pointer {
             qualifiers: vec![],
+            size: PtrSize::Default,
             pointee: Box::new(Ty::Void),
         };
         let span = Span::dummy();
@@ -891,7 +892,7 @@ pub fn types_compatible(a: &Ty, b: &Ty) -> bool {
             // libc functions this way, like GCC.
             pa.iter().zip(pb.iter()).all(|(x, y)| types_compatible(&unqualified_param_ty(x), &unqualified_param_ty(y)))
         }
-        (Ty::Pointer { qualifiers: qa, pointee: pa }, Ty::Pointer { qualifiers: qb, pointee: pb }) => qa == qb && types_compatible(pa, pb),
+        (Ty::Pointer { qualifiers: qa, size: sa, pointee: pa }, Ty::Pointer { qualifiers: qb, size: sb, pointee: pb }) => qa == qb && sa == sb && types_compatible(pa, pb),
         (Ty::Array { elem: ea, quals: qa, bound: ba }, Ty::Array { elem: eb, quals: qb, bound: bb }) => qa == qb && types_compatible(ea, eb) && bounds_compatible(ba, bb),
         _ => a == b,
     }
@@ -913,8 +914,9 @@ pub fn types_compatible_p(a: &Ty, b: &Ty) -> bool {
 fn unqualified_param_ty(ty: &Ty) -> Ty {
     match ty {
         Ty::Qualified { inner, .. } => inner.unqualified().clone(),
-        Ty::Pointer { pointee, .. } => Ty::Pointer {
+        Ty::Pointer { pointee, size, .. } => Ty::Pointer {
             qualifiers: Vec::new(),
+            size: *size,
             pointee: pointee.clone(),
         },
         _ => ty.clone(),
@@ -988,8 +990,9 @@ pub fn composite_type(a: Ty, b: Ty) -> Ty {
                 }
             }
         }
-        (Ty::Pointer { qualifiers: qa, pointee: pa }, Ty::Pointer { pointee: pb, .. }) => Ty::Pointer {
+        (Ty::Pointer { qualifiers: qa, size, pointee: pa }, Ty::Pointer { pointee: pb, .. }) => Ty::Pointer {
             qualifiers: qa,
+            size,
             pointee: Box::new(composite_type(*pa, *pb)),
         },
         (Ty::Qualified { quals: qa, inner: ia }, Ty::Qualified { quals: qb, inner: ib }) => {

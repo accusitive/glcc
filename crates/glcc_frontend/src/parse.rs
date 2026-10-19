@@ -1472,11 +1472,12 @@ impl<'a> Parser<'a> {
             if matches!(ty, Ty::Func { .. }) {
                 ty = Ty::Pointer {
                     qualifiers: Vec::new(),
+                    size: PtrSize::Default,
                     pointee: Box::new(ty),
                 };
             }
             if let Ty::Array { elem, quals, .. } = ty {
-                ty = Ty::Pointer { qualifiers: quals, pointee: elem };
+                ty = Ty::Pointer { qualifiers: quals, size: PtrSize::Default, pointee: elem };
             }
             if ty.unqualified() == &Ty::Void {
                 return self.fail(decl_span, "declaration of `void` object");
@@ -2761,6 +2762,16 @@ impl<'a> Parser<'a> {
     fn peek_alternate_inline(&self) -> bool {
         self.peek_is_gnu("__inline__") || self.peek_is_gnu("__inline") || self.peek_is_gnu("__forceinline")
     }
+    /// MSVC's pointer-size attributes, which follow the `*` they modify.
+    fn peek_ms_ptr_size(&self) -> Option<PtrSize> {
+        if self.peek_is_gnu("__ptr32") {
+            Some(PtrSize::Ptr32)
+        } else if self.peek_is_gnu("__ptr64") {
+            Some(PtrSize::Ptr64)
+        } else {
+            None
+        }
+    }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
     /// This includes GCC's predefined typedef spellings
@@ -2863,6 +2874,7 @@ impl<'a> Parser<'a> {
                 Ty::Float,
                 vec![Ty::Pointer {
                     qualifiers: vec![],
+                    size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 }],
                 false,
@@ -2875,6 +2887,7 @@ impl<'a> Parser<'a> {
                 },
                 vec![Ty::Pointer {
                     qualifiers: vec![],
+                    size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 }],
                 false,
@@ -3895,9 +3908,29 @@ impl<'a> Parser<'a> {
                 Some(Token::Punctuator(Punctuator::Star)) => {
                     let start = self.mark();
                     self.tokens.advance();
-                    let qualifiers = self.parse_type_qualifier_list();
+                    let mut qualifiers = Vec::new();
+                    let mut size = PtrSize::Default;
+                    loop {
+                        if let Some(s) = self.peek_ms_ptr_size() {
+                            size = s;
+                            self.tokens.advance();
+                            continue;
+                        }
+                        let before = qualifiers.len();
+                        qualifiers.extend(self.parse_type_qualifier_list());
+                        if qualifiers.len() == before {
+                            break;
+                        }
+                    }
+                    // On a 64-bit target `__ptr64` names the ordinary
+                    // pointer type (MSVC and clang both treat it so),
+                    // so normalize it away instead of minting a
+                    // distinct-but-identical type.
+                    if size == PtrSize::Ptr64 && self.sema.target.pointer_size == 8 {
+                        size = PtrSize::Default;
+                    }
                     let span = self.span_since(start);
-                    pointer.push(Pointer { qualifiers, span });
+                    pointer.push(Pointer { qualifiers, size, span });
                 }
                 _ => break,
             }
@@ -4276,6 +4309,7 @@ impl<'a> Parser<'a> {
         if matches!(ty, Ty::Func { .. }) {
             ty = Ty::Pointer {
                 qualifiers: Vec::new(),
+                size: PtrSize::Default,
                 pointee: Box::new(ty),
             };
         }
@@ -4283,7 +4317,7 @@ impl<'a> Parser<'a> {
         // pointer to its element; bracket qualifiers (`[const 3]`)
         // qualify the pointer (C17 §6.7.6.3p7).
         if let Ty::Array { elem, quals, .. } = ty {
-            ty = Ty::Pointer { qualifiers: quals, pointee: elem };
+            ty = Ty::Pointer { qualifiers: quals, size: PtrSize::Default, pointee: elem };
         }
         let span = self.span_since(start);
         Param {
@@ -4439,6 +4473,7 @@ impl<'a> Parser<'a> {
                 let ty = if self.sema.target.os == crate::target::Os::Windows {
                     Ty::Pointer {
                         qualifiers: Vec::new(),
+                        size: PtrSize::Default,
                         pointee: Box::new(Ty::Char),
                     }
                 } else {
@@ -6310,6 +6345,7 @@ impl<'a> Parser<'a> {
             for ptr in &d.pointer {
                 ty = Ty::Pointer {
                     qualifiers: ptr.qualifiers.clone(),
+                    size: ptr.size,
                     pointee: Box::new(ty),
                 };
             }
@@ -6649,6 +6685,7 @@ fn push_escaped(out: &mut String, s: &str) {
 fn ptr(pointee: Ty) -> Ty {
     Ty::Pointer {
         qualifiers: vec![],
+        size: PtrSize::Default,
         pointee: Box::new(pointee),
     }
 }
@@ -6890,6 +6927,26 @@ pub enum TypeQualifier {
     Restrict,
     Volatile,
 }
+/// MSVC's pointer-size attributes (`__ptr32`/`__ptr64`). They select the
+/// width of the pointer itself, not of its pointee.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PtrSize {
+    #[default]
+    Default,
+    Ptr32,
+    Ptr64,
+}
+
+impl PtrSize {
+    /// Width in bits on a target whose ordinary pointers are `default` bits.
+    pub fn bits(self, default: u32) -> u32 {
+        match self {
+            PtrSize::Default => default,
+            PtrSize::Ptr32 => 32,
+            PtrSize::Ptr64 => 64,
+        }
+    }
+}
 #[derive(Debug, Default)]
 pub struct DeclarationSpecifiers {
     class: Vec<StorageClass>,
@@ -6964,6 +7021,7 @@ impl HasSpan for Declarator {
 #[derive(Debug, Default)]
 pub struct Pointer {
     pub(crate) qualifiers: Vec<TypeQualifier>,
+    pub(crate) size: PtrSize,
     pub span: Span,
 }
 
@@ -7730,6 +7788,7 @@ pub enum Ty {
     Complex(Box<Ty>),
     Pointer {
         qualifiers: Vec<TypeQualifier>,
+        size: PtrSize,
         pointee: Box<Ty>,
     },
     Func {
@@ -7805,11 +7864,11 @@ impl Ty {
                 quals: aq,
                 bound,
             },
-            Ty::Pointer { mut qualifiers, pointee } => {
+            Ty::Pointer { mut qualifiers, size, pointee } => {
                 qualifiers.extend(quals);
                 qualifiers.sort_by_key(|q| *q as u8);
                 qualifiers.dedup();
-                Ty::Pointer { qualifiers, pointee }
+                Ty::Pointer { qualifiers, size, pointee }
             }
             Ty::Func { .. } => inner,
             Ty::Qualified {

@@ -499,7 +499,7 @@ fn address_info(func: &Function, value: Value) -> Option<AddressInfo> {
         InstKind::GetElementPtr { base, indices } => {
             let mut info = address_info(func, *base)?;
             let mut ty = match &func.values[*base].ty {
-                Ty::Ptr(inner) => (**inner).clone(),
+                Ty::Ptr { pointee, .. } => (**pointee).clone(),
                 _ => return Some(info),
             };
             for index in indices.iter() {
@@ -619,7 +619,7 @@ fn non_escaping_stack_slots(func: &Function) -> std::collections::HashSet<Value>
             InstKind::Store { val, .. } => escape_value(func, *val, &mut escaped),
             InstKind::GetElementPtr { .. } => {}
             InstKind::Bitcast(inner) => {
-                let pointer_bitcast = result_ty.is_some_and(|ty| matches!(ty, Ty::Ptr(_))) && matches!(func.values[*inner].ty, Ty::Ptr(_));
+                let pointer_bitcast = result_ty.is_some_and(|ty| matches!(ty, Ty::Ptr { .. })) && matches!(func.values[*inner].ty, Ty::Ptr { .. });
                 if !pointer_bitcast {
                     escape_root(func, *inner, &mut escaped);
                 }

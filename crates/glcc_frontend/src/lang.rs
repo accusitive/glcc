@@ -87,7 +87,7 @@ pub struct LangOpts {
     pub gnu: bool,
     /// MSVC-family spellings: `__declspec`, calling conventions
     /// (`__cdecl`, `__stdcall`, ...), `__intN`, `__pragma`,
-    /// `__forceinline`.
+    /// `__forceinline`, pointer-size attributes (`__ptr32`/`__ptr64`).
     pub ms: bool,
     /// clang-family spellings: `_Float32`/`_Float64` and friends.
     pub clang: bool,
@@ -151,7 +151,7 @@ pub fn spelling_family(word: &str) -> Fam {
         // keep doing so.
         "thread_local" | "typeof" => Fam::GnuOrC23,
         "__int8" | "__int16" | "__int32" | "__int64" | "__declspec" | "_declspec" | "__pragma" | "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
-        | "__clrcall" | "__forceinline" => Fam::Ms,
+        | "__clrcall" | "__forceinline" | "__ptr32" | "__ptr64" => Fam::Ms,
         "_Float32" | "_Float64" => Fam::Clang,
         _ => Fam::Gnu,
     }

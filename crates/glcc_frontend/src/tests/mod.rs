@@ -3,8 +3,8 @@ use crate::lang::{LangOpts, Std};
 use crate::layout::StructLayout;
 use crate::lexer::{CharLiteral, CharPrefix, Constant, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, Lexer, Punctuator, Radix, StringPrefix, Token};
 use crate::parse::{
-    ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, DirectBase, DirectSuffix, Expr, ExternalDeclaration, GnuAttributes, Initializer, Parser, Stmt, Ty, TypeQualifier,
-    UnaryOp, resolve_type_specifiers,
+    ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, DirectBase, DirectSuffix, Expr, ExternalDeclaration, GnuAttributes, Initializer, Parser, PtrSize, Stmt, Ty,
+    TypeQualifier, UnaryOp, resolve_type_specifiers,
 };
 use crate::sema::Sema;
 use crate::span::{CompileError, Severity, Span, byte_range};
@@ -751,6 +751,7 @@ fn function_parameter_names_and_types_parse() {
         f.params[1].ty,
         Ty::Pointer {
             qualifiers: vec![],
+            size: PtrSize::Default,
             pointee: Box::new(Ty::Char),
         }
     );
@@ -870,6 +871,7 @@ fn spec_to_ty_carries_parameter_types() {
                 Ty::Int,
                 Ty::Pointer {
                     qualifiers: vec![],
+                    size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 },
             ],
@@ -905,7 +907,7 @@ fn spec_to_ty_adjusts_function_parameter_to_pointer() {
     let ty = lower_to_ty("f(int g(void))");
     let Ty::Func { params, .. } = &ty else { panic!("{ty:?}") };
     let [param] = params.as_slice() else { panic!("{params:?}") };
-    let Ty::Pointer { qualifiers, pointee } = param else { panic!("{param:?}") };
+    let Ty::Pointer { qualifiers, pointee, .. } = param else { panic!("{param:?}") };
     assert!(qualifiers.is_empty());
     assert!(matches!(**pointee, Ty::Func { .. }));
 }
@@ -926,7 +928,7 @@ fn array_parameter_decays_to_pointer() {
     // Bracket qualifiers qualify the adjusted pointer.
     let ty = lower_to_ty("f(int a[const 3])");
     let Ty::Func { params, .. } = &ty else { panic!("{ty:?}") };
-    let [Ty::Pointer { qualifiers, pointee }] = params.as_slice() else {
+    let [Ty::Pointer { qualifiers, pointee, .. }] = params.as_slice() else {
         panic!("{params:?}")
     };
     assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Const]));
@@ -1529,6 +1531,38 @@ fn forceinline_requires_ms_extensions() {
     let mut parser = test_parser("__forceinline int f(void) { return 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
     assert!(parser.has_errors());
+}
+
+#[test]
+fn ptr_size_requires_ms_extensions() {
+    let mut sema = gated_sema(LangOpts { ms: false, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int * __ptr32 p;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
+}
+
+#[test]
+fn ptr_size_attributes_set_pointer_width() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int * __ptr32 p; int * __ptr64 q; int *r;", &mut sema, &mut interner);
+    let p = parse_decl(&mut parser);
+    let q = parse_decl(&mut parser);
+    let r = parse_decl(&mut parser);
+    let ptr_ty = |size| Ty::Pointer {
+        qualifiers: vec![],
+        size,
+        pointee: Box::new(Ty::Int),
+    };
+    assert_eq!(parser.sema.decls[p.0 as usize].ty, ptr_ty(PtrSize::Ptr32));
+    // `__ptr64` is the ordinary 64-bit pointer type on this target.
+    assert_eq!(parser.sema.decls[q.0 as usize].ty, ptr_ty(PtrSize::Default));
+    assert_eq!(parser.sema.decls[r.0 as usize].ty, ptr_ty(PtrSize::Default));
+    let size = |id: DeclId| parser.sema.type_size(&parser.sema.decls[id.0 as usize].ty, &parser.intern);
+    assert_eq!(size(p), Some(4));
+    assert_eq!(size(q), Some(8));
+    assert_eq!(size(r), Some(8));
 }
 
 #[test]
@@ -2708,6 +2742,7 @@ fn msvc_spellings_and_annotations_parse() {
         Ty::Func {
             ret: Box::new(Ty::Pointer {
                 qualifiers: Vec::new(),
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::UnsignedLongLong)
             }),
             params: vec![],
@@ -3558,6 +3593,7 @@ fn type_sizes_and_aligns() {
         (
             size(&Ty::Pointer {
                 qualifiers: vec![],
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::Char),
             }),
             align(&Ty::Complex(Box::new(Ty::Double)))
@@ -5841,6 +5877,7 @@ fn func_name_identifiers_expand() {
             expr.ty,
             Ty::Pointer {
                 qualifiers: vec![],
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Char)),
             }
         );
@@ -5902,7 +5939,7 @@ fn const_qualified_spellings_keep_qualifiers() {
     let mut interner = Interner::new();
     let mut parser = test_parser("char *const p;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
-    let Ty::Pointer { qualifiers, pointee } = &parser.sema.decls[id.0 as usize].ty else {
+    let Ty::Pointer { qualifiers, pointee, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected a pointer");
     };
     assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Const]));
@@ -6062,6 +6099,7 @@ fn ternary_pointer_mix_composes_const() {
         checked.ty,
         Ty::Pointer {
             qualifiers: vec![],
+            size: PtrSize::Default,
             pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Char)),
         }
     );
@@ -6073,10 +6111,12 @@ fn ternary_void_ptr_mix_composes_silently() {
     // "pointer type mismatch" warning, like GCC (C17 §6.5.15).
     let void_ptr = Ty::Pointer {
         qualifiers: vec![],
+        size: PtrSize::Default,
         pointee: Box::new(Ty::Void),
     };
     let const_void_ptr = Ty::Pointer {
         qualifiers: vec![],
+        size: PtrSize::Default,
         pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Void)),
     };
     let cases: &[(&[&str], &str, Ty)] = &[
@@ -6117,10 +6157,12 @@ fn ternary_null_constant_keeps_the_other_pointer_type() {
     // `(i == 0 ? (void *)0 : s)->i` needs this.
     let int_ptr = Ty::Pointer {
         qualifiers: vec![],
+        size: PtrSize::Default,
         pointee: Box::new(Ty::Int),
     };
     let const_void_ptr = Ty::Pointer {
         qualifiers: vec![],
+        size: PtrSize::Default,
         pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Void)),
     };
     let decls = &["int *q;", "int c;"];
@@ -6301,6 +6343,7 @@ fn function_declaration_lowers_parameters() {
             Ty::Int,
             Ty::Pointer {
                 qualifiers: vec![],
+                size: PtrSize::Default,
                 pointee: Box::new(Ty::Char),
             },
         ]
@@ -8440,6 +8483,7 @@ fn check_unary_forms() {
         check_with(&["int x;"], "&x").ty,
         Ty::Pointer {
             qualifiers: Vec::new(),
+            size: PtrSize::Default,
             pointee: Box::new(Ty::Int),
         }
     );
@@ -9248,6 +9292,7 @@ fn atomic_erases_to_its_base_type() {
         base_of("_Atomic(int *)"),
         Ty::Pointer {
             qualifiers: vec![],
+            size: PtrSize::Default,
             pointee: Box::new(Int),
         }
     );

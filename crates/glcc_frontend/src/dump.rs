@@ -450,8 +450,13 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
         Ty::Double => "double".to_string(),
         Ty::LongDouble => "long double".to_string(),
         Ty::Complex(inner) => format!("{} _Complex", dump_ty(inner, sema, interner)),
-        Ty::Pointer { qualifiers, pointee } => {
-            format!("*{}{}", quals(qualifiers), dump_ty(pointee, sema, interner))
+        Ty::Pointer { qualifiers, size, pointee } => {
+            let size = match size {
+                crate::parse::PtrSize::Default => "",
+                crate::parse::PtrSize::Ptr32 => " __ptr32",
+                crate::parse::PtrSize::Ptr64 => " __ptr64",
+            };
+            format!("*{}{}{}", size, quals(qualifiers), dump_ty(pointee, sema, interner))
         }
         Ty::Func {
             ret,

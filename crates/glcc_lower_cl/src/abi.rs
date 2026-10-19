@@ -496,7 +496,11 @@ fn classify_value(target: Target, ty: &mir::Ty, counters: &mut Counters, is_ret:
                 ValueClass::Regs(vec![(0, int_cover(target, *bits))])
             }
         }
-        mir::Ty::Ptr(_) | mir::Ty::BuiltinVaList { .. } => {
+        mir::Ty::Ptr { bits, .. } => {
+            counters.gp += 1;
+            ValueClass::Regs(vec![(0, int_cover(target, *bits))])
+        }
+        mir::Ty::BuiltinVaList { .. } => {
             counters.gp += 1;
             ValueClass::Regs(vec![(0, types::I64)])
         }
@@ -561,7 +565,7 @@ fn mir_align(ty: &mir::Ty) -> u64 {
             // Quad and x87 extended both align to 16 bytes.
             mir::FloatKind::F128 | mir::FloatKind::F80 => 16,
         },
-        mir::Ty::Ptr(_) => 8,
+        mir::Ty::Ptr { bits, .. } => ((*bits as u64).max(8) / 8).min(16),
         mir::Ty::BuiltinVaList { align, .. } => *align,
         mir::Ty::Array { elem, .. } => mir_align(elem),
         mir::Ty::Struct { fields, .. } => fields.iter().map(mir_align).max().unwrap_or(1),
@@ -580,7 +584,7 @@ enum LeafClass {
 
 fn aggregate_leaves(ty: &mir::Ty, base: u64, out: &mut Vec<(u64, u64, LeafClass)>) {
     match ty {
-        mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Ptr(_) => out.push((base, ty.size_bytes(), LeafClass::Int)),
+        mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Ptr { .. } => out.push((base, ty.size_bytes(), LeafClass::Int)),
         mir::Ty::Float(mir::FloatKind::F32) | mir::Ty::Float(mir::FloatKind::F64) => out.push((base, ty.size_bytes(), LeafClass::Sse)),
         mir::Ty::Float(mir::FloatKind::F128) => out.push((base, 16, LeafClass::Quad)),
         mir::Ty::Float(mir::FloatKind::F80) | mir::Ty::Void | mir::Ty::BuiltinVaList { .. } => {

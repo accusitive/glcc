@@ -10,7 +10,13 @@ fn ty_str(ty: &Ty) -> String {
         Ty::Bool => "bool".to_string(),
         Ty::Int { bits } => format!("i{bits}"),
         Ty::Float(k) => format!("{k:?}").to_lowercase(),
-        Ty::Ptr(inner) => format!("ptr({})", ty_str(inner)),
+        Ty::Ptr { pointee, bits } => {
+            if *bits == 64 {
+                format!("ptr({})", ty_str(pointee))
+            } else {
+                format!("ptr{bits}({})", ty_str(pointee))
+            }
+        }
         Ty::BuiltinVaList { .. } => "va_list".to_string(),
         Ty::Array { elem, len } => format!("[{} x {}]", ty_str(elem), len),
         Ty::Struct { fields, .. } => {

@@ -58,18 +58,18 @@ pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer:
                 size: size * 2,
             }
         }
-        fe::parse::Ty::Pointer { pointee, .. } => {
+        fe::parse::Ty::Pointer { pointee, size, .. } => {
             // Struct pointees erase to `void`: navigating into one
             // re-derives its layout from the frontend per hop
             // (`place` uses the checker's byte offsets), so keeping
             // the definition here buys nothing and diverges on
             // self-referential structs (`struct S { struct S *next; }`,
-            // `FILE`, mutual recursion). Everything downstream treats
-            // pointers as 8-byte addresses either way.
+            // `FILE`, mutual recursion).
+            let bits = size.bits((sema.target.pointer_size * 8) as u32);
             if matches!(pointee.unqualified(), fe::parse::Ty::Struct(_)) {
-                mir::Ty::ptr(mir::Ty::Void)
+                mir::Ty::ptr_bits(mir::Ty::Void, bits)
             } else {
-                mir::Ty::ptr(lower_ty(pointee, sema, interner))
+                mir::Ty::ptr_bits(lower_ty(pointee, sema, interner), bits)
             }
         }
         fe::parse::Ty::BuiltinVaList => mir::Ty::BuiltinVaList {
