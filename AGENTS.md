@@ -41,6 +41,7 @@
 
 - Never run broad filesystem searches (no `find /`, no registry-wide
   greps). Stay inside the repo and `~/.cargo` for crate sources.
+- In general, searches for compiler-related code should be contained to `crates`, we have a lot of c++ submodules that slows down rg
 - `examples/` holds runnable demos, not tests: keep `make` and `make
   clean` working in every example (see `examples/README.md`).
 - Be VERY careful and considerate when using git stashes. when possible avoid it entirely.
