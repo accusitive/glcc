@@ -1046,6 +1046,44 @@ mod tests {
         assert_eq!(nls, 11);
     }
 
+    /// C11 6.4.8 pp-number: a sign continues the number only when the
+    /// character just consumed was `e`/`E`/`p`/`P`. Hex digits are not
+    /// exponent markers: `0xE1+` splits, while `0xE+` joins (the sign,
+    /// then the identifier characters, become part of the number).
+    #[test]
+    fn pp_lexer_sign_needs_trailing_exponent_marker() {
+        fn numbers(src: &str) -> Vec<String> {
+            use glcc_frontend::lexer::{Lexer, PpToken};
+            let mut interner = Interner::new();
+            let mut lexer = Lexer::new(src, &mut interner);
+            lexer
+                .lex_pp_all()
+                .iter()
+                .filter_map(|t| match t.tok {
+                    PpToken::PpNumber(sym) => Some(interner.resolve(sym).unwrap_or("").to_string()),
+                    _ => None,
+                })
+                .collect()
+        }
+        assert_eq!(numbers("0xE1+rol"), ["0xE1"]);
+        assert_eq!(numbers("0xABCDEF+1"), ["0xABCDEF", "1"]);
+        assert_eq!(numbers("1E5-2"), ["1E5", "2"]);
+        assert_eq!(numbers("1e+5"), ["1e+5"]);
+        assert_eq!(numbers("0xE+rol"), ["0xE+rol"]);
+    }
+
+    /// Regression: a sticky sign flag used to swallow the macro
+    /// invocation after any number containing `e`/`E`/`p`/`P`, so
+    /// SQLite's `0x6ED9EBA1+rol(v,5)` never expanded `rol`.
+    #[test]
+    fn macro_expands_after_number_containing_exponent_marker() {
+        let src = "#define rol(x,k) (((x)<<(k))|((x)>>(32-(k))))\nint a = 0xE1+rol(1,2);\nint b = 1E5+rol(3,4);\n";
+        assert_eq!(
+            pp(src).unwrap(),
+            "\nint a = 0xE1+(((1)<<(2))|((1)>>(32-(2))));\nint b = 1E5+(((3)<<(4))|((3)>>(32-(4))));\n"
+        );
+    }
+
     #[test]
     fn passthrough_without_directives() {
         assert_eq!(pp("int x = 1;\n").unwrap(), "int x = 1;\n");

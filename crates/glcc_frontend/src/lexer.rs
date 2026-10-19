@@ -480,9 +480,10 @@ impl<'a> Lexer<'a> {
         let mut exp_sign = false;
         while let Some((nc, _, _)) = self.chars.peek().copied() {
             if nc.is_ascii_alphanumeric() || nc == '.' || nc == '_' || nc == '\'' {
-                if matches!(nc, 'e' | 'E' | 'p' | 'P') {
-                    exp_sign = true;
-                }
+                // A sign continues the pp-number only right after an
+                // `e`/`E`/`p`/`P` (C11 6.4.8), so the flag follows the
+                // character just consumed: `0xE1+` splits, `0xE+` joins.
+                exp_sign = matches!(nc, 'e' | 'E' | 'p' | 'P');
                 raw.push(nc);
                 *col += nc.len_utf8() as u64;
                 let _ = self.pp_next(line);
