@@ -133,8 +133,10 @@ pub enum FcmpPred {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemFlags {
     /// C `volatile` access: passes must not eliminate, fold, forward
-    /// through, or promote it away. Codegen still emits plain Clif
-    /// memory ops; the flag exists to keep optimizations sound.
+    /// through, or promote it away. Clif itself has no volatile memory
+    /// flag (as of the pinned Cranelift), so lowering emits atomic
+    /// memory ops for these to keep Cranelift's optimizer from eliding
+    /// them.
     pub volatile: bool,
 }
 

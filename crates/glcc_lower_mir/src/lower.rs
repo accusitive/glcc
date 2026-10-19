@@ -2046,6 +2046,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             decl_ty: fe::parse::Ty,
             bit: u32,
             width: u32,
+            volatile: bool,
         }
         let mut operands = Vec::with_capacity(asm.outputs.len() + asm.inputs.len());
         let mut conversion: Vec<(fe::parse::Ty, Option<fe::parse::Ty>)> =
@@ -2069,6 +2070,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 Some((bit, width, decl_ty)) => {
                     let unit_mir = lower_ty(&decl_ty, self.sema, self.interner);
                     let temp = self.alloca(func, frame, unit_mir.clone());
+                    let volatile = access_volatile(&output.expr, &self.sema.decls);
                     if output.constraint.contains('+') {
                         let field = self.bitfield_load(
                             func,
@@ -2079,7 +2081,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             bit,
                             width,
                             is_signed(&decl_ty, self.sema),
-                            ty_is_volatile(&decl_ty),
+                            volatile,
                         );
                         let unit = self.convert(func, frame, field, &output.expr.ty, &decl_ty);
                         self.store(func, frame, temp, unit, false);
@@ -2090,6 +2092,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         decl_ty: decl_ty.clone(),
                         bit,
                         width,
+                        volatile,
                     });
                     conversion.push((output.expr.ty.clone(), Some(decl_ty.clone())));
                     operands.push(mir::AsmOperand {
@@ -2203,7 +2206,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 value,
                 out.bit,
                 out.width,
-                ty_is_volatile(&out.decl_ty),
+                out.volatile,
             );
         }
         if let Some(selector) = selector {
@@ -2820,7 +2823,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::sema::BindingKind::Var => {
                         let addr = self.place_of_var(func, frame, globals, *id);
                         let array = self.expr_denotes_array(expr);
-                        self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr))
+                        self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
                     }
                     _ => panic!("identifier is not a value"),
                 }
@@ -2860,7 +2863,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             panic!("pointer step without a pointer");
                         };
                         let pointee_mir = pointee_mir.as_ref().clone();
-                        let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner));
+                        let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner, &self.sema.decls));
                         let one = self.iconst(func, 64, 1);
                         let mag = if matches!(op, PreInc | PostInc) {
                             one
@@ -2881,7 +2884,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             scale,
                             pointee_mir,
                         );
-                        self.store(func, frame, addr, next, access_volatile(inner));
+                        self.store(func, frame, addr, next, access_volatile(inner, &self.sema.decls));
                         return if matches!(op, PreInc | PreDec) { next } else { cur };
                     }
                     // Bit-fields step through extraction and RMW: the
@@ -2902,7 +2905,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             *bit,
                             *width,
                             is_signed(decl_ty, self.sema),
-                            ty_is_volatile(decl_ty),
+                            access_volatile(inner, &self.sema.decls),
                         );
                         let one = self.iconst(func, int_bits(&inner_ty), 1);
                         let next = if matches!(op, PreInc | PostInc) {
@@ -2911,7 +2914,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             self.emit(func, frame, mir::InstKind::Sub(cur, one), inner_ty.clone())
                         };
                         let unit = self.convert(func, frame, next, &inner.ty, decl_ty);
-                        self.bitfield_store(func, frame, addr, decl_ty, unit, *bit, *width, ty_is_volatile(decl_ty));
+                        self.bitfield_store(func, frame, addr, decl_ty, unit, *bit, *width, access_volatile(inner, &self.sema.decls));
                         // `++f` yields the value stored, narrowed to the
                         // field: the step above wraps at the unit width.
                         return if matches!(op, PreInc | PreDec) {
@@ -2927,7 +2930,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             cur
                         };
                     }
-                    let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner));
+                    let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner, &self.sema.decls));
                     let one = match &inner_ty {
                         mir::Ty::Float(_) => {
                             // 1.0 at the operand width: long double uses
@@ -2963,7 +2966,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         _ => mir::InstKind::Sub(cur, one),
                     };
                     let next = self.emit(func, frame, kind, inner_ty);
-                    self.store(func, frame, addr, next, access_volatile(inner));
+                    self.store(func, frame, addr, next, access_volatile(inner, &self.sema.decls));
                     // Prefix yields the new value, postfix the old one.
                     return if matches!(op, PreInc | PreDec) { next } else { cur };
                 }
@@ -3118,7 +3121,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             return ptr;
                         }
                         let array = self.expr_denotes_array(expr);
-                        self.rvalue_of_place(func, frame, ptr, array, mir_ty, access_volatile(expr))
+                        self.rvalue_of_place(func, frame, ptr, array, mir_ty, access_volatile(expr, &self.sema.decls))
                     }
                     fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag => {
                         // `__real__ x` / `__imag__ x` select a
@@ -3141,7 +3144,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                                 let (addr, _) = self.place(
                                     module, func, frame, funcs, externs, globals, expr,
                                 );
-                                self.load(func, frame, addr, mir_ty, access_volatile(inner))
+                                self.load(func, frame, addr, mir_ty, access_volatile(inner, &self.sema.decls))
                             }
                             _ => {
                                 let agg = self.expr_value(
@@ -3319,7 +3322,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         self.expr_value(module, func, frame, funcs, externs, globals, rhs);
                     let narrowed = self.convert(func, frame, rhs_val, &rhs.ty, &lhs.ty);
                     let unit = self.convert(func, frame, narrowed, &lhs.ty, decl_ty);
-                    self.bitfield_store(func, frame, addr, decl_ty, unit, *bit, *width, ty_is_volatile(decl_ty));
+                    self.bitfield_store(func, frame, addr, decl_ty, unit, *bit, *width, access_volatile(lhs, &self.sema.decls));
                     return self.bitfield_load(
                         func,
                         frame,
@@ -3329,13 +3332,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         *bit,
                         *width,
                         is_signed(decl_ty, self.sema),
-                        ty_is_volatile(decl_ty),
+                        access_volatile(lhs, &self.sema.decls),
                     );
                 }
                 let (addr, _) = self.place(module, func, frame, funcs, externs, globals, lhs);
                 let rhs_val = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
                 let narrowed = self.convert(func, frame, rhs_val, &rhs.ty, &lhs.ty);
-                self.store(func, frame, addr, narrowed, access_volatile(lhs));
+                self.store(func, frame, addr, narrowed, access_volatile(lhs, &self.sema.decls));
                 // An assignment evaluates to the stored value.
                 narrowed
             }
@@ -3370,9 +3373,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         *bit,
                         *width,
                         is_signed(unit_ty, self.sema),
-                        ty_is_volatile(unit_ty),
+                        access_volatile(lhs, &self.sema.decls),
                     ),
-                    None => self.load(func, frame, addr, mir_ty.clone(), access_volatile(lhs)),
+                    None => self.load(func, frame, addr, mir_ty.clone(), access_volatile(lhs, &self.sema.decls)),
                 };
                 let cur = self.convert(func, frame, cur, &lhs.ty, op_ty);
                 let combined = self.compound_op(
@@ -3383,7 +3386,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 match &bitfield {
                     Some((bit, width, unit_ty)) => {
                         let unit = self.convert(func, frame, narrowed, &lhs.ty, unit_ty);
-                        self.bitfield_store(func, frame, addr, unit_ty, unit, *bit, *width, ty_is_volatile(unit_ty));
+                        self.bitfield_store(func, frame, addr, unit_ty, unit, *bit, *width, access_volatile(lhs, &self.sema.decls));
                         self.bitfield_load(
                             func,
                             frame,
@@ -3393,11 +3396,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             *bit,
                             *width,
                             is_signed(unit_ty, self.sema),
-                            ty_is_volatile(unit_ty),
+                            access_volatile(lhs, &self.sema.decls),
                         )
                     }
                     None => {
-                        self.store(func, frame, addr, narrowed, access_volatile(lhs));
+                        self.store(func, frame, addr, narrowed, access_volatile(lhs, &self.sema.decls));
                         narrowed
                     }
                 }
@@ -3639,26 +3642,26 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     *bit,
                     *width,
                     is_signed(decl_ty, self.sema),
-                    ty_is_volatile(decl_ty),
+                    access_volatile(expr, &self.sema.decls),
                 )
             }
             fe::check::CheckedExprKind::Member { .. } => {
                 let (addr, _) =
                     self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
-                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr))
+                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
             fe::check::CheckedExprKind::Subscript { .. } => {
                 let (addr, _) =
                     self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
-                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr))
+                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
             fe::check::CheckedExprKind::CompoundLiteral { .. } => {
                 let (addr, _) =
                     self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
-                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr))
+                self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
             fe::check::CheckedExprKind::Str(parts) => {
                 let addr = self.string_literal(module, func, frame, parts);
@@ -8437,25 +8440,58 @@ fn ty_is_volatile(ty: &fe::parse::Ty) -> bool {
 }
 
 /// Whether reading/writing `e` touches volatile storage: its own
-/// type's qualifier, or — through wrappers that drop qualifiers
-/// (`__real__`/`__imag__` keep only `const`; casts retarget the
-/// type) — its object's. Dereference and member nodes already carry
-/// the pointee/member type, so they need no recursion.
-fn access_volatile(e: &fe::check::CheckedExpr) -> bool {
+/// (lvalue) type's qualifier, or the object it designates. The
+/// checker's lvalue conversion strips top-level qualifiers from value
+/// expressions, so a read of `*p` for a `volatile int *p` arrives here
+/// typed `int`; resolving the designated object — the declared type
+/// for an identifier, the pointee for a dereference or subscript, the
+/// base object for a member — recovers what the access actually
+/// touches. Wrappers that drop or retarget qualifiers (`__real__`,
+/// `__imag__`, casts, assignment conversions) recurse.
+fn access_volatile(e: &fe::check::CheckedExpr, decls: &[fe::sema::Binding]) -> bool {
     if ty_is_volatile(&e.ty) {
         return true;
     }
     match &e.kind {
+        fe::check::CheckedExprKind::Ident(id) => ty_is_volatile(&decls[id.0 as usize].ty),
+        fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => {
+            pointee_volatile(&inner.ty)
+        }
+        fe::check::CheckedExprKind::Subscript { base, .. } => pointee_volatile(&base.ty),
+        fe::check::CheckedExprKind::Member {
+            base,
+            arrow,
+            decl_ty,
+            ..
+        } => {
+            ty_is_volatile(decl_ty)
+                || if *arrow {
+                    pointee_volatile(&base.ty)
+                } else {
+                    access_volatile(base, decls)
+                }
+        }
         fe::check::CheckedExprKind::Unary(op, inner)
             if matches!(
                 op,
                 fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag
             ) =>
         {
-            access_volatile(inner)
+            access_volatile(inner, decls)
         }
         fe::check::CheckedExprKind::Cast { expr: inner, .. }
-        | fe::check::CheckedExprKind::Convert { expr: inner, .. } => access_volatile(inner),
+        | fe::check::CheckedExprKind::Convert { expr: inner, .. } => access_volatile(inner, decls),
+        _ => false,
+    }
+}
+
+/// Qualifiers of the object a pointer (or decayed array) designates.
+/// The pointee is not touched by lvalue conversion, unlike the value
+/// expression's own top-level qualifiers.
+fn pointee_volatile(ty: &fe::parse::Ty) -> bool {
+    match ty.unqualified() {
+        fe::parse::Ty::Pointer { pointee, .. } => ty_is_volatile(pointee),
+        fe::parse::Ty::Array { elem, .. } => ty_is_volatile(elem),
         _ => false,
     }
 }
@@ -10980,6 +11016,75 @@ mod tests {
             )),
             "volatile traffic was optimized out"
         );
+    }
+
+    /// The checker's value conversion strips top-level qualifiers, so a
+    /// volatile read through `*p`, `a[i]`, `s->x`, or a parameter
+    /// reaches lowering typed as a plain value; lowering must resolve
+    /// the designated object and keep the `.vol` flag. Without it the
+    /// read is a plain load that Cranelift forwards a dominating store
+    /// into.
+    #[test]
+    fn volatile_lvalue_reads_keep_their_flag() {
+        let src = "struct S { int x; };\n\
+                   struct B { int x : 3; };\n\
+                   int param(volatile int n) { return n + 2; }\n\
+                   int deref(volatile int *p) { return *p + 2; }\n\
+                   int sub(volatile int *a) { return a[0] + 2; }\n\
+                   int member(volatile struct S *s) { return s->x + 2; }\n\
+                   int dot(void) { volatile struct S s; s.x = 1; return s.x + 2; }\n\
+                   int bitfield(volatile struct B *b) { b->x = 3; return b->x + 2; }\n\
+                   int local(void) { volatile int v = 1; return v + 2; }\n\
+                   void store(volatile int *p, int v) { *p = v; }\n\
+                   int plain(int n) { return n + 2; }\n\
+                   int main(void) { return local() + dot(); }";
+        let volatile_accesses = |module: &mir::Module, name: &str| -> (usize, usize) {
+            let f = module
+                .funcs
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap_or_else(|| panic!("{name} lowered"));
+            let mut loads = 0;
+            let mut stores = 0;
+            for inst in f.blocks.iter().flat_map(|b| b.insts.iter()) {
+                match &f.insts[*inst].kind {
+                    mir::InstKind::Load { flags, .. } if flags.volatile => loads += 1,
+                    mir::InstKind::Store { flags, .. } if flags.volatile => stores += 1,
+                    _ => {}
+                }
+            }
+            (loads, stores)
+        };
+        let forms = [
+            ("param", true, true),
+            ("deref", true, false),
+            ("sub", true, false),
+            ("member", true, false),
+            ("dot", true, true),
+            ("bitfield", true, true),
+            ("local", true, true),
+            ("store", false, true),
+        ];
+        let mut module = lower_module(src);
+        for (name, want_load, want_store) in forms {
+            let (loads, stores) = volatile_accesses(&module, name);
+            assert_eq!(loads > 0, want_load, "volatile loads in {name} before optimization: {loads}");
+            assert_eq!(stores > 0, want_store, "volatile stores in {name} before optimization: {stores}");
+        }
+        assert_eq!(volatile_accesses(&module, "plain"), (0, 0), "plain parameter marked volatile");
+        run_opt_pipeline(&mut module);
+        assert!(mir::verify::verify_module(&module).is_empty());
+        for (name, want_load, want_store) in forms {
+            let (loads, stores) = volatile_accesses(&module, name);
+            assert_eq!(loads > 0, want_load, "volatile loads in {name} after optimization: {loads}");
+            assert_eq!(stores > 0, want_store, "volatile stores in {name} after optimization: {stores}");
+        }
+        assert_eq!(
+            volatile_accesses(&module, "plain"),
+            (0, 0),
+            "plain parameter marked volatile after optimization"
+        );
+        assert_eq!(jit_run_main(module), 6);
     }
 
     #[test]

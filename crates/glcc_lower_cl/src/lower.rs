@@ -987,6 +987,65 @@ fn operand(body: &mut Body, builder: &mut FunctionBuilder, mir_value: mir::Value
     lowered
 }
 
+/// One volatile scalar load. C requires every volatile access to touch
+/// memory; this Cranelift (0.136) has no volatile memory flag, and its
+/// alias analysis happily forwards a plain load from a dominating store
+/// (or replaces it with an equal earlier load). Atomic load/store are
+/// opaque to that analysis — it treats them as fences — so they are what
+/// volatile accesses lower to. The ordering is stronger than C's
+/// volatile asks for, which is a legal implementation of it.
+///
+/// 16-byte scalars (F80/F128 carriers, I128) have no atomic lowering on
+/// every supported target, so those keep a plain access fenced on both
+/// sides: no store reaches across the fence to feed the load and no
+/// later load reaches back over it.
+fn volatile_load(builder: &mut FunctionBuilder, ty: Type, addr: ClifValue) -> ClifValue {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = builder.ins().atomic_load(int_ty, MemFlagsData::new(), addr);
+        if int_ty == ty {
+            raw
+        } else {
+            builder.ins().bitcast(ty, MemFlagsData::new(), raw)
+        }
+    } else {
+        builder.ins().fence();
+        let value = builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(0));
+        builder.ins().fence();
+        value
+    }
+}
+
+/// The store counterpart of [`volatile_load`]: atomic for integer-like
+/// scalars up to 64 bits (32/64-bit floats bitcast through an integer),
+/// fenced plain store otherwise.
+fn volatile_store(builder: &mut FunctionBuilder, ty: Type, val: ClifValue, addr: ClifValue) {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = if int_ty == ty {
+            val
+        } else {
+            builder.ins().bitcast(int_ty, MemFlagsData::new(), val)
+        };
+        builder.ins().atomic_store(MemFlagsData::new(), raw, addr);
+    } else {
+        builder.ins().fence();
+        builder.ins().store(MemFlagsData::new(), val, addr, Offset32::new(0));
+        builder.ins().fence();
+    }
+}
+
+/// The integer type an atomic Clif op can carry for a volatile scalar:
+/// integers and pointers pass through, 32/64-bit floats go through an
+/// integer of the same size. 128-bit scalars return `None` (no atomic
+/// lowering is available on every supported target).
+fn atomic_ty(ty: Type) -> Option<Type> {
+    match ty {
+        types::I8 | types::I16 | types::I32 | types::I64 => Some(ty),
+        types::F32 => Some(types::I32),
+        types::F64 => Some(types::I64),
+        _ => None,
+    }
+}
+
 /// A compile-time constant as a Clif value. Aggregate-typed values have
 /// no constant form besides `undef`, which materializes as a fresh,
 /// uninitialized slot whose address is returned.
@@ -1964,31 +2023,54 @@ fn emit_inst<M: Module>(
             }
             Some(builder.ins().stack_addr(types::I64, slot, 0))
         }
-        mir::InstKind::Load { addr, .. } => {
-            // Clif models no volatility; MIR passes preserve
-            // volatile accesses so codegen never sees them elided.
+        mir::InstKind::Load { addr, flags } => {
+            // This Cranelift has no volatile memory flag: a plain Clif
+            // load is fair game for alias analysis (RLE, forwarding).
+            // Volatile MIR accesses lower to atomic ops instead, which
+            // the analysis never rewrites; see `volatile_load`.
             let x = operand(body, builder, addr);
             let Some(mir_ty) = result_ty.clone() else {
                 panic!("load needs a result type");
             };
             if mir_ty.is_aggregate() {
+                if flags.volatile {
+                    builder.ins().fence();
+                }
                 let slot = stack_slot(builder, &mir_ty);
                 let dst = builder.ins().stack_addr(types::I64, slot, 0);
                 emit_memcpy(builder, dst, x, mir_ty.size_bytes());
+                if flags.volatile {
+                    builder.ins().fence();
+                }
                 Some(dst)
             } else {
                 let ty = clif_ty(&mir_ty).unwrap_or_else(|| panic!("load of non-scalar type {mir_ty:?}"));
-                Some(builder.ins().load(ty, MemFlagsData::new(), x, Offset32::new(0)))
+                if flags.volatile {
+                    Some(volatile_load(builder, ty, x))
+                } else {
+                    Some(builder.ins().load(ty, MemFlagsData::new(), x, Offset32::new(0)))
+                }
             }
         }
-        mir::InstKind::Store { addr, val, .. } => {
+        mir::InstKind::Store { addr, val, flags } => {
             let dst = operand(body, builder, addr);
             let src = operand(body, builder, val);
             let mir_ty = body.func.values[val].ty.clone();
             if mir_ty.is_aggregate() {
+                if flags.volatile {
+                    builder.ins().fence();
+                }
                 emit_memcpy(builder, dst, src, mir_ty.size_bytes());
+                if flags.volatile {
+                    builder.ins().fence();
+                }
             } else {
-                builder.ins().store(MemFlagsData::new(), src, dst, Offset32::new(0));
+                let ty = clif_ty(&mir_ty).unwrap_or_else(|| panic!("store of non-scalar type {mir_ty:?}"));
+                if flags.volatile {
+                    volatile_store(builder, ty, src, dst);
+                } else {
+                    builder.ins().store(MemFlagsData::new(), src, dst, Offset32::new(0));
+                }
             }
             None
         }
@@ -4647,6 +4729,178 @@ mod tests {
         assert_eq!(section.align(), 8);
         assert_eq!(section.data().expect("section data").len(), 8);
         assert!(section.relocations().next().is_some(), "hook address is a link-time reloc");
+    }
+
+    /// Volatile MIR accesses must be opaque to Cranelift's alias
+    /// analysis, which happily forwards a plain load from a dominating
+    /// store: they lower to atomic ops it treats as fences. 16-byte
+    /// scalars have no portable atomic form and keep a plain access
+    /// fenced on both sides instead.
+    #[test]
+    fn volatile_accesses_lower_to_atomics() {
+        use cranelift_codegen::ir::types;
+        use cranelift_codegen::ir::{Function, InstBuilder, Opcode, Type};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+
+        fn access_opcodes(ty: Type) -> Vec<Opcode> {
+            let mut func = Function::new();
+            {
+                let mut ctx = FunctionBuilderContext::new();
+                let mut builder = FunctionBuilder::new(&mut func, &mut ctx);
+                let entry = builder.create_block();
+                builder.switch_to_block(entry);
+                let addr = builder.append_block_param(entry, types::I64);
+                let value = super::volatile_load(&mut builder, ty, addr);
+                super::volatile_store(&mut builder, ty, value, addr);
+                builder.ins().return_(&[]);
+                builder.seal_all_blocks();
+            }
+            func.layout
+                .blocks()
+                .flat_map(|block| func.layout.block_insts(block))
+                .map(|inst| func.dfg.insts[inst].opcode())
+                .collect()
+        }
+
+        for ty in [types::I8, types::I16, types::I32, types::I64, types::F32, types::F64] {
+            let opcodes = access_opcodes(ty);
+            assert!(opcodes.contains(&Opcode::AtomicLoad), "{ty} load: {opcodes:?}");
+            assert!(opcodes.contains(&Opcode::AtomicStore), "{ty} store: {opcodes:?}");
+        }
+        let opcodes = access_opcodes(types::F128);
+        assert!(!opcodes.contains(&Opcode::AtomicLoad), "{opcodes:?}");
+        assert!(!opcodes.contains(&Opcode::AtomicStore), "{opcodes:?}");
+        assert!(opcodes.contains(&Opcode::Fence), "{opcodes:?}");
+        assert!(opcodes.contains(&Opcode::Load) && opcodes.contains(&Opcode::Store), "{opcodes:?}");
+    }
+
+    /// A `Module` that compiles nothing: it keeps the finalized Clif of
+    /// each defined function so tests can inspect what lowering
+    /// emitted. Only enough of the trait for modules of plain functions.
+    struct RecordingModule {
+        isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+        declarations: cranelift_module::ModuleDeclarations,
+        funcs: Vec<cranelift_codegen::ir::Function>,
+    }
+
+    impl RecordingModule {
+        fn new() -> Self {
+            let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+            let isa = cranelift_native::builder().expect("native isa").finish(flags).expect("native isa");
+            Self {
+                isa,
+                declarations: cranelift_module::ModuleDeclarations::default(),
+                funcs: Vec::new(),
+            }
+        }
+    }
+
+    impl cranelift_module::Module for RecordingModule {
+        fn isa(&self) -> &dyn cranelift_codegen::isa::TargetIsa {
+            &*self.isa
+        }
+
+        fn declarations(&self) -> &cranelift_module::ModuleDeclarations {
+            &self.declarations
+        }
+
+        fn declare_function(
+            &mut self,
+            name: &str,
+            linkage: cranelift_module::Linkage,
+            signature: &cranelift_codegen::ir::Signature,
+        ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+            self.declarations.declare_function(name, linkage, signature).map(|(id, _)| id)
+        }
+
+        fn declare_anonymous_function(
+            &mut self,
+            signature: &cranelift_codegen::ir::Signature,
+        ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+            self.declarations.declare_anonymous_function(signature)
+        }
+
+        fn declare_data(
+            &mut self,
+            name: &str,
+            linkage: cranelift_module::Linkage,
+            writable: bool,
+            tls: bool,
+        ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+            self.declarations.declare_data(name, linkage, writable, tls).map(|(id, _)| id)
+        }
+
+        fn declare_anonymous_data(
+            &mut self,
+            writable: bool,
+            tls: bool,
+        ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+            self.declarations.declare_anonymous_data(writable, tls)
+        }
+
+        fn define_function_with_control_plane(
+            &mut self,
+            _func: cranelift_module::FuncId,
+            ctx: &mut cranelift_codegen::Context,
+            _ctrl_plane: &mut cranelift_codegen::control::ControlPlane,
+        ) -> cranelift_module::ModuleResult<()> {
+            self.funcs.push(ctx.func.clone());
+            Ok(())
+        }
+
+        fn define_function_bytes(
+            &mut self,
+            _func_id: cranelift_module::FuncId,
+            _alignment: u64,
+            _bytes: &[u8],
+            _relocs: &[cranelift_module::ModuleReloc],
+        ) -> cranelift_module::ModuleResult<()> {
+            unreachable!("a recording module has no object bytes")
+        }
+
+        fn define_data(&mut self, _data_id: cranelift_module::DataId, _data: &cranelift_module::DataDescription) -> cranelift_module::ModuleResult<()> {
+            unreachable!("a recording module defines no data")
+        }
+    }
+
+    /// The wiring, not just the helpers: `emit_inst` must route a
+    /// volatile MIR access through the atomic path (which Cranelift's
+    /// alias analysis never forwards a store into) and leave plain
+    /// accesses plain.
+    #[test]
+    fn volatile_mir_accesses_lower_to_atomic_clif() {
+        use cranelift_codegen::ir::Opcode;
+
+        fn lowered_opcodes(volatile: bool) -> Vec<Opcode> {
+            let mut module = mir::Module::new();
+            let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::int(32))], mir::Ty::int(32));
+            let (mut f, entry) = mir::Function::new("f", sig);
+            let p = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 0);
+            let flags = if volatile { mir::MemFlags::vol() } else { mir::MemFlags::plain() };
+            let load = emit(&mut f, entry, mir::InstKind::Load { addr: p, flags }, mir::Ty::int(32));
+            let seven = iconst(&mut f, 32, 7);
+            emit_unit(&mut f, entry, mir::InstKind::Store { addr: p, val: seven, flags });
+            ret(&mut f, entry, Some(load));
+            module.push_func(f);
+
+            let mut sink = RecordingModule::new();
+            lower_module(&module, &mut sink, crate::abi::Target::native());
+            let func = &sink.funcs[0];
+            func.layout
+                .blocks()
+                .flat_map(|block| func.layout.block_insts(block))
+                .map(|inst| func.dfg.insts[inst].opcode())
+                .collect()
+        }
+
+        let volatile_ops = lowered_opcodes(true);
+        assert!(volatile_ops.contains(&Opcode::AtomicLoad), "{volatile_ops:?}");
+        assert!(volatile_ops.contains(&Opcode::AtomicStore), "{volatile_ops:?}");
+        let plain_ops = lowered_opcodes(false);
+        assert!(plain_ops.contains(&Opcode::Load), "{plain_ops:?}");
+        assert!(plain_ops.contains(&Opcode::Store), "{plain_ops:?}");
+        assert!(!plain_ops.contains(&Opcode::AtomicLoad), "{plain_ops:?}");
+        assert!(!plain_ops.contains(&Opcode::AtomicStore), "{plain_ops:?}");
     }
 }
 
