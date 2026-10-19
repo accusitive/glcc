@@ -363,6 +363,40 @@ fn literal_metadata() {
     let Constant::Float(x) = h else { panic!("{h:?}") };
     assert_eq!((x.radix, x.suffix), (Radix::Hex, FloatSuffix::None));
 }
+
+#[test]
+fn msvc_int_suffixes() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let source = "1i8 2i16 3i32 4i64 5ui8 6ui16 7ui32 8ui64 9I64 10UI64 11i";
+    let mut parser = test_parser(source, &mut sema, &mut interner);
+    let mut lits = Vec::new();
+    while let Some(t) = parser.tokens.advance() {
+        match &t.val {
+            Token::Constant(Constant::Int(i)) => lits.push((i.spelling, i.suffix, i.imag)),
+            other => panic!("expected int constant, got {other:?}"),
+        }
+    }
+    let suffixes = lits.iter().map(|(_, s, _)| *s).collect::<Vec<_>>();
+    assert_eq!(
+        suffixes,
+        [
+            IntSuffix::I8,
+            IntSuffix::I16,
+            IntSuffix::I32,
+            IntSuffix::I64,
+            IntSuffix::UI8,
+            IntSuffix::UI16,
+            IntSuffix::UI32,
+            IntSuffix::UI64,
+            IntSuffix::I64,
+            IntSuffix::UI64,
+            IntSuffix::None,
+        ]
+    );
+    assert!(lits[10].2, "trailing `i` must stay the imaginary suffix");
+}
+
 #[test]
 fn works_across_lines() {
     assert_eq!(lex_raw("1\\\n..."), ["i:1", "..."]);
@@ -3355,6 +3389,19 @@ fn int_literal_values() {
     assert_eq!(lit("1ull", Radix::Dec, IntSuffix::ULL), Some((UnsignedLongLong, 1)));
     assert_eq!(lit("0xFFFFFFFFFFFFFFFF", Radix::Hex, IntSuffix::None), Some((UnsignedLong, u64::MAX as i128)));
     assert_eq!(lit("0x10000000000000000", Radix::Hex, IntSuffix::None), None);
+    assert_eq!(
+        lit("9223372036854775807i64", Radix::Dec, IntSuffix::I64),
+        Some((LongLong, i64::MAX as i128))
+    );
+    assert_eq!(
+        lit("0xFFFFFFFFFFFFFFFFui64", Radix::Hex, IntSuffix::UI64),
+        Some((UnsignedLongLong, u64::MAX as i128))
+    );
+    assert_eq!(lit("127i8", Radix::Dec, IntSuffix::I8), Some((SignedChar, 127)));
+    assert_eq!(lit("128i8", Radix::Dec, IntSuffix::I8), None);
+    assert_eq!(lit("0xffffui16", Radix::Hex, IntSuffix::UI16), Some((UnsignedShort, 0xffff)));
+    assert_eq!(lit("2147483647i32", Radix::Dec, IntSuffix::I32), Some((Int, i32::MAX as i128)));
+    assert_eq!(lit("0xffffffffui32", Radix::Hex, IntSuffix::UI32), Some((UnsignedInt, u32::MAX as i128)));
 }
 
 #[test]

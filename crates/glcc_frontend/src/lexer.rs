@@ -682,7 +682,8 @@ pub enum Radix {
     Dec,
     Hex,
 }
-/// `u`/`U` and/or `l`/`L`/`ll`/`LL` suffix of an integer constant.
+/// `u`/`U` and/or `l`/`L`/`ll`/`LL` suffix of an integer constant, plus
+/// MSVC's fixed-width `__intN` suffixes (`i8`..`i64`, `ui8`..`ui64`).
 #[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntSuffix {
@@ -692,6 +693,14 @@ pub enum IntSuffix {
     UL,
     LL,
     ULL,
+    I8,
+    I16,
+    I32,
+    I64,
+    UI8,
+    UI16,
+    UI32,
+    UI64,
 }
 /// `f`/`F` (`float`) or `l`/`L` (`long double`) suffix of a float constant;
 /// no suffix means `double`.
@@ -1224,7 +1233,57 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// MSVC's `__intN` literal suffixes: `i8`/`i16`/`i32`/`i64` and the
+    /// unsigned `ui8`..`ui64` forms, which select that fixed-width type
+    /// regardless of the constant's value (MSVC's <stdint.h> spells
+    /// `INT64_MIN` as `-9223372036854775807i64`). Case-insensitive.
+    /// Not consumed when the text is not one of these (`1i` stays the
+    /// GNU imaginary suffix).
+    fn lex_ms_int_suffix(&mut self, buf: &mut String) -> Option<IntSuffix> {
+        let i_at = match self.peek_char(0) {
+            Some('u') | Some('U') => 1,
+            Some('i') | Some('I') => 0,
+            _ => return None,
+        };
+        if !matches!(self.peek_char(i_at), Some('i') | Some('I')) {
+            return None;
+        }
+        let mut width = 0u32;
+        let mut digits = 0;
+        let mut len = i_at + 1;
+        while digits < 3 {
+            let Some(digit) = self.peek_char(len).and_then(|c| c.to_digit(10)) else { break };
+            if digits == 0 && digit == 0 {
+                return None;
+            }
+            width = width * 10 + digit;
+            digits += 1;
+            len += 1;
+        }
+        if matches!(self.peek_char(len), Some(c) if c.is_ascii_digit()) {
+            return None;
+        }
+        let suffix = match (i_at == 1, width) {
+            (false, 8) => IntSuffix::I8,
+            (false, 16) => IntSuffix::I16,
+            (false, 32) => IntSuffix::I32,
+            (false, 64) => IntSuffix::I64,
+            (true, 8) => IntSuffix::UI8,
+            (true, 16) => IntSuffix::UI16,
+            (true, 32) => IntSuffix::UI32,
+            (true, 64) => IntSuffix::UI64,
+            _ => return None,
+        };
+        for _ in 0..len {
+            self.bump_into(buf);
+        }
+        Some(suffix)
+    }
+
     fn lex_int_suffix(&mut self, buf: &mut String) -> IntSuffix {
+        if let Some(suffix) = self.lex_ms_int_suffix(buf) {
+            return suffix;
+        }
         if self.lex_u(buf) {
             match self.lex_l_run(buf) {
                 0 => IntSuffix::U,

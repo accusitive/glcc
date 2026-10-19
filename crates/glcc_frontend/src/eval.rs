@@ -339,8 +339,9 @@ fn suffix_len(suffix: IntSuffix) -> usize {
     match suffix {
         IntSuffix::None => 0,
         IntSuffix::U | IntSuffix::L => 1,
-        IntSuffix::UL | IntSuffix::LL => 2,
-        IntSuffix::ULL => 3,
+        IntSuffix::UL | IntSuffix::LL | IntSuffix::I8 => 2,
+        IntSuffix::ULL | IntSuffix::I16 | IntSuffix::I32 | IntSuffix::I64 | IntSuffix::UI8 => 3,
+        IntSuffix::UI16 | IntSuffix::UI32 | IntSuffix::UI64 => 4,
     }
 }
 
@@ -359,6 +360,10 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
     let text = if text.is_empty() { "0" } else { text };
     let magnitude = u128::from_str_radix(text, radix).ok()?;
     // First type in each list whose range holds the magnitude.
+    const I8: u128 = 1 << 7;
+    const U8: u128 = 1 << 8;
+    const I16: u128 = 1 << 15;
+    const U16: u128 = 1 << 16;
     const I31: u128 = 1 << 31;
     const U32: u128 = 1 << 32;
     const I63: u128 = 1 << 63;
@@ -385,6 +390,18 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
         (false, IntSuffix::UL) => &[(Ty::UnsignedLong, ulong_bound), (Ty::UnsignedLongLong, U64)],
         (false, IntSuffix::LL) => &[(Ty::LongLong, I63), (Ty::UnsignedLongLong, U64)],
         (false, IntSuffix::ULL) => &[(Ty::UnsignedLongLong, U64)],
+        // MSVC's `__intN` suffixes name the type outright.
+        (_, IntSuffix::I8) => &[(Ty::SignedChar, I8)],
+        (_, IntSuffix::I16) => &[(Ty::Short, I16)],
+        (_, IntSuffix::I32) => &[(Ty::Int, I31)],
+        // MSVC allows an out-of-range hex `i64` to fall back to unsigned,
+        // matching its `LL` treatment (`0xffffffffffffffffi64`).
+        (true, IntSuffix::I64) => &[(Ty::LongLong, I63)],
+        (false, IntSuffix::I64) => &[(Ty::LongLong, I63), (Ty::UnsignedLongLong, U64)],
+        (_, IntSuffix::UI8) => &[(Ty::UnsignedChar, U8)],
+        (_, IntSuffix::UI16) => &[(Ty::UnsignedShort, U16)],
+        (_, IntSuffix::UI32) => &[(Ty::UnsignedInt, U32)],
+        (_, IntSuffix::UI64) => &[(Ty::UnsignedLongLong, U64)],
     };
     let (ty, _) = table.iter().find(|(_, bound)| magnitude < *bound)?;
     // Every surviving magnitude fits `i128` (`u64::MAX < i128::MAX`).
