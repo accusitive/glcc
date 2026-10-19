@@ -11405,17 +11405,19 @@ mod tests {
             run_main("int main(){const void *p = (const void*)-1; return (p == (const void*)-1) + ((long)p == -1);}"),
             2
         );
+        // Plain `char` is signed on x86-64 but unsigned on aarch64 and
+        // riscv64, so spell out the signedness this check needs.
         assert_eq!(
-            run_main("int main(){volatile int i = -1; volatile short s = -1; volatile char c = -1;\
+            run_main("int main(){volatile int i = -1; volatile short s = -1; volatile signed char c = -1;\
                 return ((long)(void*)i == -1) + ((long)(void*)s == -1) * 2 + ((long)(void*)c == -1) * 4;}"),
             7
         );
         // Unsigned narrow sources stay zero-extended, including the
         // full-width unsigned value whose sign bit is set.
         assert_eq!(
-            run_main("int main(){volatile unsigned u = 4294967295u; volatile unsigned short h = 65535;\
-                return ((unsigned long)(void*)u == 4294967295UL) + ((unsigned long)(void*)h == 65535UL) * 2;}"),
-            3
+            run_main("int main(){volatile unsigned u = 4294967295u; volatile unsigned short h = 65535; volatile unsigned char b = 255;\
+                return ((unsigned long)(void*)u == 4294967295UL) + ((unsigned long)(void*)h == 65535UL) * 2 + ((unsigned long)(void*)b == 255UL) * 4;}"),
+            7
         );
         assert_eq!(run_main("int main(){volatile long l = -1; return (long)(void*)l == -1;}"), 1);
     }
@@ -11438,6 +11440,41 @@ mod tests {
             }
         }
         assert_eq!(seen, 4, "casts lowered through inttoptr");
+    }
+
+    /// Plain `char` takes its signedness from the target (signed on
+    /// x86-64, unsigned on aarch64 and riscv64); `signed char` and
+    /// `unsigned char` never do. The widening before `inttoptr` follows.
+    #[test]
+    fn int_to_pointer_extension_follows_target_char_signedness() {
+        let src = "void sink(const void *p); void f(volatile char c, volatile signed char s, volatile unsigned char u) {\
+                    sink((const void*)c); sink((const void*)s); sink((const void*)u); }";
+        let cases = [
+            (fe::target::Target::X86_64, ["sext", "sext", "zext"]),
+            (fe::target::Target::AARCH64, ["zext", "sext", "zext"]),
+        ];
+        for (target, expected) in cases {
+            let module = lower_module_for(src, target);
+            let mut exts = Vec::new();
+            for func in module.funcs.iter().filter(|f| f.name == "f") {
+                for inst in func.insts.iter() {
+                    let mir::InstKind::IntToPtr(v) = &inst.kind else {
+                        continue;
+                    };
+                    let def = func
+                        .insts
+                        .iter()
+                        .find(|i| i.result == Some(*v))
+                        .expect("inttoptr source widens to pointer width first");
+                    exts.push(match &def.kind {
+                        mir::InstKind::Sext(_) => "sext",
+                        mir::InstKind::Zext(_) => "zext",
+                        _ => panic!("inttoptr source is not a sext/zext"),
+                    });
+                }
+            }
+            assert_eq!(exts, expected, "extension before inttoptr on {target:?}");
+        }
     }
 
     /// The optimized pipeline keeps the conversion values intact with a
