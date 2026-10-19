@@ -175,6 +175,18 @@ fn lower_module_impl<M: Module>(
     // x86-64 foreign variadic calls route through the runtime
     // trampoline; declare its symbols only when such a call exists.
     let rt = Rt::declare_if_needed(mir_module, target, clif);
+    let memcpy_id = mir_module
+        .funcs
+        .iter()
+        .any(needs_libc_memcpy)
+        .then(|| {
+            // A user prototype may describe a different signature. In that
+            // case fall back to the inline copy rather than conflicting
+            // with the user's declaration.
+            clif.declare_function("memcpy", Linkage::Import, &rt_sig(target, vec![types::I64, types::I64, types::I64], vec![types::I64]))
+                .ok()
+        })
+        .flatten();
     for (id, func) in mir_module.funcs.iter_enumerated() {
         lower_function(
             id,
@@ -187,6 +199,7 @@ fn lower_module_impl<M: Module>(
             &data_ids,
             &tls_data,
             &rt,
+            memcpy_id,
             clif,
             &mut wrappers,
             debug.as_deref_mut(),
@@ -195,6 +208,23 @@ fn lower_module_impl<M: Module>(
     }
     asm_text.push_str(&wrappers.text);
     ids
+}
+
+fn is_large_aggregate(ty: &mir::Ty) -> bool {
+    ty.is_aggregate() && ty.size_bytes() >= LIBC_COPY_THRESHOLD
+}
+
+fn needs_libc_memcpy(func: &mir::Function) -> bool {
+    if is_large_aggregate(&func.sig.ret) || func.sig.params.iter().any(is_large_aggregate) {
+        return true;
+    }
+    func.insts.iter().any(|inst| match &inst.kind {
+        mir::InstKind::Memcpy { len, .. } => *len >= LIBC_COPY_THRESHOLD,
+        mir::InstKind::Load { .. } => inst.result.is_some_and(|v| is_large_aggregate(&func.values[v].ty)),
+        mir::InstKind::Store { val, .. } => is_large_aggregate(&func.values[*val].ty),
+        mir::InstKind::InsertValue { agg, .. } => is_large_aggregate(&func.values[*agg].ty),
+        _ => false,
+    })
 }
 
 /// Inline-asm wrapper text collected while lowering one module,
@@ -664,6 +694,9 @@ struct Body<'m> {
     consts: HashMap<(ClifBlock, mir::Value), ClifValue>,
     blocks: HashMap<mir::Block, ClifBlock>,
     sret: Option<ClifValue>,
+    /// The libc `memcpy` import, present when this function contains a
+    /// copy large enough to call it.
+    memcpy: Option<FuncRef>,
     /// Variadic prelude state, present exactly in variadic definitions.
     va: Option<VaCtx>,
     /// Where the Clif builder is positioned, to avoid redundant
@@ -688,6 +721,7 @@ fn lower_function<M: Module>(
     data_ids: &HashMap<mir::Global, cranelift_module::DataId>,
     tls_data: &std::collections::HashSet<mir::Global>,
     rt: &Rt,
+    memcpy_id: Option<FuncId>,
     clif: &mut M,
     wrappers: &mut Wrappers,
     debug: Option<&mut glcc_dwarf::LoweredDebug>,
@@ -696,6 +730,7 @@ fn lower_function<M: Module>(
     let layout = layouts[&id].clone();
     let mut ctx = clif.make_context();
     ctx.func.signature = abi::clif_signature(&layout, target.call_conv());
+    let memcpy = memcpy_id.map(|id| clif.declare_func_in_func(id, &mut ctx.func));
     let mut func_ctx = FunctionBuilderContext::new();
     let mut builder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
 
@@ -707,6 +742,7 @@ fn lower_function<M: Module>(
         consts: HashMap::new(),
         blocks: HashMap::new(),
         sret: None,
+        memcpy,
         va: None,
         current: None,
         slots: HashMap::new(),
@@ -909,7 +945,7 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
         if mir_ty.is_aggregate() {
             let slot = stack_slot(builder, &mir_ty);
             let dst = builder.ins().stack_addr(types::I64, slot, 0);
-            emit_memcpy(builder, dst, *addr, mir_ty.size_bytes());
+            emit_copy(body, builder, dst, *addr, mir_ty.size_bytes());
             body.values.insert(mir_param, dst);
         } else {
             // Scalar behind an address (x86-64 `long double`): load
@@ -1153,6 +1189,11 @@ pub(crate) fn emit_memcpy_pub(builder: &mut FunctionBuilder, dst: ClifValue, src
     emit_memcpy(builder, dst, src, len)
 }
 
+/// Copies at least this large call libc `memcpy` instead of unrolling
+/// one load/store pair per 16 bytes. Smaller copies keep the inline
+/// sequence to avoid call overhead on common small aggregates.
+const LIBC_COPY_THRESHOLD: u64 = 256;
+
 fn emit_memcpy(builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, len: u64) {
     let mut off = 0u64;
     for (chunk_ty, chunk) in [(types::F128, 16), (types::I64, 8), (types::I32, 4), (types::I16, 2), (types::I8, 1)] {
@@ -1162,6 +1203,17 @@ fn emit_memcpy(builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, le
             off += chunk;
         }
     }
+}
+
+fn emit_copy(body: &Body, builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, len: u64) {
+    if len >= LIBC_COPY_THRESHOLD {
+        if let Some(memcpy) = body.memcpy {
+            let len = builder.ins().iconst(types::I64, len as i64);
+            builder.ins().call(memcpy, &[dst, src, len]);
+            return;
+        }
+    }
+    emit_memcpy(builder, dst, src, len);
 }
 
 /// Whether a MIR value is an x86-64 80-bit extended float: arithmetic
@@ -2035,7 +2087,11 @@ fn emit_inst<M: Module>(
                 }
                 let slot = stack_slot(builder, &mir_ty);
                 let dst = builder.ins().stack_addr(types::I64, slot, 0);
-                emit_memcpy(builder, dst, x, mir_ty.size_bytes());
+                if flags.volatile {
+                    emit_memcpy(builder, dst, x, mir_ty.size_bytes());
+                } else {
+                    emit_copy(body, builder, dst, x, mir_ty.size_bytes());
+                }
                 if flags.volatile {
                     builder.ins().fence();
                 }
@@ -2056,10 +2112,10 @@ fn emit_inst<M: Module>(
             if mir_ty.is_aggregate() {
                 if flags.volatile {
                     builder.ins().fence();
-                }
-                emit_memcpy(builder, dst, src, mir_ty.size_bytes());
-                if flags.volatile {
+                    emit_memcpy(builder, dst, src, mir_ty.size_bytes());
                     builder.ins().fence();
+                } else {
+                    emit_copy(body, builder, dst, src, mir_ty.size_bytes());
                 }
             } else {
                 let ty = clif_ty(&mir_ty).unwrap_or_else(|| panic!("store of non-scalar type {mir_ty:?}"));
@@ -2096,10 +2152,10 @@ fn emit_inst<M: Module>(
             let slot = stack_slot(builder, &mir_ty);
             let dst = builder.ins().stack_addr(types::I64, slot, 0);
             if !is_undef(body, agg) {
-                emit_memcpy(builder, dst, base, mir_ty.size_bytes());
+                emit_copy(body, builder, dst, base, mir_ty.size_bytes());
             }
             if elem_ty.is_aggregate() {
-                emit_memcpy_offset(builder, dst, off, val, elem_ty.size_bytes());
+                emit_memcpy_offset(body, builder, dst, off, val, elem_ty.size_bytes());
             } else {
                 builder.ins().store(memflags::notrap(), val, dst, Offset32::new(off as i32));
             }
@@ -2108,7 +2164,7 @@ fn emit_inst<M: Module>(
         mir::InstKind::Memcpy { dst, src, len } => {
             let d = operand(body, builder, dst);
             let s = operand(body, builder, src);
-            emit_memcpy(builder, d, s, len);
+            emit_copy(body, builder, d, s, len);
             None
         }
         mir::InstKind::Memset { dst, byte, len } => {
@@ -2433,9 +2489,9 @@ fn narrow_to_declared(builder: &mut FunctionBuilder, v: ClifValue, mir_ty: &mir:
     resize_int(builder, v, got, decl)
 }
 
-fn emit_memcpy_offset(builder: &mut FunctionBuilder, dst_base: ClifValue, dst_off: u64, src: ClifValue, len: u64) {
+fn emit_memcpy_offset(body: &Body, builder: &mut FunctionBuilder, dst_base: ClifValue, dst_off: u64, src: ClifValue, len: u64) {
     let dst = if dst_off == 0 { dst_base } else { builder.ins().iadd_imm_u(dst_base, dst_off as i64) };
-    emit_memcpy(builder, dst, src, len);
+    emit_copy(body, builder, dst, src, len);
 }
 
 /// Lower a GEP to address arithmetic: constant steps fold to one
@@ -2617,7 +2673,7 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                 abi::RetLoc::Sret => {
                     let slot = body.sret.expect("aggregate return needs an out-pointer");
                     let addr = operand(body, builder, val.expect("aggregate return needs a value"));
-                    emit_memcpy(builder, slot, addr, body.func.sig.ret.size_bytes());
+                    emit_copy(body, builder, slot, addr, body.func.sig.ret.size_bytes());
                     builder.ins().return_(&[]);
                 }
                 abi::RetLoc::Regs(_) if ret_pieces.is_some() => {
@@ -3011,6 +3067,86 @@ mod tests {
         assert_eq!(run_i32(&jit, &ids, 0, 0), 10);
         assert_eq!(run_i32(&jit, &ids, 0, 1), 20);
         assert_eq!(run_i32(&jit, &ids, 0, 99), 30);
+    }
+
+    #[test]
+    fn large_copies_call_libc_memcpy() {
+        use cranelift_codegen::ir::Opcode;
+
+        fn opcodes(len: u64) -> Vec<Opcode> {
+            let mut module = mir::Module::new();
+            let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::Void), mir::Ty::ptr(mir::Ty::Void)], mir::Ty::Void);
+            let (mut f, entry) = mir::Function::new("copy", sig);
+            let dst = param(&mut f, entry, mir::Ty::ptr(mir::Ty::Void), 0);
+            let src = param(&mut f, entry, mir::Ty::ptr(mir::Ty::Void), 1);
+            emit_unit(&mut f, entry, mir::InstKind::Memcpy { dst, src, len });
+            ret(&mut f, entry, None);
+            module.push_func(f);
+
+            let mut sink = RecordingModule::new();
+            lower_module(&module, &mut sink, crate::abi::Target::native());
+            let func = &sink.funcs[0];
+            func.layout
+                .blocks()
+                .flat_map(|block| func.layout.block_insts(block))
+                .map(|inst| func.dfg.insts[inst].opcode())
+                .collect()
+        }
+
+        let large = opcodes(1024);
+        assert!(large.contains(&Opcode::Call), "{large:?}");
+        assert!(!large.contains(&Opcode::Load), "{large:?}");
+
+        let small = opcodes(64);
+        assert!(!small.contains(&Opcode::Call), "{small:?}");
+        assert!(small.contains(&Opcode::Load), "{small:?}");
+    }
+
+    #[test]
+    fn volatile_aggregate_copies_stay_inline() {
+        use cranelift_codegen::ir::Opcode;
+
+        let mut module = mir::Module::new();
+        let ty = mir::Ty::Array {
+            elem: Box::new(mir::Ty::int(8)),
+            len: 1024,
+        };
+        let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::Void), mir::Ty::ptr(mir::Ty::Void)], mir::Ty::Void);
+        let (mut f, entry) = mir::Function::new("copy", sig);
+        let dst = param(&mut f, entry, mir::Ty::ptr(mir::Ty::Void), 0);
+        let src = param(&mut f, entry, mir::Ty::ptr(mir::Ty::Void), 1);
+        let value = emit(
+            &mut f,
+            entry,
+            mir::InstKind::Load {
+                addr: src,
+                flags: mir::MemFlags::vol(),
+            },
+            ty,
+        );
+        emit_unit(
+            &mut f,
+            entry,
+            mir::InstKind::Store {
+                addr: dst,
+                val: value,
+                flags: mir::MemFlags::vol(),
+            },
+        );
+        ret(&mut f, entry, None);
+        module.push_func(f);
+
+        let mut sink = RecordingModule::new();
+        lower_module(&module, &mut sink, crate::abi::Target::native());
+        let func = &sink.funcs[0];
+        let opcodes: Vec<_> = func
+            .layout
+            .blocks()
+            .flat_map(|block| func.layout.block_insts(block))
+            .map(|inst| func.dfg.insts[inst].opcode())
+            .collect();
+        assert!(!opcodes.contains(&Opcode::Call), "{opcodes:?}");
+        assert!(opcodes.contains(&Opcode::Load), "{opcodes:?}");
     }
 
     #[test]
