@@ -2979,6 +2979,30 @@ mod tests {
         }
     }
 
+    /// A variable whose slot the optimizer promoted has no home in the
+    /// emitted code. Its DIE must survive with a name and type but no
+    /// location, so a debugger reports "optimized out" (and `ptype`
+    /// still resolves) instead of "No symbol".
+    #[test]
+    fn debug_optimized_out_variables_keep_their_die() {
+        use gimli::constants::*;
+        let src = "__attribute__((noinline)) int f(int a) {\n\
+                       int t = a + 1;\n\
+                       return t * 2;\n\
+                   }\n\
+                   int main(void) { return f(3); }\n";
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
+            .expect("compiles")
+            .0;
+        let (dies, _) = read_dies(&bytes);
+        let param = find(&dies, DW_TAG_formal_parameter, "a");
+        let local = find(&dies, DW_TAG_variable, "t");
+        assert!(!param.has_location, "promoted parameter kept a location");
+        assert!(!local.has_location, "promoted local kept a location");
+        assert!(!param.flags.contains(&DW_AT_declaration), "parameter marked a declaration");
+        assert!(!local.flags.contains(&DW_AT_declaration), "local marked a declaration");
+    }
+
     /// Windows unwind tables: compiling for x86_64-windows appends
     /// `.pdata` (one 12-byte RUNTIME_FUNCTION per defined function, in
     /// ascending `.text` order, every field

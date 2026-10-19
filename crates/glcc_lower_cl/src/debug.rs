@@ -40,8 +40,8 @@ pub(crate) fn collect_function_debug(
     };
     let (params, vars, scopes) = match &func.debug {
         Some(mir_debug) => (
-            mir_debug.params.iter().filter_map(|var| lower_var(var, &ctx)).collect(),
-            mir_debug.vars.iter().filter_map(|var| lower_var(var, &ctx)).collect(),
+            mir_debug.params.iter().map(|var| lower_var(var, &ctx)).collect(),
+            mir_debug.vars.iter().map(|var| lower_var(var, &ctx)).collect(),
             mir_debug.scopes.iter().map(|scope| lower_scope(scope, &ctx)).collect(),
         ),
         None => (Vec::new(), Vec::new(), Vec::new()),
@@ -98,35 +98,38 @@ struct HomeCtx<'a> {
 }
 
 /// Resolve one MIR variable record: its slot's frame offset from the
-/// CFA, or its data symbol. Records with no describable home drop out
-/// (they carry no location to describe).
-fn lower_var(var: &mir::VarDebug, ctx: &HomeCtx<'_>) -> Option<glcc_dwarf::VarDebug> {
+/// CFA, or its data symbol. A record whose home no longer exists in the
+/// emitted code (the optimizer promoted its slot, and the value now
+/// moves between registers or was folded away) becomes
+/// [`VarLoc::OptimizedOut`] rather than being dropped, so the DIE still
+/// names the variable and describes its type.
+fn lower_var(var: &mir::VarDebug, ctx: &HomeCtx<'_>) -> glcc_dwarf::VarDebug {
     let loc = match var.home {
-        mir::VarHome::Slot(value) => {
-            let slot = ctx.slots.get(&value)?;
-            let slot = ctx.frame?.stackslots.get(*slot)?;
-            VarLoc::Fbreg(i64::from(slot.offset) - ctx.fb_base?)
-        }
-        mir::VarHome::Global(global) => {
-            if ctx.tls_data.contains(&global) {
-                return None;
-            }
-            VarLoc::Static(*ctx.data_ids.get(&global)?)
-        }
+        mir::VarHome::Slot(value) => ctx
+            .slots
+            .get(&value)
+            .and_then(|slot| ctx.frame?.stackslots.get(*slot))
+            .and_then(|slot| ctx.fb_base.map(|base| i64::from(slot.offset) - base))
+            .map(VarLoc::Fbreg)
+            .unwrap_or(VarLoc::OptimizedOut),
+        mir::VarHome::Global(global) => match ctx.data_ids.get(&global) {
+            Some(data) if !ctx.tls_data.contains(&global) => VarLoc::Static(*data),
+            _ => VarLoc::OptimizedOut,
+        },
     };
-    Some(glcc_dwarf::VarDebug {
+    glcc_dwarf::VarDebug {
         name: var.name.clone(),
         decl: var.decl,
         debug_ty: var.debug_ty,
         loc,
-    })
+    }
 }
 
 fn lower_scope(scope: &mir::ScopeDebug, ctx: &HomeCtx<'_>) -> glcc_dwarf::ScopeDebug {
     glcc_dwarf::ScopeDebug {
         start: scope.start,
         end: scope.end,
-        vars: scope.vars.iter().filter_map(|var| lower_var(var, ctx)).collect(),
+        vars: scope.vars.iter().map(|var| lower_var(var, ctx)).collect(),
         children: scope.children.iter().map(|child| lower_scope(child, ctx)).collect(),
     }
 }

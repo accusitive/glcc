@@ -62,14 +62,20 @@ pub struct VarDebug {
 }
 
 /// Where a variable lives: a CFA-relative frame offset for automatics
-/// homed in explicit stack slots, or a data symbol for globals and
-/// block-scope statics.
+/// homed in explicit stack slots, a data symbol for globals and
+/// block-scope statics, or nowhere describable.
 #[derive(Debug, Clone, Copy)]
 pub enum VarLoc {
     /// Offset from the CFA (`DW_OP_fbreg`).
     Fbreg(i64),
     /// Link-time address (`DW_OP_addr` against the data symbol).
     Static(DataId),
+    /// The variable exists in the source but has no home in the emitted
+    /// code: its slot was promoted and folded away, or its value lives
+    /// only in registers. The DIE keeps the name and type but carries no
+    /// location, which is how debuggers spell "optimized out" — and it
+    /// keeps `ptype`/`print sizeof` working.
+    OptimizedOut,
 }
 
 /// One lexical block before PC-range resolution.
@@ -386,7 +392,8 @@ fn intern_file(file_ids: &mut [Option<FileId>], line_prog: &mut LineProgram, fil
 }
 
 /// Location expression for one variable home: `DW_OP_fbreg` into its
-/// slot or `DW_OP_addr` of its data symbol.
+/// slot or `DW_OP_addr` of its data symbol. `None` (an optimized-out
+/// home, or a data symbol that never got one) emits no `DW_AT_location`.
 fn location_expr(loc: VarLoc, data_sym: &dyn Fn(DataId) -> Option<usize>) -> Option<Expression> {
     let mut expr = Expression::new();
     match loc {
@@ -399,6 +406,7 @@ fn location_expr(loc: VarLoc, data_sym: &dyn Fn(DataId) -> Option<usize>) -> Opt
             expr.op_addr(Address::Symbol { symbol: idx, addend: 0 });
             Some(expr)
         }
+        VarLoc::OptimizedOut => None,
     }
 }
 
@@ -406,8 +414,11 @@ struct VarDie<'a> {
     name: Option<&'a str>,
     decl: Option<Location>,
     debug_ty: Option<DebugTypeId>,
-    /// `None` for a declaration with no storage here (`extern`): the
-    /// DIE is emitted without a location.
+    /// `None` for a declaration with no storage here (`extern`), which
+    /// is emitted with `DW_AT_declaration` and no location. Any
+    /// `VarLoc` that resolves to no expression (e.g. `OptimizedOut`)
+    /// keeps the DIE but likewise gets no location, without the
+    /// declaration flag.
     loc: Option<VarLoc>,
     external: bool,
 }
@@ -425,13 +436,8 @@ fn emit_var(
     data_sym: &dyn Fn(DataId) -> Option<usize>,
 ) {
     use gimli::constants::*;
-    let location = match var.loc {
-        Some(loc) => match location_expr(loc, data_sym) {
-            Some(expr) => Some(expr),
-            None => return,
-        },
-        None => None,
-    };
+    let declaration = var.loc.is_none();
+    let location = var.loc.and_then(|loc| location_expr(loc, data_sym));
     let die = unit.add(parent, tag);
     if let Some(ty_id) = var.debug_ty.and_then(|id| ty_die(unit, root, type_cache, types, id)) {
         unit.get_mut(die).set(DW_AT_type, AttributeValue::UnitRef(ty_id));
@@ -446,9 +452,10 @@ fn emit_var(
         }
         entry.set(DW_AT_decl_line, AttributeValue::Udata(u64::from(decl.line)));
     }
-    match location {
-        Some(expr) => entry.set(DW_AT_location, AttributeValue::Exprloc(expr)),
-        None => entry.set(DW_AT_declaration, AttributeValue::Flag(true)),
+    if let Some(expr) = location {
+        entry.set(DW_AT_location, AttributeValue::Exprloc(expr));
+    } else if declaration {
+        entry.set(DW_AT_declaration, AttributeValue::Flag(true));
     }
     if var.external {
         entry.set(DW_AT_external, AttributeValue::Flag(true));
