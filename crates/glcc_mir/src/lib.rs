@@ -29,7 +29,7 @@ pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use debug::{BaseEncoding, DebugType, DebugTypeId, Enumerator, File, FunctionDebug, GlobalDebug, Location, Member, MemberLocation, Qualifier, ScopeDebug, VarDebug, VarHome};
 pub use ir::{
     AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, FcmpPred, Func, Function, Global, GlobalData, IcmpPred, Inst, InstData,
-    InstKind, MemFlags, Module, Terminator, Value, ValueData,
+    InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
 pub use pass::{FunctionPass, ModulePass, PassManager};
 pub use ty::{FloatKind, GepIndex, Signature, Ty, dense_field_offsets, struct_field_offsets};

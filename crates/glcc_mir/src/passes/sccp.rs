@@ -22,7 +22,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ir::{Block, Const, Def, FcmpPred, Function, Inst, InstKind, Terminator, Value, ValueData};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, Inst, InstKind, Terminator, Value, ValueData, ValueOrigin};
 use crate::pass::FunctionPass;
 use crate::ty::{FloatKind, Ty};
 
@@ -132,6 +132,12 @@ impl State {
                 }
             }
         }
+        // Debug builds prove the fixpoint the rewrite assumes; release
+        // skips the check entirely.
+        if cfg!(debug_assertions) {
+            let errors = self.fixpoint_errors(func);
+            debug_assert!(errors.is_empty(), "sccp fixpoint violated: {errors:?}");
+        }
     }
 
     fn mark_edge(&mut self, from: Block, to: Block) {
@@ -164,33 +170,50 @@ impl State {
             };
             self.join_param(func, *param, arg);
         }
+    }
 
-        /// The edge's `i`th argument, or `None` for edges without a
-        /// branch arm there (a `Switch` target, whose arms carry no
-        /// arguments) and for argument lists shorter than the params.
-        fn edge_arg(func: &Function, from: Block, to: Block, i: usize) -> Option<Value> {
-            let term = func.blocks[from].term.as_ref()?;
-            let args = match term {
-                Terminator::Br { dest, args } if *dest == to => args,
-                Terminator::CondBr {
-                    then_block,
-                    then_args,
-                    else_block,
-                    else_args,
-                    ..
-                } => {
-                    if *then_block == to {
-                        then_args
-                    } else if *else_block == to {
-                        else_args
-                    } else {
-                        return None;
+    /// Check the fixpoint invariant: every block-param's lattice must
+    /// equal the join of the arguments on its executable incoming edges.
+    /// A stale join (a param stuck at a constant its incoming arguments
+    /// have since widened past) violates this and is the class of
+    /// miscompile that `mark_edge`'s no-dedup rule fixes; this reports
+    /// it instead of leaving a silently wrong rewrite.
+    fn fixpoint_errors(&self, func: &Function) -> Vec<String> {
+        let mut errors = Vec::new();
+        for block_idx in 0..func.blocks.len() {
+            let block = Block::from_usize(block_idx);
+            if !self.executable[block_idx] || block == func.entry {
+                continue;
+            }
+            for (i, param) in func.blocks[block].params.clone().iter().enumerate() {
+                let mut expected = Lat::Unknown;
+                for from_idx in 0..func.blocks.len() {
+                    let from = Block::from_usize(from_idx);
+                    if !self.executable[from_idx] {
+                        continue;
                     }
+                    let Some(arg) = edge_arg(func, from, block, i) else {
+                        continue;
+                    };
+                    expected = lub(&expected, &self.lattice[arg.index()]);
                 }
-                _ => return None,
-            };
-            args.get(i).copied()
+                let stored = &self.lattice[param.index()];
+                if stored != &expected {
+                    errors.push(format!(
+                        "{}: b{block_idx} param %{} is {stored:?}, expected {expected:?}",
+                        func.name,
+                        param.index()
+                    ));
+                } else if matches!(stored, Lat::Unknown) {
+                    errors.push(format!(
+                        "{}: b{block_idx} param %{} never joined (stayed Unknown)",
+                        func.name,
+                        param.index()
+                    ));
+                }
+            }
         }
+        errors
     }
 
     /// One more argument joins a phi parameter; the param belongs to
@@ -272,6 +295,44 @@ impl State {
         let result_ty = func.values[result].ty.clone();
         let next = eval(&kind, &result_ty, &self.lattice);
         self.assign(func, result, next);
+    }
+}
+
+/// The edge's `i`th argument, or `None` for edges without a branch arm
+/// there (a `Switch` target, whose arms carry no arguments) and for
+/// argument lists shorter than the params.
+fn edge_arg(func: &Function, from: Block, to: Block, i: usize) -> Option<Value> {
+    let term = func.blocks[from].term.as_ref()?;
+    let args = match term {
+        Terminator::Br { dest, args } if *dest == to => args,
+        Terminator::CondBr {
+            then_block,
+            then_args,
+            else_block,
+            else_args,
+            ..
+        } => {
+            if *then_block == to {
+                then_args
+            } else if *else_block == to {
+                else_args
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    args.get(i).copied()
+}
+
+/// Least upper bound of two lattice values: any `Unknown` yields the
+/// other, `Over` absorbs, and only equal constants keep a constant.
+fn lub(a: &Lat, b: &Lat) -> Lat {
+    match (a, b) {
+        (Lat::Unknown, other) | (other, Lat::Unknown) => other.clone(),
+        (Lat::Over, _) | (_, Lat::Over) => Lat::Over,
+        (Lat::Const(x), Lat::Const(y)) if x == y => Lat::Const(x.clone()),
+        (Lat::Const(_), Lat::Const(_)) => Lat::Over,
     }
 }
 
@@ -576,19 +637,47 @@ fn note_value(func: &mut Function, map: &mut HashMap<Value, Value>, lattice: &[L
     match (&lat, &func.values[v].def) {
         (Lat::Const(c), Def::Const(existing)) if c == existing => {}
         (Lat::Const(c), _) => {
+            let origin = value_origin(func, v);
             let ty = func.values[v].ty.clone();
             let fresh = func.values.push(ValueData { ty, def: Def::Const(c.clone()) });
             map.insert(v, fresh);
+            if let Some(origin) = origin {
+                func.origins.insert(fresh, origin);
+            }
         }
         (Lat::Unknown, _) => {
+            let origin = value_origin(func, v);
             let ty = func.values[v].ty.clone();
             let fresh = func.values.push(ValueData {
                 ty,
                 def: Def::Const(Const::Undef),
             });
             map.insert(v, fresh);
+            if let Some(origin) = origin {
+                func.origins.insert(fresh, origin);
+            }
         }
         (Lat::Over, _) => {}
+    }
+}
+
+/// Debug provenance for the value `note_value` is about to replace in
+/// place of `v`: the defining instruction's pre-fold text (its operands
+/// are still the original values at this point) and source location, or
+/// a block-param spelling. Constants need no origin.
+fn value_origin(func: &Function, v: Value) -> Option<ValueOrigin> {
+    match &func.values[v].def {
+        Def::Inst(inst) => Some(ValueOrigin {
+            pass: "sccp",
+            text: crate::display::inst_str(func, &func.insts[*inst].kind),
+            loc: func.insts[*inst].loc,
+        }),
+        Def::Param(block, i) => Some(ValueOrigin {
+            pass: "sccp",
+            text: format!("b{}.param{i}", block.index()),
+            loc: None,
+        }),
+        Def::Const(_) => None,
     }
 }
 
@@ -795,46 +884,41 @@ mod tests {
     /// never advanced.
     #[test]
     fn rejoins_a_phi_whose_argument_widens() {
-        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
-        let (mut func, entry) = Function::new("f", sig);
-        let cond = param(&mut func, entry, Ty::Bool, 0);
-        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
-        let one = func.push_const(Const::Int { bits: 32, value: 1 });
-        let hdr = func.push_block(vec![Ty::int(32)]);
-        let body = func.push_block(vec![]);
-        let back = func.push_block(vec![Ty::int(32)]);
-        let out = func.push_block(vec![]);
-        let j = func.blocks[hdr].params[0];
-        func.blocks[entry].term = Some(Terminator::Br {
-            dest: hdr,
-            args: [zero].into_iter().collect(),
-        });
-        func.blocks[hdr].term = Some(Terminator::CondBr {
-            cond,
-            then_block: body,
-            else_block: out,
-            then_args: Default::default(),
-            else_args: Default::default(),
-        });
-        let next = emit(&mut func, body, InstKind::Add(j, one), Ty::int(32));
-        func.blocks[body].term = Some(Terminator::Br {
-            dest: back,
-            args: [next].into_iter().collect(),
-        });
-        let carried = func.blocks[back].params[0];
-        func.blocks[back].term = Some(Terminator::Br {
-            dest: hdr,
-            args: [carried].into_iter().collect(),
-        });
-        func.blocks[out].term = Some(Terminator::Return { val: Some(zero) });
-
+        let scenario = widening_loop();
+        let mut func = scenario.func;
         assert!(!Sccp.run(&mut func), "the loop counter must stay dynamic");
         assert!(verify_func(&func).is_empty());
-        let Some(Terminator::Br { dest, args }) = func.blocks[back].term.clone() else {
+        let Some(Terminator::Br { dest, args }) = func.blocks[scenario.back].term.clone() else {
             panic!("back edge vanished");
         };
-        assert_eq!(dest, hdr);
-        assert_eq!(args[0], carried, "stale constant joined as the loop argument");
+        assert_eq!(dest, scenario.hdr);
+        assert_eq!(args[0], scenario.carried, "stale constant joined as the loop argument");
+    }
+
+    /// The fixpoint checker accepts a correct solve: every param equals
+    /// the join of its executable incoming arguments.
+    #[test]
+    fn solve_reaches_a_valid_fixpoint_for_a_widening_phi() {
+        let scenario = widening_loop();
+        let mut state = State::new(&scenario.func);
+        state.solve(&scenario.func);
+        let errors = state.fixpoint_errors(&scenario.func);
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+
+    /// The checker catches the stale-join class of bug directly: force a
+    /// phi param back to the constant it first joined while its incoming
+    /// argument has since widened, and the mismatch is reported.
+    #[test]
+    fn fixpoint_errors_flags_a_stale_phi_param() {
+        let scenario = widening_loop();
+        let mut state = State::new(&scenario.func);
+        state.solve(&scenario.func);
+        state.lattice[scenario.j.index()] = Lat::Const(Const::Int { bits: 32, value: 1 });
+        let errors = state.fixpoint_errors(&scenario.func);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains(&format!("%{}", scenario.j.index())), "{}", errors[0]);
+        assert!(errors[0].contains("Over"), "{}", errors[0]);
     }
 
     #[test]
@@ -958,6 +1042,59 @@ mod tests {
             }
         }
         panic!("no value return in {func:?}");
+    }
+
+    /// The loop from `rejoins_a_phi_whose_argument_widens`: entry feeds
+    /// `zero` into the header's counter phi, then the back edge carries a
+    /// value that widens from `Const(1)` to `Over`.
+    struct WideningLoop {
+        func: Function,
+        hdr: Block,
+        back: Block,
+        j: Value,
+        carried: Value,
+    }
+
+    fn widening_loop() -> WideningLoop {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let hdr = func.push_block(vec![Ty::int(32)]);
+        let body = func.push_block(vec![]);
+        let back = func.push_block(vec![Ty::int(32)]);
+        let out = func.push_block(vec![]);
+        let j = func.blocks[hdr].params[0];
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: hdr,
+            args: [zero].into_iter().collect(),
+        });
+        func.blocks[hdr].term = Some(Terminator::CondBr {
+            cond,
+            then_block: body,
+            else_block: out,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let next = emit(&mut func, body, InstKind::Add(j, one), Ty::int(32));
+        func.blocks[body].term = Some(Terminator::Br {
+            dest: back,
+            args: [next].into_iter().collect(),
+        });
+        let carried = func.blocks[back].params[0];
+        func.blocks[back].term = Some(Terminator::Br {
+            dest: hdr,
+            args: [carried].into_iter().collect(),
+        });
+        func.blocks[out].term = Some(Terminator::Return { val: Some(zero) });
+        WideningLoop {
+            func,
+            hdr,
+            back,
+            j,
+            carried,
+        }
     }
 
     fn param(func: &mut Function, block: Block, ty: Ty, index: u32) -> Value {

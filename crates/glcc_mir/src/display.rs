@@ -41,7 +41,7 @@ fn val_name(func: &Function, v: crate::ir::Value) -> String {
     }
 }
 
-fn inst_str(func: &Function, kind: &InstKind) -> String {
+pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
     match kind {
         InstKind::Add(a, b) => format!("add {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Sub(a, b) => format!("sub {} {}", val_name(func, *a), val_name(func, *b)),
@@ -188,9 +188,34 @@ fn location_str(module: &Module, loc: Location) -> String {
     format!("{}:{}:{}", module.files[loc.file as usize].path, loc.line, loc.column)
 }
 
+/// Provenance suffix for the values a line mentions: for every operand
+/// with a recorded [`crate::ir::ValueOrigin`], `val <- pass: text`
+/// (plus `@ file:line:column` when the replaced definition was
+/// located), joined with `, ` and preceded by `  ; `. Empty when no
+/// mentioned value has an origin, so compact dumps stay unchanged.
+fn provenance_suffix(func: &Function, module: &Module, values: &[crate::ir::Value]) -> String {
+    let mut entries = Vec::new();
+    for &v in values {
+        let Some(origin) = func.origins.get(&v) else {
+            continue;
+        };
+        let mut entry = format!("{} <- {}: {}", val_name(func, v), origin.pass, origin.text);
+        if let Some(loc) = origin.loc {
+            entry.push_str(&format!(" @ {}", location_str(module, loc)));
+        }
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        String::new()
+    } else {
+        format!("  ; {}", entries.join(", "))
+    }
+}
+
 /// Render one function. With `None`, instructions print bare; with a
 /// module, every located instruction carries its source position as a
-/// `  ; path:line:column` suffix.
+/// `  ; path:line:column` suffix, and any line mentioning a
+/// pass-materialized value carries its provenance after that.
 fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module>) -> fmt::Result {
     if func.inline {
         writeln!(out, "func @{} inline:", func.name)?;
@@ -202,17 +227,26 @@ fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module
         writeln!(out, "  b{}({}):", id.index(), params.join(", "))?;
         for inst in &block.insts {
             let data = &func.insts[*inst];
-            let loc = match (module, data.loc) {
-                (Some(module), Some(loc)) => format!("  ; {}", location_str(module, loc)),
-                _ => String::new(),
+            let suffix = match module {
+                Some(module) => {
+                    let loc = data.loc.map(|loc| format!("  ; {}", location_str(module, loc))).unwrap_or_default();
+                    format!("{loc}{}", provenance_suffix(func, module, &data.kind.operands()))
+                }
+                None => String::new(),
             };
             match data.result {
-                Some(r) => writeln!(out, "    %{}:{} = {}{loc}", r.index(), ty_str(&func.values[r].ty), inst_str(func, &data.kind))?,
-                None => writeln!(out, "    {}{loc}", inst_str(func, &data.kind))?,
+                Some(r) => writeln!(out, "    %{}:{} = {}{suffix}", r.index(), ty_str(&func.values[r].ty), inst_str(func, &data.kind))?,
+                None => writeln!(out, "    {}{suffix}", inst_str(func, &data.kind))?,
             }
         }
         match &block.term {
-            Some(t) => writeln!(out, "    {}", term_str(func, t))?,
+            Some(t) => {
+                let suffix = match module {
+                    Some(module) => provenance_suffix(func, module, &t.operands()),
+                    None => String::new(),
+                };
+                writeln!(out, "    {}{suffix}", term_str(func, t))?;
+            }
             None => writeln!(out, "    <unterminated>")?,
         }
     }
@@ -257,7 +291,7 @@ pub fn dump_module_full(module: &Module) -> String {
 mod tests {
     use super::*;
     use crate::debug::File;
-    use crate::ir::{Block, Const, Def, Inst, InstData, Value, ValueData};
+    use crate::ir::{Block, Const, Def, Inst, InstData, Value, ValueData, ValueOrigin};
     use crate::ty::{GepIndex, Signature};
 
     fn param(func: &mut Function, block: Block, ty: Ty) -> Value {
@@ -313,6 +347,44 @@ mod tests {
         assert!(located_line.ends_with("; t.c:4:7"), "{located_line}");
         let bare_line = full.lines().find(|l| l.contains("get.frame.pointer")).expect("frame pointer line");
         assert!(!bare_line.contains(';'), "{bare_line}");
+    }
+
+    #[test]
+    fn full_dump_annotates_materialized_constants() {
+        let sig = Signature::new(vec![Ty::int(32)], Ty::int(32));
+        let (mut f, entry) = Function::new("t", sig);
+        let base = param(&mut f, entry, Ty::int(32));
+        let one = f.push_const(Const::Int { bits: 32, value: 1 });
+        let sum = emit(&mut f, entry, InstKind::Add(base, one), Ty::int(32));
+        f.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
+        // Simulate a pass materializing `one` in place of an earlier def.
+        f.origins.insert(
+            one,
+            ValueOrigin {
+                pass: "sccp",
+                text: "add %j i32(1)".to_string(),
+                loc: Some(Location { file: 0, line: 7, column: 3 }),
+            },
+        );
+
+        let mut module = Module::default();
+        module.files.push(File { path: "t.c".to_string() });
+        let one_name = val_name(&f, one);
+        let base_name = val_name(&f, base);
+        module.push_func(f);
+
+        let plain = dump_module(&module);
+        assert!(!plain.contains("<-"), "compact dump gained provenance:\n{plain}");
+
+        let full = dump_module_full(&module);
+        let annotation = format!("{one_name} <- sccp: add %j i32(1) @ t.c:7:3");
+        assert!(full.contains(&annotation), "missing annotation:\n{full}");
+        // The un-origined parameter must not be annotated.
+        assert!(!full.contains(&format!("{base_name} <- ")), "{full}");
+        // Compact output is still a substring of the full dump.
+        for line in plain.lines() {
+            assert!(full.contains(line), "compact line missing:\n{line}");
+        }
     }
 
     #[test]

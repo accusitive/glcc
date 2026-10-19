@@ -246,7 +246,14 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
         Plan::Value(v) => v,
         Plan::Const(c) => {
             let ty = func.values[result].ty.clone();
-            func.values.push(ValueData { ty, def: Def::Const(c) })
+            let origin = crate::ir::ValueOrigin {
+                pass: "instcombine",
+                text: crate::display::inst_str(func, &func.insts[inst].kind),
+                loc: func.insts[inst].loc,
+            };
+            let fresh = func.values.push(ValueData { ty, def: Def::Const(c) });
+            func.origins.insert(fresh, origin);
+            fresh
         }
         Plan::Inst(kind) => {
             let loc = func.insts[inst].loc.clone();

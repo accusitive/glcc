@@ -105,6 +105,18 @@ pub struct ValueData {
     pub def: Def,
 }
 
+/// Debug-only provenance of a value a pass materialized in place of
+/// another: what the replaced definition looked like and where it was.
+#[derive(Debug, Clone)]
+pub struct ValueOrigin {
+    /// Which pass materialized the value ("sccp", "const-fold", ...).
+    pub pass: &'static str,
+    /// How the replaced definition rendered at fold time, e.g. "add %3 i32(1)".
+    pub text: String,
+    /// Source location of the replaced definition, if it had one.
+    pub loc: Option<crate::debug::Location>,
+}
+
 /// Integer comparison predicates. Signedness is explicit per op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IcmpPred {
@@ -729,6 +741,9 @@ pub struct Function {
     pub insts: IndexVec<Inst, InstData>,
     pub blocks: IndexVec<Block, BlockData>,
     pub entry: Block,
+    /// Debug-only: provenance of constants a pass materialized, keyed by
+    /// the fresh value. Empty outside debug-oriented dumps.
+    pub origins: std::collections::HashMap<Value, ValueOrigin>,
 }
 
 impl Function {
@@ -747,6 +762,7 @@ impl Function {
             insts: IndexVec::new(),
             blocks: IndexVec::new(),
             entry: Block::from_usize(0),
+            origins: std::collections::HashMap::new(),
         };
         let entry = func.push_block(vec![]);
         func.entry = entry;

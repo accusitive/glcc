@@ -226,7 +226,13 @@ impl FunctionPass for ConstFold {
                     // carry `result`'s type: `c.ty()` loses it (`Undef` is
                     // `Void`, `Null` is `ptr(Void)`, aggregates have none).
                     let ty = func.values[result].ty.clone();
+                    let origin = crate::ir::ValueOrigin {
+                        pass: "const-fold",
+                        text: crate::display::inst_str(func, &kind),
+                        loc: func.insts[inst].loc,
+                    };
                     let replacement = func.values.push(crate::ir::ValueData { ty, def: Def::Const(c) });
+                    func.origins.insert(replacement, origin);
                     func.replace_uses(result, replacement);
                     changed = true;
                 }
