@@ -18,6 +18,9 @@ cranelift-codegen = { version = "0.136.0", default-features = false, features = 
 cranelift-module = "0.136.0"
 cranelift-native = "0.136.0"
 cranelift-object = "0.136.0"
+# Object read/write for patching 32-bit (`__ptr32`) data relocations the
+# Cranelift data machinery cannot express.
+object = { version = "0.40.0", default-features = false, features = ["write", "std"] }
 
 [build-dependencies]
 # clang / `lib.exe` discovery for the Win64 runtime staging in build.rs.

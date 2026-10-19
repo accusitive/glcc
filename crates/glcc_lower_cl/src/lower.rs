@@ -30,6 +30,24 @@ pub struct WinUnwindEntry {
     pub xdata: Vec<u8>,
 }
 
+/// A 32-bit (`__ptr32`) address patch in a global's image. The
+/// Cranelift data machinery only emits pointer-width relocations, so
+/// these are reported to the object driver, which patches the emitted
+/// object with a 4-byte absolute relocation at `offset` within the
+/// object `container`. `addend` is a byte displacement.
+pub struct NarrowReloc {
+    pub container: cranelift_module::DataId,
+    pub offset: u64,
+    pub target: NarrowTarget,
+    pub addend: i64,
+}
+
+/// The symbol a [`NarrowReloc`] resolves to.
+pub enum NarrowTarget {
+    Data(cranelift_module::DataId),
+    Func(FuncId),
+}
+
 /// Lower a whole MIR module into a Cranelift module for `target`,
 /// defining every function and global. Returns the Clif id of each MIR
 /// function.
@@ -40,19 +58,21 @@ pub struct WinUnwindEntry {
 /// stable symbol names either way.
 pub fn lower_module<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target) -> HashMap<mir::Func, FuncId> {
     let mut asm_text = String::new();
-    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None)
+    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None).0
 }
 
 /// [`lower_module`], also appending the generated inline-asm wrapper
 /// text to `asm_text`. The driver assembles it into the TU's `.s`.
+/// Returns the 32-bit (`__ptr32`) address patches the object driver
+/// must apply itself.
 pub fn lower_module_collecting<M: Module>(
     mir_module: &mir::Module,
     clif: &mut M,
     target: Target,
     asm_text: &mut String,
     unwind: &mut Vec<WinUnwindEntry>,
-) -> HashMap<mir::Func, FuncId> {
-    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind))
+) -> Vec<NarrowReloc> {
+    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind)).1
 }
 
 /// [`lower_module_collecting`], also collecting the debug records the
@@ -64,10 +84,10 @@ pub fn lower_module_with_debug<M: Module>(
     target: Target,
     asm_text: &mut String,
     unwind: &mut Vec<WinUnwindEntry>,
-) -> (HashMap<mir::Func, FuncId>, glcc_dwarf::LoweredDebug) {
+) -> (HashMap<mir::Func, FuncId>, glcc_dwarf::LoweredDebug, Vec<NarrowReloc>) {
     let mut debug = glcc_dwarf::LoweredDebug::new();
-    let ids = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind));
-    (ids, debug)
+    let (ids, narrow) = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind));
+    (ids, debug, narrow)
 }
 
 fn lower_module_impl<M: Module>(
@@ -77,7 +97,7 @@ fn lower_module_impl<M: Module>(
     asm_text: &mut String,
     mut debug: Option<&mut glcc_dwarf::LoweredDebug>,
     mut unwind: Option<&mut Vec<WinUnwindEntry>>,
-) -> HashMap<mir::Func, FuncId> {
+) -> (HashMap<mir::Func, FuncId>, Vec<NarrowReloc>) {
     let mut wrappers = Wrappers::default();
     let mut layouts = HashMap::new();
     for (id, func) in mir_module.funcs.iter_enumerated() {
@@ -118,7 +138,7 @@ fn lower_module_impl<M: Module>(
         }
     }
     for global in mir_module.globals.iter() {
-        for (_, reloc) in &global.relocs {
+        for (_, reloc) in global.relocs.iter().chain(&global.relocs32) {
             match reloc {
                 mir::DataReloc::Global { target, .. } => {
                     used_globals.insert(*target);
@@ -162,9 +182,10 @@ fn lower_module_impl<M: Module>(
             tls_data.insert(id);
         }
     }
+    let mut narrow = Vec::new();
     for (id, global) in mir_module.globals.iter_enumerated() {
         if let Some(&did) = data_ids.get(&id) {
-            define_global(global, did, &data_ids, &ids, &extern_ids, clif);
+            define_global(global, did, &data_ids, &ids, &extern_ids, clif, &mut narrow);
         }
     }
     if let Some(debug) = debug.as_deref_mut() {
@@ -207,7 +228,7 @@ fn lower_module_impl<M: Module>(
         );
     }
     asm_text.push_str(&wrappers.text);
-    ids
+    (ids, narrow)
 }
 
 fn is_large_aggregate(ty: &mir::Ty) -> bool {
@@ -606,6 +627,7 @@ fn define_global<M: Module>(
     func_ids: &HashMap<mir::Func, FuncId>,
     extern_ids: &HashMap<mir::Extern, FuncId>,
     clif: &mut M,
+    narrow: &mut Vec<NarrowReloc>,
 ) {
     if global.external {
         return;
@@ -622,7 +644,7 @@ fn define_global<M: Module>(
     // An all-zero object with no custom section is uninitialized storage:
     // defining it as such keeps it out of the object file. (`.init_array`
     // and friends must stay PROGBITS even when empty.)
-    if global.section.is_none() && global.relocs.is_empty() && bytes.iter().all(|b| *b == 0) {
+    if global.section.is_none() && global.relocs.is_empty() && global.relocs32.is_empty() && bytes.iter().all(|b| *b == 0) {
         desc.define_zeroinit(bytes.len());
     } else {
         desc.define(bytes.into_boxed_slice());
@@ -648,6 +670,22 @@ fn define_global<M: Module>(
                 desc.write_function_addr(*off as u32, fr);
             }
         }
+    }
+    // 32-bit patches stay out of the descriptor: Cranelift would emit a
+    // pointer-width relocation and clobber the neighbouring bytes. The
+    // object driver adds a 4-byte relocation over the zeroed image.
+    for (off, reloc) in &global.relocs32 {
+        let (target, addend) = match reloc {
+            mir::DataReloc::Global { target, addend } => (NarrowTarget::Data(data_ids[target]), *addend),
+            mir::DataReloc::Func { target } => (NarrowTarget::Func(func_ids[target]), 0),
+            mir::DataReloc::FuncExtern { target } => (NarrowTarget::Func(extern_ids[target]), 0),
+        };
+        narrow.push(NarrowReloc {
+            container: id,
+            offset: *off,
+            target,
+            addend,
+        });
     }
     clif.define_data(id, &desc).expect("cannot define data");
 }

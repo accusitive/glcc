@@ -7,6 +7,45 @@ use glcc_mir as mir;
 
 use crate::ty::{complex_component, int_bits, is_complex, is_signed, lower_ty};
 
+/// Address patches gathered while folding one global image: byte
+/// offset, the relocation, and the patch width in bits (64 for ordinary
+/// pointers, 32 for `__ptr32`). Split into `relocs`/`relocs32` once the
+/// fold completes.
+type GlobalRelocs = Vec<(u64, mir::DataReloc, u32)>;
+
+/// Width of the address patch a pointer destination needs: its own
+/// pointer width (`32` for `__ptr32`), or 64 for the integer-at-pointer-
+/// width address case.
+fn pointer_reloc_bits(ty: &mir::Ty) -> u32 {
+    match ty {
+        mir::Ty::Ptr { bits, .. } => *bits,
+        _ => 64,
+    }
+}
+
+/// Split a fold's address patches into pointer-width and 32-bit
+/// (`__ptr32`) lists. Later initializers overwrite earlier ones at the
+/// same offset (`{ [0 ... 2] = f, [0] = g }`), so keep only the last
+/// patch per offset, in first-seen order.
+fn split_global_relocs(relocs: GlobalRelocs) -> (Vec<(u64, mir::DataReloc)>, Vec<(u64, mir::DataReloc)>) {
+    let mut seen = HashSet::new();
+    let mut native = Vec::new();
+    let mut narrow = Vec::new();
+    for (off, reloc, bits) in relocs.into_iter().rev() {
+        if !seen.insert(off) {
+            continue;
+        }
+        if bits <= 32 {
+            narrow.push((off, reloc));
+        } else {
+            native.push((off, reloc));
+        }
+    }
+    native.reverse();
+    narrow.reverse();
+    (native, narrow)
+}
+
 /// Shared lowering context: checked semantic facts plus global symbols.
 /// Everything else (the MIR function under construction and its frame)
 /// threads through as explicit arguments, so nothing aliases.
@@ -447,7 +486,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
             }
         }
         for global in &module.module.globals {
-            for (_, reloc) in &global.relocs {
+            for (_, reloc) in global.relocs.iter().chain(&global.relocs32) {
                 if let mir::DataReloc::FuncExtern { target } = reloc {
                     used.insert(*target);
                 }
@@ -508,7 +547,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                 }
             }
             for global in module.module.globals.iter_mut() {
-                for (_, reloc) in &mut global.relocs {
+                for (_, reloc) in global.relocs.iter_mut().chain(&mut global.relocs32) {
                     if matches!(reloc, mir::DataReloc::FuncExtern { target } if *target == extern_id) {
                         *reloc = mir::DataReloc::Func { target: fid };
                     }
@@ -711,10 +750,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             if let Some(init) = self.sema.inits.get(&id) {
                 let init = init.clone();
                 let (mir_ty, image, relocs) = self.sized_unsized(module, funcs, externs, globals, binding, &init);
+                let (relocs, relocs32) = split_global_relocs(relocs);
                 let shell = &mut module.module.globals[gid];
                 shell.ty = mir_ty;
                 shell.init = Some(mir::Const::Bytes(image));
                 shell.relocs = relocs;
+                shell.relocs32 = relocs32;
             }
             return;
         }
@@ -761,21 +802,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (Some(mir::Const::Bytes(image)), relocs)
             }
         };
+        let (relocs, relocs32) = split_global_relocs(relocs);
         let shell = &mut module.module.globals[gid];
         shell.ty = mir_ty;
         shell.init = init;
-        // Later initializers overwrite earlier ones at the same offset
-        // (`{ [0 ... 2] = f, [0] = g }` keeps `g`); keep the last reloc
-        // per offset in first-seen order, matching the image fold.
-        let mut seen = HashSet::new();
-        let mut deduped: Vec<(u64, mir::DataReloc)> = Vec::with_capacity(relocs.len());
-        for (off, reloc) in relocs.into_iter().rev() {
-            if seen.insert(off) {
-                deduped.push((off, reloc));
-            }
-        }
-        deduped.reverse();
-        shell.relocs = deduped;
+        shell.relocs = relocs;
+        shell.relocs32 = relocs32;
     }
 
     /// Bytes an initializer actually covers. Usually the type's own
@@ -889,7 +921,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
         binding: &fe::sema::Binding,
         init: &fe::parse::Initializer,
-    ) -> (mir::Ty, Vec<u8>, Vec<(u64, mir::DataReloc)>) {
+    ) -> (mir::Ty, Vec<u8>, GlobalRelocs) {
         let fe::parse::Ty::Array { elem, .. } = binding.ty.unqualified() else {
             panic!("unsized non-array");
         };
@@ -951,7 +983,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         funcs: &HashMap<fe::sema::DeclId, mir::Func>,
         externs: &HashMap<fe::sema::DeclId, mir::Extern>,
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
-        relocs: &mut Vec<(u64, mir::DataReloc)>,
+        relocs: &mut GlobalRelocs,
     ) {
         match init {
             fe::parse::Initializer::Expr(e) => {
@@ -998,7 +1030,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                         let (target, ..) = self.materialize_string_global(module, parts);
-                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }));
+                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }, pointer_reloc_bits(mir_ty)));
                         return;
                     }
                 }
@@ -1010,7 +1042,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 if let fe::check::CheckedExprKind::CompoundLiteral { ty: lit_ty, init: lit_init } = &e.kind {
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                         let target = self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
-                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }));
+                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }, pointer_reloc_bits(mir_ty)));
                     } else {
                         self.fold_global_bytes(
                             module,
@@ -1084,14 +1116,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // Addresses, pointer arithmetic, and (through
                 // conversions) string literals for pointer targets.
                 if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
-                    self.reloc_global_addr(module, funcs, externs, globals, relocs, base, e);
+                    self.reloc_global_addr(module, funcs, externs, globals, relocs, base, e, pointer_reloc_bits(mir_ty));
                     return;
                 }
                 // An address constant held in an integer (`(long)&obj`,
                 // at pointer width): a link-time value like the pointer
                 // path. Only at pointer width, which never truncates.
                 if matches!(mir_ty, mir::Ty::Int { bits: 64 }) && self.is_global_address(e) {
-                    self.reloc_global_addr(module, funcs, externs, globals, relocs, base, e);
+                    self.reloc_global_addr(module, funcs, externs, globals, relocs, base, e, 64);
                     return;
                 }
                 panic!("non-constant global initializer");
@@ -1239,7 +1271,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let global = &mut module.module.globals[gid];
         global.local = true;
         global.align = Some(self.sema.type_align(ty, self.interner).expect("compound literal of complete type"));
+        let (relocs, relocs32) = split_global_relocs(relocs);
         global.relocs = relocs;
+        global.relocs32 = relocs32;
         gid
     }
 
@@ -1254,33 +1288,34 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         funcs: &HashMap<fe::sema::DeclId, mir::Func>,
         externs: &HashMap<fe::sema::DeclId, mir::Extern>,
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
-        relocs: &mut Vec<(u64, mir::DataReloc)>,
+        relocs: &mut GlobalRelocs,
         off: u64,
         e: &fe::check::CheckedExpr,
+        bits: u32,
     ) {
         if matches!(fe::eval::eval_const(e, self.sema, self.interner), Some(fe::eval::Value::Int(0))) {
             return;
         }
         match &e.kind {
             fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => {
-                self.reloc_global_addr(module, funcs, externs, globals, relocs, off, expr);
+                self.reloc_global_addr(module, funcs, externs, globals, relocs, off, expr, bits);
             }
             fe::check::CheckedExprKind::Str(parts) => {
                 let (target, ..) = self.materialize_string_global(module, parts);
-                relocs.push((off, mir::DataReloc::Global { target, addend: 0 }));
+                relocs.push((off, mir::DataReloc::Global { target, addend: 0 }, bits));
             }
             fe::check::CheckedExprKind::Unary(op, inner) => {
                 assert!(matches!(op, fe::parse::UnaryOp::AddrOf), "only address constants reach relocs");
-                self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, inner, 0);
+                self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, inner, 0, bits);
             }
             fe::check::CheckedExprKind::Ident(id) => {
                 let binding = &self.sema.decls[id.0 as usize];
                 match binding.kind {
                     fe::sema::BindingKind::Func => {
                         if let Some(target) = funcs.get(id) {
-                            relocs.push((off, mir::DataReloc::Func { target: *target }));
+                            relocs.push((off, mir::DataReloc::Func { target: *target }, bits));
                         } else if let Some(target) = externs.get(id) {
-                            relocs.push((off, mir::DataReloc::FuncExtern { target: *target }));
+                            relocs.push((off, mir::DataReloc::FuncExtern { target: *target }, bits));
                         } else {
                             panic!("address of a function before its declaration");
                         }
@@ -1290,7 +1325,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         let Some(target) = globals.get(id) else {
                             panic!("address of undefined storage");
                         };
-                        relocs.push((off, mir::DataReloc::Global { target: *target, addend: 0 }));
+                        relocs.push((off, mir::DataReloc::Global { target: *target, addend: 0 }, bits));
                     }
                 }
             }
@@ -1314,7 +1349,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // The address side roots at a declared object, a string
                 // literal, or a compound literal; casts and conversions
                 // are looked through there.
-                self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, addr_side, addend as i64);
+                self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, addr_side, addend as i64, bits);
             }
             _ => panic!("non-constant global initializer"),
         }
@@ -1390,29 +1425,30 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         funcs: &HashMap<fe::sema::DeclId, mir::Func>,
         externs: &HashMap<fe::sema::DeclId, mir::Extern>,
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
-        relocs: &mut Vec<(u64, mir::DataReloc)>,
+        relocs: &mut GlobalRelocs,
         off: u64,
         pointed: &fe::check::CheckedExpr,
         extra: i64,
+        bits: u32,
     ) {
         let (root, disp) = self.global_pointed_root(pointed, extra);
         match root {
             AddrRoot::Str(parts) => {
                 let (target, ..) = self.materialize_string_global(module, parts);
-                relocs.push((off, mir::DataReloc::Global { target, addend: disp }));
+                relocs.push((off, mir::DataReloc::Global { target, addend: disp }, bits));
             }
             AddrRoot::Compound(lit_ty, lit_init) => {
                 let target = self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
-                relocs.push((off, mir::DataReloc::Global { target, addend: disp }));
+                relocs.push((off, mir::DataReloc::Global { target, addend: disp }, bits));
             }
             AddrRoot::Decl(id) => {
                 let binding = &self.sema.decls[id.0 as usize];
                 if matches!(binding.kind, fe::sema::BindingKind::Func) {
                     assert!(disp == 0, "arithmetic on a function address");
                     if let Some(target) = funcs.get(&id) {
-                        relocs.push((off, mir::DataReloc::Func { target: *target }));
+                        relocs.push((off, mir::DataReloc::Func { target: *target }, bits));
                     } else if let Some(target) = externs.get(&id) {
-                        relocs.push((off, mir::DataReloc::FuncExtern { target: *target }));
+                        relocs.push((off, mir::DataReloc::FuncExtern { target: *target }, bits));
                     } else {
                         panic!("address of a function before its declaration");
                     }
@@ -1421,7 +1457,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let Some(target) = globals.get(&id) else {
                     panic!("address of undefined storage");
                 };
-                relocs.push((off, mir::DataReloc::Global { target: *target, addend: disp }));
+                relocs.push((off, mir::DataReloc::Global { target: *target, addend: disp }, bits));
             }
         }
     }
@@ -7593,6 +7629,17 @@ mod tests {
         lower_translation_unit(&sema, &interner, &tu)
     }
 
+    /// `lower_module` with MS extensions on, for `__ptr32`/`__ptr64`.
+    fn lower_module_ms(src: &str) -> mir::Module {
+        let mut interner = fe::lexer::Interner::new();
+        let mut sema = fe::sema::Sema::new();
+        sema.lang = fe::lang::LangOpts { ms: true, ..Default::default() };
+        let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
+        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let tu = parser.parse_translation_unit();
+        lower_translation_unit(&sema, &interner, &tu)
+    }
+
     /// MSVC's headers define every CRT wrapper as a non-static
     /// `__inline` and rely on COMDAT folding or the identical CRT
     /// export. On the Windows target the body is dropped at
@@ -8618,6 +8665,35 @@ mod tests {
             ),
             0
         );
+    }
+
+    #[test]
+    fn ptr32_global_addresses_become_narrow_relocs() {
+        let module = lower_module_ms(
+            "int x;\
+             int *__ptr32 g = &x;\
+             int *h = &x;\
+             struct S { int *__ptr32 a; int *b; };\
+             struct S s = { &x, &x };\
+             int main(){ return 0; }",
+        );
+        // The `__ptr32` field patches 4 bytes, so it never reaches the
+        // pointer-width list the object backend emits directly.
+        let g = global_named(&module, "g");
+        assert!(g.relocs.is_empty(), "no pointer-width patch for __ptr32");
+        assert_eq!(g.relocs32.len(), 1);
+        assert_eq!(g.relocs32[0].0, 0);
+        assert!(matches!(g.relocs32[0].1, mir::DataReloc::Global { addend: 0, .. }), "{:?}", g.relocs32[0].1);
+
+        let h = global_named(&module, "h");
+        assert!(h.relocs32.is_empty());
+        assert_eq!(h.relocs.len(), 1);
+
+        // Mixed struct: the 32-bit member at offset 0, the ordinary
+        // pointer at offset 8, each in its own list.
+        let s = global_named(&module, "s");
+        assert_eq!(s.relocs32.iter().map(|(off, _)| *off).collect::<Vec<_>>(), [0]);
+        assert_eq!(s.relocs.iter().map(|(off, _)| *off).collect::<Vec<_>>(), [8]);
     }
 
     #[test]

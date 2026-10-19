@@ -1312,18 +1312,20 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         let mut obj = cranelift_object::ObjectModule::new(builder);
         let mut unwind = Vec::new();
         Ok(if debug {
-            let (_, lowered) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+            let (_, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
             let mut product = obj.finish();
             if let Err(e) = winunwind::emit(&mut product, &unwind) {
                 eprintln!("glcc: warning: {e}");
             }
+            apply_narrow_relocs(&mut product, &narrow);
             (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
         } else {
-            glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+            let narrow = glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
             let mut product = obj.finish();
             if let Err(e) = winunwind::emit(&mut product, &unwind) {
                 eprintln!("glcc: warning: {e}");
             }
+            apply_narrow_relocs(&mut product, &narrow);
             (product.emit().expect("object emit"), asm_text)
         })
     }));
@@ -1331,6 +1333,41 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         Ok(Ok(compiled)) => Ok(compiled),
         Ok(Err(())) => Err(()),
         Err(_) => Err(()),
+    }
+}
+
+/// Patch a `__ptr32` object's 32-bit address relocations into the
+/// emitted object. Cranelift's data descriptor only offers pointer-width
+/// relocations, so `define_global` leaves these fields zeroed and hands
+/// them here; the object writer turns each into a format-appropriate
+/// 4-byte absolute reloc (`R_X86_64_32`, `IMAGE_REL_AMD64_ADDR32`) over
+/// the zeroed image.
+fn apply_narrow_relocs(product: &mut cranelift_object::ObjectProduct, narrow: &[glcc_lower_cl::NarrowReloc]) {
+    use glcc_lower_cl::NarrowTarget;
+    use object::write::{Relocation, SymbolId, SymbolSection};
+    use object::{RelocationEncoding, RelocationFlags, RelocationKind};
+
+    for reloc in narrow {
+        let container = product.data_symbol(reloc.container);
+        let SymbolSection::Section(section) = product.object.symbol(container).section else {
+            panic!("__ptr32 reloc container has no section");
+        };
+        let place = product.object.symbol(container).value + reloc.offset;
+        let symbol: SymbolId = match reloc.target {
+            NarrowTarget::Data(id) => product.data_symbol(id),
+            NarrowTarget::Func(id) => product.function_symbol(id),
+        };
+        let relocation = Relocation {
+            offset: place,
+            symbol,
+            addend: reloc.addend,
+            flags: RelocationFlags::Generic {
+                kind: RelocationKind::Absolute,
+                encoding: RelocationEncoding::Generic,
+                size: 32,
+            },
+        };
+        product.object.add_relocation(section, relocation).expect("__ptr32 relocation");
     }
 }
 
@@ -2977,6 +3014,36 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A `__ptr32` object holding an address patches 4 bytes, but
+    /// Cranelift's data descriptor only emits pointer-width
+    /// relocations, so the driver adds a 32-bit absolute reloc itself
+    /// after `finish`.
+    #[test]
+    fn ptr32_global_initializer_emits_a_32_bit_relocation() {
+        let src = "int x;\nint *__ptr32 g = &x;\nint main(void) { return 0; }\n";
+        let lang = LangOpts { ms: true, ..LangOpts::default() };
+        let bytes = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, lang, ErrorFormat::Human)
+            .expect("compiles")
+            .0;
+        use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+        let obj = object::File::parse(&bytes[..]).expect("object parses");
+        let g = obj.symbol_by_name("g").expect("g is defined");
+        assert_eq!(g.size(), 4, "a __ptr32 object is 4 bytes");
+        let mut relocs = Vec::new();
+        for section in obj.sections() {
+            for (_, reloc) in section.relocations() {
+                if let object::RelocationTarget::Symbol(idx) = reloc.target() {
+                    if obj.symbol_by_index(idx).ok().and_then(|s| s.name().ok()) == Some("x") {
+                        relocs.push(reloc);
+                    }
+                }
+            }
+        }
+        assert_eq!(relocs.len(), 1, "one patch for the __ptr32 pointer");
+        assert_eq!(relocs[0].size(), 32, "the patch is 32 bits wide");
+        assert_eq!(relocs[0].kind(), object::RelocationKind::Absolute);
     }
 
     /// A variable whose slot the optimizer promoted has no home in the

@@ -1114,8 +1114,14 @@ pub struct GlobalData {
     pub tls: bool,
     pub align: Option<u64>,
     pub section: Option<String>,
-    /// Link-time patches over the image (`Const::Bytes` only).
+    /// Link-time patches over the image (`Const::Bytes` only), at
+    /// ordinary pointer width.
     pub relocs: Vec<(u64, DataReloc)>,
+    /// Link-time patches that write only 32 bits: a `__ptr32` pointer
+    /// field whose initializer is an address. Kept apart from
+    /// `relocs` because the backend's default data relocation is
+    /// pointer-width and cannot express a 4-byte patch.
+    pub relocs32: Vec<(u64, DataReloc)>,
     /// Debug record for module-level objects; `None` for synthesized
     /// storage (string literals, compound literals, import shims).
     pub debug: Option<GlobalDebug>,
@@ -1166,6 +1172,7 @@ impl Module {
             align: None,
             section: None,
             relocs: Vec::new(),
+            relocs32: Vec::new(),
             debug: None,
         })
     }
@@ -1183,6 +1190,7 @@ impl Module {
             align: None,
             section: None,
             relocs: Vec::new(),
+            relocs32: Vec::new(),
             debug: None,
         })
     }
