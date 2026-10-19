@@ -70,11 +70,6 @@ jobs:
 
   # End-to-end C compiler check: build SQLite from source with glcc and run
   # its in-house veryquick suite (333k tests, ~10 minutes).
-  #
-  # Linux only for now. Windows needs the link.exe smoke test above to be
-  # green first, plus a build path for SQLite (POSIX make + Tcl) that the
-  # runner does not have; a polyglot bash/PowerShell script can carry the
-  # Windows half once those land.
   sqlite:
     name: sqlite (veryquick)
     runs-on: ubuntu-24.04
@@ -95,3 +90,29 @@ jobs:
         run: cargo build --locked
       - name: SQLite veryquick suite
         run: tests/sqlite/download-sqlite.sh
+
+  # The Windows half of the SQLite check: run-windows.ps1 builds Tcl 8.6
+  # and the MSVC testfixture itself, recompiles the amalgamation with glcc,
+  # and runs veryquick. It is allowed to fail until the path is proven green
+  # on the hosted image; flip continue-on-error once it is.
+  sqlite-windows:
+    name: sqlite (veryquick, windows)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set up MSVC (link.exe/lib.exe on PATH, LIB set)
+        uses: ilammy/msvc-dev-cmd@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite-windows
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - name: Build glcc
+        run: cargo build --locked
+      - name: SQLite veryquick suite
+        shell: pwsh
+        run: tests/sqlite/run-windows.ps1
