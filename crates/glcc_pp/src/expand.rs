@@ -2038,7 +2038,9 @@ impl<'a, 'b> Expander<'a, 'b> {
         self.mark_n = 1;
         self.mark_emit = 0;
         // Save the file frame; the child shares macros and paint.
-        let save_display = self.file_display;
+        // Name the included file for diagnostics raised while lexing,
+        // grouping, or expanding it.
+        let save_display = std::mem::replace(&mut self.file_display, display);
         let save_path = std::mem::replace(&mut self.file_path, path.to_path_buf());
         let save_found = std::mem::replace(&mut self.file_found, found);
         let save_base = self.line_base;

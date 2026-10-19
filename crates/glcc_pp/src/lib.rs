@@ -1204,6 +1204,18 @@ mod tests {
     }
 
     #[test]
+    fn include_errors_name_the_included_file() {
+        let dir = test_dir("inc-err");
+        write_file(&dir.join("bad.h"), "#endif\n");
+        let main = dir.join("main.c");
+        write_file(&main, "#include \"bad.h\"\n");
+        let e = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &opts()).unwrap_err();
+        assert!(e.0.contains("bad.h:1: #endif without #if"), "was: {e}");
+        assert!(!e.0.contains("main.c:1: #endif"), "was: {e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn include_in_inactive_branch_is_not_read() {
         let got = pp("#if 0\n#include \"nope.h\"\n#else\nint x = 1;\n#endif\n").unwrap();
         assert_eq!(got, "\nint x = 1;\n\n");
