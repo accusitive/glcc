@@ -31,17 +31,11 @@ use glcc_mir as mir;
 /// layout, so member access stays byte-exact. Only alignment
 /// *metadata* is missing from MIR types, so stack slots and by-value
 /// classification use natural alignment (globals carry the real one).
-pub fn lower_ty(
-    ty: &fe::parse::Ty,
-    sema: &fe::sema::Sema,
-    interner: &fe::lexer::Interner,
-) -> mir::Ty {
+pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer::Interner) -> mir::Ty {
     match ty.unqualified() {
         fe::parse::Ty::Void => mir::Ty::Void,
         fe::parse::Ty::Bool => mir::Ty::Bool,
-        fe::parse::Ty::Char
-        | fe::parse::Ty::SignedChar
-        | fe::parse::Ty::UnsignedChar => mir::Ty::int(8),
+        fe::parse::Ty::Char | fe::parse::Ty::SignedChar | fe::parse::Ty::UnsignedChar => mir::Ty::int(8),
         fe::parse::Ty::Short | fe::parse::Ty::UnsignedShort => mir::Ty::int(16),
         fe::parse::Ty::Int | fe::parse::Ty::UnsignedInt => mir::Ty::int(32),
         fe::parse::Ty::Long | fe::parse::Ty::UnsignedLong => mir::Ty::int((sema.target.long_size * 8) as u32),
@@ -57,9 +51,7 @@ pub fn lower_ty(
         fe::parse::Ty::Float128 => mir::Ty::Float(mir::FloatKind::F128),
         fe::parse::Ty::Complex(inner) => {
             let comp = lower_ty(inner, sema, interner);
-            let size = sema
-                .type_size(inner, interner)
-                .expect("complex component has a size");
+            let size = sema.type_size(inner, interner).expect("complex component has a size");
             mir::Ty::Struct {
                 fields: vec![comp.clone(), comp],
                 offsets: vec![0, size],
@@ -81,9 +73,9 @@ pub fn lower_ty(
             }
         }
         fe::parse::Ty::BuiltinVaList => mir::Ty::BuiltinVaList {
-        size: sema.target.va_list_size,
-        align: sema.target.va_list_align,
-    },
+            size: sema.target.va_list_size,
+            align: sema.target.va_list_align,
+        },
         fe::parse::Ty::Func { .. } => mir::Ty::ptr(mir::Ty::Void),
         fe::parse::Ty::Array { elem, bound, .. } => match bound {
             // Unsized and starred arrays only occur decayed as pointers;
@@ -113,22 +105,14 @@ pub fn lower_ty(
 /// structs or fixed arrays): invalid C whose structural expansion
 /// would otherwise recurse forever. Pointer and function edges cut
 /// the walk, matching what `lower_ty` expands.
-fn check_acyclic(
-    id: fe::sema::StructId,
-    sema: &fe::sema::Sema,
-    stack: &mut Vec<fe::sema::StructId>,
-) {
+fn check_acyclic(id: fe::sema::StructId, sema: &fe::sema::Sema, stack: &mut Vec<fe::sema::StructId>) {
     let def = &sema.structs[id.0 as usize];
     for member in &def.members {
         check_ty_acyclic(&member.ty, sema, stack);
     }
 }
 
-fn check_ty_acyclic(
-    ty: &fe::parse::Ty,
-    sema: &fe::sema::Sema,
-    stack: &mut Vec<fe::sema::StructId>,
-) {
+fn check_ty_acyclic(ty: &fe::parse::Ty, sema: &fe::sema::Sema, stack: &mut Vec<fe::sema::StructId>) {
     match ty.unqualified() {
         fe::parse::Ty::Struct(id) => {
             if stack.contains(id) {
@@ -146,11 +130,7 @@ fn check_ty_acyclic(
     }
 }
 
-fn lower_struct(
-    id: fe::sema::StructId,
-    sema: &fe::sema::Sema,
-    interner: &fe::lexer::Interner,
-) -> mir::Ty {
+fn lower_struct(id: fe::sema::StructId, sema: &fe::sema::Sema, interner: &fe::lexer::Interner) -> mir::Ty {
     // By-value self-embedding (`struct S { struct S v; }`, invalid C the
     // parser rejects) would diverge the structural expansion below, so
     // reject it loudly up front. Only value edges recurse: pointers (the
@@ -181,11 +161,7 @@ fn lower_struct(
         None => {
             let offsets = mir::dense_field_offsets(&fields);
             let size = fields.iter().map(|f| f.size_bytes()).sum();
-            mir::Ty::Struct {
-                fields,
-                offsets,
-                size,
-            }
+            mir::Ty::Struct { fields, offsets, size }
         }
     }
 }
@@ -199,15 +175,8 @@ fn lower_struct(
 /// member-wise as usual. Field indices shift by construction, so all
 /// member access on such structs resolves through byte offsets (never
 /// symbolic field steps).
-fn lower_bitfield_struct(
-    id: fe::sema::StructId,
-    def: &fe::sema::StructDef,
-    sema: &fe::sema::Sema,
-    interner: &fe::lexer::Interner,
-) -> mir::Ty {
-    let layout = sema
-        .struct_layout(id, interner)
-        .expect("layout of bitfield struct");
+fn lower_bitfield_struct(id: fe::sema::StructId, def: &fe::sema::StructDef, sema: &fe::sema::Sema, interner: &fe::lexer::Interner) -> mir::Ty {
+    let layout = sema.struct_layout(id, interner).expect("layout of bitfield struct");
     let mut fields = Vec::new();
     let mut offsets = Vec::new();
     let mut i = 0;
@@ -225,11 +194,7 @@ fn lower_bitfield_struct(
                 fields.push(lower_ty(&m.ty, sema, interner));
             }
         } else {
-            let end = if j < def.members.len() {
-                layout.member_offsets[j]
-            } else {
-                layout.size
-            };
+            let end = if j < def.members.len() { layout.member_offsets[j] } else { layout.size };
             if end > start {
                 offsets.push(start);
                 fields.push(unit_covering(end - start));
@@ -274,12 +239,7 @@ fn unit_covering(bytes: u64) -> mir::Ty {
 /// `union{float f[3]; short s[3]}` whose upper eightbyte is float-only.
 /// 16-byte-aligned unions additionally miss the ARM/RISC-V
 /// even-register skip.
-fn lower_union(
-    id: fe::sema::StructId,
-    def: &fe::sema::StructDef,
-    sema: &fe::sema::Sema,
-    interner: &fe::lexer::Interner,
-) -> mir::Ty {
+fn lower_union(id: fe::sema::StructId, def: &fe::sema::StructDef, sema: &fe::sema::Sema, interner: &fe::lexer::Interner) -> mir::Ty {
     let len = match sema.struct_layout(id, interner) {
         Some(layout) => layout.size,
         None => {

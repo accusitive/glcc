@@ -63,13 +63,7 @@ pub unsafe extern "C" fn glcc_free(ptr: *mut u8, len: usize) {
 /// # Safety
 /// `src` must point to `len` readable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn glcc_compile(
-    src: *const u8,
-    len: usize,
-    opt: u32,
-    target: u32,
-    flags: u32,
-) -> usize {
+pub unsafe extern "C" fn glcc_compile(src: *const u8, len: usize, opt: u32, target: u32, flags: u32) -> usize {
     install_panic_hook();
     if let Ok(mut p) = PANIC.lock() {
         p.clear();

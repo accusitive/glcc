@@ -39,8 +39,14 @@ index_vec::define_index_type! {
 /// (see [`Const::canonical`]); floats are raw bits with their kind.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Const {
-    Int { bits: u32, value: i128 },
-    Float { kind: FloatKind, bits: u128 },
+    Int {
+        bits: u32,
+        value: i128,
+    },
+    Float {
+        kind: FloatKind,
+        bits: u128,
+    },
     Null,
     Undef,
     /// All-zero image of the value's type. Only meaningful where a type
@@ -242,35 +248,81 @@ pub enum InstKind {
         then_val: Value,
         else_val: Value,
     },
-    Alloca { pointee: Ty, count: u64 },
-    Load { addr: Value, flags: MemFlags },
-    Store { addr: Value, val: Value, flags: MemFlags },
-    GetElementPtr { base: Value, indices: SmallVec<[GepIndex; 4]> },
-    ExtractValue { agg: Value, index: u32 },
-    InsertValue { agg: Value, elem: Value, index: u32 },
-    Memcpy { dst: Value, src: Value, len: u64 },
+    Alloca {
+        pointee: Ty,
+        count: u64,
+    },
+    Load {
+        addr: Value,
+        flags: MemFlags,
+    },
+    Store {
+        addr: Value,
+        val: Value,
+        flags: MemFlags,
+    },
+    GetElementPtr {
+        base: Value,
+        indices: SmallVec<[GepIndex; 4]>,
+    },
+    ExtractValue {
+        agg: Value,
+        index: u32,
+    },
+    InsertValue {
+        agg: Value,
+        elem: Value,
+        index: u32,
+    },
+    Memcpy {
+        dst: Value,
+        src: Value,
+        len: u64,
+    },
     /// Fill `len` bytes at `dst` with `byte`. Unrolled at lowering like
     /// `Memcpy`; covers zero-initialization without a libc call.
-    Memset { dst: Value, byte: u8, len: u64 },
+    Memset {
+        dst: Value,
+        byte: u8,
+        len: u64,
+    },
     /// Address of a module function. Lowers to `func_addr`.
-    FuncAddr { func: Func },
+    FuncAddr {
+        func: Func,
+    },
     /// Address of an imported function. Lowers to `func_addr` on the import.
-    ExternAddr { target: Extern },
+    ExternAddr {
+        target: Extern,
+    },
     /// Initialize a `va_list` from the current function's fixed
     /// arguments. The register save area and overflow base come from
     /// the function's own signature, so this needs no operands beyond
     /// the list address.
-    VaStart { ap: Value },
+    VaStart {
+        ap: Value,
+    },
     /// Read the next variadic argument of the result type from a
     /// `va_list`, advancing it. Aggregates arrive in a fresh slot.
-    VaArg { ap: Value },
+    VaArg {
+        ap: Value,
+    },
     /// Tear down a `va_list`. No code on any current target.
-    VaEnd { ap: Value },
+    VaEnd {
+        ap: Value,
+    },
     /// Copy one `va_list` object onto another.
-    VaCopy { dst: Value, src: Value },
+    VaCopy {
+        dst: Value,
+        src: Value,
+    },
     /// Address of a module global. Lowers to `symbol_value`.
-    GlobalAddr { global: Global },
-    Call { callee: Func, args: SmallVec<[Value; 4]> },
+    GlobalAddr {
+        global: Global,
+    },
+    Call {
+        callee: Func,
+        args: SmallVec<[Value; 4]>,
+    },
     /// Indirect call through a code address. The callee signature
     /// rides along for call lowering (per-call Clif signature, like
     /// foreign calls); variadic callees take the platform's indirect
@@ -293,12 +345,19 @@ pub enum InstKind {
     /// `coroutine` flag is set; the coroutine pass rewrites every
     /// occurrence (poll loop, frame state save/restore) before codegen,
     /// so it must never reach `glcc_lower_cl`.
-    Await { fut: Value },
+    Await {
+        fut: Value,
+    },
     /// Atomic load of a scalar. Orders are ignored (sequentially
     /// consistent, like the legacy backend).
-    AtomicLoad { addr: Value },
+    AtomicLoad {
+        addr: Value,
+    },
     /// Atomic store of a scalar value.
-    AtomicStore { addr: Value, val: Value },
+    AtomicStore {
+        addr: Value,
+        val: Value,
+    },
     /// Atomic read-modify-write: returns the previous value.
     AtomicRmw {
         op: AtomicRmwOp,
@@ -320,7 +379,9 @@ pub enum InstKind {
     /// and produces no value (outputs land in memory). Lowered as a
     /// call to a generated out-of-line wrapper, so the template never
     /// reaches the register allocator.
-    InlineAsm { block: Box<AsmBlock> },
+    InlineAsm {
+        block: Box<AsmBlock>,
+    },
     /// Address held in the frame pointer register (`__builtin_frame_address`
     /// level 0). Requires the `preserve_frame_pointers` setting.
     GetFramePointer,
@@ -406,11 +467,7 @@ impl InstKind {
                 f(*lhs);
                 f(*rhs);
             }
-            InstKind::Select {
-                cond,
-                then_val,
-                else_val,
-            } => {
+            InstKind::Select { cond, then_val, else_val } => {
                 f(*cond);
                 f(*then_val);
                 f(*else_val);
@@ -467,11 +524,7 @@ impl InstKind {
                 f(*addr);
                 f(*val);
             }
-            InstKind::AtomicCas {
-                addr,
-                expected,
-                replacement,
-            } => {
+            InstKind::AtomicCas { addr, expected, replacement } => {
                 f(*addr);
                 f(*expected);
                 f(*replacement);
@@ -552,7 +605,10 @@ impl InstKind {
 /// mirroring Cranelift so lowering is a direct transcription.
 #[derive(Debug, Clone)]
 pub enum Terminator {
-    Br { dest: Block, args: SmallVec<[Value; 4]> },
+    Br {
+        dest: Block,
+        args: SmallVec<[Value; 4]>,
+    },
     CondBr {
         cond: Value,
         then_block: Block,
@@ -565,22 +621,18 @@ pub enum Terminator {
         cases: Vec<(i128, Block)>,
         default: Block,
     },
-    Return { val: Option<Value> },
+    Return {
+        val: Option<Value>,
+    },
     Unreachable,
 }
 
 impl Terminator {
     pub fn successors(&self) -> SmallVec<[Block; 2]> {
         match self {
-            Terminator::Br { dest, .. } => [ *dest ].into_iter().collect(),
-            Terminator::CondBr {
-                then_block,
-                else_block,
-                ..
-            } => [*then_block, *else_block].into_iter().collect(),
-            Terminator::Switch {
-                cases, default, ..
-            } => cases.iter().map(|(_, b)| *b).chain([*default]).collect(),
+            Terminator::Br { dest, .. } => [*dest].into_iter().collect(),
+            Terminator::CondBr { then_block, else_block, .. } => [*then_block, *else_block].into_iter().collect(),
+            Terminator::Switch { cases, default, .. } => cases.iter().map(|(_, b)| *b).chain([*default]).collect(),
             Terminator::Return { .. } | Terminator::Unreachable => SmallVec::new(),
         }
     }
@@ -599,12 +651,7 @@ impl Terminator {
                     f(a);
                 }
             }
-            Terminator::CondBr {
-                cond,
-                then_args,
-                else_args,
-                ..
-            } => {
+            Terminator::CondBr { cond, then_args, else_args, .. } => {
                 f(*cond);
                 for &a in then_args.iter() {
                     f(a);
@@ -721,10 +768,7 @@ impl Function {
     pub fn push_const(&mut self, c: Const) -> Value {
         let c = c.canonical();
         let ty = c.ty();
-        self.values.push(ValueData {
-            ty,
-            def: Def::Const(c),
-        })
+        self.values.push(ValueData { ty, def: Def::Const(c) })
     }
 
     pub fn const_value(&self, v: Value) -> Option<&Const> {
@@ -899,11 +943,7 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         InstKind::Fpext(a) => InstKind::Fpext(swap(*a)),
         InstKind::PtrToInt(a) => InstKind::PtrToInt(swap(*a)),
         InstKind::IntToPtr(a) => InstKind::IntToPtr(swap(*a)),
-        InstKind::Select {
-            cond,
-            then_val,
-            else_val,
-        } => InstKind::Select {
+        InstKind::Select { cond, then_val, else_val } => InstKind::Select {
             cond: swap(*cond),
             then_val: swap(*then_val),
             else_val: swap(*else_val),
@@ -912,10 +952,7 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
             pointee: pointee.clone(),
             count: *count,
         },
-        InstKind::Load { addr, flags } => InstKind::Load {
-            addr: swap(*addr),
-            flags: *flags,
-        },
+        InstKind::Load { addr, flags } => InstKind::Load { addr: swap(*addr), flags: *flags },
         InstKind::Store { addr, val, flags } => InstKind::Store {
             addr: swap(*addr),
             val: swap(*val),
@@ -929,15 +966,9 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
                     other => next.push(other.clone()),
                 }
             }
-            InstKind::GetElementPtr {
-                base: swap(*base),
-                indices: next,
-            }
+            InstKind::GetElementPtr { base: swap(*base), indices: next }
         }
-        InstKind::ExtractValue { agg, index } => InstKind::ExtractValue {
-            agg: swap(*agg),
-            index: *index,
-        },
+        InstKind::ExtractValue { agg, index } => InstKind::ExtractValue { agg: swap(*agg), index: *index },
         InstKind::InsertValue { agg, elem, index } => InstKind::InsertValue {
             agg: swap(*agg),
             elem: swap(*elem),
@@ -959,10 +990,7 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         InstKind::VaStart { ap } => InstKind::VaStart { ap: swap(*ap) },
         InstKind::VaArg { ap } => InstKind::VaArg { ap: swap(*ap) },
         InstKind::VaEnd { ap } => InstKind::VaEnd { ap: swap(*ap) },
-        InstKind::VaCopy { dst, src } => InstKind::VaCopy {
-            dst: swap(*dst),
-            src: swap(*src),
-        },
+        InstKind::VaCopy { dst, src } => InstKind::VaCopy { dst: swap(*dst), src: swap(*src) },
         InstKind::Call { callee, args } => InstKind::Call {
             callee: *callee,
             args: args.iter().map(|&a| swap(a)).collect(),
@@ -994,11 +1022,7 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
             addr: swap(*addr),
             val: swap(*val),
         },
-        InstKind::AtomicCas {
-            addr,
-            expected,
-            replacement,
-        } => InstKind::AtomicCas {
+        InstKind::AtomicCas { addr, expected, replacement } => InstKind::AtomicCas {
             addr: swap(*addr),
             expected: swap(*expected),
             replacement: swap(*replacement),
@@ -1027,18 +1051,12 @@ pub(crate) fn remap_term(term: &Terminator, swap: impl Fn(Value) -> Value) -> Te
             then_args: then_args.iter().map(|&a| swap(a)).collect(),
             else_args: else_args.iter().map(|&a| swap(a)).collect(),
         },
-        Terminator::Switch {
-            scrutinee,
-            cases,
-            default,
-        } => Terminator::Switch {
+        Terminator::Switch { scrutinee, cases, default } => Terminator::Switch {
             scrutinee: swap(*scrutinee),
             cases: cases.clone(),
             default: *default,
         },
-        Terminator::Return { val } => Terminator::Return {
-            val: val.map(swap),
-        },
+        Terminator::Return { val } => Terminator::Return { val: val.map(swap) },
         Terminator::Unreachable => Terminator::Unreachable,
     }
 }

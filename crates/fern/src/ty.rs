@@ -50,10 +50,7 @@ impl Kind {
     pub fn apply(&self, arg: &Kind, span: Span) -> Result<Kind, crate::span::Diag> {
         match self {
             Kind::Arrow(a, b) if (&**a) == arg => Ok((**b).clone()),
-            other => Err(crate::span::Diag::new(
-                format!("cannot apply a type of kind `{other}` to a `{arg}` type"),
-                span,
-            )),
+            other => Err(crate::span::Diag::new(format!("cannot apply a type of kind `{other}` to a `{arg}` type"), span)),
         }
     }
 }
@@ -84,10 +81,7 @@ impl Ty {
     }
 
     pub fn named(name: &str, args: Vec<Ty>) -> Ty {
-        Ty::Named {
-            name: name.to_string(),
-            args,
-        }
+        Ty::Named { name: name.to_string(), args }
     }
 
     pub fn app(head: Ty, arg: Ty) -> Ty {
@@ -237,9 +231,5 @@ fn operand_of(ty: &Ty) -> String {
 
 /// Render a type in head position; only arrows need parens there.
 fn self_operand(ty: &Ty) -> String {
-    if matches!(ty, Ty::Arrow(..)) {
-        format!("({ty})")
-    } else {
-        format!("{ty}")
-    }
+    if matches!(ty, Ty::Arrow(..)) { format!("({ty})") } else { format!("{ty}") }
 }

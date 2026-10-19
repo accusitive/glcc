@@ -1,5 +1,5 @@
-use alloc::{boxed::Box, string::String, vec};
 use alloc::vec::Vec;
+use alloc::{boxed::Box, string::String, vec};
 use core::cell::{Cell, RefCell};
 
 use hashbrown::{HashMap, HashSet};
@@ -404,8 +404,22 @@ impl Sema {
             tag: None,
             is_union: false,
             members: vec![
-                Member { name: None, ty: ptr(), bitfield: None, packed: false, align_override: None, span },
-                Member { name: None, ty: ptr(), bitfield: None, packed: false, align_override: None, span },
+                Member {
+                    name: None,
+                    ty: ptr(),
+                    bitfield: None,
+                    packed: false,
+                    align_override: None,
+                    span,
+                },
+                Member {
+                    name: None,
+                    ty: ptr(),
+                    bitfield: None,
+                    packed: false,
+                    align_override: None,
+                    span,
+                },
             ],
             complete: true,
             packed: false,
@@ -420,11 +434,7 @@ impl Sema {
     /// Every async declaration makes one, so a call site of an async
     /// function always finds its handle here.
     pub fn future_handle_of(&self, result: &Ty) -> Option<Ty> {
-        self.future_handles
-            .borrow()
-            .iter()
-            .find(|(r, _)| r == result)
-            .map(|(_, id)| Ty::Struct(*id))
+        self.future_handles.borrow().iter().find(|(r, _)| r == result).map(|(_, id)| Ty::Struct(*id))
     }
     /// The result type of a `_Future(T)` handle type: `None` unless
     /// `ty` is a future handle.
@@ -432,11 +442,7 @@ impl Sema {
         let Ty::Struct(id) = ty.unqualified() else {
             return None;
         };
-        self.future_handles
-            .borrow()
-            .iter()
-            .find(|(_, sid)| sid == id)
-            .map(|(r, _)| r.clone())
+        self.future_handles.borrow().iter().find(|(_, sid)| sid == id).map(|(r, _)| r.clone())
     }
     /// True at file scope (no pushed block/prototype scopes).
     pub fn is_file_scope(&self) -> bool {
@@ -1054,11 +1060,7 @@ pub fn string_contents(parts: &[StringLiteral], interner: &Interner) -> Option<S
             let (v, used) = escape_value(&tail);
             // A UCN names a code point directly; every other escape
             // truncates mod 256 (like GCC), so any value is a scalar.
-            let ch = if crate::eval::is_ucn(&tail) {
-                char::from_u32(v)?
-            } else {
-                char::from_u32(v & 0xFF)?
-            };
+            let ch = if crate::eval::is_ucn(&tail) { char::from_u32(v)? } else { char::from_u32(v & 0xFF)? };
             out.push(ch);
             i += 1 + tail[..used].iter().map(|c| c.len_utf8()).sum::<usize>();
         }

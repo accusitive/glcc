@@ -32,11 +32,16 @@ pub struct Obligation {
 pub enum Solution {
     /// An instance applies; `args` are its generic parameters'
     /// instantiations, in declaration order.
-    Instance { index: usize, args: Vec<Ty> },
+    Instance {
+        index: usize,
+        args: Vec<Ty>,
+    },
     /// Discharged by a bound in the environment.
     Bound,
     /// More than one instance applies.
-    Ambiguous { instances: Vec<usize> },
+    Ambiguous {
+        instances: Vec<usize>,
+    },
     Unsatisfied,
     /// Some argument is not known yet; the goal must be resolved after
     /// monomorphization.
@@ -62,13 +67,7 @@ impl<'d> Solver<'d> {
         self.defs
     }
 
-    pub fn prove(
-        &self,
-        infer: &mut InferCtx,
-        env: &[Bound],
-        goal: &Obligation,
-        span: Span,
-    ) -> KResult<Solution> {
+    pub fn prove(&self, infer: &mut InferCtx, env: &[Bound], goal: &Obligation, span: Span) -> KResult<Solution> {
         let mut stack = Vec::new();
         self.prove_at(infer, env, goal, span, 0, &mut stack)
     }
@@ -76,65 +75,34 @@ impl<'d> Solver<'d> {
     pub fn describe_failure(&self, goal: &Obligation, solution: &Solution, span: Span) -> Diag {
         let goal_ty = self.goal_display(goal);
         match solution {
-            Solution::Unsatisfied => {
-                Diag::new(format!("the bound `{goal_ty}` is not satisfied"), span)
-            }
-            Solution::Ambiguous { instances } => Diag::new(
-                format!(
-                    "multiple instances apply to `{goal_ty}` ({} candidates)",
-                    instances.len()
-                ),
-                span,
-            ),
-            Solution::Deferred => Diag::new(
-                format!("type annotations needed: cannot decide `{goal_ty}` yet"),
-                span,
-            ),
+            Solution::Unsatisfied => Diag::new(format!("the bound `{goal_ty}` is not satisfied"), span),
+            Solution::Ambiguous { instances } => Diag::new(format!("multiple instances apply to `{goal_ty}` ({} candidates)", instances.len()), span),
+            Solution::Deferred => Diag::new(format!("type annotations needed: cannot decide `{goal_ty}` yet"), span),
             _ => Diag::new("class obligation failed", span),
         }
     }
 
     pub fn goal_display(&self, goal: &Obligation) -> String {
         let class = &self.defs.classes[goal.class_id.index()];
-        let args = goal
-            .args
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let args = goal.args.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" ");
         format!("{} {args}", class.name)
     }
 
     fn resolved_goal_display(&self, infer: &InferCtx, goal: &Obligation) -> String {
         let class = &self.defs.classes[goal.class_id.index()];
-        let args = goal
-            .args
-            .iter()
-            .map(|t| infer.resolve(t).to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let args = goal.args.iter().map(|t| infer.resolve(t).to_string()).collect::<Vec<_>>().join(" ");
         format!("{} {args}", class.name)
     }
 
     /// Tries the environment's bounds for the goal. On success the
     /// argument unifications are kept, so callers see the match.
-    fn prove_bound(
-        &self,
-        infer: &mut InferCtx,
-        env: &[Bound],
-        goal: &Obligation,
-        span: Span,
-    ) -> KResult<bool> {
+    fn prove_bound(&self, infer: &mut InferCtx, env: &[Bound], goal: &Obligation, span: Span) -> KResult<bool> {
         for bound in env {
             if bound.class_id != goal.class_id || bound.args.len() != goal.args.len() {
                 continue;
             }
             let mark = infer.mark();
-            let ok = bound
-                .args
-                .iter()
-                .zip(goal.args.iter())
-                .all(|(b, g)| infer.unify(b, g, span).is_ok());
+            let ok = bound.args.iter().zip(goal.args.iter()).all(|(b, g)| infer.unify(b, g, span).is_ok());
             if ok {
                 return Ok(true);
             }
@@ -143,30 +111,13 @@ impl<'d> Solver<'d> {
         Ok(false)
     }
 
-    fn prove_at(
-        &self,
-        infer: &mut InferCtx,
-        env: &[Bound],
-        goal: &Obligation,
-        span: Span,
-        depth: usize,
-        stack: &mut Vec<String>,
-    ) -> KResult<Solution> {
+    fn prove_at(&self, infer: &mut InferCtx, env: &[Bound], goal: &Obligation, span: Span, depth: usize, stack: &mut Vec<String>) -> KResult<Solution> {
         if depth > DEPTH_LIMIT {
-            return Err(Diag::new(
-                format!(
-                    "class solver recursion limit reached while proving `{}`",
-                    self.goal_display(goal)
-                ),
-                span,
-            ));
+            return Err(Diag::new(format!("class solver recursion limit reached while proving `{}`", self.goal_display(goal)), span));
         }
 
         let args: Vec<Ty> = goal.args.iter().map(|a| infer.resolve(a)).collect();
-        let resolved = Obligation {
-            class_id: goal.class_id,
-            args,
-        };
+        let resolved = Obligation { class_id: goal.class_id, args };
 
         // Bounds discharge goals on rigid parameters before anything
         // else; they are the assumptions an instance context provides.
@@ -253,16 +204,7 @@ impl<'d> Solver<'d> {
     /// Re-applies the winning instance after the candidate scan, so its
     /// unifications survive in the caller's state and callers can read
     /// the instantiated generic arguments.
-    fn apply_instance(
-        &self,
-        infer: &mut InferCtx,
-        env: &[Bound],
-        goal: &Obligation,
-        index: usize,
-        span: Span,
-        depth: usize,
-        stack: &mut Vec<String>,
-    ) -> KResult<Solution> {
+    fn apply_instance(&self, infer: &mut InferCtx, env: &[Bound], goal: &Obligation, index: usize, span: Span, depth: usize, stack: &mut Vec<String>) -> KResult<Solution> {
         let instance = &self.defs.instances[index];
         let mut subst: HashMap<String, Ty> = HashMap::new();
         for (name, _) in &instance.generics {
@@ -278,11 +220,7 @@ impl<'d> Solver<'d> {
             };
             self.prove_at(infer, env, &sub_goal, span, depth + 1, stack)?;
         }
-        let args = instance
-            .generics
-            .iter()
-            .map(|(name, _)| infer.resolve(&subst[name]))
-            .collect();
+        let args = instance.generics.iter().map(|(name, _)| infer.resolve(&subst[name])).collect();
         Ok(Solution::Instance { index, args })
     }
 }

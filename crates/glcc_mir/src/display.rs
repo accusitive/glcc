@@ -63,16 +63,8 @@ fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::FMul(a, b) => format!("fmul {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::FDiv(a, b) => format!("fdiv {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::FNeg(a) => format!("fneg {}", val_name(func, *a)),
-        InstKind::Icmp { pred, lhs, rhs } => format!(
-            "icmp.{pred:?} {} {}",
-            val_name(func, *lhs),
-            val_name(func, *rhs)
-        ),
-        InstKind::Fcmp { pred, lhs, rhs } => format!(
-            "fcmp.{pred:?} {} {}",
-            val_name(func, *lhs),
-            val_name(func, *rhs)
-        ),
+        InstKind::Icmp { pred, lhs, rhs } => format!("icmp.{pred:?} {} {}", val_name(func, *lhs), val_name(func, *rhs)),
+        InstKind::Fcmp { pred, lhs, rhs } => format!("fcmp.{pred:?} {} {}", val_name(func, *lhs), val_name(func, *rhs)),
         InstKind::Trunc(a) => format!("trunc {}", val_name(func, *a)),
         InstKind::Zext(a) => format!("zext {}", val_name(func, *a)),
         InstKind::Sext(a) => format!("sext {}", val_name(func, *a)),
@@ -85,31 +77,13 @@ fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::Fpext(a) => format!("fpext {}", val_name(func, *a)),
         InstKind::PtrToInt(a) => format!("ptrtoint {}", val_name(func, *a)),
         InstKind::IntToPtr(a) => format!("inttoptr {}", val_name(func, *a)),
-        InstKind::Select {
-            cond,
-            then_val,
-            else_val,
-        } => format!(
-            "select {} {} {}",
-            val_name(func, *cond),
-            val_name(func, *then_val),
-            val_name(func, *else_val)
-        ),
+        InstKind::Select { cond, then_val, else_val } => format!("select {} {} {}", val_name(func, *cond), val_name(func, *then_val), val_name(func, *else_val)),
         InstKind::Alloca { pointee, count } => {
             format!("alloca {} x{count}", ty_str(pointee))
         }
-        InstKind::Load { addr, flags } => format!(
-            "load{} {}",
-            if flags.volatile { ".vol" } else { "" },
-            val_name(func, *addr)
-        ),
+        InstKind::Load { addr, flags } => format!("load{} {}", if flags.volatile { ".vol" } else { "" }, val_name(func, *addr)),
         InstKind::Store { addr, val, flags } => {
-            format!(
-                "store{} {} {}",
-                if flags.volatile { ".vol" } else { "" },
-                val_name(func, *addr),
-                val_name(func, *val)
-            )
+            format!("store{} {} {}", if flags.volatile { ".vol" } else { "" }, val_name(func, *addr), val_name(func, *val))
         }
         InstKind::Call { callee, args } => {
             let list: Vec<_> = args.iter().map(|a| val_name(func, *a)).collect();
@@ -125,26 +99,9 @@ fn inst_str(func: &Function, kind: &InstKind) -> String {
         }
         InstKind::Await { fut } => format!("await {}", val_name(func, *fut)),
         InstKind::AtomicLoad { addr } => format!("atomic.load {}", val_name(func, *addr)),
-        InstKind::AtomicStore { addr, val } => format!(
-            "atomic.store {} {}",
-            val_name(func, *addr),
-            val_name(func, *val)
-        ),
-        InstKind::AtomicRmw { op, addr, val } => format!(
-            "atomic.rmw.{op:?} {} {}",
-            val_name(func, *addr),
-            val_name(func, *val)
-        ),
-        InstKind::AtomicCas {
-            addr,
-            expected,
-            replacement,
-        } => format!(
-            "atomic.cas {} {} {}",
-            val_name(func, *addr),
-            val_name(func, *expected),
-            val_name(func, *replacement)
-        ),
+        InstKind::AtomicStore { addr, val } => format!("atomic.store {} {}", val_name(func, *addr), val_name(func, *val)),
+        InstKind::AtomicRmw { op, addr, val } => format!("atomic.rmw.{op:?} {} {}", val_name(func, *addr), val_name(func, *val)),
+        InstKind::AtomicCas { addr, expected, replacement } => format!("atomic.cas {} {} {}", val_name(func, *addr), val_name(func, *expected), val_name(func, *replacement)),
         InstKind::AtomicFence => "atomic.fence".to_string(),
         InstKind::InlineAsm { block } => {
             let list: Vec<_> = block
@@ -169,11 +126,7 @@ fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::ExtractValue { agg, index } => {
             format!("extract {} .{index}", val_name(func, *agg))
         }
-        InstKind::InsertValue { agg, elem, index } => format!(
-            "insert {} {} .{index}",
-            val_name(func, *agg),
-            val_name(func, *elem)
-        ),
+        InstKind::InsertValue { agg, elem, index } => format!("insert {} {} .{index}", val_name(func, *agg), val_name(func, *elem)),
         InstKind::GlobalAddr { global } => format!("global g{}", global.index()),
         InstKind::Ceil(a) => format!("ceil {}", val_name(func, *a)),
         InstKind::Floor(a) => format!("floor {}", val_name(func, *a)),
@@ -187,20 +140,9 @@ fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::VaStart { ap } => format!("vastart {}", val_name(func, *ap)),
         InstKind::VaArg { ap } => format!("vaarg {}", val_name(func, *ap)),
         InstKind::VaEnd { ap } => format!("vaend {}", val_name(func, *ap)),
-        InstKind::VaCopy { dst, src } => format!(
-            "vacopy {} {}",
-            val_name(func, *dst),
-            val_name(func, *src)
-        ),
-        InstKind::Memset { dst, byte, len } => format!(
-            "memset {} {byte} len{len}",
-            val_name(func, *dst)
-        ),
-        InstKind::Memcpy { dst, src, len } => format!(
-            "memcpy {} {} len{len}",
-            val_name(func, *dst),
-            val_name(func, *src)
-        ),
+        InstKind::VaCopy { dst, src } => format!("vacopy {} {}", val_name(func, *dst), val_name(func, *src)),
+        InstKind::Memset { dst, byte, len } => format!("memset {} {byte} len{len}", val_name(func, *dst)),
+        InstKind::Memcpy { dst, src, len } => format!("memcpy {} {} len{len}", val_name(func, *dst), val_name(func, *src)),
     }
 }
 
@@ -228,21 +170,9 @@ fn term_str(func: &Function, term: &Terminator) -> String {
             block_str(func, *then_block, then_args),
             block_str(func, *else_block, else_args)
         ),
-        Terminator::Switch {
-            scrutinee,
-            cases,
-            default,
-        } => {
-            let cases: Vec<_> = cases
-                .iter()
-                .map(|(value, block)| format!("{value}: b{}", block.index()))
-                .collect();
-            format!(
-                "switch {} [{}] default b{}",
-                val_name(func, *scrutinee),
-                cases.join(", "),
-                default.index()
-            )
+        Terminator::Switch { scrutinee, cases, default } => {
+            let cases: Vec<_> = cases.iter().map(|(value, block)| format!("{value}: b{}", block.index())).collect();
+            format!("switch {} [{}] default b{}", val_name(func, *scrutinee), cases.join(", "), default.index())
         }
         Terminator::Return { val } => match val {
             Some(v) => format!("ret {}", val_name(func, *v)),
@@ -255,10 +185,7 @@ fn term_str(func: &Function, term: &Terminator) -> String {
 /// One source location as `path:line:column`, resolved through the
 /// module's file table.
 fn location_str(module: &Module, loc: Location) -> String {
-    format!(
-        "{}:{}:{}",
-        module.files[loc.file as usize].path, loc.line, loc.column
-    )
+    format!("{}:{}:{}", module.files[loc.file as usize].path, loc.line, loc.column)
 }
 
 /// Render one function. With `None`, instructions print bare; with a
@@ -271,11 +198,7 @@ fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module
         writeln!(out, "func @{}:", func.name)?;
     }
     for (id, block) in func.blocks.iter_enumerated() {
-        let params: Vec<_> = block
-            .params
-            .iter()
-            .map(|p| format!("{}:{}", val_name(func, *p), ty_str(&func.values[*p].ty)))
-            .collect();
+        let params: Vec<_> = block.params.iter().map(|p| format!("{}:{}", val_name(func, *p), ty_str(&func.values[*p].ty))).collect();
         writeln!(out, "  b{}({}):", id.index(), params.join(", "))?;
         for inst in &block.insts {
             let data = &func.insts[*inst];
@@ -284,13 +207,7 @@ fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module
                 _ => String::new(),
             };
             match data.result {
-                Some(r) => writeln!(
-                    out,
-                    "    %{}:{} = {}{loc}",
-                    r.index(),
-                    ty_str(&func.values[r].ty),
-                    inst_str(func, &data.kind)
-                )?,
+                Some(r) => writeln!(out, "    %{}:{} = {}{loc}", r.index(), ty_str(&func.values[r].ty), inst_str(func, &data.kind))?,
                 None => writeln!(out, "    {}{loc}", inst_str(func, &data.kind))?,
             }
         }
@@ -355,10 +272,7 @@ mod tests {
 
     fn emit(func: &mut Function, block: Block, kind: InstKind, ty: Ty) -> Value {
         let inst = Inst::from_usize(func.insts.len());
-        let value = func.values.push(ValueData {
-            ty,
-            def: Def::Inst(inst),
-        });
+        let value = func.values.push(ValueData { ty, def: Def::Inst(inst) });
         func.insts.push(InstData {
             block,
             kind,
@@ -373,21 +287,9 @@ mod tests {
     fn full_dump_annotates_located_instructions() {
         let sig = Signature::new(vec![], Ty::Void);
         let (mut f, entry) = Function::new("t", sig);
-        let located = emit(
-            &mut f,
-            entry,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 1,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
+        let located = emit(&mut f, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         if let Def::Inst(inst) = &f.values[located].def {
-            f.insts[*inst].loc = Some(Location {
-                file: 0,
-                line: 4,
-                column: 7,
-            });
+            f.insts[*inst].loc = Some(Location { file: 0, line: 4, column: 7 });
         } else {
             panic!("emit produces an instruction");
         }
@@ -400,24 +302,16 @@ mod tests {
         f.blocks[entry].term = Some(Terminator::Return { val: None });
 
         let mut module = Module::default();
-        module.files.push(File {
-            path: "t.c".to_string(),
-        });
+        module.files.push(File { path: "t.c".to_string() });
         module.push_func(f);
 
         let plain = dump_module(&module);
         assert!(!plain.contains("t.c"), "{plain}");
 
         let full = dump_module_full(&module);
-        let located_line = full
-            .lines()
-            .find(|l| l.contains("alloca"))
-            .expect("alloca line");
+        let located_line = full.lines().find(|l| l.contains("alloca")).expect("alloca line");
         assert!(located_line.ends_with("; t.c:4:7"), "{located_line}");
-        let bare_line = full
-            .lines()
-            .find(|l| l.contains("get.frame.pointer"))
-            .expect("frame pointer line");
+        let bare_line = full.lines().find(|l| l.contains("get.frame.pointer")).expect("frame pointer line");
         assert!(!bare_line.contains(';'), "{bare_line}");
     }
 
@@ -436,27 +330,14 @@ mod tests {
             cases: vec![(0, b1), (1, b2)],
             default: b3,
         });
-        let base = emit(
-            &mut f,
-            b1,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 1,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
+        let base = emit(&mut f, b1, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let idx = f.push_const(Const::Int { bits: 64, value: 5 });
         let gep = emit(
             &mut f,
             b1,
             InstKind::GetElementPtr {
                 base,
-                indices: vec![
-                    GepIndex::Field(1),
-                    GepIndex::ConstIndex(3),
-                    GepIndex::Index(idx),
-                ]
-                .into(),
+                indices: vec![GepIndex::Field(1), GepIndex::ConstIndex(3), GepIndex::Index(idx)].into(),
             },
             Ty::ptr(Ty::int(32)),
         );
@@ -482,34 +363,11 @@ mod tests {
 
         let mut text = String::new();
         dump_function(&mut text, &f).unwrap();
-        let gep_line = format!(
-            "gep {} [.1, 3, {}]",
-            val_name(&f, base),
-            val_name(&f, idx)
-        );
+        let gep_line = format!("gep {} [.1, 3, {}]", val_name(&f, base), val_name(&f, idx));
         assert!(text.contains(&gep_line), "{text}");
-        assert!(
-            text.contains(&format!("br b4({})", val_name(&f, gep))),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("br b4({})", val_name(&f, idx))),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!(
-                "switch {} [0: b1, 1: b2] default b3",
-                val_name(&f, scrut)
-            )),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!(
-                "brif {} b5 b3({})",
-                val_name(&f, cond),
-                val_name(&f, p)
-            )),
-            "{text}"
-        );
+        assert!(text.contains(&format!("br b4({})", val_name(&f, gep))), "{text}");
+        assert!(text.contains(&format!("br b4({})", val_name(&f, idx))), "{text}");
+        assert!(text.contains(&format!("switch {} [0: b1, 1: b2] default b3", val_name(&f, scrut))), "{text}");
+        assert!(text.contains(&format!("brif {} b5 b3({})", val_name(&f, cond), val_name(&f, p))), "{text}");
     }
 }

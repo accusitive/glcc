@@ -1,10 +1,10 @@
-use codespan_reporting::files::{self as csfiles, Error as FilesError, Files};
-use codespan_reporting::diagnostic::{Diagnostic, Label};
 #[cfg(feature = "std")]
 use codespan_reporting::diagnostic::Severity;
-use codespan_reporting::term::{self, Config};
+use codespan_reporting::diagnostic::{Diagnostic, Label};
+use codespan_reporting::files::{self as csfiles, Error as FilesError, Files};
 #[cfg(feature = "std")]
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
+use codespan_reporting::term::{self, Config};
 
 use hashbrown::HashMap;
 
@@ -23,7 +23,7 @@ use string_interner::symbol::SymbolU32;
 use crate::{
     check::{CheckedExpr, CheckedExprKind, is_integer},
     lang::Std,
-    lexer::{Interner, IntLiteral, IntSuffix, Keyword, Located, Location, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
+    lexer::{IntLiteral, IntSuffix, Interner, Keyword, Located, Location, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
     sema::{Binding, BindingKind, DeclId, EnumId, Enumerator, Linkage, Member, Sema, StructId},
     span::{CompileError, HasSpan, Span, byte_range, mark_diagnostic_emitted},
 };
@@ -757,11 +757,7 @@ impl<'a> Parser<'a> {
                 // driver (vague linkage for EDG-lowered COMDAT inline
                 // functions, which lose their `extern` on the
                 // definition); see `Sema::weak_extern_inline`.
-                weak: attrs.weak
-                    || specifiers.attrs.weak
-                    || (self.sema.weak_extern_inline
-                        && specifiers.is_inline()
-                        && !specifiers.has_storage(StorageClass::Static)),
+                weak: attrs.weak || specifiers.attrs.weak || (self.sema.weak_extern_inline && specifiers.is_inline() && !specifiers.has_storage(StorageClass::Static)),
                 alias: None,
                 naked,
                 is_async,
@@ -888,9 +884,7 @@ impl<'a> Parser<'a> {
     fn check_naked_body(&self, block: &Compound) {
         for item in &block.items {
             let ok = match item {
-                BlockItem::Stmt(Stmt::Asm(asm)) => {
-                    asm.outputs.is_empty() && asm.inputs.is_empty() && asm.clobbers.is_empty() && asm.labels.is_empty()
-                }
+                BlockItem::Stmt(Stmt::Asm(asm)) => asm.outputs.is_empty() && asm.inputs.is_empty() && asm.clobbers.is_empty() && asm.labels.is_empty(),
                 BlockItem::Stmt(Stmt::Empty { .. }) => true,
                 _ => false,
             };
@@ -906,7 +900,8 @@ impl<'a> Parser<'a> {
     /// `int (f)(int)` still finds the `(int)`. Old-style
     /// identifier-lists carry no parameter types, so this is `None`
     /// for them.
-    fn defined_params(declarator: &Declarator) -> Option<&FunctionDeclarator> {        let mut d = declarator;
+    fn defined_params(declarator: &Declarator) -> Option<&FunctionDeclarator> {
+        let mut d = declarator;
         let mut found = None;
         loop {
             for suffix in &d.direct.suffixes {
@@ -1202,9 +1197,7 @@ impl<'a> Parser<'a> {
     /// the GNU asm family (gated by `-fno-gnu-extensions`).
     fn peek_is_asm_keyword(&self) -> bool {
         match self.tokens.peek_val() {
-            Some(Token::Identifier(sym)) if matches!(self.intern.resolve(*sym), Some("asm" | "__asm__" | "__asm")) => {
-                self.sema.lang.gnu
-            }
+            Some(Token::Identifier(sym)) if matches!(self.intern.resolve(*sym), Some("asm" | "__asm__" | "__asm")) => self.sema.lang.gnu,
             _ => false,
         }
     }
@@ -1243,14 +1236,10 @@ impl<'a> Parser<'a> {
         let mut scan = 0;
         loop {
             match self.tokens.peek_nth(scan).map(|t| &t.val) {
-                Some(Token::Identifier(sym))
-                    if self.intern.resolve(*sym) == Some("__extension__") =>
-                {
+                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("__extension__") => {
                     scan += 1;
                 }
-                Some(Token::Identifier(sym))
-                    if matches!(self.intern.resolve(*sym), Some("asm" | "__asm__" | "__asm")) =>
-                {
+                Some(Token::Identifier(sym)) if matches!(self.intern.resolve(*sym), Some("asm" | "__asm__" | "__asm")) => {
                     scan += 1;
                     break;
                 }
@@ -1332,10 +1321,7 @@ impl<'a> Parser<'a> {
         if !is_goto && saw_labels {
             return self.fail(span, "asm label list requires asm goto");
         }
-        let listed: Vec<&str> = labels
-            .iter()
-            .filter_map(|label| self.intern.resolve(*label))
-            .collect();
+        let listed: Vec<&str> = labels.iter().filter_map(|label| self.intern.resolve(*label)).collect();
         for name in asm_label_refs(&template) {
             if !listed.contains(&name.as_str()) {
                 return self.fail(span, format!("undefined named operand '{name}'"));
@@ -1366,10 +1352,7 @@ impl<'a> Parser<'a> {
     fn parse_asm_operands(&mut self, outputs: bool) -> Vec<AsmOperand> {
         let mut operands = Vec::new();
         loop {
-            if matches!(
-                self.tokens.peek_val(),
-                Some(Token::Punctuator(Punctuator::Colon | Punctuator::RParen))
-            ) {
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon | Punctuator::RParen))) {
                 break;
             }
             let start = self.mark();
@@ -1392,12 +1375,7 @@ impl<'a> Parser<'a> {
                     return self.fail(span, "memory input is not directly addressable");
                 }
             }
-            operands.push(AsmOperand {
-                name,
-                constraint,
-                expr,
-                span,
-            });
+            operands.push(AsmOperand { name, constraint, expr, span });
             if !self.eat_punct(Punctuator::Comma) {
                 break;
             }
@@ -1426,10 +1404,7 @@ impl<'a> Parser<'a> {
     fn parse_asm_string_list(&mut self) -> Vec<String> {
         let mut out = Vec::new();
         loop {
-            if matches!(
-                self.tokens.peek_val(),
-                Some(Token::Punctuator(Punctuator::Colon | Punctuator::RParen))
-            ) {
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon | Punctuator::RParen))) {
                 break;
             }
             out.push(self.parse_asm_string("clobber"));
@@ -1478,11 +1453,7 @@ impl<'a> Parser<'a> {
     /// dotted spelling cannot collide with real identifiers.
     fn fresh_label(&mut self, name: SymbolU32) -> SymbolU32 {
         self.label_gen += 1;
-        let spelling = format!(
-            "{}.{}",
-            self.intern.resolve(name).unwrap_or("?"),
-            self.label_gen
-        );
+        let spelling = format!("{}.{}", self.intern.resolve(name).unwrap_or("?"), self.label_gen);
         self.intern.get_or_intern(&spelling)
     }
 
@@ -1549,9 +1520,7 @@ impl<'a> Parser<'a> {
                     self.tokens.advance();
                 }
                 self.expect_punct(Punctuator::Semi);
-                Stmt::Empty {
-                    span: self.span_since(start),
-                }
+                Stmt::Empty { span: self.span_since(start) }
             }
             Some(Token::Punctuator(Punctuator::LBrace)) => Stmt::Compound(self.parse_compound_statement(ret)),
             Some(Token::Punctuator(Punctuator::Semi)) => {
@@ -1868,7 +1837,14 @@ impl<'a> Parser<'a> {
             Stmt::Label { stmt, .. } => {
                 self.collect_switch_cases(promoted, stmt, values, default);
             }
-            Stmt::Empty { .. } | Stmt::Expr { .. } | Stmt::Asm(_) | Stmt::Return { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } | Stmt::GotoComputed { .. } => {}
+            Stmt::Empty { .. }
+            | Stmt::Expr { .. }
+            | Stmt::Asm(_)
+            | Stmt::Return { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Goto { .. }
+            | Stmt::GotoComputed { .. } => {}
         }
     }
     /// Validate control flow in a parsed function body: labels are
@@ -1928,13 +1904,7 @@ impl<'a> Parser<'a> {
     /// Flow-walk one declaration's initializer at the declaration's
     /// scope: only statement expressions can hold control flow, and
     /// gotos escaping them resolve outward (see `check_flow_expr`).
-    fn check_flow_decl_init(
-        &self,
-        id: DeclId,
-        gotos: &mut Vec<(SymbolU32, Span)>,
-        scope: usize,
-        fv: &mut FlowVla,
-    ) {
+    fn check_flow_decl_init(&self, id: DeclId, gotos: &mut Vec<(SymbolU32, Span)>, scope: usize, fv: &mut FlowVla) {
         if let Some(init) = self.sema.inits.get(&id).cloned() {
             self.check_flow_init(&init, gotos, scope, fv);
         }
@@ -1956,15 +1926,7 @@ impl<'a> Parser<'a> {
     /// `break`/`continue`/`case` placement, recursing with the
     /// enclosing context (loops and switches nest; labels do not reset
     /// the context).
-    fn check_flow_stmt(
-        &self,
-        stmt: &Stmt,
-        ctx: FlowCtx,
-        labels: &mut Vec<(SymbolU32, Span)>,
-        gotos: &mut Vec<(SymbolU32, Span)>,
-        scope: usize,
-        fv: &mut FlowVla,
-    ) {
+    fn check_flow_stmt(&self, stmt: &Stmt, ctx: FlowCtx, labels: &mut Vec<(SymbolU32, Span)>, gotos: &mut Vec<(SymbolU32, Span)>, scope: usize, fv: &mut FlowVla) {
         match stmt {
             Stmt::Compound(compound) => {
                 let inner = fv.alloc_scope(scope);
@@ -2097,14 +2059,7 @@ impl<'a> Parser<'a> {
     }
     /// Control flow inside an expression: only statement expressions
     /// hold statements, each with a fresh label scope.
-    fn check_flow_expr(
-        &self,
-        expr: &CheckedExpr,
-        labels: &mut Vec<(SymbolU32, Span)>,
-        gotos: &mut Vec<(SymbolU32, Span)>,
-        scope: usize,
-        fv: &mut FlowVla,
-    ) {
+    fn check_flow_expr(&self, expr: &CheckedExpr, labels: &mut Vec<(SymbolU32, Span)>, gotos: &mut Vec<(SymbolU32, Span)>, scope: usize, fv: &mut FlowVla) {
         match &expr.kind {
             CheckedExprKind::Ident(_)
             | CheckedExprKind::Int(_)
@@ -2247,7 +2202,15 @@ impl<'a> Parser<'a> {
         }
         match self.tokens.peek().map(|located| &located.val) {
             Some(Token::Keyword(
-                pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary | Keyword::_Atomic | Keyword::_Noreturn,
+                pat_storage_class_specifier!()
+                | pat_basic_type_specifier!()
+                | pat_type_qualifier!()
+                | pat_struct_or_union!()
+                | Keyword::Enum
+                | Keyword::Inline
+                | Keyword::_Imaginary
+                | Keyword::_Atomic
+                | Keyword::_Noreturn,
             )) => true,
             // A typedef name may open a declaration (`Arg a;`), as may
             // the GNU `inline` spellings (`__inline__ int f();`,
@@ -2337,7 +2300,24 @@ impl<'a> Parser<'a> {
             Some(word)
                 if matches!(
                     word,
-                    "__float128" | "__builtin_va_list" | "__extension__" | "__signed__" | "__int128" | "__uint128_t" | "__int128_t" | "__int8" | "__int16" | "__int32" | "__int64" | "_Float32" | "_Float64" | "__complex__" | "__complex" | "typeof" | "__typeof__" | "__typeof"
+                    "__float128"
+                        | "__builtin_va_list"
+                        | "__extension__"
+                        | "__signed__"
+                        | "__int128"
+                        | "__uint128_t"
+                        | "__int128_t"
+                        | "__int8"
+                        | "__int16"
+                        | "__int32"
+                        | "__int64"
+                        | "_Float32"
+                        | "_Float64"
+                        | "__complex__"
+                        | "__complex"
+                        | "typeof"
+                        | "__typeof__"
+                        | "__typeof"
                 ) =>
             {
                 word
@@ -2401,11 +2381,7 @@ impl<'a> Parser<'a> {
             Some("__builtin_parityll") => (Ty::Int, vec![Ty::UnsignedLongLong], false),
             Some("__builtin_copysign") => (Ty::Double, vec![Ty::Double, Ty::Double], false),
             Some("__builtin_copysignf") => (Ty::Float, vec![Ty::Float, Ty::Float], false),
-            Some("__builtin_copysignl") => (
-                Ty::LongDouble,
-                vec![Ty::LongDouble, Ty::LongDouble],
-                false,
-            ),
+            Some("__builtin_copysignl") => (Ty::LongDouble, vec![Ty::LongDouble, Ty::LongDouble], false),
             Some("__builtin_inff") => (Ty::Float, vec![], false),
             Some("__builtin_inf") => (Ty::Double, vec![], false),
             Some("__builtin_infl") => (Ty::LongDouble, vec![], false),
@@ -2434,9 +2410,7 @@ impl<'a> Parser<'a> {
             ),
             Some("__builtin_floor" | "__builtin_ceil") => (Ty::Double, vec![Ty::Double], false),
             Some("__builtin_floorf" | "__builtin_ceilf") => (Ty::Float, vec![Ty::Float], false),
-            Some("__builtin_floorl" | "__builtin_ceill") => {
-                (Ty::LongDouble, vec![Ty::LongDouble], false)
-            }
+            Some("__builtin_floorl" | "__builtin_ceill") => (Ty::LongDouble, vec![Ty::LongDouble], false),
             Some("__builtin_abs") => (Ty::Int, vec![Ty::Int], false),
             Some("__builtin_labs") => (Ty::Long, vec![Ty::Long], false),
             Some("__builtin_llabs") => (Ty::LongLong, vec![Ty::LongLong], false),
@@ -2451,21 +2425,9 @@ impl<'a> Parser<'a> {
             // `float _Complex`, `__builtin_conj` over
             // `double _Complex`, `__builtin_conjl` over
             // `long double _Complex`.
-            Some("__builtin_conjf") => (
-                Ty::Complex(Box::new(Ty::Float)),
-                vec![Ty::Complex(Box::new(Ty::Float))],
-                false,
-            ),
-            Some("__builtin_conj") => (
-                Ty::Complex(Box::new(Ty::Double)),
-                vec![Ty::Complex(Box::new(Ty::Double))],
-                false,
-            ),
-            Some("__builtin_conjl") => (
-                Ty::Complex(Box::new(Ty::LongDouble)),
-                vec![Ty::Complex(Box::new(Ty::LongDouble))],
-                false,
-            ),
+            Some("__builtin_conjf") => (Ty::Complex(Box::new(Ty::Float)), vec![Ty::Complex(Box::new(Ty::Float))], false),
+            Some("__builtin_conj") => (Ty::Complex(Box::new(Ty::Double)), vec![Ty::Complex(Box::new(Ty::Double))], false),
+            Some("__builtin_conjl") => (Ty::Complex(Box::new(Ty::LongDouble)), vec![Ty::Complex(Box::new(Ty::LongDouble))], false),
             // Complex accessors (`__builtin_creal/cimag/cabs` and
             // `f`/`l` variants): the real part, the imaginary part,
             // and the magnitude of a complex number.
@@ -2521,10 +2483,7 @@ impl<'a> Parser<'a> {
     /// the implicit-declaration path declares it with the real
     /// prototype (`libc_prototype`). The frame-address builtins need
     /// no rewrite — checking folds them inline.
-    const RUNTIME_BUILTIN_NAMES: &[(&str, &str)] = &[
-        ("__builtin_setjmp", "__glccrt_setjmp"),
-        ("__builtin_longjmp", "__glccrt_longjmp"),
-    ];
+    const RUNTIME_BUILTIN_NAMES: &[(&str, &str)] = &[("__builtin_setjmp", "__glccrt_setjmp"), ("__builtin_longjmp", "__glccrt_longjmp")];
     /// C89 implicit function declaration (§3.3.2.2): a call `f(...)`
     /// with no visible declaration of `f` implicitly declares
     /// `extern int f()` (unprototyped, so arguments undergo the
@@ -2561,8 +2520,7 @@ impl<'a> Parser<'a> {
         // everything else is C89 `extern int f()`. Runtime entry
         // points are compiler-generated (rewritten builtins), so they
         // declare silently.
-        let (ret, params, variadic, prototyped, assumption) =
-            match Self::libc_prototype(text, &self.sema.target.size_type()) {
+        let (ret, params, variadic, prototyped, assumption) = match Self::libc_prototype(text, &self.sema.target.size_type()) {
             Some((ret, params, variadic)) => (ret, params, variadic, true, "C library prototype assumed"),
             None => (Ty::Int, vec![], false, false, "C89 `extern int` assumed"),
         };
@@ -2670,12 +2628,76 @@ impl<'a> Parser<'a> {
     fn math_prototype(name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
         /// Base names that have the usual `f`/`l` width forms.
         const BASES: &[&str] = &[
-            "acos", "acosh", "asin", "asinh", "atan", "atan2", "atanh", "cbrt", "ceil", "copysign", "cos", "cosh", "drem",
-            "erf", "erfc", "exp", "exp2", "exp10", "expm1", "fabs", "fdim", "floor", "fma", "fmax", "fmin", "fmod", "frexp",
-            "gamma", "hypot", "ilogb", "j0", "j1", "jn", "ldexp", "lgamma", "llrint", "llround", "log", "log10", "log1p",
-            "log2", "logb", "lrint", "lround", "modf", "nearbyint", "nextafter", "nexttoward", "pow", "pow10", "remainder",
-            "remquo", "rint", "round", "roundeven", "scalb", "scalbln", "scalbn", "significand", "sin", "sincos", "sinh",
-            "sqrt", "tan", "tanh", "tgamma", "trunc", "y0", "y1", "yn",
+            "acos",
+            "acosh",
+            "asin",
+            "asinh",
+            "atan",
+            "atan2",
+            "atanh",
+            "cbrt",
+            "ceil",
+            "copysign",
+            "cos",
+            "cosh",
+            "drem",
+            "erf",
+            "erfc",
+            "exp",
+            "exp2",
+            "exp10",
+            "expm1",
+            "fabs",
+            "fdim",
+            "floor",
+            "fma",
+            "fmax",
+            "fmin",
+            "fmod",
+            "frexp",
+            "gamma",
+            "hypot",
+            "ilogb",
+            "j0",
+            "j1",
+            "jn",
+            "ldexp",
+            "lgamma",
+            "llrint",
+            "llround",
+            "log",
+            "log10",
+            "log1p",
+            "log2",
+            "logb",
+            "lrint",
+            "lround",
+            "modf",
+            "nearbyint",
+            "nextafter",
+            "nexttoward",
+            "pow",
+            "pow10",
+            "remainder",
+            "remquo",
+            "rint",
+            "round",
+            "roundeven",
+            "scalb",
+            "scalbln",
+            "scalbn",
+            "significand",
+            "sin",
+            "sincos",
+            "sinh",
+            "sqrt",
+            "tan",
+            "tanh",
+            "tgamma",
+            "trunc",
+            "y0",
+            "y1",
+            "yn",
         ];
         for (stem, ty) in [("lgamma_r", Ty::Double), ("lgammaf_r", Ty::Float), ("lgammal_r", Ty::LongDouble)] {
             if name == stem {
@@ -2694,8 +2716,7 @@ impl<'a> Parser<'a> {
         }
         let one = |t: Ty| (t.clone(), vec![t], false);
         Some(match base {
-            "atan2" | "copysign" | "drem" | "fdim" | "fmax" | "fmin" | "fmod" | "hypot" | "nextafter" | "pow" | "remainder"
-            | "scalb" => (ty.clone(), vec![ty.clone(), ty], false),
+            "atan2" | "copysign" | "drem" | "fdim" | "fmax" | "fmin" | "fmod" | "hypot" | "nextafter" | "pow" | "remainder" | "scalb" => (ty.clone(), vec![ty.clone(), ty], false),
             "fma" => (ty.clone(), vec![ty.clone(), ty.clone(), ty], false),
             "frexp" => (ty.clone(), vec![ty.clone(), ptr(Ty::Int)], false),
             "modf" => (ty.clone(), vec![ty.clone(), ptr(ty.clone())], false),
@@ -2974,9 +2995,7 @@ impl<'a> Parser<'a> {
         // automatic local; record the distinction for the backend. A
         // block-scope thread-local without `extern` likewise has
         // static (thread) storage even without `static`.
-        let block_static = kind == BindingKind::Var
-            && !file_scope
-            && (specifiers.has_storage(StorageClass::Static) || (specifiers.thread_local && !specifiers.is_extern()));
+        let block_static = kind == BindingKind::Var && !file_scope && (specifiers.has_storage(StorageClass::Static) || (specifiers.thread_local && !specifiers.is_extern()));
         // A variably modified object must have no linkage: an `extern`
         // VLA names a file-scope object that can never be variably
         // modified (GCC: "object with variably modified type must have
@@ -3261,12 +3280,7 @@ impl<'a> Parser<'a> {
                 }
                 // Obsolete GNU designator (`{ field: value }`): a bare
                 // identifier immediately followed by `:`.
-                Some(Token::Identifier(name))
-                    if matches!(
-                        self.tokens.peek_nth(1).map(|located| &located.val),
-                        Some(Token::Punctuator(Punctuator::Colon))
-                    ) =>
-                {
+                Some(Token::Identifier(name)) if matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon))) => {
                     let name_start = self.mark();
                     let name = *name;
                     self.tokens.advance();
@@ -3276,10 +3290,7 @@ impl<'a> Parser<'a> {
                     });
                     // The `:` stands in for the `=` below.
                     self.tokens.advance();
-                    let init = if matches!(
-                        self.tokens.peek_val(),
-                        Some(Token::Punctuator(Punctuator::LBrace))
-                    ) {
+                    let init = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
                         self.parse_brace_list()
                     } else {
                         let expr = self.parse_assignment_expression();
@@ -3449,7 +3460,15 @@ impl<'a> Parser<'a> {
                             comma_or_ellipsis = true;
                         }
                         Some(Token::Keyword(
-                            pat_storage_class_specifier!() | pat_basic_type_specifier!() | pat_type_qualifier!() | pat_struct_or_union!() | Keyword::Enum | Keyword::Inline | Keyword::_Imaginary | Keyword::_Atomic | Keyword::_Noreturn,
+                            pat_storage_class_specifier!()
+                            | pat_basic_type_specifier!()
+                            | pat_type_qualifier!()
+                            | pat_struct_or_union!()
+                            | Keyword::Enum
+                            | Keyword::Inline
+                            | Keyword::_Imaginary
+                            | Keyword::_Atomic
+                            | Keyword::_Noreturn,
                         )) if content == 0 => {
                             first_is_specifier = true;
                         }
@@ -3631,7 +3650,11 @@ impl<'a> Parser<'a> {
             let mut idents = Vec::new();
             loop {
                 match self.tokens.peek().copied() {
-                    Some(Located { val: Token::Identifier(sym), loc, end }) => {
+                    Some(Located {
+                        val: Token::Identifier(sym),
+                        loc,
+                        end,
+                    }) => {
                         self.tokens.advance();
                         idents.push((sym, Span::new(loc, end)));
                     }
@@ -3754,7 +3777,9 @@ impl<'a> Parser<'a> {
         // pointer, but the bound still evaluates on entry to a
         // definition's body (C17 §6.7.6.2p6).
         let vla_bound = match &ty {
-            Ty::Array { bound: Some(ArrayBound::Vla(id)), .. } => Some(*id),
+            Ty::Array {
+                bound: Some(ArrayBound::Vla(id)), ..
+            } => Some(*id),
             _ => None,
         };
         // A parameter declared as a function adjusts to a pointer to
@@ -3772,7 +3797,15 @@ impl<'a> Parser<'a> {
             ty = Ty::Pointer { qualifiers: quals, pointee: elem };
         }
         let span = self.span_since(start);
-        Param { name, ty, body_ty: None, vla_bound, span, star, proto: None }
+        Param {
+            name,
+            ty,
+            body_ty: None,
+            vla_bound,
+            span,
+            star,
+            proto: None,
+        }
     }
     pub fn parse_type_qualifier_list(&mut self) -> Vec<TypeQualifier> {
         let mut qualifiers = Vec::new();
@@ -4260,10 +4293,7 @@ impl<'a> Parser<'a> {
                 && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
             {
                 out.merge(self.parse_gnu_attribute_list());
-            } else if asm_labels
-                && self.peek_is_asm_keyword()
-                && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
-            {
+            } else if asm_labels && self.peek_is_asm_keyword() && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen))) {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
                 let label = self.parse_asm_string("label");
@@ -4570,11 +4600,7 @@ impl<'a> Parser<'a> {
     /// like `alias("name")` take a plain spelling, not a value.
     fn string_literal_body(&self, lit: StringLiteral) -> String {
         let spelling = self.intern.resolve(lit.spelling).unwrap_or("");
-        spelling
-            .split_once('"')
-            .and_then(|(_, rest)| rest.strip_suffix('"'))
-            .unwrap_or(spelling)
-            .to_string()
+        spelling.split_once('"').and_then(|(_, rest)| rest.strip_suffix('"')).unwrap_or(spelling).to_string()
     }
 
     // enum [identifier] [{ enumerator-list [,] }] (C17 §6.7.2.2). A body
@@ -5216,11 +5242,7 @@ impl<'a> Parser<'a> {
                 | Keyword::Restrict
                 | Keyword::Volatile,
             )) => true,
-            Some(Token::Identifier(sym)) => {
-                self.is_typedef_name(*sym)
-                    || self.is_gnu_type_keyword(*sym)
-                    || self.is_future_specifier(*sym)
-            }
+            Some(Token::Identifier(sym)) => self.is_typedef_name(*sym) || self.is_gnu_type_keyword(*sym) || self.is_future_specifier(*sym),
             _ => false,
         }
     }
@@ -5278,10 +5300,7 @@ impl<'a> Parser<'a> {
         );
         if is_alignof {
             self.tokens.advance();
-            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen)))
-                && self.paren_starts_type_name()
-                && !self.paren_starts_compound_literal()
-            {
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) && self.paren_starts_type_name() && !self.paren_starts_compound_literal() {
                 self.tokens.advance();
                 let ty = self.parse_type_name();
                 self.expect_punct(Punctuator::RParen);
@@ -5310,10 +5329,7 @@ impl<'a> Parser<'a> {
                 // literal, not a parenthesized type-name: `(type){`
                 // takes the operand branch and parses as a postfix
                 // expression (C17 §6.5.2.5).
-                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen)))
-                    && self.paren_starts_type_name()
-                    && !self.paren_starts_compound_literal()
-                {
+                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) && self.paren_starts_type_name() && !self.paren_starts_compound_literal() {
                     self.tokens.advance();
                     let ty = self.parse_type_name();
                     self.expect_punct(Punctuator::RParen);
@@ -6311,11 +6327,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
                 }
                 bail!("no type specifier");
             }
-            if unsigned {
-                Ty::UnsignedInt
-            } else {
-                Ty::Int
-            }
+            if unsigned { Ty::UnsignedInt } else { Ty::Int }
         }
         (true, 0) => {
             if unsigned {
@@ -6340,11 +6352,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Ty {
         }
         _ => bail!("`short` with `long`"),
     };
-    if n_complex == 1 {
-        Ty::Complex(Box::new(base))
-    } else {
-        base
-    }
+    if n_complex == 1 { Ty::Complex(Box::new(base)) } else { base }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeQualifier {
@@ -6834,21 +6842,28 @@ impl HasSpan for InitItem {
 /// expressions check like any other expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Designator {
-    Field { name: SymbolU32, span: Span },
+    Field {
+        name: SymbolU32,
+        span: Span,
+    },
     /// A hop through an anonymous member: the checker rewrites
     /// designations that name a field inside one (`.b` for
     /// `union { struct { int a, b; }; }`) so the backend can address
     /// members by index without searching.
-    AnonField { index: u32, span: Span },
-    Index { index: CheckedExpr, span: Span },
+    AnonField {
+        index: u32,
+        span: Span,
+    },
+    Index {
+        index: CheckedExpr,
+        span: Span,
+    },
 }
 
 impl HasSpan for Designator {
     fn span(&self) -> Span {
         match self {
-            Designator::Field { span, .. }
-            | Designator::AnonField { span, .. }
-            | Designator::Index { span, .. } => *span,
+            Designator::Field { span, .. } | Designator::AnonField { span, .. } | Designator::Index { span, .. } => *span,
         }
     }
 }
@@ -7108,10 +7123,7 @@ fn stmt_has_label(stmt: &Stmt) -> bool {
                     stack.push(els);
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::For { body, .. }
-            | Stmt::Switch { body, .. } => stack.push(body),
+            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::For { body, .. } | Stmt::Switch { body, .. } => stack.push(body),
             _ => {}
         }
     }
@@ -7123,13 +7135,7 @@ fn stmt_has_label(stmt: &Stmt) -> bool {
 /// jump to. This lives in its own function, taking only references, so
 /// `parse_statement`'s frame stays the size it was — it sits on the
 /// stack through the whole nested parse.
-fn fold_constant_if(
-    cond: &CheckedExpr,
-    then: &mut Stmt,
-    els: &mut Option<Box<Stmt>>,
-    sema: &Sema,
-    interner: &Interner,
-) {
+fn fold_constant_if(cond: &CheckedExpr, then: &mut Stmt, els: &mut Option<Box<Stmt>>, sema: &Sema, interner: &Interner) {
     match crate::eval::eval_const(cond, sema, interner) {
         // The else arm is never taken.
         Some(crate::eval::Value::Int(n)) if n != 0 => {

@@ -520,29 +520,20 @@ fn run_case(case: &Case, machine: Machine, id: &str) -> Result<(), String> {
         run_capture(full[0], &full[1..])?
     };
     if output != case.expected_stdout {
-        return Err(format!(
-            "stdout mismatch:\n  expected: {:?}\n  actual:   {:?}",
-            case.expected_stdout, output
-        ));
+        return Err(format!("stdout mismatch:\n  expected: {:?}\n  actual:   {:?}", case.expected_stdout, output));
     }
     Ok(())
 }
 
-fn build_module_object(
-    src: &str,
-    target: Target,
-    fe_target: glcc_frontend::target::Target,
-    obj_path: &Path,
-) -> Result<(), String> {
+fn build_module_object(src: &str, target: Target, fe_target: glcc_frontend::target::Target, obj_path: &Path) -> Result<(), String> {
     use cranelift_codegen::settings;
     use cranelift_codegen::settings::Configurable;
-    
+
     // Frontend -> MIR.
     let mut interner = glcc_frontend::lexer::Interner::new();
     let mut sema = glcc_frontend::sema::Sema::with_target(fe_target);
     let tokens = glcc_frontend::lexer::Lexer::new(src, &mut interner).lex_all();
-    let mut parser =
-        glcc_frontend::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+    let mut parser = glcc_frontend::parse::Parser::new(src, tokens, &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     let mir_module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
     let errors = glcc_mir::verify::verify_module(&mir_module);
@@ -553,32 +544,17 @@ fn build_module_object(
     let mut flag_builder = settings::builder();
     flag_builder.set("opt_level", "none").map_err(|e| e.to_string())?;
     flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;
-    flag_builder
-        .set("preserve_frame_pointers", "true")
-        .map_err(|e| e.to_string())?;
+    flag_builder.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     flag_builder.set("tls_model", "elf_gd").map_err(|e| e.to_string())?;
     let flags = settings::Flags::new(flag_builder);
     let isa: cranelift_codegen::isa::OwnedTargetIsa = match target.arch {
-        Arch::X86_64 => cranelift_native::builder()
+        Arch::X86_64 => cranelift_native::builder().map_err(|e| e.to_string())?.finish(flags).map_err(|e| e.to_string())?,
+        _ => cranelift_codegen::isa::lookup(target.triple().parse().map_err(|_| "bad triple".to_string())?)
             .map_err(|e| e.to_string())?
             .finish(flags)
             .map_err(|e| e.to_string())?,
-        _ => cranelift_codegen::isa::lookup(
-            target
-                .triple()
-                .parse()
-                .map_err(|_| "bad triple".to_string())?,
-        )
-        .map_err(|e| e.to_string())?
-        .finish(flags)
-        .map_err(|e| e.to_string())?,
     };
-    let builder = cranelift_object::ObjectBuilder::new(
-        isa,
-        "abi_probe",
-        cranelift_module::default_libcall_names(),
-    )
-    .map_err(|e| e.to_string())?;
+    let builder = cranelift_object::ObjectBuilder::new(isa, "abi_probe", cranelift_module::default_libcall_names()).map_err(|e| e.to_string())?;
     let mut obj = cranelift_object::ObjectModule::new(builder);
     glcc_lower_cl::lower_module(&mir_module, &mut obj, target);
     let product = obj.finish();
@@ -622,10 +598,7 @@ fn glccrt_object(machine: Machine) -> Result<PathBuf, String> {
 }
 
 fn run(prog: &str, args: &[&str]) -> Result<(), String> {
-    let status = Command::new(prog)
-        .args(args)
-        .status()
-        .map_err(|e| format!("spawn {prog}: {e}"))?;
+    let status = Command::new(prog).args(args).status().map_err(|e| format!("spawn {prog}: {e}"))?;
     if status.success() {
         Ok(())
     } else {
@@ -634,10 +607,7 @@ fn run(prog: &str, args: &[&str]) -> Result<(), String> {
 }
 
 fn run_capture(prog: &str, args: &[&str]) -> Result<String, String> {
-    let output = Command::new(prog)
-        .args(args)
-        .output()
-        .map_err(|e| format!("spawn {prog}: {e}"))?;
+    let output = Command::new(prog).args(args).output().map_err(|e| format!("spawn {prog}: {e}"))?;
     if !output.status.success() {
         return Err(format!("{prog} exited {}", output.status));
     }

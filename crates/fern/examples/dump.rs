@@ -9,10 +9,7 @@ fn main() {
     let mut tokens = fern::lexer::lex(fern::prelude::SOURCE).expect("lex");
     tokens.pop();
     for token in &mut tokens {
-        token.span = Span::new(
-            (token.span.lo + PRELUDE_TAG) as usize,
-            (token.span.hi + PRELUDE_TAG) as usize,
-        );
+        token.span = Span::new((token.span.lo + PRELUDE_TAG) as usize, (token.span.hi + PRELUDE_TAG) as usize);
     }
     tokens.extend(fern::lexer::lex(&src).expect("lex"));
     let program = fern::parser::parse(tokens).expect("parse");

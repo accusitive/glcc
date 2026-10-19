@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use glcc_frontend::lexer::{Interner, Lexer, PpToken, PpWs, Punctuator};
 
-use crate::expand::{tok_is_ws, Tok};
+use crate::expand::{Tok, tok_is_ws};
 
 pub type ArgMap = HashMap<String, MacroArgument>;
 
@@ -93,10 +93,7 @@ impl<'a> ArgumentSubstitution<'a> {
         while self.pos < self.replacements.len() && tok_is_ws(&self.replacements[self.pos]) {
             self.pos += 1;
         }
-        if matches!(
-            self.replacements.get(self.pos).map(|t| &t.tok),
-            Some(PpToken::Punct(Punctuator::HashHash))
-        ) {
+        if matches!(self.replacements.get(self.pos).map(|t| &t.tok), Some(PpToken::Punct(Punctuator::HashHash))) {
             self.pos += 1;
             // The `##` was consumed: the operand after it must not set
             // `NextTokGetsSpace` from its own leading space
@@ -168,10 +165,7 @@ impl<'a> ArgumentSubstitution<'a> {
             while i < self.replacements.len() && tok_is_ws(&self.replacements[i]) {
                 i += 1;
             }
-            if matches!(
-                self.replacements.get(i).map(|t| &t.tok),
-                Some(PpToken::Punct(Punctuator::HashHash))
-            ) {
+            if matches!(self.replacements.get(i).map(|t| &t.tok), Some(PpToken::Punct(Punctuator::HashHash))) {
                 self.pos += 1;
                 return Ok(Some(Vec::new()));
             }
@@ -189,8 +183,7 @@ impl<'a> ArgumentSubstitution<'a> {
             // GNU `, ## __VA_ARGS__` with a non-empty pack is not a real
             // paste: the `##` disappears, the comma stays, and the pack
             // tokens follow with their own flags (clang `VaArgsPseudoPaste`).
-            let pseudo = self.is_va_param(&tok)
-                && matches!(self.glue_chain.last().map(|t| &t.tok), Some(PpToken::Punct(Punctuator::Comma)));
+            let pseudo = self.is_va_param(&tok) && matches!(self.glue_chain.last().map(|t| &t.tok), Some(PpToken::Punct(Punctuator::Comma)));
             if pseudo && !self.va_empty() {
                 let out = self.va_raw_tokens(&tok);
                 self.next_space = false;
@@ -243,9 +236,7 @@ impl<'a> ArgumentSubstitution<'a> {
                 self.stringify_next = true;
                 Ok(Some(Vec::new()))
             }
-            PpToken::Punct(Punctuator::HashHash) => {
-                Err(crate::err("'##' cannot appear at the start of a macro replacement"))
-            }
+            PpToken::Punct(Punctuator::HashHash) => Err(crate::err("'##' cannot appear at the start of a macro replacement")),
             _ if matches!(self.peek_non_ws().map(|t| &t.tok), Some(PpToken::Punct(Punctuator::HashHash))) => {
                 // `X ##`: start a paste with X's raw tokens as the left
                 // operand (`##` is consumed; its own spacing never lands).
@@ -433,9 +424,7 @@ pub fn render_raw(toks: &[Tok], interner: &Interner) -> String {
 
 pub fn render_tok(t: &Tok, interner: &Interner) -> String {
     match t.tok {
-        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => {
-            interner.resolve(sym).unwrap_or("").to_string()
-        }
+        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => interner.resolve(sym).unwrap_or("").to_string(),
         PpToken::Punct(p) => p.as_str().to_string(),
         PpToken::Ws(PpWs::Space) => " ".to_string(),
         PpToken::Ws(PpWs::Tab) => "\t".to_string(),

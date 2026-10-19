@@ -1170,7 +1170,10 @@ fn builtin_types_compatible_p_folds_to_int() {
     let bound = |parser: &mut Parser| {
         let id = parse_decl(parser);
         match &parser.sema.decls[id.0 as usize].ty {
-            Ty::Array { bound: Some(ArrayBound::Fixed(n)), .. } => *n,
+            Ty::Array {
+                bound: Some(ArrayBound::Fixed(n)),
+                ..
+            } => *n,
             other => panic!("expected a fixed array bound, got {other:?}"),
         }
     };
@@ -1224,9 +1227,15 @@ fn stmt_case_ranges_parse_and_check() {
     };
     let Stmt::Compound(inner) = &**switch_body else { panic!("{switch_body:?}") };
     let [range, single, default] = inner.items.as_slice() else { panic!("{inner:?}") };
-    let BlockItem::Stmt(Stmt::Case { expr: Some(_), hi: Some(_), .. }) = range else { panic!("{range:?}") };
-    let BlockItem::Stmt(Stmt::Case { expr: Some(_), hi: None, .. }) = single else { panic!("{single:?}") };
-    let BlockItem::Stmt(Stmt::Case { expr: None, hi: None, .. }) = default else { panic!("{default:?}") };
+    let BlockItem::Stmt(Stmt::Case { expr: Some(_), hi: Some(_), .. }) = range else {
+        panic!("{range:?}")
+    };
+    let BlockItem::Stmt(Stmt::Case { expr: Some(_), hi: None, .. }) = single else {
+        panic!("{single:?}")
+    };
+    let BlockItem::Stmt(Stmt::Case { expr: None, hi: None, .. }) = default else {
+        panic!("{default:?}")
+    };
 }
 
 #[test]
@@ -1236,11 +1245,7 @@ fn stmt_case_range_endpoint_duplicate_panics() {
     // check, so `case 5:` after `case 1 ... 5:` is caught.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void f(int x) { switch (x) { case 1 ... 5: break; case 5: break; } }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void f(int x) { switch (x) { case 1 ... 5: break; case 5: break; } }", &mut sema, &mut interner);
     parse_one_body("duplicate case range", &mut parser);
 }
 
@@ -1248,11 +1253,7 @@ fn stmt_case_range_endpoint_duplicate_panics() {
 fn member_attributes_may_follow_bitfield_width() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "struct s { unsigned a : 16; unsigned long b : 32 __attribute__((packed)); } x;",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("struct s { unsigned a : 16; unsigned long b : 32 __attribute__((packed)); } x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
     let Ty::Struct(tag) = parser.sema.decls[id.0 as usize].ty.unqualified() else {
         panic!("not a struct object")
@@ -1399,7 +1400,10 @@ fn no_gnu_extensions_reject_gnu_spellings() {
         "__extension__ typedef int t;",
         "void *__restrict__ p;",
     ] {
-        let mut sema = gated_sema(LangOpts { gnu: false, ..LangOpts::default() });
+        let mut sema = gated_sema(LangOpts {
+            gnu: false,
+            ..LangOpts::default()
+        });
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         assert!(
@@ -1421,7 +1425,10 @@ fn no_ms_extensions_filter_declspec() {
 #[test]
 #[should_panic(expected = "no type specifier")]
 fn c89_static_assert_keyword() {
-    let mut sema = gated_sema(LangOpts { std: Std::C89, ..LangOpts::default() });
+    let mut sema = gated_sema(LangOpts {
+        std: Std::C89,
+        ..LangOpts::default()
+    });
     let mut interner = Interner::new();
     let mut parser = test_parser("_Static_assert(1, \"x\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1430,7 +1437,10 @@ fn c89_static_assert_keyword() {
 #[test]
 #[should_panic(expected = "expected `;`, got Keyword(Int)")]
 fn c89_thread_local_standard_spelling() {
-    let mut sema = gated_sema(LangOpts { std: Std::C89, ..LangOpts::default() });
+    let mut sema = gated_sema(LangOpts {
+        std: Std::C89,
+        ..LangOpts::default()
+    });
     let mut interner = Interner::new();
     let mut parser = test_parser("_Thread_local int y;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1440,13 +1450,15 @@ fn c89_thread_local_standard_spelling() {
 fn gnu_spellings_survive_at_standard_level() {
     // `-std=c99` gates C11/C23 keywords, not the GNU family.
     for src in ["__asm__(\"nop\");", "__attribute__((aligned(1))) int x;", "__thread long long y;"] {
-        let mut sema = gated_sema(LangOpts { std: Std::C99, ..LangOpts::default() });
+        let mut sema = gated_sema(LangOpts {
+            std: Std::C99,
+            ..LangOpts::default()
+        });
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         parser.parse_translation_unit();
     }
 }
-
 
 #[test]
 #[should_panic(expected = "struct member 'v' has incomplete type")]
@@ -1785,11 +1797,7 @@ fn implicit_int_function_definition() {
     // `int`, C89-style.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "static inline fu (unsigned short data) { return data; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("static inline fu (unsigned short data) { return data; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 }
@@ -2271,11 +2279,7 @@ fn alias_attribute_resolves_to_the_target_declaration() {
     // untouched.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "int a[10]; extern int b[10] __attribute__((alias(\"a\")));",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("int a[10]; extern int b[10] __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     let a = parse_decl(&mut parser);
     let b = parse_decl(&mut parser);
     assert_eq!(parser.sema.decls[b.0 as usize].alias, Some(a));
@@ -2284,11 +2288,7 @@ fn alias_attribute_resolves_to_the_target_declaration() {
     // so the target id stays stable.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "int a[10]; extern int b[10] __attribute__((alias(\"a\"))); int a[10] = {1};",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("int a[10]; extern int b[10] __attribute__((alias(\"a\"))); int a[10] = {1};", &mut sema, &mut interner);
     let a = parse_decl(&mut parser);
     let b = parse_decl(&mut parser);
     let redefined = parse_decl(&mut parser);
@@ -2360,11 +2360,7 @@ fn plain_inline_definition_is_weak_in_cpp_mode() {
     let mut sema = Sema::new();
     sema.weak_extern_inline = true;
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "inline int f(void) { return 1; } static inline int g(void) { return 2; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("inline int f(void) { return 1; } static inline int g(void) { return 2; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 2);
     let f = parser.intern.get_or_intern("f");
@@ -2383,11 +2379,7 @@ fn asm_labels_record_the_emitted_symbol() {
     // (`_Z6strchrPci(...) __asm__("strchr")`).
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "extern char *strchr_(const char *, int) __asm__(\"strchr\");",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("extern char *strchr_(const char *, int) __asm__(\"strchr\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
     let name = parser.intern.get_or_intern("strchr_");
     let id = parser.sema.lookup_symbol(name).unwrap();
@@ -2402,11 +2394,7 @@ fn asm_label_from_a_prototype_rides_the_definition() {
     // it.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "extern int f(int) __asm__(\"g\");\nint f(int x) { return x; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("extern int f(int) __asm__(\"g\");\nint f(int x) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
     let name = parser.intern.get_or_intern("f");
     let id = parser.sema.lookup_symbol(name).unwrap();
@@ -2608,13 +2596,18 @@ fn msvc_spellings_and_annotations_parse() {
     assert_eq!(tu.external_declarations.len(), 2);
     let f = parser.intern.get_or_intern("f");
     let id = parser.sema.lookup_symbol(f).unwrap();
-    assert_eq!(parser.sema.decls[id.0 as usize].ty,
+    assert_eq!(
+        parser.sema.decls[id.0 as usize].ty,
         Ty::Func {
-            ret: Box::new(Ty::Pointer { qualifiers: Vec::new(), pointee: Box::new(Ty::UnsignedLongLong) }),
+            ret: Box::new(Ty::Pointer {
+                qualifiers: Vec::new(),
+                pointee: Box::new(Ty::UnsignedLongLong)
+            }),
             params: vec![],
             variadic: false,
             prototyped: true,
-        });
+        }
+    );
 }
 
 #[test]
@@ -2745,7 +2738,11 @@ fn qualified_struct_assignment_accepted() {
 fn distinct_struct_assignment_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser("struct A { int x; }; struct B { int x; }; void f(void) { struct A a; struct B b; a = b; }", &mut sema, &mut interner);
+    let mut parser = test_parser(
+        "struct A { int x; }; struct B { int x; }; void f(void) { struct A a; struct B b; a = b; }",
+        &mut sema,
+        &mut interner,
+    );
     parser.parse_translation_unit();
 }
 
@@ -2875,7 +2872,9 @@ fn compound_literal_direct_sizeof_operand() {
     assert_eq!(tu.external_declarations.len(), 3);
     let mut values = Vec::new();
     for decl in &tu.external_declarations {
-        let ExternalDeclaration::Var(id) = decl else { panic!("expected a declaration, got {decl:?}") };
+        let ExternalDeclaration::Var(id) = decl else {
+            panic!("expected a declaration, got {decl:?}")
+        };
         let Initializer::Expr(e) = parser.sema.inits[id].clone() else {
             panic!("expected an expression initializer");
         };
@@ -3728,10 +3727,7 @@ fn attributes_between_pointer_and_declarator() {
     for name in ["f", "g"] {
         let sym = parser.intern.get_or_intern(name);
         let id = parser.sema.lookup_symbol(sym).unwrap();
-        assert!(
-            matches!(parser.sema.decls[id.0 as usize].ty, Ty::Func { .. }),
-            "{name} must stay a function"
-        );
+        assert!(matches!(parser.sema.decls[id.0 as usize].ty, Ty::Func { .. }), "{name} must stay a function");
     }
 }
 
@@ -3770,11 +3766,7 @@ fn parenthesized_declarator_parameters_parse() {
     // function-pointer parameter (verified against gcc).
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void q(void ((*f)()), void ((*g)(void)));",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void q(void ((*f)()), void ((*g)(void)));", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
     let q = parser.intern.get_or_intern("q");
@@ -3989,7 +3981,11 @@ fn designator_into_array_without_index_panics() {
 fn designator_chain_selects_into_array_element() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser("struct S { int bit; int other; }; struct S s[2] = { [1].bit = 4, [0].other = 3 };", &mut sema, &mut interner);
+    let mut parser = test_parser(
+        "struct S { int bit; int other; }; struct S s[2] = { [1].bit = 4, [0].other = 3 };",
+        &mut sema,
+        &mut interner,
+    );
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 }
@@ -4172,7 +4168,11 @@ fn vla_bound_expression_retained() {
         panic!("expected a declaration followed by a statement, got {:?}", body.block.items)
     };
     let [a] = ids.as_slice() else { panic!("expected one declarator, got {ids:?}") };
-    let Ty::Array { bound: Some(ArrayBound::Vla(slot)), .. } = &parser.sema.decls[a.0 as usize].ty else {
+    let Ty::Array {
+        bound: Some(ArrayBound::Vla(slot)),
+        ..
+    } = &parser.sema.decls[a.0 as usize].ty
+    else {
         panic!("expected a VLA object, got {:?}", parser.sema.decls[a.0 as usize].ty)
     };
     assert!(
@@ -4195,12 +4195,18 @@ fn vla_param_bound_remapped_to_body_params() {
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [n_id, a_id] = body.params.as_slice() else { panic!("expected two params, got {:?}", body.params) };
+    let [n_id, a_id] = body.params.as_slice() else {
+        panic!("expected two params, got {:?}", body.params)
+    };
     // The parameter decayed to a pointer to the `int[n]` row.
     let Ty::Pointer { pointee, .. } = &parser.sema.decls[a_id.0 as usize].ty else {
         panic!("expected a decayed array parameter, got {:?}", parser.sema.decls[a_id.0 as usize].ty)
     };
-    let Ty::Array { bound: Some(ArrayBound::Vla(slot)), .. } = pointee.as_ref() else {
+    let Ty::Array {
+        bound: Some(ArrayBound::Vla(slot)),
+        ..
+    } = pointee.as_ref()
+    else {
         panic!("expected a VLA row, got {pointee:?}")
     };
     let bound = &parser.sema.vla_bounds[*slot as usize];
@@ -4221,11 +4227,17 @@ fn kr_vla_param_bound_remapped_to_body_params() {
     let g = parser.intern.get_or_intern("get");
     let fid = parser.sema.lookup_symbol(g).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [m_id, n_id, a_id] = body.params.as_slice() else { panic!("expected three params, got {:?}", body.params) };
+    let [m_id, n_id, a_id] = body.params.as_slice() else {
+        panic!("expected three params, got {:?}", body.params)
+    };
     let Ty::Pointer { pointee, .. } = &parser.sema.decls[a_id.0 as usize].ty else {
         panic!("expected a decayed array parameter, got {:?}", parser.sema.decls[a_id.0 as usize].ty)
     };
-    let Ty::Array { bound: Some(ArrayBound::Vla(slot)), .. } = pointee.as_ref() else {
+    let Ty::Array {
+        bound: Some(ArrayBound::Vla(slot)),
+        ..
+    } = pointee.as_ref()
+    else {
         panic!("expected a VLA row, got {pointee:?}")
     };
     let bound = &parser.sema.vla_bounds[*slot as usize];
@@ -4686,10 +4698,7 @@ fn alignof_object_takes_its_alignment_attribute() {
     parser.parse_declaration();
     let expr = parser.parse_expression();
     let checked = parser.sema.check_expr(&expr, &parser.intern).expect("check failed");
-    assert_eq!(
-        crate::eval::eval_const(&checked, parser.sema, &parser.intern),
-        Some(crate::eval::Value::Int(1641))
-    );
+    assert_eq!(crate::eval::eval_const(&checked, parser.sema, &parser.intern), Some(crate::eval::Value::Int(1641)));
 }
 
 #[test]
@@ -4717,24 +4726,15 @@ fn alignas_specifier_aligns_members() {
     // `_Alignas`/`alignas` on a member (C11 §6.7.5, C23 keyword)
     // raises the member's alignment like `aligned(n)`; values verified
     // against gcc.
-    assert_eq!(
-        struct_size_of("struct A { char c; int _Alignas(16) x; };", "A"),
-        (32, 16)
-    );
-    assert_eq!(
-        struct_size_of("struct B { char c; int alignas(8) y; };", "B"),
-        (16, 8)
-    );
+    assert_eq!(struct_size_of("struct A { char c; int _Alignas(16) x; };", "A"), (32, 16));
+    assert_eq!(struct_size_of("struct B { char c; int alignas(8) y; };", "B"), (16, 8));
 }
 
 #[test]
 fn single_underscore_attribute_parses() {
     // `__attribute` (no trailing underscores) is accepted by GCC and
     // clang next to `__attribute__`.
-    assert_eq!(
-        struct_size_of("struct __attribute((packed)) S { char c; int x; };", "S"),
-        (5, 1)
-    );
+    assert_eq!(struct_size_of("struct __attribute((packed)) S { char c; int x; };", "S"), (5, 1));
 }
 
 #[test]
@@ -4982,7 +4982,11 @@ fn libc_builtins_rewrite_to_libc_calls() {
     // implicitly instead.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser("void f(void) { __builtin_abort(); __builtin_strlen(\"abc\"); __builtin_memcpy(((void *)0), ((void *)0), 0); }", &mut sema, &mut interner);
+    let mut parser = test_parser(
+        "void f(void) { __builtin_abort(); __builtin_strlen(\"abc\"); __builtin_memcpy(((void *)0), ((void *)0), 0); }",
+        &mut sema,
+        &mut interner,
+    );
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
     for name in ["abort", "strlen", "memcpy"] {
@@ -5000,11 +5004,7 @@ fn runtime_builtins_rewrite_to_runtime_calls() {
     // declared with their real prototypes.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void f(void *b) { if (__builtin_setjmp(b)) __builtin_longjmp(b, 1); }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void f(void *b) { if (__builtin_setjmp(b)) __builtin_longjmp(b, 1); }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
     for name in ["__glccrt_setjmp", "__glccrt_longjmp"] {
@@ -5026,21 +5026,9 @@ fn frame_address_builtins_fold_their_level() {
     // constant integer) and the result is `void *`.
     let checked = check_with(&[], "__builtin_return_address(1 + 1)");
     assert!(matches!(checked.ty, Ty::Pointer { .. }));
-    assert!(matches!(
-        checked.kind,
-        CheckedExprKind::FrameAddress {
-            level: 2,
-            returns_address: true
-        }
-    ));
+    assert!(matches!(checked.kind, CheckedExprKind::FrameAddress { level: 2, returns_address: true }));
     let checked = check_with(&[], "__builtin_frame_address(0)");
-    assert!(matches!(
-        checked.kind,
-        CheckedExprKind::FrameAddress {
-            level: 0,
-            returns_address: false
-        }
-    ));
+    assert!(matches!(checked.kind, CheckedExprKind::FrameAddress { level: 0, returns_address: false }));
     assert!(check_with_err(&["int x;"], "__builtin_return_address(x)").contains("constant"));
 }
 
@@ -5180,17 +5168,26 @@ fn builtin_signbit_check() {
     assert_eq!(checked.ty, Ty::Int);
     assert!(matches!(
         checked.kind,
-        CheckedExprKind::FpClass { op: crate::check::FpPredicate::SignBit, .. }
+        CheckedExprKind::FpClass {
+            op: crate::check::FpPredicate::SignBit,
+            ..
+        }
     ));
     let checked = check_with(&[], "__builtin_signbitf(1.5f)");
     assert!(matches!(
         checked.kind,
-        CheckedExprKind::FpClass { op: crate::check::FpPredicate::SignBit, .. }
+        CheckedExprKind::FpClass {
+            op: crate::check::FpPredicate::SignBit,
+            ..
+        }
     ));
     let checked = check_with(&[], "__builtin_signbitl(1.5L)");
     assert!(matches!(
         checked.kind,
-        CheckedExprKind::FpClass { op: crate::check::FpPredicate::SignBit, .. }
+        CheckedExprKind::FpClass {
+            op: crate::check::FpPredicate::SignBit,
+            ..
+        }
     ));
     let checked = check_with(&[], "__builtin_signbit(-1)");
     let CheckedExprKind::FpClass { arg, .. } = &checked.kind else {
@@ -5279,9 +5276,7 @@ fn builtin_prefetch_is_a_void_hint() {
 fn builtin_alloca_check() {
     // The size converts to `size_t`; the result is `void *`.
     let checked = check_with(&[], "__builtin_alloca(16)");
-    assert!(
-        matches!(checked.ty.unqualified(), Ty::Pointer { pointee, .. } if pointee.unqualified() == &Ty::Void)
-    );
+    assert!(matches!(checked.ty.unqualified(), Ty::Pointer { pointee, .. } if pointee.unqualified() == &Ty::Void));
     let CheckedExprKind::Alloca { size } = &checked.kind else {
         panic!("expected an alloca node")
     };
@@ -5296,7 +5291,8 @@ fn builtin_alloca_check() {
 }
 
 #[test]
-fn builtin_overflow_check() {    // The pointed-to type fixes the result width and signedness; the
+fn builtin_overflow_check() {
+    // The pointed-to type fixes the result width and signedness; the
     // operands keep their own.
     let checked = check_with(&["int r;"], "__builtin_add_overflow(1, 2, &r)");
     assert_eq!(checked.ty, Ty::Int);
@@ -5314,7 +5310,10 @@ fn builtin_overflow_check() {    // The pointed-to type fixes the result width a
     let checked = check_with(&["unsigned char r;"], "__builtin_sub_overflow(1, 2, &r)");
     assert!(matches!(
         checked.kind,
-        CheckedExprKind::Overflow { op: crate::check::OverflowOp::Sub, .. }
+        CheckedExprKind::Overflow {
+            op: crate::check::OverflowOp::Sub,
+            ..
+        }
     ));
     // The result pointer may be any pointer expression.
     let checked = check_with(&["int a[2];"], "__builtin_add_overflow(1, 2, a + 1)");
@@ -5528,16 +5527,12 @@ fn label_address_and_computed_goto_parse() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { void *p = &&l; goto *p; l: ; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("label-addr", &mut parser);
-    let [BlockItem::Decl { ids, .. }, BlockItem::Stmt(goto), BlockItem::Stmt(label)] =
-        body.block.items.as_slice()
-    else {
+    let [BlockItem::Decl { ids, .. }, BlockItem::Stmt(goto), BlockItem::Stmt(label)] = body.block.items.as_slice() else {
         panic!("{body:?}")
     };
     assert!(matches!(goto, Stmt::GotoComputed { .. }));
     assert!(matches!(label, Stmt::Label { .. }));
-    let Initializer::Expr(e) = &sema.inits[&ids[0]] else {
-        panic!("{ids:?}")
-    };
+    let Initializer::Expr(e) = &sema.inits[&ids[0]] else { panic!("{ids:?}") };
     assert!(matches!(&e.kind, CheckedExprKind::LabelAddr(_)));
     assert_eq!(sema.label_ids.len(), 1);
     assert_eq!(sema.label_ids.values().copied().collect::<Vec<_>>(), [0]);
@@ -5581,9 +5576,7 @@ fn gnu_label_declaration_is_consumed() {
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { __label__ a, b; a: goto a; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("gnu-label", &mut parser);
-    let [empty, label] = body.block.items.as_slice() else {
-        panic!("{body:?}")
-    };
+    let [empty, label] = body.block.items.as_slice() else { panic!("{body:?}") };
     assert!(matches!(empty, BlockItem::Stmt(Stmt::Empty { .. })));
     assert!(matches!(label, BlockItem::Stmt(Stmt::Label { .. })));
 }
@@ -5705,10 +5698,14 @@ fn constant_if_drops_the_untaken_branch() {
         panic!("expected three ifs, got {:?}", body.block.items)
     };
     // The never-taken then empties; the else stays the else.
-    let Stmt::If { then, els: Some(_), .. } = t0 else { panic!("expected an if with an else, got {t0:?}") };
+    let Stmt::If { then, els: Some(_), .. } = t0 else {
+        panic!("expected an if with an else, got {t0:?}")
+    };
     assert!(matches!(&**then, Stmt::Empty { .. }), "dead then must empty, got {then:?}");
     // The never-taken else is dropped outright.
-    let Stmt::If { els: None, .. } = t1 else { panic!("expected the else to be dropped, got {t1:?}") };
+    let Stmt::If { els: None, .. } = t1 else {
+        panic!("expected the else to be dropped, got {t1:?}")
+    };
     // The label keeps the dead branch alive for `goto`.
     let Stmt::If { then, .. } = t2 else { panic!("expected an if, got {t2:?}") };
     assert!(matches!(&**then, Stmt::Compound(_)), "labeled dead branch must survive, got {then:?}");
@@ -5998,9 +5995,16 @@ fn ternary_void_ptr_mix_composes_silently() {
             parser.parse_declaration();
         }
         let expr = parser.parse_expression();
-        let checked = parser.sema.check_expr(&expr, &parser.intern).unwrap_or_else(|err| panic!("check failed for {expr_src:?}: {}", err.message));
+        let checked = parser
+            .sema
+            .check_expr(&expr, &parser.intern)
+            .unwrap_or_else(|err| panic!("check failed for {expr_src:?}: {}", err.message));
         assert_eq!(checked.ty, *want, "for {expr_src:?}");
-        assert!(parser.sema.warnings.borrow().is_empty(), "unexpected warning for {expr_src:?}: {:?}", parser.sema.warnings.borrow());
+        assert!(
+            parser.sema.warnings.borrow().is_empty(),
+            "unexpected warning for {expr_src:?}: {:?}",
+            parser.sema.warnings.borrow()
+        );
     }
 }
 
@@ -6039,21 +6043,13 @@ fn enum_pointer_mixes_with_its_repr() {
     // silently, like GCC.
     let decls = &["enum e { a = -2147483647 - 1 };", "int *p;", "enum e *q;"];
     let checked = check_with(decls, "1 ? q : p");
-    assert!(
-        matches!(checked.ty.unqualified(), Ty::Pointer { pointee, .. } if matches!(pointee.unqualified(), Ty::Enum(_)))
-    );
+    assert!(matches!(checked.ty.unqualified(), Ty::Pointer { pointee, .. } if matches!(pointee.unqualified(), Ty::Enum(_))));
     let checked = check_with(decls, "p = q");
     assert!(matches!(checked.ty.unqualified(), Ty::Pointer { .. }));
     // A different integer type and a second enum stay incompatible.
-    let msg = check_with_err(
-        &["enum e { a = -2147483647 - 1 };", "unsigned *u;", "enum e *q;"],
-        "1 ? q : u",
-    );
+    let msg = check_with_err(&["enum e { a = -2147483647 - 1 };", "unsigned *u;", "enum e *q;"], "1 ? q : u");
     assert!(msg.contains("incompatible operand types in ternary"), "{msg:?}");
-    let msg = check_with_err(
-        &["enum e1 { a = 1 };", "enum e2 { b = 2 };", "enum e1 *q1;", "enum e2 *q2;"],
-        "1 ? q1 : q2",
-    );
+    let msg = check_with_err(&["enum e1 { a = 1 };", "enum e2 { b = 2 };", "enum e1 *q1;", "enum e2 *q2;"], "1 ? q1 : q2");
     assert!(msg.contains("incompatible operand types in ternary"), "{msg:?}");
 }
 
@@ -6517,7 +6513,9 @@ fn kr_missing_param_defaults_to_int() {
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b) int a; { return a + b; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-missing", &mut parser);
-    let Ty::Func { prototyped, params, .. } = &parser.sema.decls[id.0 as usize].ty else { panic!("expected func") };
+    let Ty::Func { prototyped, params, .. } = &parser.sema.decls[id.0 as usize].ty else {
+        panic!("expected func")
+    };
     assert!(prototyped);
     assert_eq!(params, &vec![Ty::Int, Ty::Int]);
 }
@@ -6528,7 +6526,9 @@ fn kr_parameters_promote_in_the_signature_only() {
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(c, s, h) char c; short s; float h; { return 0; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-promote", &mut parser);
-    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else { panic!("expected func") };
+    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else {
+        panic!("expected func")
+    };
     assert!(prototyped);
     // The signature carries the promoted types: an unprototyped
     // caller passes promoted values, so the ABI slot must hold them.
@@ -6536,11 +6536,7 @@ fn kr_parameters_promote_in_the_signature_only() {
     // The body's parameters keep the declared types; the prologue
     // converts, so `sizeof(c)` is 1 and `f(-1)` reads the low byte.
     let body = parser.sema.bodies.get(&id).expect("body recorded");
-    let body_tys: Vec<Ty> = body
-        .params
-        .iter()
-        .map(|p| parser.sema.decls[p.0 as usize].ty.clone())
-        .collect();
+    let body_tys: Vec<Ty> = body.params.iter().map(|p| parser.sema.decls[p.0 as usize].ty.clone()).collect();
     assert_eq!(body_tys, vec![Ty::Char, Ty::Short, Ty::Float]);
 }
 
@@ -6550,7 +6546,9 @@ fn kr_array_and_function_decay() {
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, p) int a[]; int (*p)(void); { return 0; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-decay", &mut parser);
-    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else { panic!("expected func") };
+    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else {
+        panic!("expected func")
+    };
     assert!(prototyped);
     assert_eq!(params.len(), 2);
     assert!(matches!(&params[0], Ty::Pointer { .. }));
@@ -6563,7 +6561,9 @@ fn kr_multi_declarator_list() {
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b) int a, b; { return a + b; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-multi", &mut parser);
-    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else { panic!("expected func") };
+    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else {
+        panic!("expected func")
+    };
     assert!(prototyped);
     assert_eq!(params, &vec![Ty::Int, Ty::Int]);
 }
@@ -6574,7 +6574,9 @@ fn kr_register_allowed() {
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) register int a; { return a; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-register", &mut parser);
-    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else { panic!("expected func") };
+    let Ty::Func { params, prototyped, .. } = &parser.sema.decls[id.0 as usize].ty else {
+        panic!("expected func")
+    };
     assert!(prototyped);
     assert_eq!(params, &vec![Ty::Int]);
 }
@@ -8137,18 +8139,9 @@ fn uac_common_type_table() {
     assert_eq!(Sema::uac_common_type(&Double, &Float), Double);
     assert_eq!(Sema::uac_common_type(&LongDouble, &Int), LongDouble);
     // Complex follows its real component.
-    assert_eq!(
-        Sema::uac_common_type(&Complex(Box::new(Float)), &Int),
-        Complex(Box::new(Float))
-    );
-    assert_eq!(
-        Sema::uac_common_type(&Double, &Complex(Box::new(Float))),
-        Complex(Box::new(Double))
-    );
-    assert_eq!(
-        Sema::uac_common_type(&Complex(Box::new(Int)), &Complex(Box::new(Long))),
-        Complex(Box::new(Long))
-    );
+    assert_eq!(Sema::uac_common_type(&Complex(Box::new(Float)), &Int), Complex(Box::new(Float)));
+    assert_eq!(Sema::uac_common_type(&Double, &Complex(Box::new(Float))), Complex(Box::new(Double)));
+    assert_eq!(Sema::uac_common_type(&Complex(Box::new(Int)), &Complex(Box::new(Long))), Complex(Box::new(Long)));
 }
 
 #[test]
@@ -8376,7 +8369,8 @@ fn check_assignment_forms() {
 
     // Null constants assign to pointers silently; other integers and
     // pointers convert with a GCC-style `-Wint-conversion` warning.
-    check_with(&["int *p;"], "p = 0");    let checked = check_with(&["int *p;"], "p = 1");
+    check_with(&["int *p;"], "p = 0");
+    let checked = check_with(&["int *p;"], "p = 1");
     let CheckedExprKind::Assign(_, _, r) = &checked.kind else {
         panic!("expected an assignment node")
     };
@@ -8544,11 +8538,7 @@ fn void_function_returns_void_call() {
     // `return f();` for a void `f` is legal; a non-void value is not.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void f(void); void g(void) { return f(); }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void f(void); void g(void) { return f(); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -8565,10 +8555,7 @@ fn void_function_returns_value_panics() {
 fn cast_to_union_initializes_member() {
     // A GNU cast to a union type initializes the member whose type
     // matches the operand.
-    let checked = check_with(
-        &["union U { int a; double b; };"],
-        "(union U) 1.5",
-    );
+    let checked = check_with(&["union U { int a; double b; };"], "(union U) 1.5");
     assert!(matches!(checked.kind, CheckedExprKind::CompoundLiteral { .. }));
     let msg = check_with_err(&["union U { int a; };"], "(union U) 1.5");
     assert!(msg.contains("not present in union"), "{msg:?}");
@@ -8806,9 +8793,7 @@ fn asm_nonempty_template_accepted() {
 
 #[test]
 fn asm_goto_template_accepted() {
-    let items = body_of_f(
-        "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }",
-    );
+    let items = body_of_f("int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }");
     let [BlockItem::Stmt(Stmt::Asm(asm)), ..] = items.as_slice() else {
         panic!("expected asm goto first, got {items:?}");
     };
@@ -8889,11 +8874,7 @@ fn asm_aarch64_memory_letter_needs_an_lvalue() {
     use crate::target::Target;
     let mut sema = Sema::with_target(Target::AARCH64);
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void f(int x){ asm(\"\" : : \"Q\"(x + 1)); }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void f(int x){ asm(\"\" : : \"Q\"(x + 1)); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -8907,11 +8888,7 @@ fn asm_output_readonly_rejected() {
 fn file_scope_asm_collected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "asm(\".globl x\\n.globl y\");\n__asm__(\"nop\");\nint f(void){ return 0; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("asm(\".globl x\\n.globl y\");\n__asm__(\"nop\");\nint f(void){ return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
     let templates: Vec<&str> = parser.sema.toplevel_asm.iter().map(|(t, _)| t.as_str()).collect();
     assert_eq!(templates, [".globl x\n.globl y", "nop"]);
@@ -9023,17 +9000,10 @@ fn async_attribute_without_the_flag_is_inert() {
     // so calls still see the declared result.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "__attribute__((async)) int f(void); f()",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("__attribute__((async)) int f(void); f()", &mut sema, &mut interner);
     parser.parse_external_declaration();
     let expr = parser.parse_expression();
-    let checked = parser
-        .sema
-        .check_expr(&expr, &parser.intern)
-        .unwrap_or_else(|err| panic!("check failed: {}", err.message));
+    let checked = parser.sema.check_expr(&expr, &parser.intern).unwrap_or_else(|err| panic!("check failed: {}", err.message));
     assert_eq!(checked.ty, Ty::Int);
     assert!(sema.future_handle_of(&Ty::Int).is_none(), "no handle without the flag");
 }
@@ -9043,11 +9013,7 @@ fn async_attribute_without_the_flag_is_inert() {
 fn await_outside_a_coroutine_is_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "int f(void) { return __builtin_await(0); }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("int f(void) { return __builtin_await(0); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -9056,11 +9022,7 @@ fn await_outside_a_coroutine_is_rejected() {
 fn variadic_coroutines_are_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "__attribute__((async)) int f(int x, ...) { return x; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("__attribute__((async)) int f(int x, ...) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -9069,11 +9031,7 @@ fn variadic_coroutines_are_rejected() {
 fn async_main_is_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "__attribute__((async)) int main(void) { return 0; }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("__attribute__((async)) int main(void) { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -9082,11 +9040,7 @@ fn async_main_is_rejected() {
 fn naked_coroutines_are_rejected() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "__attribute__((async)) __attribute__((naked)) void f(void) { }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("__attribute__((async)) __attribute__((naked)) void f(void) { }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 
@@ -9105,22 +9059,13 @@ fn async_on_an_object_is_inert() {
 fn future_handles_are_interned_per_result_type() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "_Future(int) a; _Future(int) b; _Future(char) c;",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("_Future(int) a; _Future(int) b; _Future(char) c;", &mut sema, &mut interner);
     parser.parse_translation_unit();
     let int_handle = sema.future_handle_of(&Ty::Int).expect("int handle interned");
     let char_handle = sema.future_handle_of(&Ty::Char).expect("char handle interned");
     assert_ne!(int_handle, char_handle);
     assert_eq!(sema.future_result_of(&int_handle), Some(Ty::Int));
-    let decls: Vec<crate::parse::Ty> = sema
-        .decls
-        .iter()
-        .filter(|b| b.kind == crate::sema::BindingKind::Var)
-        .map(|b| b.ty.clone())
-        .collect();
+    let decls: Vec<crate::parse::Ty> = sema.decls.iter().filter(|b| b.kind == crate::sema::BindingKind::Var).map(|b| b.ty.clone()).collect();
     assert_eq!(decls.len(), 3, "{decls:?}");
     assert_eq!(decls[0], decls[1], "one handle per result type");
     assert_ne!(decls[0], decls[2]);
@@ -9132,17 +9077,10 @@ fn future_handles_are_interned_per_result_type() {
 fn async_calls_are_typed_as_future_handles() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "__attribute__((async)) int f(int x); f(1)",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("__attribute__((async)) int f(int x); f(1)", &mut sema, &mut interner);
     parser.parse_external_declaration();
     let expr = parser.parse_expression();
-    let checked = parser
-        .sema
-        .check_expr(&expr, &parser.intern)
-        .unwrap_or_else(|err| panic!("check failed: {}", err.message));
+    let checked = parser.sema.check_expr(&expr, &parser.intern).unwrap_or_else(|err| panic!("check failed: {}", err.message));
     let handle = parser.sema.future_handle_of(&Ty::Int).expect("handle interned");
     assert_eq!(checked.ty, handle);
 }
@@ -9153,18 +9091,11 @@ fn async_calls_are_typed_as_future_handles() {
 fn await_yields_the_result_and_rejects_non_futures() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = async_parser(
-        "__attribute__((async)) int f(int x); __builtin_await(f(1))",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = async_parser("__attribute__((async)) int f(int x); __builtin_await(f(1))", &mut sema, &mut interner);
     parser.parse_external_declaration();
     parser.sema.checking_async_fn.set(true);
     let expr = parser.parse_expression();
-    let checked = parser
-        .sema
-        .check_expr(&expr, &parser.intern)
-        .unwrap_or_else(|err| panic!("check failed: {}", err.message));
+    let checked = parser.sema.check_expr(&expr, &parser.intern).unwrap_or_else(|err| panic!("check failed: {}", err.message));
     assert_eq!(checked.ty, Ty::Int);
     assert!(matches!(checked.kind, CheckedExprKind::Await(_)));
     parser.sema.checking_async_fn.set(false);
@@ -9175,15 +9106,8 @@ fn await_yields_the_result_and_rejects_non_futures() {
     parser.parse_external_declaration();
     parser.sema.checking_async_fn.set(true);
     let expr = parser.parse_expression();
-    let err = parser
-        .sema
-        .check_expr(&expr, &parser.intern)
-        .expect_err("non-futures are rejected");
-    assert!(
-        err.message.contains("is not a future"),
-        "{}",
-        err.message
-    );
+    let err = parser.sema.check_expr(&expr, &parser.intern).expect_err("non-futures are rejected");
+    assert!(err.message.contains("is not a future"), "{}", err.message);
 }
 
 // ---- C99 gap coverage: `_Imaginary`, universal character names, `_Pragma` ----
@@ -9291,10 +9215,7 @@ fn atomic_specifier_combines_with_nothing() {
 /// decodes it to the named character.
 #[test]
 fn ucn_names_identifier_characters() {
-    let cases = [
-        ("int \\u00e9 = 1;", "é"),
-        ("int a\\u00e9b = 1;", "aéb"),
-    ];
+    let cases = [("int \\u00e9 = 1;", "é"), ("int a\\u00e9b = 1;", "aéb")];
     for (src, want) in cases {
         let mut interner = Interner::new();
         let tokens = Lexer::new(src, &mut interner).lex_all();
@@ -9374,11 +9295,7 @@ fn pragma_operator_is_skipped_at_file_scope() {
 fn pragma_operator_is_skipped_in_a_block() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser(
-        "void f(void) { _Pragma(\"pack(1)\") int x; (void)x; _Pragma(\"pack()\") }",
-        &mut sema,
-        &mut interner,
-    );
+    let mut parser = test_parser("void f(void) { _Pragma(\"pack(1)\") int x; (void)x; _Pragma(\"pack()\") }", &mut sema, &mut interner);
     parser.parse_translation_unit();
 }
 

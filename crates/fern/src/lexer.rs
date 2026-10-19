@@ -38,9 +38,9 @@ pub enum Tok {
     Semi,
     Colon,
     ColonColon, // ::
-    Arrow,     // ->
-    FatArrow,  // =>
-    Eq,        // =
+    Arrow,      // ->
+    FatArrow,   // =>
+    Eq,         // =
     Plus,
     Minus,
     Star,
@@ -53,7 +53,7 @@ pub enum Tok {
     Ne,
     AmpAmp,
     PipePipe,
-    Pipe,      // | (data decl separator)
+    Pipe, // | (data decl separator)
     Underscore,
     Eof,
 }
@@ -257,10 +257,7 @@ impl<'s> Lexer<'s> {
             end += 1;
         }
         let mut is_float = false;
-        if end + 1 < self.bytes.len()
-            && self.bytes[end] == b'.'
-            && self.bytes[end + 1].is_ascii_digit()
-        {
+        if end + 1 < self.bytes.len() && self.bytes[end] == b'.' && self.bytes[end + 1].is_ascii_digit() {
             is_float = true;
             end += 2;
             while end < self.bytes.len() && self.bytes[end].is_ascii_digit() {
@@ -270,14 +267,10 @@ impl<'s> Lexer<'s> {
         let text = &self.src[lo..end];
         self.pos = end;
         if is_float {
-            let value = text
-                .parse::<f64>()
-                .map_err(|_| self.err(format!("float literal `{text}` is out of range"), lo, end))?;
+            let value = text.parse::<f64>().map_err(|_| self.err(format!("float literal `{text}` is out of range"), lo, end))?;
             self.push(Tok::Float(value), lo, tokens);
         } else {
-            let value = text
-                .parse::<i64>()
-                .map_err(|_| self.err(format!("integer literal `{text}` is out of range"), lo, end))?;
+            let value = text.parse::<i64>().map_err(|_| self.err(format!("integer literal `{text}` is out of range"), lo, end))?;
             self.push(Tok::Int(value), lo, tokens);
         }
         Ok(())
@@ -290,93 +283,93 @@ impl<'s> Lexer<'s> {
         match b {
             b'(' => {
                 tokens.push(Token {
-            tok: Tok::LParen,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::LParen,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b')' => {
                 tokens.push(Token {
-            tok: Tok::RParen,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::RParen,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'{' => {
                 tokens.push(Token {
-            tok: Tok::LBrace,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::LBrace,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'}' => {
                 tokens.push(Token {
-            tok: Tok::RBrace,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::RBrace,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'[' => {
                 tokens.push(Token {
-            tok: Tok::LBracket,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::LBracket,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b']' => {
                 tokens.push(Token {
-            tok: Tok::RBracket,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::RBracket,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b',' => {
                 tokens.push(Token {
-            tok: Tok::Comma,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::Comma,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b';' => {
                 tokens.push(Token {
-            tok: Tok::Semi,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::Semi,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'*' => {
                 tokens.push(Token {
-            tok: Tok::Star,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::Star,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'+' => {
                 tokens.push(Token {
-            tok: Tok::Plus,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::Plus,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'/' => {
                 tokens.push(Token {
-            tok: Tok::Slash,
-            span: Span::new(lo, start + 1),
-        });
+                    tok: Tok::Slash,
+                    span: Span::new(lo, start + 1),
+                });
                 Ok(())
             }
             b'-' => {
                 if two(self) == b'>' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::Arrow,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::Arrow,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Minus,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Minus,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -384,14 +377,14 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'|' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::PipePipe,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::PipePipe,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Pipe,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Pipe,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -399,20 +392,20 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'=' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::EqEq,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::EqEq,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else if two(self) == b'>' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::FatArrow,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::FatArrow,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Eq,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Eq,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -420,9 +413,9 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'=' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::Ne,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::Ne,
+                        span: Span::new(lo, start + 2),
+                    });
                     Ok(())
                 } else {
                     Err(self.err("`!` is not valid fern; use `Eq::eq`", lo, self.pos))
@@ -432,14 +425,14 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'=' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::Le,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::Le,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Lt,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Lt,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -447,14 +440,14 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'=' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::Ge,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::Ge,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Gt,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Gt,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -462,14 +455,14 @@ impl<'s> Lexer<'s> {
                 if two(self) == b':' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::ColonColon,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::ColonColon,
+                        span: Span::new(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
-            tok: Tok::Colon,
-            span: Span::new(lo, start + 1),
-        });
+                        tok: Tok::Colon,
+                        span: Span::new(lo, start + 1),
+                    });
                 }
                 Ok(())
             }
@@ -477,19 +470,15 @@ impl<'s> Lexer<'s> {
                 if two(self) == b'&' {
                     self.bump();
                     tokens.push(Token {
-            tok: Tok::AmpAmp,
-            span: Span::new(lo, start + 2),
-        });
+                        tok: Tok::AmpAmp,
+                        span: Span::new(lo, start + 2),
+                    });
                     Ok(())
                 } else {
                     Err(self.err("single `&` is not valid fern", lo, self.pos))
                 }
             }
-            _ => Err(self.err(
-                "unexpected character in source text",
-                lo,
-                self.pos.max(lo + 1),
-            )),
+            _ => Err(self.err("unexpected character in source text", lo, self.pos.max(lo + 1))),
         }
     }
 

@@ -53,8 +53,7 @@ fn partial_application_matches_saturated_constructor() {
     let mut ctx = InferCtx::new();
     let f = ctx.fresh();
     let b = ctx.fresh();
-    ctx.unify(&named("Free", vec![Ty::int_ty(), b.clone()]), &Ty::app(f.clone(), b), span())
-        .expect("unify");
+    ctx.unify(&named("Free", vec![Ty::int_ty(), b.clone()]), &Ty::app(f.clone(), b), span()).expect("unify");
     assert_eq!(ctx.resolve(&f), named("Free", vec![Ty::int_ty()]));
 }
 
@@ -80,17 +79,10 @@ fn equal_length_spines_unify_heads() {
 fn named_types_unify_structurally() {
     let mut ctx = InferCtx::new();
     let a = ctx.fresh();
-    ctx.unify(
-        &named("List", vec![a.clone()]),
-        &named("List", vec![Ty::int_ty()]),
-        span(),
-    )
-    .expect("unify");
+    ctx.unify(&named("List", vec![a.clone()]), &named("List", vec![Ty::int_ty()]), span()).expect("unify");
     assert_eq!(ctx.resolve(&a), Ty::int_ty());
 
-    let err = ctx
-        .unify(&named("List", vec![a]), &named("Maybe", vec![Ty::int_ty()]), span())
-        .unwrap_err();
+    let err = ctx.unify(&named("List", vec![a]), &named("Maybe", vec![Ty::int_ty()]), span()).unwrap_err();
     assert!(err.msg.contains("mismatched types"), "{}", err.msg);
 }
 
@@ -115,9 +107,7 @@ fn rigid_parameters_do_not_bind() {
 fn occurs_check_rejects_cycles() {
     let mut ctx = InferCtx::new();
     let a = ctx.fresh();
-    let err = ctx
-        .unify(&a, &named("List", vec![a.clone()]), span())
-        .unwrap_err();
+    let err = ctx.unify(&a, &named("List", vec![a.clone()]), span()).unwrap_err();
     assert!(err.msg.contains("recursive type"), "{}", err.msg);
 }
 
@@ -168,13 +158,10 @@ fn generalize_then_instantiate() {
     assert!(scheme.ty.contains_param());
 
     let inst = ctx.instantiate_scheme(&scheme);
-    ctx.unify(&inst, &Ty::arrow(Ty::int_ty(), Ty::int_ty()), span())
-        .expect("same-type instantiation");
+    ctx.unify(&inst, &Ty::arrow(Ty::int_ty(), Ty::int_ty()), span()).expect("same-type instantiation");
     let inst2 = ctx.instantiate_scheme(&scheme);
     ctx.unify(&inst2, &Ty::arrow(Ty::bool_ty(), Ty::bool_ty()), span())
         .expect("second instantiation is independent");
     let inst3 = ctx.instantiate_scheme(&scheme);
-    assert!(ctx
-        .unify(&inst3, &Ty::arrow(Ty::int_ty(), Ty::bool_ty()), span())
-        .is_err());
+    assert!(ctx.unify(&inst3, &Ty::arrow(Ty::int_ty(), Ty::bool_ty()), span()).is_err());
 }

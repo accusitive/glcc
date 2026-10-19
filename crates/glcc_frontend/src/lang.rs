@@ -96,7 +96,12 @@ impl Default for LangOpts {
     /// Fully permissive: C17 with every extension family on, matching
     /// the behavior before gating existed.
     fn default() -> Self {
-        Self { std: Std::Gnu17, gnu: true, ms: true, clang: true }
+        Self {
+            std: Std::Gnu17,
+            gnu: true,
+            ms: true,
+            clang: true,
+        }
     }
 }
 
@@ -144,7 +149,8 @@ pub fn spelling_family(word: &str) -> Fam {
         // accepting them liberally, and unchanged defaults (GNU on)
         // keep doing so.
         "thread_local" | "typeof" => Fam::GnuOrC23,
-        "__int8" | "__int16" | "__int32" | "__int64" | "__declspec" | "_declspec" | "__pragma" | "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall" | "__clrcall" => Fam::Ms,
+        "__int8" | "__int16" | "__int32" | "__int64" | "__declspec" | "_declspec" | "__pragma" | "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
+        | "__clrcall" => Fam::Ms,
         "_Float32" | "_Float64" => Fam::Clang,
         _ => Fam::Gnu,
     }
@@ -189,6 +195,12 @@ mod tests {
         assert!(Std::Gnu11.is_gnu());
         assert!(!Std::C11.is_gnu());
         assert!(LangOpts::default().standard_includes(Std::C11));
-        assert!(!LangOpts { std: Std::C89, ..LangOpts::default() }.standard_includes(Std::C11));
+        assert!(
+            !LangOpts {
+                std: Std::C89,
+                ..LangOpts::default()
+            }
+            .standard_includes(Std::C11)
+        );
     }
 }

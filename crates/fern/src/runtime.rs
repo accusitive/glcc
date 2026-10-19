@@ -24,13 +24,9 @@ pub const SOURCE: &str = include_str!("../rt/gc.c");
 /// The runtime is compiler-internal, so it always gets the standard
 /// pipeline regardless of the program's optimization level.
 pub fn module() -> mir::Module {
-    let module = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compile))
-        .expect("fern runtime: the C frontend rejected rt/gc.c (see the diagnostic above)");
+    let module = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compile)).expect("fern runtime: the C frontend rejected rt/gc.c (see the diagnostic above)");
     let errors = mir::verify::verify_module(&module);
-    assert!(
-        errors.is_empty(),
-        "fern runtime: MIR verification failed: {errors:?}"
-    );
+    assert!(errors.is_empty(), "fern runtime: MIR verification failed: {errors:?}");
     module
 }
 
@@ -45,8 +41,7 @@ fn compile() -> mir::Module {
     // suppressed because nothing maps runtime positions back to source.
     let mut opts = glcc_pp::cpp_flags_to_opts(&[], NAME);
     opts.linemarkers = false;
-    let src = glcc_pp::preprocess(SOURCE, NAME, &opts)
-        .expect("fern runtime: preprocessing rt/gc.c failed");
+    let src = glcc_pp::preprocess(SOURCE, NAME, &opts).expect("fern runtime: preprocessing rt/gc.c failed");
     let mut interner = Interner::new();
     let mut sema = Sema::with_target(Target::native());
     let tokens = Lexer::new(&src, &mut interner).lex_all();

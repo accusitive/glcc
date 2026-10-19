@@ -68,18 +68,9 @@ impl<'d> Types<'d> {
             Ty::Tuple(vs) if vs.is_empty() => Ok(mir::Ty::int(8)),
             Ty::Tuple(_) => Ok(self.memo(&ty, mir::Ty::ptr(mir::Ty::Void))),
             Ty::Arrow(..) => Ok(mir::Ty::ptr(mir::Ty::Void)),
-            Ty::App(..) => Err(Diag::new(
-                format!("`{ty}` reached lowering with an unresolved head"),
-                span,
-            )),
-            Ty::Param(p) => Err(Diag::new(
-                format!("type parameter `{p}` reached lowering uninstantiated"),
-                span,
-            )),
-            Ty::Var(v) => Err(Diag::new(
-                format!("inference variable `?{v}` reached lowering"),
-                span,
-            )),
+            Ty::App(..) => Err(Diag::new(format!("`{ty}` reached lowering with an unresolved head"), span)),
+            Ty::Param(p) => Err(Diag::new(format!("type parameter `{p}` reached lowering uninstantiated"), span)),
+            Ty::Var(v) => Err(Diag::new(format!("inference variable `?{v}` reached lowering"), span)),
         }
     }
 
@@ -96,10 +87,7 @@ impl<'d> Types<'d> {
             return Err(Diag::new(format!("cannot find type `{name}`"), span));
         }
         if !orig.is_concrete() {
-            return Err(Diag::new(
-                format!("`{orig}` reached lowering uninstantiated"),
-                span,
-            ));
+            return Err(Diag::new(format!("`{orig}` reached lowering uninstantiated"), span));
         }
         Ok(mir::Ty::ptr(mir::Ty::Void))
     }
@@ -120,22 +108,11 @@ impl<'d> Types<'d> {
         if let Some(l) = self.layouts.get(&key) {
             return Ok(l.clone());
         }
-        let data_id = self
-            .defs
-            .data_by_name(name)
-            .ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
+        let data_id = self.defs.data_by_name(name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
         let ctor_args: Vec<Vec<Ty>> = {
             let data = &self.defs.data[data_id.index()];
-            let subst: HashMap<String, Ty> = data
-                .params
-                .iter()
-                .map(|(n, _)| n.clone())
-                .zip(args.iter().cloned())
-                .collect();
-            data.ctors
-                .iter()
-                .map(|c| c.args.iter().map(|a| a.substitute(&subst)).collect())
-                .collect()
+            let subst: HashMap<String, Ty> = data.params.iter().map(|(n, _)| n.clone()).zip(args.iter().cloned()).collect();
+            data.ctors.iter().map(|c| c.args.iter().map(|a| a.substitute(&subst)).collect()).collect()
         };
         let mut field_tys = Vec::with_capacity(ctor_args.len());
         for args in &ctor_args {
@@ -238,10 +215,7 @@ pub(crate) fn normalize(ty: &Ty) -> Ty {
 pub(crate) fn struct_offsets(ty: &mir::Ty, span: Span) -> KResult<Vec<u64>> {
     match ty {
         mir::Ty::Struct { offsets, .. } => Ok(offsets.clone()),
-        other => Err(Diag::new(
-            format!("cannot select a field of `{other:?}`"),
-            span,
-        )),
+        other => Err(Diag::new(format!("cannot select a field of `{other:?}`"), span)),
     }
 }
 
@@ -250,18 +224,8 @@ pub(crate) fn struct_offsets(ty: &mir::Ty, span: Span) -> KResult<Vec<u64>> {
 /// zero-sized slots).
 pub(crate) fn struct_ty(fields: Vec<mir::Ty>) -> mir::Ty {
     let offsets = mir::dense_field_offsets(&fields);
-    let align = fields
-        .iter()
-        .map(mir::ty::ty_align)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let end = fields
-        .iter()
-        .zip(&offsets)
-        .map(|(f, off)| off + f.size_bytes())
-        .max()
-        .unwrap_or(0);
+    let align = fields.iter().map(mir::ty::ty_align).max().unwrap_or(1).max(1);
+    let end = fields.iter().zip(&offsets).map(|(f, off)| off + f.size_bytes()).max().unwrap_or(0);
     mir::Ty::Struct {
         fields,
         offsets,

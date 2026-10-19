@@ -10,9 +10,7 @@ pub use instcombine::InstCombine;
 pub use licm::Licm;
 pub use sccp::Sccp;
 
-use crate::ir::{
-    Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstKind, Module, Terminator, Value,
-};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstKind, Module, Terminator, Value};
 use crate::pass::{FunctionPass, ModulePass};
 use crate::ty::{FloatKind, Ty};
 
@@ -79,20 +77,12 @@ fn eval_icmp(pred: IcmpPred, bits: u32, lhs: i128, rhs: i128) -> bool {
 /// or read a bit pattern the backend defines: division by a wrapped
 /// zero and oversized shifts never fold.
 fn fold_int2_bits(bits: u32, x: i128, y: i128, f: impl FnOnce(i128, i128) -> i128) -> Option<Const> {
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, f(x, y)),
-    })
+    Some(Const::Int { bits, value: wrap(bits, f(x, y)) })
 }
 
 /// Refuse oversized shifts (C UB, and the backend defines the hardware
 /// behavior): those stay for codegen.
-fn fold_shift_bits(
-    bits: u32,
-    x: u128,
-    s: i128,
-    f: impl FnOnce(u128, u32) -> u128,
-) -> Option<Const> {
+fn fold_shift_bits(bits: u32, x: u128, s: i128, f: impl FnOnce(u128, u32) -> u128) -> Option<Const> {
     if bits == 0 || bits > 128 || s < 0 || s as u128 >= bits as u128 {
         return None;
     }
@@ -109,24 +99,13 @@ fn fold_div_bits(bits: u32, x: i128, y: i128, signed: bool, is_rem: bool) -> Opt
         return None;
     }
     let value = if signed {
-        wrap(
-            bits,
-            if is_rem {
-                x.wrapping_rem(y)
-            } else {
-                x.wrapping_div(y)
-            },
-        )
+        wrap(bits, if is_rem { x.wrapping_rem(y) } else { x.wrapping_div(y) })
     } else {
         let m = mask(bits);
         let xu = (x as u128) & m;
         let yu = (y as u128) & m;
         // `y != 0` as a wrapped value implies `yu != 0`.
-        let q = if is_rem {
-            xu.wrapping_rem(yu)
-        } else {
-            xu.wrapping_div(yu)
-        };
+        let q = if is_rem { xu.wrapping_rem(yu) } else { xu.wrapping_div(yu) };
         wrap(bits, q as i128)
     };
     Some(Const::Int { bits, value })
@@ -140,10 +119,7 @@ fn fold_neg_bits(bits: u32, x: i128) -> Option<Const> {
 }
 
 fn fold_not_bits(bits: u32, x: i128) -> Option<Const> {
-    Some(Const::Int {
-        bits,
-        value: wrap(bits, !x),
-    })
+    Some(Const::Int { bits, value: wrap(bits, !x) })
 }
 
 /// An arithmetic shift right (sign-preserving Rust `>>` on the wrapped
@@ -211,9 +187,7 @@ impl FunctionPass for ConstFold {
                 InstKind::Neg(a) => fold_neg(func, *a),
                 InstKind::Not(a) => fold_not(func, *a),
                 InstKind::Trunc(a) => fold_conv(func, *a, result_ty.as_ref(), |x, _, tb| wrap(tb, x)),
-                InstKind::Zext(a) => fold_conv(func, *a, result_ty.as_ref(), |x, ob, tb| {
-                    wrap(tb, ((x as u128) & mask(ob)) as i128)
-                }),
+                InstKind::Zext(a) => fold_conv(func, *a, result_ty.as_ref(), |x, ob, tb| wrap(tb, ((x as u128) & mask(ob)) as i128)),
                 InstKind::Sext(a) => fold_conv(func, *a, result_ty.as_ref(), |x, _, tb| wrap(tb, x)),
                 InstKind::Bitcast(a) => fold_bitcast(func, *a, result_ty.as_ref()),
                 InstKind::FNeg(a) => match func.const_value(*a) {
@@ -226,32 +200,20 @@ impl FunctionPass for ConstFold {
                             FloatKind::F80 => 1u128 << 79,
                             FloatKind::F128 => 1u128 << 127,
                         };
-                        Some(Const::Float {
-                            kind: *kind,
-                            bits: bits ^ sign,
-                        })
+                        Some(Const::Float { kind: *kind, bits: bits ^ sign })
                     }
                     _ => None,
                 },
                 InstKind::Fcmp { pred, lhs, rhs } => fold_fcmp(func, *pred, *lhs, *rhs),
                 InstKind::Icmp { pred, lhs, rhs } => {
-                    if let (Some((bits, l)), Some((_, r))) =
-                        (int_const(func, *lhs), int_const(func, *rhs))
-                    {
+                    if let (Some((bits, l)), Some((_, r))) = (int_const(func, *lhs), int_const(func, *rhs)) {
                         let b = eval_icmp(*pred, bits, l, r);
-                        Some(Const::Int {
-                            bits: 1,
-                            value: i128::from(b),
-                        })
+                        Some(Const::Int { bits: 1, value: i128::from(b) })
                     } else {
                         None
                     }
                 }
-                InstKind::Select {
-                    cond,
-                    then_val,
-                    else_val,
-                } => match int_const(func, *cond) {
+                InstKind::Select { cond, then_val, else_val } => match int_const(func, *cond) {
                     Some((_, 0)) => func.const_value(*else_val).cloned(),
                     Some(_) => func.const_value(*then_val).cloned(),
                     None => None,
@@ -264,10 +226,7 @@ impl FunctionPass for ConstFold {
                     // carry `result`'s type: `c.ty()` loses it (`Undef` is
                     // `Void`, `Null` is `ptr(Void)`, aggregates have none).
                     let ty = func.values[result].ty.clone();
-                    let replacement = func.values.push(crate::ir::ValueData {
-                        ty,
-                        def: Def::Const(c),
-                    });
+                    let replacement = func.values.push(crate::ir::ValueData { ty, def: Def::Const(c) });
                     func.replace_uses(result, replacement);
                     changed = true;
                 }
@@ -303,26 +262,15 @@ impl FunctionPass for ConstFold {
                         }
                     }
                 }
-                Some(Terminator::Switch {
-                    scrutinee,
-                    cases,
-                    default,
-                }) => match func.const_value(scrutinee) {
+                Some(Terminator::Switch { scrutinee, cases, default }) => match func.const_value(scrutinee) {
                     Some(Const::Int { bits, value }) => {
                         // Cases compare in the scrutinee's own width
                         // (lowering promotes the scrutinee first, so
                         // widths already agree): match low bits.
                         let m = mask(*bits);
                         let v = (*value as u128) & m;
-                        let dest = cases
-                            .iter()
-                            .find(|(k, _)| (*k as u128) & m == v)
-                            .map(|(_, b)| *b)
-                            .unwrap_or(default);
-                        Some(Terminator::Br {
-                            dest,
-                            args: Default::default(),
-                        })
+                        let dest = cases.iter().find(|(k, _)| (*k as u128) & m == v).map(|(_, b)| *b).unwrap_or(default);
+                        Some(Terminator::Br { dest, args: Default::default() })
                     }
                     _ => None,
                 },
@@ -396,12 +344,7 @@ fn fold_bitcast(func: &Function, a: Value, result_ty: Option<&Ty>) -> Option<Con
     }
     Some(c)
 }
-fn fold_conv(
-    func: &Function,
-    a: Value,
-    result_ty: Option<&Ty>,
-    f: impl Fn(i128, u32, u32) -> i128,
-) -> Option<Const> {
+fn fold_conv(func: &Function, a: Value, result_ty: Option<&Ty>, f: impl Fn(i128, u32, u32) -> i128) -> Option<Const> {
     let (obits, x) = int_const(func, a)?;
     let tbits = result_ty.and_then(int_ty_bits)?;
     let c = Const::Int {
@@ -421,9 +364,7 @@ fn fold_fcmp(func: &Function, pred: FcmpPred, lhs: Value, rhs: Value) -> Option<
         (Some(Const::Float { kind: FloatKind::F32, bits: lb }), Some(Const::Float { kind: FloatKind::F32, bits: rb })) => {
             (f32::from_bits(*lb as u32) as f64, f32::from_bits(*rb as u32) as f64)
         }
-        (Some(Const::Float { kind: FloatKind::F64, bits: lb }), Some(Const::Float { kind: FloatKind::F64, bits: rb })) => {
-            (f64::from_bits(*lb as u64), f64::from_bits(*rb as u64))
-        }
+        (Some(Const::Float { kind: FloatKind::F64, bits: lb }), Some(Const::Float { kind: FloatKind::F64, bits: rb })) => (f64::from_bits(*lb as u64), f64::from_bits(*rb as u64)),
         _ => return None,
     };
     Some(Const::Int {
@@ -443,8 +384,7 @@ impl FunctionPass for DeadCodeElim {
 
     fn run(&mut self, func: &mut Function) -> bool {
         use std::collections::HashSet;
-        let resident: HashSet<crate::ir::Inst> =
-            func.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
+        let resident: HashSet<crate::ir::Inst> = func.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
         let counts = func.count_resident_uses();
         let mut dead = Vec::new();
         for (id, inst) in func.insts.iter_enumerated() {
@@ -565,11 +505,7 @@ fn promote_slots(func: &mut Function) -> bool {
         return false;
     }
 
-    let resident: HashSet<Inst> = func
-        .blocks
-        .iter()
-        .flat_map(|block| block.insts.iter().copied())
-        .collect();
+    let resident: HashSet<Inst> = func.blocks.iter().flat_map(|block| block.insts.iter().copied()).collect();
     let escaped = escaping_addresses(func);
     let reachable = func.reachable_blocks();
 
@@ -630,10 +566,7 @@ fn promote_slots(func: &mut Function) -> bool {
                     }
                 },
                 InstKind::Store { flags, .. } if !flags.volatile => {
-                    slot.stores.push(SlotStore {
-                        block: data.block,
-                        inst: site,
-                    });
+                    slot.stores.push(SlotStore { block: data.block, inst: site });
                 }
                 _ => {
                     ok = false;
@@ -663,15 +596,7 @@ fn promote_slots(func: &mut Function) -> bool {
         let switch_targets = switch_targets(func);
         let mut undef_cache: Vec<(Ty, Value)> = Vec::new();
         for slot in &promotable {
-            changed |= promote_slot(
-                func,
-                &dom,
-                &switch_targets,
-                slot,
-                &mut replace,
-                &mut dead,
-                &mut undef_cache,
-            );
+            changed |= promote_slot(func, &dom, &switch_targets, slot, &mut replace, &mut dead, &mut undef_cache);
         }
     }
 
@@ -736,12 +661,7 @@ fn promote_slot(
 /// definitions of the slot gets one phi. Returns `None` when a phi
 /// would land somewhere unsupported (the entry block or a `Switch`
 /// target), leaving the caller to keep the slot in memory.
-fn place_phis(
-    func: &Function,
-    dom: &DomInfo,
-    store_blocks: &[Block],
-    switch_targets: &std::collections::HashSet<Block>,
-) -> Option<Vec<Block>> {
+fn place_phis(func: &Function, dom: &DomInfo, store_blocks: &[Block], switch_targets: &std::collections::HashSet<Block>) -> Option<Vec<Block>> {
     let mut placed: std::collections::HashSet<Block> = std::collections::HashSet::new();
     let mut work: Vec<Block> = store_blocks.to_vec();
     let mut phis = Vec::new();
@@ -790,9 +710,7 @@ fn rename_slot(
                     let inst = func.blocks[block].insts[i];
                     match &func.insts[inst].kind {
                         InstKind::Load { addr, .. } if *addr == slot.addr => {
-                            let result = func.insts[inst]
-                                .result
-                                .expect("candidate load has a result");
+                            let result = func.insts[inst].result.expect("candidate load has a result");
                             replace.insert(result, *stack.last().unwrap());
                         }
                         InstKind::Store { addr, val, .. } if *addr == slot.addr => {
@@ -822,12 +740,7 @@ fn rename_slot(
 /// successor phi. `extend_incoming_edges` put placeholders at the same
 /// indices on every edge, so edges the walk cannot see (unreachable
 /// predecessors) stay arity-correct.
-fn set_successor_args(
-    func: &mut Function,
-    block: Block,
-    phi_index: &std::collections::HashMap<Block, usize>,
-    value: Value,
-) {
+fn set_successor_args(func: &mut Function, block: Block, phi_index: &std::collections::HashMap<Block, usize>, value: Value) {
     let Some(term) = func.blocks[block].term.as_mut() else {
         return;
     };
@@ -1033,23 +946,12 @@ impl DomInfo {
             }
         }
 
-        DomInfo {
-            preds,
-            idom,
-            children,
-            df,
-        }
+        DomInfo { preds, idom, children, df }
     }
 }
 
 /// Climb two dominators until they meet (RPO indices shrink upward).
-fn intersect(
-    mut a: Block,
-    mut b: Block,
-    idom: &[Option<Block>],
-    rpo_index: &[usize],
-    entry: Block,
-) -> Block {
+fn intersect(mut a: Block, mut b: Block, idom: &[Option<Block>], rpo_index: &[usize], entry: Block) -> Block {
     while a != b {
         while rpo_index[a.index()] > rpo_index[b.index()] {
             a = idom[a.index()].unwrap_or(entry);
@@ -1108,8 +1010,7 @@ impl FunctionPass for SimplifyCfg {
                 continue;
             }
             let block = crate::ir::Block::from_usize(idx);
-            let cleared = func.blocks[block].insts.is_empty()
-                && matches!(func.blocks[block].term, Some(Terminator::Unreachable));
+            let cleared = func.blocks[block].insts.is_empty() && matches!(func.blocks[block].term, Some(Terminator::Unreachable));
             if cleared {
                 continue;
             }
@@ -1160,8 +1061,7 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
                 continue;
             }
             let params = func.blocks[dest].params.clone();
-            let map: std::collections::HashMap<Value, Value> =
-                params.iter().copied().zip(args.iter().copied()).collect();
+            let map: std::collections::HashMap<Value, Value> = params.iter().copied().zip(args.iter().copied()).collect();
             func.remap_operands(&map);
             func.blocks[dest].params.clear();
             let insts = std::mem::take(&mut func.blocks[dest].insts);
@@ -1227,11 +1127,7 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
             let Some(term) = func.blocks[block].term.clone() else {
                 continue;
             };
-            let sinks: Vec<Block> = term
-                .successors()
-                .into_iter()
-                .filter(|d| *d != block && *d != func.entry && preds[d.index()] == 1)
-                .collect();
+            let sinks: Vec<Block> = term.successors().into_iter().filter(|d| *d != block && *d != func.entry && preds[d.index()] == 1).collect();
             if sinks.is_empty() {
                 continue;
             }
@@ -1316,9 +1212,7 @@ impl ModulePass for Inline {
 
     fn run(&mut self, module: &mut Module) -> bool {
         let mut changed = false;
-        let func_ids: Vec<_> = (0..module.funcs.len())
-            .map(crate::ir::Func::from_usize)
-            .collect();
+        let func_ids: Vec<_> = (0..module.funcs.len()).map(crate::ir::Func::from_usize).collect();
         for caller_id in func_ids {
             // Collect call sites up front, then re-derive each site's
             // block/args/result at processing time: inlining one site
@@ -1328,12 +1222,7 @@ impl ModulePass for Inline {
                 .blocks
                 .iter()
                 .flat_map(|b| b.insts.clone())
-                .filter(|inst| {
-                    matches!(
-                        module.funcs[caller_id].insts[*inst].kind,
-                        InstKind::Call { .. }
-                    )
-                })
+                .filter(|inst| matches!(module.funcs[caller_id].insts[*inst].kind, InstKind::Call { .. }))
                 .collect();
             for site in sites {
                 let (block, callee, args, result) = {
@@ -1348,12 +1237,7 @@ impl ModulePass for Inline {
                         continue;
                     }
                     match &data.kind {
-                        InstKind::Call { callee, args } => (
-                            data.block,
-                            *callee,
-                            args.iter().copied().collect::<Vec<_>>(),
-                            data.result,
-                        ),
+                        InstKind::Call { callee, args } => (data.block, *callee, args.iter().copied().collect::<Vec<_>>(), data.result),
                         _ => continue,
                     }
                 };
@@ -1369,16 +1253,8 @@ impl ModulePass for Inline {
                     continue;
                 }
                 let marked = module.funcs[callee].inline;
-                let total: usize = module.funcs[callee]
-                    .blocks
-                    .iter()
-                    .map(|b| b.insts.len())
-                    .sum();
-                let limit = if marked {
-                    self.max_inline_insts
-                } else {
-                    self.max_insts
-                };
+                let total: usize = module.funcs[callee].blocks.iter().map(|b| b.insts.len()).sum();
+                let limit = if marked { self.max_inline_insts } else { self.max_insts };
                 if total > limit {
                     continue;
                 }
@@ -1406,13 +1282,7 @@ impl ModulePass for Inline {
 /// single/multi-block split): no variadics, no frame-bound `Va*`
 /// bodies, no direct or mutual recursion, matching arity, matching
 /// voidness, every block terminated, and at least one `Return`.
-fn callee_eligible(
-    module: &Module,
-    caller: crate::ir::Func,
-    callee: crate::ir::Func,
-    args: &[Value],
-    result: Option<Value>,
-) -> bool {
+fn callee_eligible(module: &Module, caller: crate::ir::Func, callee: crate::ir::Func, args: &[Value], result: Option<Value>) -> bool {
     let f = &module.funcs[callee];
     if f.sig.variadic {
         return false;
@@ -1436,10 +1306,7 @@ fn callee_eligible(
                     return false;
                 }
             }
-            Some(Terminator::Br { .. })
-            | Some(Terminator::CondBr { .. })
-            | Some(Terminator::Switch { .. })
-            | Some(Terminator::Unreachable) => {}
+            Some(Terminator::Br { .. }) | Some(Terminator::CondBr { .. }) | Some(Terminator::Switch { .. }) | Some(Terminator::Unreachable) => {}
             None => return false,
         }
     }
@@ -1478,9 +1345,7 @@ fn inline_single_block(
 ) -> bool {
     let (ret_val, callee_insts) = {
         let f = &module.funcs[callee];
-        let Terminator::Return { val } =
-            f.blocks[f.entry].term.clone().unwrap_or(Terminator::Unreachable)
-        else {
+        let Terminator::Return { val } = f.blocks[f.entry].term.clone().unwrap_or(Terminator::Unreachable) else {
             return false;
         };
         (val, f.blocks[f.entry].insts.clone())
@@ -1491,12 +1356,7 @@ fn inline_single_block(
     let mut map = std::collections::HashMap::new();
     {
         let callee_func = &module.funcs[callee];
-        for (i, param) in callee_func.blocks[callee_func.entry]
-            .params
-            .clone()
-            .into_iter()
-            .enumerate()
-        {
+        for (i, param) in callee_func.blocks[callee_func.entry].params.clone().into_iter().enumerate() {
             if let Some(arg) = args.get(i) {
                 map.insert(param, *arg);
             } else {
@@ -1512,10 +1372,7 @@ fn inline_single_block(
         let new_result = data.result.map(|old| {
             let ty = callee_snapshot.values[old].ty.clone();
             let next_inst = crate::ir::Inst::from_usize(caller.insts.len());
-            let fresh = caller.values.push(crate::ir::ValueData {
-                ty,
-                def: Def::Inst(next_inst),
-            });
+            let fresh = caller.values.push(crate::ir::ValueData { ty, def: Def::Inst(next_inst) });
             map.insert(old, fresh);
             fresh
         });
@@ -1535,12 +1392,7 @@ fn inline_single_block(
     // a mapping.
     for (src, new_inst) in &cloned {
         let caller = &mut module.funcs[caller_id];
-        let kind = remap_operands_materialized(
-            caller,
-            &callee_snapshot,
-            &mut map,
-            &callee_snapshot.insts[*src].kind,
-        );
+        let kind = remap_operands_materialized(caller, &callee_snapshot, &mut map, &callee_snapshot.insts[*src].kind);
         caller.insts[*new_inst].kind = kind;
     }
     let returned = ret_val.map(|v| {
@@ -1550,21 +1402,12 @@ fn inline_single_block(
     if let (Some(old_result), Some(inlined)) = (result, returned) {
         module.funcs[caller_id].replace_uses(old_result, inlined);
     }
-    let call_pos = module.funcs[caller_id].blocks[block]
-        .insts
-        .iter()
-        .position(|i| *i == site)
-        .unwrap_or(0);
+    let call_pos = module.funcs[caller_id].blocks[block].insts.iter().position(|i| *i == site).unwrap_or(0);
     // The site may have moved under us; confirm it is still there.
-    if !module.funcs[caller_id].blocks[block]
-        .insts
-        .contains(&site)
-    {
+    if !module.funcs[caller_id].blocks[block].insts.contains(&site) {
         return false;
     }
-    module.funcs[caller_id].blocks[block]
-        .insts
-        .retain(|i| *i != site);
+    module.funcs[caller_id].blocks[block].insts.retain(|i| *i != site);
     let block_insts = &mut module.funcs[caller_id].blocks[block].insts;
     let insert_at = call_pos.min(block_insts.len());
     for (offset, (_, fresh)) in cloned.iter().enumerate() {
@@ -1577,14 +1420,7 @@ fn inline_single_block(
 /// block and a post-call join, clone every callee block, and rewire
 /// each cloned `Return` to the join (carrying the return value as a
 /// block param when the call site keeps one).
-fn inline_multi_block(
-    module: &mut Module,
-    caller_id: crate::ir::Func,
-    site: crate::ir::Inst,
-    callee: crate::ir::Func,
-    args: &[Value],
-    result: Option<Value>,
-) -> bool {
+fn inline_multi_block(module: &mut Module, caller_id: crate::ir::Func, site: crate::ir::Inst, callee: crate::ir::Func, args: &[Value], result: Option<Value>) -> bool {
     let snapshot = module.funcs[callee].clone();
     let entry_params = snapshot.blocks[snapshot.entry].params.clone();
     if entry_params.len() != args.len() {
@@ -1599,16 +1435,11 @@ fn inline_multi_block(
     // Resolve the live call block: earlier inlinings may have moved
     // this site.
     let call_block = module.funcs[caller_id].insts[site].block;
-    let call_pos = match module.funcs[caller_id].blocks[call_block]
-        .insts
-        .iter()
-        .position(|i| *i == site)
-    {
+    let call_pos = match module.funcs[caller_id].blocks[call_block].insts.iter().position(|i| *i == site) {
         Some(pos) => pos,
         None => return false,
     };
-    let suffix: Vec<crate::ir::Inst> =
-        module.funcs[caller_id].blocks[call_block].insts[call_pos + 1..].to_vec();
+    let suffix: Vec<crate::ir::Inst> = module.funcs[caller_id].blocks[call_block].insts[call_pos + 1..].to_vec();
     let orig_term = module.funcs[caller_id].blocks[call_block].term.clone();
     let caller = &mut module.funcs[caller_id];
     let post = if need_post_param {
@@ -1636,17 +1467,9 @@ fn inline_multi_block(
         let new_b = if old_b == snapshot.entry {
             caller.push_block(vec![])
         } else {
-            let tys: Vec<_> = snapshot.blocks[old_b]
-                .params
-                .iter()
-                .map(|v| snapshot.values[*v].ty.clone())
-                .collect();
+            let tys: Vec<_> = snapshot.blocks[old_b].params.iter().map(|v| snapshot.values[*v].ty.clone()).collect();
             let nb = caller.push_block(tys);
-            for (old_p, new_p) in snapshot.blocks[old_b]
-                .params
-                .iter()
-                .zip(caller.blocks[nb].params.clone())
-            {
+            for (old_p, new_p) in snapshot.blocks[old_b].params.iter().zip(caller.blocks[nb].params.clone()) {
                 map.insert(*old_p, new_p);
             }
             nb
@@ -1667,10 +1490,7 @@ fn inline_multi_block(
             let new_result = data.result.map(|old| {
                 let ty = snapshot.values[old].ty.clone();
                 let next = crate::ir::Inst::from_usize(caller.insts.len());
-                let fresh = caller.values.push(crate::ir::ValueData {
-                    ty,
-                    def: Def::Inst(next),
-                });
+                let fresh = caller.values.push(crate::ir::ValueData { ty, def: Def::Inst(next) });
                 map.insert(old, fresh);
                 fresh
             });
@@ -1696,8 +1516,7 @@ fn inline_multi_block(
     // use can precede the definition of its operand here. Remap operands once
     // every callee value has a mapping.
     for (src, fresh) in cloned {
-        let kind =
-            remap_operands_materialized(caller, &snapshot, &mut map, &snapshot.insts[src].kind);
+        let kind = remap_operands_materialized(caller, &snapshot, &mut map, &snapshot.insts[src].kind);
         caller.insts[fresh].kind = kind;
     }
     for idx in 0..snapshot.blocks.len() {
@@ -1712,17 +1531,11 @@ fn inline_multi_block(
                     let v = val.expect("valued return for valued call");
                     out.push(materialize_operand(caller, &snapshot, &mut map, v));
                 }
-                Some(Terminator::Br {
-                    dest: post,
-                    args: out,
-                })
+                Some(Terminator::Br { dest: post, args: out })
             }
             Some(Terminator::Br { dest, args }) => {
                 let nd = block_map[&dest];
-                let na = args
-                    .iter()
-                    .map(|a| materialize_operand(caller, &snapshot, &mut map, *a))
-                    .collect();
+                let na = args.iter().map(|a| materialize_operand(caller, &snapshot, &mut map, *a)).collect();
                 Some(Terminator::Br { dest: nd, args: na })
             }
             Some(Terminator::CondBr {
@@ -1735,14 +1548,8 @@ fn inline_multi_block(
                 let nc = materialize_operand(caller, &snapshot, &mut map, cond);
                 let nt = block_map[&then_block];
                 let ne = block_map[&else_block];
-                let nta = then_args
-                    .iter()
-                    .map(|a| materialize_operand(caller, &snapshot, &mut map, *a))
-                    .collect();
-                let nea = else_args
-                    .iter()
-                    .map(|a| materialize_operand(caller, &snapshot, &mut map, *a))
-                    .collect();
+                let nta = then_args.iter().map(|a| materialize_operand(caller, &snapshot, &mut map, *a)).collect();
+                let nea = else_args.iter().map(|a| materialize_operand(caller, &snapshot, &mut map, *a)).collect();
                 Some(Terminator::CondBr {
                     cond: nc,
                     then_block: nt,
@@ -1751,16 +1558,9 @@ fn inline_multi_block(
                     else_args: nea,
                 })
             }
-            Some(Terminator::Switch {
-                scrutinee,
-                cases,
-                default,
-            }) => {
+            Some(Terminator::Switch { scrutinee, cases, default }) => {
                 let ns = materialize_operand(caller, &snapshot, &mut map, scrutinee);
-                let ncases = cases
-                    .iter()
-                    .map(|(k, b)| (*k, block_map[b]))
-                    .collect();
+                let ncases = cases.iter().map(|(k, b)| (*k, block_map[b])).collect();
                 Some(Terminator::Switch {
                     scrutinee: ns,
                     cases: ncases,
@@ -1784,12 +1584,7 @@ fn calls_into(func: &crate::ir::Function, target: crate::ir::Func) -> bool {
 /// Map a callee operand into the caller, materializing constants fresh.
 /// Value arenas are per-function, so reusing a callee index directly would
 /// alias an unrelated caller value.
-fn materialize_operand(
-    caller: &mut crate::ir::Function,
-    snapshot: &crate::ir::Function,
-    map: &mut std::collections::HashMap<Value, Value>,
-    v: Value,
-) -> Value {
+fn materialize_operand(caller: &mut crate::ir::Function, snapshot: &crate::ir::Function, map: &mut std::collections::HashMap<Value, Value>, v: Value) -> Value {
     if let Some(mapped) = map.get(&v) {
         return *mapped;
     }
@@ -1802,26 +1597,15 @@ fn materialize_operand(
             // `Const::Undef.ty()` is `Void` and would erase, e.g., the
             // scalar type of a Mem2Reg phi undef.
             let ty = snapshot.values[v].ty.clone();
-            let fresh = caller.values.push(crate::ir::ValueData {
-                ty,
-                def: Def::Const(c.clone()),
-            });
+            let fresh = caller.values.push(crate::ir::ValueData { ty, def: Def::Const(c.clone()) });
             map.insert(v, fresh);
             fresh
         }
-        _ => panic!(
-            "callee value {} has no mapping during inlining",
-            v.index()
-        ),
+        _ => panic!("callee value {} has no mapping during inlining", v.index()),
     }
 }
 
-fn remap_operands_materialized(
-    caller: &mut crate::ir::Function,
-    snapshot: &crate::ir::Function,
-    map: &mut std::collections::HashMap<Value, Value>,
-    kind: &InstKind,
-) -> InstKind {
+fn remap_operands_materialized(caller: &mut crate::ir::Function, snapshot: &crate::ir::Function, map: &mut std::collections::HashMap<Value, Value>, kind: &InstKind) -> InstKind {
     match kind {
         InstKind::Add(a, b) => {
             let (aa, bb) = (*a, *b);
@@ -1953,12 +1737,7 @@ fn remap_operands_materialized(
     }
 }
 
-fn remap_simple_materialized(
-    caller: &mut crate::ir::Function,
-    snapshot: &crate::ir::Function,
-    map: &mut std::collections::HashMap<Value, Value>,
-    kind: &InstKind,
-) -> InstKind {
+fn remap_simple_materialized(caller: &mut crate::ir::Function, snapshot: &crate::ir::Function, map: &mut std::collections::HashMap<Value, Value>, kind: &InstKind) -> InstKind {
     match kind {
         InstKind::Trunc(a) => {
             let x = materialize_operand(caller, snapshot, map, *a);
@@ -2013,7 +1792,11 @@ fn remap_simple_materialized(
             let cc = materialize_operand(caller, snapshot, map, c);
             let tt = materialize_operand(caller, snapshot, map, t);
             let ee = materialize_operand(caller, snapshot, map, e);
-            InstKind::Select { cond: cc, then_val: tt, else_val: ee }
+            InstKind::Select {
+                cond: cc,
+                then_val: tt,
+                else_val: ee,
+            }
         }
         InstKind::Alloca { pointee, count } => InstKind::Alloca {
             pointee: pointee.clone(),
@@ -2157,11 +1940,7 @@ fn remap_simple_materialized(
             let v = materialize_operand(caller, snapshot, map, *val);
             InstKind::AtomicRmw { op: *op, addr: a, val: v }
         }
-        InstKind::AtomicCas {
-            addr,
-            expected,
-            replacement,
-        } => {
+        InstKind::AtomicCas { addr, expected, replacement } => {
             let a = materialize_operand(caller, snapshot, map, *addr);
             let e = materialize_operand(caller, snapshot, map, *expected);
             let r = materialize_operand(caller, snapshot, map, *replacement);
@@ -2211,17 +1990,9 @@ mod tests {
         fold.run(&mut func);
         let term = func.blocks[func.entry].term.clone();
         assert!(matches!(term, Some(Terminator::Return { .. })));
-        let Terminator::Return { val } = term.unwrap() else {
-            unreachable!()
-        };
+        let Terminator::Return { val } = term.unwrap() else { unreachable!() };
         let c = func.const_value(val.unwrap()).unwrap();
-        assert_eq!(
-            c,
-            &Const::Int {
-                bits: 32,
-                value: 14
-            }
-        );
+        assert_eq!(c, &Const::Int { bits: 32, value: 14 });
     }
 
     #[test]
@@ -2240,10 +2011,7 @@ mod tests {
         });
         let mut fold = ConstFold;
         assert!(fold.run(&mut func));
-        assert!(matches!(
-            func.blocks[entry].term,
-            Some(Terminator::Br { .. })
-        ));
+        assert!(matches!(func.blocks[entry].term, Some(Terminator::Br { .. })));
     }
 
     #[test]
@@ -2353,10 +2121,7 @@ mod tests {
         func.blocks[dead].term = Some(Terminator::Return { val: None });
         let mut simp = SimplifyCfg;
         assert!(simp.run(&mut func));
-        assert!(matches!(
-            func.blocks[dead].term,
-            Some(Terminator::Unreachable)
-        ));
+        assert!(matches!(func.blocks[dead].term, Some(Terminator::Unreachable)));
     }
 
     #[test]
@@ -2387,14 +2152,8 @@ mod tests {
             panic!("chain did not sink into the entry block");
         };
         assert_eq!(v, sum);
-        assert!(matches!(
-            func.blocks[mid].term,
-            Some(Terminator::Unreachable)
-        ));
-        assert!(matches!(
-            func.blocks[end].term,
-            Some(Terminator::Unreachable)
-        ));
+        assert!(matches!(func.blocks[mid].term, Some(Terminator::Unreachable)));
+        assert!(matches!(func.blocks[end].term, Some(Terminator::Unreachable)));
         assert!(!simp.run(&mut func), "second run is a no-op");
     }
 
@@ -2541,11 +2300,7 @@ mod tests {
         assert!(simp.run(&mut func));
         assert!(crate::verify::verify_func(&func).is_empty());
         assert!(func.blocks[entry].insts.is_empty(), "entry keeps only the branch");
-        let kinds: Vec<InstKind> = func.blocks[then_block]
-            .insts
-            .iter()
-            .map(|i| func.insts[*i].kind.clone())
-            .collect();
+        let kinds: Vec<InstKind> = func.blocks[then_block].insts.iter().map(|i| func.insts[*i].kind.clone()).collect();
         assert!(matches!(kinds[0], InstKind::Add(..)), "add sinks first: {kinds:?}");
         assert!(matches!(kinds[1], InstKind::Mul(..)), "mul follows its operand: {kinds:?}");
         assert!(!simp.run(&mut func), "second run is a no-op");
@@ -2655,20 +2410,17 @@ mod tests {
         });
         caller.values[call_val].def = Def::Inst(call);
         caller.blocks[entry].insts.push(call);
-        caller.blocks[entry].term = Some(Terminator::Return {
-            val: Some(call_val),
-        });
+        caller.blocks[entry].term = Some(Terminator::Return { val: Some(call_val) });
         module.push_func(caller);
 
         let mut inline = Inline::small();
         assert!(inline.run(&mut module));
         let caller = &module.funcs[crate::ir::Func::from_usize(1)];
-        let still_calls = caller.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-            matches!(
-                caller.insts[*i].kind,
-                InstKind::Call { .. }
-            )
-        });
+        let still_calls = caller
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .any(|i| matches!(caller.insts[*i].kind, InstKind::Call { .. }));
         assert!(!still_calls);
         // Inlined `41 + 1` must fold to 42: the callee constant has to be
         // materialized fresh in the caller arena, not reused by index.
@@ -2679,10 +2431,7 @@ mod tests {
             Some(Terminator::Return { val }) => val.unwrap(),
             _ => panic!("caller returns a value"),
         };
-        assert_eq!(
-            module.funcs[caller_id].const_value(ret),
-            Some(&Const::Int { bits: 32, value: 42 })
-        );
+        assert_eq!(module.funcs[caller_id].const_value(ret), Some(&Const::Int { bits: 32, value: 42 }));
     }
 
     #[test]
@@ -2721,9 +2470,7 @@ mod tests {
         });
         caller.values[call_val].def = Def::Inst(call);
         caller.blocks[entry].insts.push(call);
-        caller.blocks[entry].term = Some(Terminator::Return {
-            val: Some(call_val),
-        });
+        caller.blocks[entry].term = Some(Terminator::Return { val: Some(call_val) });
         module.push_func(caller);
 
         let mut inline = Inline::small();
@@ -2858,9 +2605,7 @@ mod tests {
         };
         let inst = callee.insts.push(crate::ir::InstData {
             block: centry,
-            kind: InstKind::InlineAsm {
-                block: Box::new(block),
-            },
+            kind: InstKind::InlineAsm { block: Box::new(block) },
             result: None,
             loc: None,
         });
@@ -2885,19 +2630,13 @@ mod tests {
         });
         caller.values[call_val].def = Def::Inst(call);
         caller.blocks[entry].insts.push(call);
-        caller.blocks[entry].term = Some(Terminator::Return {
-            val: Some(call_val),
-        });
+        caller.blocks[entry].term = Some(Terminator::Return { val: Some(call_val) });
         module.push_func(caller);
 
         let mut inline = Inline::small();
         assert!(inline.run(&mut module));
         let caller = &module.funcs[crate::ir::Func::from_usize(1)];
-        let live: Vec<Inst> = caller
-            .blocks
-            .iter()
-            .flat_map(|b| b.insts.iter().copied())
-            .collect();
+        let live: Vec<Inst> = caller.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
         assert!(!live.iter().any(|inst| matches!(caller.insts[*inst].kind, InstKind::Call { .. })));
         // The operand must point at a caller value (a fresh constant),
         // never at the callee's arena.
@@ -2908,10 +2647,7 @@ mod tests {
                 _ => None,
             })
             .expect("inline asm survives inlining");
-        assert_eq!(
-            caller.const_value(operand),
-            Some(&Const::Int { bits: 32, value: 5 })
-        );
+        assert_eq!(caller.const_value(operand), Some(&Const::Int { bits: 32, value: 5 }));
     }
 
     fn branchy_callee(marked_inline: bool) -> (Module, crate::ir::Func) {
@@ -2975,18 +2711,17 @@ mod tests {
         });
         caller.values[call_val].def = Def::Inst(call);
         caller.blocks[centry].insts.push(call);
-        caller.blocks[centry].term = Some(Terminator::Return {
-            val: Some(call_val),
-        });
+        caller.blocks[centry].term = Some(Terminator::Return { val: Some(call_val) });
         module.push_func(caller);
         (module, callee_id)
     }
 
     fn caller_still_calls(module: &Module, caller: crate::ir::Func) -> bool {
         let func = &module.funcs[caller];
-        func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
-            matches!(func.insts[*i].kind, InstKind::Call { .. })
-        })
+        func.blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .any(|i| matches!(func.insts[*i].kind, InstKind::Call { .. }))
     }
 
     #[test]
@@ -3064,11 +2799,7 @@ mod tests {
             caller.blocks[entry].term = Some(Terminator::Return { val: Some(rv) });
             module.push_func(caller);
             let mut only = Inline::inline_only();
-            assert_eq!(
-                only.run(&mut module),
-                expect_inline_only,
-                "marked={make_marked}"
-            );
+            assert_eq!(only.run(&mut module), expect_inline_only, "marked={make_marked}");
         }
     }
 
@@ -3126,15 +2857,8 @@ mod tests {
             caller.blocks[entry].term = Some(Terminator::Return { val: Some(rv) });
             module.push_func(caller);
             let mut inline = Inline::small();
-            assert_eq!(
-                inline.run(&mut module),
-                marked,
-                "marked={marked} should control the larger budget"
-            );
-            assert_eq!(
-                caller_still_calls(&module, crate::ir::Func::from_usize(1)),
-                !marked
-            );
+            assert_eq!(inline.run(&mut module), marked, "marked={marked} should control the larger budget");
+            assert_eq!(caller_still_calls(&module, crate::ir::Func::from_usize(1)), !marked);
         }
     }
 
@@ -3218,9 +2942,7 @@ mod tests {
         b.blocks[b_entry].params.push(b_arg);
         let b_id = module.push_func(b);
         // Back-patch the cross-calls: `a(x) = b(x)`, `b(x) = a(x)`.
-        for (self_id, entry, arg, other) in
-            [(a_id, a_entry, a_arg, b_id), (b_id, b_entry, b_arg, a_id)]
-        {
+        for (self_id, entry, arg, other) in [(a_id, a_entry, a_arg, b_id), (b_id, b_entry, b_arg, a_id)] {
             let func = &mut module.funcs[self_id];
             let rv = func.values.push(crate::ir::ValueData {
                 ty: Ty::int(32),
@@ -3261,18 +2983,8 @@ mod tests {
         slot
     }
 
-    fn emit_store(
-        func: &mut Function,
-        block: crate::ir::Block,
-        addr: Value,
-        val: Value,
-        vol: bool,
-    ) -> crate::ir::Inst {
-        let flags = if vol {
-            crate::ir::MemFlags::vol()
-        } else {
-            crate::ir::MemFlags::plain()
-        };
+    fn emit_store(func: &mut Function, block: crate::ir::Block, addr: Value, val: Value, vol: bool) -> crate::ir::Inst {
+        let flags = if vol { crate::ir::MemFlags::vol() } else { crate::ir::MemFlags::plain() };
         let inst = func.insts.push(crate::ir::InstData {
             block,
             kind: InstKind::Store { addr, val, flags },
@@ -3283,18 +2995,8 @@ mod tests {
         inst
     }
 
-    fn emit_load(
-        func: &mut Function,
-        block: crate::ir::Block,
-        addr: Value,
-        ty: Ty,
-        vol: bool,
-    ) -> Value {
-        let flags = if vol {
-            crate::ir::MemFlags::vol()
-        } else {
-            crate::ir::MemFlags::plain()
-        };
+    fn emit_load(func: &mut Function, block: crate::ir::Block, addr: Value, ty: Ty, vol: bool) -> Value {
+        let flags = if vol { crate::ir::MemFlags::vol() } else { crate::ir::MemFlags::plain() };
         let out = func.values.push(crate::ir::ValueData {
             ty,
             def: Def::Inst(crate::ir::Inst::from_usize(func.insts.len())),
@@ -3311,11 +3013,7 @@ mod tests {
     }
 
     fn resident_kinds(func: &Function) -> Vec<InstKind> {
-        func.blocks
-            .iter()
-            .flat_map(|b| b.insts.iter())
-            .map(|i| func.insts[*i].kind.clone())
-            .collect()
+        func.blocks.iter().flat_map(|b| b.insts.iter()).map(|i| func.insts[*i].kind.clone()).collect()
     }
 
     fn param(func: &mut Function, block: crate::ir::Block, ty: Ty) -> Value {
@@ -3329,12 +3027,9 @@ mod tests {
     }
 
     fn has_memory_ops(func: &Function) -> bool {
-        resident_kinds(func).iter().any(|kind| {
-            matches!(
-                kind,
-                InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }
-            )
-        })
+        resident_kinds(func)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }))
     }
 
     fn br_args(func: &Function, block: crate::ir::Block) -> Vec<Value> {
@@ -3367,10 +3062,7 @@ mod tests {
         // shift must treat it as negative.
         let sig = Signature::new(vec![], Ty::int(64));
         let (mut func, entry) = Function::new("ashr", sig);
-        let min = func.push_const(Const::Int {
-            bits: 64,
-            value: 1i128 << 63,
-        });
+        let min = func.push_const(Const::Int { bits: 64, value: 1i128 << 63 });
         let shift = func.push_const(Const::Int { bits: 64, value: 63 });
         let ashr = emit_bin(&mut func, entry, InstKind::AShr(min, shift), Ty::int(64));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(ashr) });
@@ -3379,10 +3071,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 64, value: -1 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 64, value: -1 }));
     }
 
     #[test]
@@ -3406,10 +3095,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 10 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 10 }));
 
         // Negation and complement fold with wraparound.
         let sig = Signature::new(vec![], Ty::int(32));
@@ -3425,10 +3111,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: -6 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: -6 }));
     }
 
     #[test]
@@ -3484,10 +3167,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: -4 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: -4 }));
     }
 
     #[test]
@@ -3567,10 +3247,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 253 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 253 }));
     }
 
     #[test]
@@ -3649,11 +3326,7 @@ mod tests {
             });
             let inst = func.insts.push(crate::ir::InstData {
                 block: entry,
-                kind: InstKind::Fcmp {
-                    pred,
-                    lhs: l,
-                    rhs: r,
-                },
+                kind: InstKind::Fcmp { pred, lhs: l, rhs: r },
                 result: Some(v),
                 loc: None,
             });
@@ -3683,10 +3356,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 3 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 3 }));
     }
 
     #[test]
@@ -3766,10 +3436,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 2 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 2 }));
     }
 
     #[test]
@@ -3800,10 +3467,11 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
         let mut pass = Mem2Reg;
         assert!(!pass.run(&mut func));
-        assert!(resident_kinds(&func).iter().any(|k| matches!(
-            k,
-            InstKind::Load { .. } | InstKind::Store { .. } | InstKind::Alloca { .. }
-        )));
+        assert!(
+            resident_kinds(&func)
+                .iter()
+                .any(|k| matches!(k, InstKind::Load { .. } | InstKind::Store { .. } | InstKind::Alloca { .. }))
+        );
     }
 
     #[test]
@@ -3818,10 +3486,11 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
         let mut pass = Mem2Reg;
         assert!(!pass.run(&mut func));
-        assert!(resident_kinds(&func).iter().any(|k| matches!(
-            k,
-            InstKind::Load { .. } | InstKind::Store { .. } | InstKind::Alloca { .. }
-        )));
+        assert!(
+            resident_kinds(&func)
+                .iter()
+                .any(|k| matches!(k, InstKind::Load { .. } | InstKind::Store { .. } | InstKind::Alloca { .. }))
+        );
     }
 
     #[test]
@@ -3879,7 +3548,11 @@ mod tests {
         let seven = func.push_const(Const::Int { bits: 32, value: 7 });
         let store = func.insts.push(crate::ir::InstData {
             block: entry,
-            kind: InstKind::Store { addr: field_ptr, val: seven, flags: crate::ir::MemFlags::plain() },
+            kind: InstKind::Store {
+                addr: field_ptr,
+                val: seven,
+                flags: crate::ir::MemFlags::plain(),
+            },
             result: None,
             loc: None,
         });
@@ -3890,7 +3563,10 @@ mod tests {
         });
         let load = func.insts.push(crate::ir::InstData {
             block: entry,
-            kind: InstKind::Load { addr: field_ptr, flags: crate::ir::MemFlags::plain() },
+            kind: InstKind::Load {
+                addr: field_ptr,
+                flags: crate::ir::MemFlags::plain(),
+            },
             result: Some(loaded),
             loc: None,
         });
@@ -4140,10 +3816,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 1 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 1 }));
     }
 
     #[test]
@@ -4257,12 +3930,7 @@ mod tests {
         // What remains is exactly the refused slot's traffic.
         let memory_ops = resident_kinds(&func)
             .iter()
-            .filter(|kind| {
-                matches!(
-                    kind,
-                    InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }
-                )
-            })
+            .filter(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }))
             .count();
         assert_eq!(memory_ops, 3);
     }
@@ -4279,9 +3947,7 @@ mod tests {
         let live = emit_load(&mut func, entry, slot, Ty::int(32), false);
         let dead = func.push_block(vec![]);
         let dead_load = emit_load(&mut func, dead, slot, Ty::int(32), false);
-        func.blocks[dead].term = Some(Terminator::Return {
-            val: Some(dead_load),
-        });
+        func.blocks[dead].term = Some(Terminator::Return { val: Some(dead_load) });
         func.blocks[entry].term = Some(Terminator::Return { val: Some(live) });
 
         let mut pass = Mem2Reg;
@@ -4296,10 +3962,7 @@ mod tests {
         let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
             unreachable!()
         };
-        assert_eq!(
-            func.const_value(val.unwrap()),
-            Some(&Const::Int { bits: 32, value: 7 })
-        );
+        assert_eq!(func.const_value(val.unwrap()), Some(&Const::Int { bits: 32, value: 7 }));
     }
 
     #[test]

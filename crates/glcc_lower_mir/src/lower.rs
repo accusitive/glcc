@@ -191,17 +191,11 @@ pub fn naked_asm_text(sema: &fe::sema::Sema, interner: &fe::lexer::Interner, tu:
 /// resolve to (`sprintf`) are revived as TU-local copies after
 /// lowering; see the revival pass in `lower_translation_unit`.
 fn skips_msvc_extern_inline(sema: &fe::sema::Sema, binding: &fe::sema::Binding) -> bool {
-    sema.target.os == fe::target::Os::Windows
-        && binding.inline
-        && binding.linkage == fe::sema::Linkage::External
+    sema.target.os == fe::target::Os::Windows && binding.inline && binding.linkage == fe::sema::Linkage::External
 }
 
 /// Lower a whole checked translation unit to a MIR module.
-pub fn lower_translation_unit(
-    sema: &fe::sema::Sema,
-    interner: &fe::lexer::Interner,
-    tu: &fe::parse::TranslationUnit,
-) -> mir::Module {
+pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Interner, tu: &fe::parse::TranslationUnit) -> mir::Module {
     let lx = Lowerer {
         sema,
         interner,
@@ -269,8 +263,7 @@ pub fn lower_translation_unit(
                     // linkage) stay preemptible. The C `inline` hint
                     // rides along for the `inline` pass (see
                     // `Function::inline`).
-                    module.module.funcs[fid].local =
-                        binding.linkage == fe::sema::Linkage::Internal;
+                    module.module.funcs[fid].local = binding.linkage == fe::sema::Linkage::Internal;
                     module.module.funcs[fid].weak = binding.weak;
                     module.module.funcs[fid].inline = binding.inline;
                     // An async definition's body is a coroutine over
@@ -319,18 +312,12 @@ pub fn lower_translation_unit(
             continue;
         }
         let id = fe::sema::DeclId(i as u32);
-        if sema.bodies.contains_key(&id)
-            || funcs.contains_key(&id)
-            || externs.contains_key(&id)
-            || binding.alias.is_some()
-        {
+        if sema.bodies.contains_key(&id) || funcs.contains_key(&id) || externs.contains_key(&id) || binding.alias.is_some() {
             continue;
         }
-        let defined = binding.name.and_then(|name| {
-            funcs.iter().find_map(|(&did, &target)| {
-                (sema.decls[did.0 as usize].name == Some(name)).then_some(target)
-            })
-        });
+        let defined = binding
+            .name
+            .and_then(|name| funcs.iter().find_map(|(&did, &target)| (sema.decls[did.0 as usize].name == Some(name)).then_some(target)));
         if let Some(target) = defined {
             funcs.insert(id, target);
             continue;
@@ -360,12 +347,7 @@ pub fn lower_translation_unit(
         // A pure `extern` declaration introduces no storage: it reuses
         // the (possibly imported) global entity, mirroring the legacy
         // backend's `ensure_global_data` on first reference.
-        if binding.kind == fe::sema::BindingKind::Var
-            && binding.linkage == fe::sema::Linkage::External
-            && !binding.defined
-            && !binding.tentative
-            && binding.alias.is_none()
-        {
+        if binding.kind == fe::sema::BindingKind::Var && binding.linkage == fe::sema::Linkage::External && !binding.defined && !binding.tentative && binding.alias.is_none() {
             let id = fe::sema::DeclId(i as u32);
             if !globals.contains_key(&id) {
                 let gid = lx.lower_data_extern(&mut module, id);
@@ -404,9 +386,7 @@ pub fn lower_translation_unit(
             // (see `skips_msvc_extern_inline`); referenced ones are
             // revived after this loop, with the import standing in for
             // the rest.
-            if sema.bodies.contains_key(id)
-                && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize])
-            {
+            if sema.bodies.contains_key(id) && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize]) {
                 continue;
             }
             // Duplicate entries (prototype plus definition) lower once.
@@ -458,8 +438,7 @@ pub fn lower_translation_unit(
             for block in &func.blocks {
                 for &inst in &block.insts {
                     match &func.insts[inst].kind {
-                        mir::InstKind::CallExtern { target, .. }
-                        | mir::InstKind::ExternAddr { target } => {
+                        mir::InstKind::CallExtern { target, .. } | mir::InstKind::ExternAddr { target } => {
                             used.insert(*target);
                         }
                         _ => {}
@@ -478,11 +457,7 @@ pub fn lower_translation_unit(
         // `HashMap` with no order of its own.
         let mut pending: Vec<(fe::sema::DeclId, mir::Extern)> = Vec::new();
         for (id, eid) in &externs {
-            if used.contains(eid)
-                && !revived.contains(eid)
-                && sema.bodies.contains_key(id)
-                && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize])
-            {
+            if used.contains(eid) && !revived.contains(eid) && sema.bodies.contains_key(id) && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize]) {
                 pending.push((*id, *eid));
             }
         }
@@ -515,26 +490,16 @@ pub fn lower_translation_unit(
             // Map the declaration before lowering so the body's own
             // calls (and later lookups) bind to the copy.
             funcs.insert(decl_id, fid);
-            lx.lower_function(
-                &mut module, &mut func, &mut frame, &funcs, &externs, &globals, decl_id,
-            );
+            lx.lower_function(&mut module, &mut func, &mut frame, &funcs, &externs, &globals, decl_id);
             module.module.funcs[fid] = func;
             // Calls lowered before this revival bound the extern;
             // rebind every reference to the copy.
             for caller in module.module.funcs.iter_mut() {
-                let inst_ids: Vec<mir::Inst> = caller
-                    .blocks
-                    .iter()
-                    .flat_map(|b| b.insts.iter().copied())
-                    .collect();
+                let inst_ids: Vec<mir::Inst> = caller.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
                 for inst in inst_ids {
                     let replacement = match &caller.insts[inst].kind {
-                        mir::InstKind::CallExtern { target, args } if *target == extern_id => {
-                            Some(mir::InstKind::Call { callee: fid, args: args.clone() })
-                        }
-                        mir::InstKind::ExternAddr { target } if *target == extern_id => {
-                            Some(mir::InstKind::FuncAddr { func: fid })
-                        }
+                        mir::InstKind::CallExtern { target, args } if *target == extern_id => Some(mir::InstKind::Call { callee: fid, args: args.clone() }),
+                        mir::InstKind::ExternAddr { target } if *target == extern_id => Some(mir::InstKind::FuncAddr { func: fid }),
                         _ => None,
                     };
                     if let Some(kind) = replacement {
@@ -544,8 +509,7 @@ pub fn lower_translation_unit(
             }
             for global in module.module.globals.iter_mut() {
                 for (_, reloc) in &mut global.relocs {
-                    if matches!(reloc, mir::DataReloc::FuncExtern { target } if *target == extern_id)
-                    {
+                    if matches!(reloc, mir::DataReloc::FuncExtern { target } if *target == extern_id) {
                         *reloc = mir::DataReloc::Func { target: fid };
                     }
                 }
@@ -580,12 +544,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     fn func_sig(&self, binding: &fe::sema::Binding) -> mir::Signature {
-        let fe::parse::Ty::Func {
-            params,
-            variadic,
-            ..
-        } = binding.ty.unqualified()
-        else {
+        let fe::parse::Ty::Func { params, variadic, .. } = binding.ty.unqualified() else {
             panic!("function binding without a Func type");
         };
         // An async function's public symbol returns its boxed
@@ -601,10 +560,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         } else {
             lower_ty(self.declared_ret(binding), self.sema, self.interner)
         };
-        let mut sig = mir::Signature::new(
-            params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(),
-            ret,
-        );
+        let mut sig = mir::Signature::new(params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(), ret);
         sig.variadic = *variadic;
         sig
     }
@@ -612,11 +568,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Declare a file-scope object's storage; the initializer folds
     /// in `define_global` once every entity's id exists, since address
     /// constants may point forward.
-    fn declare_global(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        id: fe::sema::DeclId,
-    ) -> mir::Global {
+    fn declare_global(&self, module: &mut mir::ModuleBuilder, id: fe::sema::DeclId) -> mir::Global {
         let binding = &self.sema.decls[id.0 as usize];
         let name = self.symbol_name(binding, id);
         let local = binding.linkage == fe::sema::Linkage::Internal;
@@ -630,20 +582,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// `ensure_global_data`, and the initializer folds once in
     /// `define_global` so calls never re-run it. Thread-locals share
     /// the path: `declare_global_with_name` marks the TLS flag.
-    fn declare_block_static(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        id: fe::sema::DeclId,
-    ) -> mir::Global {
+    fn declare_block_static(&self, module: &mut mir::ModuleBuilder, id: fe::sema::DeclId) -> mir::Global {
         let binding = &self.sema.decls[id.0 as usize];
         // An asm label names the symbol outright, without the `DeclId`.
         let name = match (binding.asm_label, binding.name) {
             (Some(sym), _) => self.interner.resolve(sym).unwrap_or("<anon>").to_string(),
-            (None, Some(sym)) => format!(
-                "{}.{}",
-                self.interner.resolve(sym).unwrap_or("<anon>"),
-                id.0
-            ),
+            (None, Some(sym)) => format!("{}.{}", self.interner.resolve(sym).unwrap_or("<anon>"), id.0),
             (None, None) => format!("<anon>.{}", id.0),
         };
         self.declare_global_with_name(module, id, &name, true)
@@ -653,11 +597,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// elsewhere: declare the import so uses lower to a symbol. A
     /// thread-local import keeps its TLS flag so `GlobalAddr` goes
     /// through `tls_value` (`elf_gd` model).
-    fn lower_data_extern(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        id: fe::sema::DeclId,
-    ) -> mir::Global {
+    fn lower_data_extern(&self, module: &mut mir::ModuleBuilder, id: fe::sema::DeclId) -> mir::Global {
         let binding = &self.sema.decls[id.0 as usize];
         let name = self.symbol_name(binding, id);
         let mir_ty = lower_ty(&binding.ty, self.sema, self.interner);
@@ -676,11 +616,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// order (bare attributes are 65535). Local linkage: the sections
     /// merge across TUs while the symbols never collide. Mirrors the
     /// legacy backend's `emit_init_fini_arrays`.
-    fn emit_init_fini_arrays(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        funcs: &HashMap<fe::sema::DeclId, mir::Func>,
-    ) {
+    fn emit_init_fini_arrays(&self, module: &mut mir::ModuleBuilder, funcs: &HashMap<fe::sema::DeclId, mir::Func>) {
         let mut ctors: Vec<(u64, fe::sema::DeclId)> = Vec::new();
         let mut dtors: Vec<(u64, fe::sema::DeclId)> = Vec::new();
         for (i, binding) in self.sema.decls.iter().enumerate() {
@@ -706,24 +642,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// collects (`KEEP(*(SORT...))` in the default script, like GCC's
     /// own). LP64 assumes an 8-byte function pointer, as does the
     /// legacy backend.
-    fn emit_hook_array(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        funcs: &HashMap<fe::sema::DeclId, mir::Func>,
-        name: &str,
-        section: &str,
-        entries: &[(u64, fe::sema::DeclId)],
-    ) {
+    fn emit_hook_array(&self, module: &mut mir::ModuleBuilder, funcs: &HashMap<fe::sema::DeclId, mir::Func>, name: &str, section: &str, entries: &[(u64, fe::sema::DeclId)]) {
         if entries.is_empty() {
             return;
         }
         const PTR_SIZE: u64 = 8;
         let mut relocs = Vec::with_capacity(entries.len());
         for (i, (_, id)) in entries.iter().enumerate() {
-            relocs.push((
-                i as u64 * PTR_SIZE,
-                mir::DataReloc::Func { target: funcs[id] },
-            ));
+            relocs.push((i as u64 * PTR_SIZE, mir::DataReloc::Func { target: funcs[id] }));
         }
         let ty = mir::Ty::Array {
             elem: Box::new(mir::Ty::ptr(mir::Ty::Void)),
@@ -744,13 +670,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Linkage, weak, TLS, and alignment come from the binding's
     /// declared type; the alignment stays with the type's element
     /// when an unsized array completes from its initializer.
-    fn declare_global_with_name(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        id: fe::sema::DeclId,
-        name: &str,
-        local: bool,
-    ) -> mir::Global {
+    fn declare_global_with_name(&self, module: &mut mir::ModuleBuilder, id: fe::sema::DeclId, name: &str, local: bool) -> mir::Global {
         let binding = &self.sema.decls[id.0 as usize];
         let mir_ty = lower_ty(&binding.ty, self.sema, self.interner);
         let gid = module.module.push_global(name, mir_ty, None);
@@ -760,18 +680,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         global.tls = binding.tls;
         // An object's `aligned` attribute sets its alignment, raising
         // or lowering it (like GCC); the type decides without one.
-        global.align = Some(binding.align.unwrap_or_else(|| {
-            self.sema
-                .type_align(&binding.ty, self.interner)
-                .expect("defined object with an alignable type")
-        }));
+        global.align = Some(
+            binding
+                .align
+                .unwrap_or_else(|| self.sema.type_align(&binding.ty, self.interner).expect("defined object with an alignable type")),
+        );
         if let Some(section) = binding.section {
-            global.section = Some(
-                self.interner
-                    .resolve(section)
-                    .expect("section name symbol")
-                    .to_string(),
-            );
+            global.section = Some(self.interner.resolve(section).expect("section name symbol").to_string());
         }
         module.module.globals[gid].debug = Some(self.global_debug(module, id));
         gid
@@ -792,14 +707,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let binding = &self.sema.decls[id.0 as usize];
         // Unsized arrays complete from their initializer: strings size
         // from the literal, lists from the element count.
-        if matches!(
-            binding.ty.unqualified(),
-            fe::parse::Ty::Array { bound: None, .. }
-        ) {
+        if matches!(binding.ty.unqualified(), fe::parse::Ty::Array { bound: None, .. }) {
             if let Some(init) = self.sema.inits.get(&id) {
                 let init = init.clone();
-                let (mir_ty, image, relocs) =
-                    self.sized_unsized(module, funcs, externs, globals, binding, &init);
+                let (mir_ty, image, relocs) = self.sized_unsized(module, funcs, externs, globals, binding, &init);
                 let shell = &mut module.module.globals[gid];
                 shell.ty = mir_ty;
                 shell.init = Some(mir::Const::Bytes(image));
@@ -808,10 +719,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             return;
         }
         let mut mir_ty = lower_ty(&binding.ty, self.sema, self.interner);
-        let mut size = self
-            .sema
-            .type_size(&binding.ty, self.interner)
-            .expect("sized global type") as usize;
+        let mut size = self.sema.type_size(&binding.ty, self.interner).expect("sized global type") as usize;
         // An initialized flexible array member grows the object past
         // `sizeof` (GCC extension): storage carries the larger size
         // while the declared type keeps its layout.
@@ -835,17 +743,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Pointer targets fold through the image path
                     // below: a null folds to zero bytes, an address to
                     // a reloc.
-                    Some(folded) if !matches!(mir_ty, mir::Ty::Ptr(_)) => {
-                        (Some(self.const_of_folded(&folded, &mir_ty)), Vec::new())
-                    }
+                    Some(folded) if !matches!(mir_ty, mir::Ty::Ptr(_)) => (Some(self.const_of_folded(&folded, &mir_ty)), Vec::new()),
                     _ => {
                         let mut image = vec![0u8; size];
                         let mut relocs = Vec::new();
                         let init = self.sema.inits.get(&id).unwrap().clone();
-                        self.fold_global_bytes(
-                            module, &mut image, 0, &binding.ty, &mir_ty, &init, None, funcs,
-                            externs, globals, &mut relocs,
-                        );
+                        self.fold_global_bytes(module, &mut image, 0, &binding.ty, &mir_ty, &init, None, funcs, externs, globals, &mut relocs);
                         (Some(mir::Const::Bytes(image)), relocs)
                     }
                 }
@@ -854,10 +757,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let mut image = vec![0u8; size];
                 let mut relocs = Vec::new();
                 let init = init.clone();
-                self.fold_global_bytes(
-                    module, &mut image, 0, &binding.ty, &mir_ty, &init, None, funcs, externs,
-                    globals, &mut relocs,
-                );
+                self.fold_global_bytes(module, &mut image, 0, &binding.ty, &mir_ty, &init, None, funcs, externs, globals, &mut relocs);
                 (Some(mir::Const::Bytes(image)), relocs)
             }
         };
@@ -889,18 +789,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Extent of an initializer under a designator prefix: the
     /// prefix walks to the selected member or element, then the
     /// initializer's own extent follows.
-    fn designated_extent(
-        &self,
-        fe_ty: &fe::parse::Ty,
-        designators: &[fe::parse::Designator],
-        init: &fe::parse::Initializer,
-    ) -> u64 {
+    fn designated_extent(&self, fe_ty: &fe::parse::Ty, designators: &[fe::parse::Designator], init: &fe::parse::Initializer) -> u64 {
         if let Some((first, rest)) = designators.split_first() {
             return match (fe_ty.unqualified(), first) {
-                (
-                    fe::parse::Ty::Struct(id),
-                    fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. },
-                ) => {
+                (fe::parse::Ty::Struct(id), fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }) => {
                     let def = &self.sema.structs[id.0 as usize];
                     let slot = designated_member(self.sema, *id, first) as usize;
                     let Some(member) = def.members.get(slot) else {
@@ -917,18 +809,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     };
                     at + self.designated_extent(&member.ty, rest, init)
                 }
-                (
-                    fe::parse::Ty::Array { elem, .. },
-                    fe::parse::Designator::Index { index, .. },
-                ) => {
-                    let Some(fe::eval::Value::Int(k)) =
-                        fe::eval::eval_const(index, self.sema, self.interner)
-                    else {
+                (fe::parse::Ty::Array { elem, .. }, fe::parse::Designator::Index { index, .. }) => {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         return 0;
                     };
                     let elem_size = self.sema.type_size(elem, self.interner).unwrap_or(0);
-                    k.max(0) as u64 * elem_size
-                        + self.designated_extent(elem, rest, init).max(elem_size)
+                    k.max(0) as u64 * elem_size + self.designated_extent(elem, rest, init).max(elem_size)
                 }
                 _ => 0,
             };
@@ -952,13 +838,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 for (i, item) in items.iter().enumerate() {
                     let (at, elem_ty, stride) = match fe_ty.unqualified() {
                         fe::parse::Ty::Array { elem, bound: None, .. } => {
-                            let elem_size =
-                                self.sema.type_size(elem, self.interner).unwrap_or(0);
-                            let at = if item.designators.is_empty() {
-                                i as u64 * elem_size
-                            } else {
-                                0
-                            };
+                            let elem_size = self.sema.type_size(elem, self.interner).unwrap_or(0);
+                            let at = if item.designators.is_empty() { i as u64 * elem_size } else { 0 };
                             (at, elem.as_ref(), elem_size)
                         }
                         fe::parse::Ty::Struct(id) => {
@@ -966,15 +847,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             if def.is_union {
                                 return 0;
                             }
-                            let Some(layout) = self.sema.struct_layout(*id, self.interner)
-                            else {
+                            let Some(layout) = self.sema.struct_layout(*id, self.interner) else {
                                 return 0;
                             };
                             let slot = match item.designators.first() {
-                                Some(
-                                    des @ (fe::parse::Designator::Field { .. }
-                                    | fe::parse::Designator::AnonField { .. }),
-                                ) => designated_member(self.sema, *id, des) as usize,
+                                Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => designated_member(self.sema, *id, des) as usize,
                                 Some(fe::parse::Designator::Index { .. }) => cursor,
                                 None => {
                                     let slot = cursor;
@@ -992,13 +869,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Every array element occupies its own size; the
                     // last one may extend further (a flexible member
                     // of a struct element).
-                    let sub = self
-                        .designated_extent(
-                            elem_ty,
-                            item.designators.get(1..).unwrap_or(&[]),
-                            &item.init,
-                        )
-                        .max(stride);
+                    let sub = self.designated_extent(elem_ty, item.designators.get(1..).unwrap_or(&[]), &item.init).max(stride);
                     end = end.max(at + sub);
                 }
                 end
@@ -1028,34 +899,24 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let fe::check::CheckedExprKind::Str(parts) = &e.kind else {
                     panic!("unsized array needs a literal initializer");
                 };
-                let mut image = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar())
-                    .expect("checked string folds to bytes");
+                let mut image = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar()).expect("checked string folds to bytes");
                 let width = elem_mir.size_bytes();
                 let len = image.len() as u64 / width + 1;
                 image.resize(len as usize * width as usize, 0);
-                (
-                    mir::Ty::Array {
-                        elem: Box::new(elem_mir),
-                        len,
-                    },
-                    image,
-                    Vec::new(),
-                )
+                (mir::Ty::Array { elem: Box::new(elem_mir), len }, image, Vec::new())
             }
             fe::parse::Initializer::List { items, .. } => {
                 let mut len = 0u64;
                 let mut cursor = 0u64;
                 for item in items {
                     match item.designators.first() {
-                        Some(fe::parse::Designator::Index { index, .. }) => {
-                            match fe::eval::eval_const(index, self.sema, self.interner) {
-                                Some(fe::eval::Value::Int(k)) => {
-                                    len = len.max((k as u64) + 1);
-                                    cursor = (k as u64) + 1;
-                                }
-                                _ => panic!("non-constant array designator"),
+                        Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
+                            Some(fe::eval::Value::Int(k)) => {
+                                len = len.max((k as u64) + 1);
+                                cursor = (k as u64) + 1;
                             }
-                        }
+                            _ => panic!("non-constant array designator"),
+                        },
                         Some(_) => panic!("field designator into array"),
                         None => {
                             cursor += 1;
@@ -1063,20 +924,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         }
                     }
                 }
-                let mir_ty = mir::Ty::Array {
-                    elem: Box::new(elem_mir),
-                    len,
-                };
-                let elem_size = self
-                    .sema
-                    .type_size(elem, self.interner)
-                    .expect("sized array element") as usize;
+                let mir_ty = mir::Ty::Array { elem: Box::new(elem_mir), len };
+                let elem_size = self.sema.type_size(elem, self.interner).expect("sized array element") as usize;
                 let mut image = vec![0u8; len as usize * elem_size];
                 let mut relocs = Vec::new();
-                self.fold_global_bytes(
-                    module, &mut image, 0, &binding.ty, &mir_ty, init, None, funcs, externs,
-                    globals, &mut relocs,
-                );
+                self.fold_global_bytes(module, &mut image, 0, &binding.ty, &mir_ty, init, None, funcs, externs, globals, &mut relocs);
                 (mir_ty, image, relocs)
             }
         }
@@ -1107,18 +959,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // unit bytes; only constant integers occur here (C
                 // requires constant static initializers).
                 if let Some(t) = bf {
-                    let Some(fe::eval::Value::Int(n)) =
-                        fe::eval::eval_static_init(e, self.sema, self.interner)
-                    else {
+                    let Some(fe::eval::Value::Int(n)) = fe::eval::eval_static_init(e, self.sema, self.interner) else {
                         panic!("constant bit-field initializer");
                     };
                     let len = lower_ty(&t.unit_ty, self.sema, self.interner).size_bytes() as usize;
                     let unit_bits = len as u32 * 8;
-                    let mask: u128 = if t.width >= unit_bits {
-                        u128::MAX
-                    } else {
-                        (1u128 << t.width) - 1
-                    };
+                    let mask: u128 = if t.width >= unit_bits { u128::MAX } else { (1u128 << t.width) - 1 };
                     let mut buf = [0u8; 16];
                     buf[..len].copy_from_slice(&image[base as usize..base as usize + len]);
                     let mut unit = u128::from_le_bytes(buf);
@@ -1132,15 +978,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // are transparent.
                 if let Some(parts) = Self::peek_global_str(e) {
                     if let fe::parse::Ty::Array { elem, bound, .. } = fe_ty.unqualified() {
-                        if let Some(lit_elem) =
-                            fe::eval::string_elem_ty_in(parts, self.sema.target.wchar())
-                        {
+                        if let Some(lit_elem) = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()) {
                             let elem_mir = lower_ty(elem, self.sema, self.interner);
                             let lit_mir = lower_ty(&lit_elem, self.sema, self.interner);
                             if elem_mir == lit_mir {
                                 let width = elem_mir.size_bytes();
-                                let content = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar())
-                                    .expect("checked string folds to bytes");
+                                let content = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar()).expect("checked string folds to bytes");
                                 let room = match bound {
                                     Some(fe::parse::ArrayBound::Fixed(n)) => n.saturating_mul(width),
                                     _ => content.len() as u64 + width,
@@ -1148,18 +991,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                                 let end = base.saturating_add(room.min(content.len() as u64));
                                 let room_in_image = (image.len() as u64).saturating_sub(base);
                                 let end = end.min(base.saturating_add(room_in_image));
-                                image[base as usize..end as usize]
-                                    .copy_from_slice(&content[..(end - base) as usize]);
+                                image[base as usize..end as usize].copy_from_slice(&content[..(end - base) as usize]);
                                 return;
                             }
                         }
                     }
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                         let (target, ..) = self.materialize_string_global(module, parts);
-                        relocs.push((
-                            base,
-                            mir::DataReloc::Global { target, addend: 0 },
-                        ));
+                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }));
                         return;
                     }
                 }
@@ -1168,22 +1007,23 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // As a value of object type its bytes patch inline; as
                 // a pointer its static object materializes anonymously
                 // and the address records as a reloc.
-                if let fe::check::CheckedExprKind::CompoundLiteral { ty: lit_ty, init: lit_init } =
-                    &e.kind
-                {
+                if let fe::check::CheckedExprKind::CompoundLiteral { ty: lit_ty, init: lit_init } = &e.kind {
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
-                        let target = self.materialize_global_compound(
-                            module, funcs, externs, globals, lit_ty, lit_init,
-                        );
-                        relocs.push((
-                            base,
-                            mir::DataReloc::Global { target, addend: 0 },
-                        ));
+                        let target = self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
+                        relocs.push((base, mir::DataReloc::Global { target, addend: 0 }));
                     } else {
                         self.fold_global_bytes(
-                            module, image, base, lit_ty,
-                            &lower_ty(lit_ty, self.sema, self.interner), lit_init, None,
-                            funcs, externs, globals, relocs,
+                            module,
+                            image,
+                            base,
+                            lit_ty,
+                            &lower_ty(lit_ty, self.sema, self.interner),
+                            lit_init,
+                            None,
+                            funcs,
+                            externs,
+                            globals,
+                            relocs,
                         );
                     }
                     return;
@@ -1195,8 +1035,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // and differences stay consecutive.
                 if let Some(n) = self.fold_label_const(e) {
                     let len = mir_ty.size_bytes() as usize;
-                    image[base as usize..base as usize + len]
-                        .copy_from_slice(&n.to_le_bytes()[..len]);
+                    image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
                     return;
                 }
                 match fe::eval::eval_static_init(e, self.sema, self.interner) {
@@ -1206,15 +1045,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         // the target type, so pointer-width zeros land
                         // for nulls.
                         let len = mir_ty.size_bytes() as usize;
-                        image[base as usize..base as usize + len]
-                            .copy_from_slice(&n.to_le_bytes()[..len]);
+                        image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
                         return;
                     }
                     Some(fe::eval::Value::Float(f)) => {
                         let bits = float_bits(f, mir_ty);
                         let len = mir_ty.size_bytes() as usize;
-                        image[base as usize..base as usize + len]
-                            .copy_from_slice(&bits.to_le_bytes()[..len]);
+                        image[base as usize..base as usize + len].copy_from_slice(&bits.to_le_bytes()[..len]);
                         return;
                     }
                     Some(fe::eval::Value::Complex(re, im)) => {
@@ -1225,10 +1062,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             panic!("complex constant for a non-complex object");
                         }
                         let comp_fe = complex_component(fe_ty);
-                        let comp_size = self
-                            .sema
-                            .type_size(&comp_fe, self.interner)
-                            .expect("complex component has a size");
+                        let comp_size = self.sema.type_size(&comp_fe, self.interner).expect("complex component has a size");
                         self.write_complex_part(image, base, &comp_fe, &re);
                         self.write_complex_part(image, base + comp_size, &comp_fe, &im);
                         return;
@@ -1239,15 +1073,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // and `NULL` from real headers): fold the operand and
                 // store the (zero) address bytes.
                 if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
-                    if let fe::check::CheckedExprKind::Cast { expr, .. }
-                    | fe::check::CheckedExprKind::Convert { expr, .. } = &e.kind
-                    {
-                        if let Some(fe::eval::Value::Int(n)) =
-                            fe::eval::eval_const(expr, self.sema, self.interner)
-                        {
+                    if let fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } = &e.kind {
+                        if let Some(fe::eval::Value::Int(n)) = fe::eval::eval_const(expr, self.sema, self.interner) {
                             let len = mir_ty.size_bytes() as usize;
-                            image[base as usize..base as usize + len]
-                                .copy_from_slice(&n.to_le_bytes()[..len]);
+                            image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
                             return;
                         }
                     }
@@ -1272,12 +1101,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // type (its MIR form is a pointer): initializing one
                 // extends the object, so elements fold by element
                 // stride past the struct.
-                (
-                    fe::parse::Ty::Array {
-                        elem, bound: None, ..
-                    },
-                    mir::Ty::Ptr(_),
-                ) => {
+                (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr(_)) => {
                     let elem_mir = lower_ty(elem, self.sema, self.interner);
                     let elem_size = elem_mir.size_bytes();
                     for (i, item) in items.iter().enumerate() {
@@ -1302,50 +1126,30 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (fe::parse::Ty::Array { .. }, mir::Ty::Array { .. }) => {
                     let mut cursor = 0u64;
                     for item in items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(
-                            base, fe_ty, mir_ty, &item.designators, cursor,
-                        );
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(
-                            module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs,
-                            externs, globals, relocs,
-                        );
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 (fe::parse::Ty::Struct(_), mir::Ty::Struct { .. }) => {
                     let mut cursor = 0u64;
                     for item in items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(
-                            base, fe_ty, mir_ty, &item.designators, cursor,
-                        );
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(
-                            module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs,
-                            externs, globals, relocs,
-                        );
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 // Unions overlay at offset zero; the blob holds bytes.
-                (fe::parse::Ty::Struct(id), mir::Ty::Array { .. })
-                    if self.sema.structs[id.0 as usize].is_union =>
-                {
+                (fe::parse::Ty::Struct(id), mir::Ty::Array { .. }) if self.sema.structs[id.0 as usize].is_union => {
                     let mut cursor = 0u64;
                     for item in items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(
-                            base, fe_ty, mir_ty, &item.designators, cursor,
-                        );
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(
-                            module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs,
-                            externs, globals, relocs,
-                        );
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 _ if items.len() == 1 && items[0].designators.is_empty() => {
-                    self.fold_global_bytes(
-                        module, image, base, fe_ty, mir_ty, &items[0].init, bf, funcs,
-                        externs, globals, relocs,
-                    );
+                    self.fold_global_bytes(module, image, base, fe_ty, mir_ty, &items[0].init, bf, funcs, externs, globals, relocs);
                 }
                 _ => panic!("braced list for scalar type"),
             },
@@ -1358,8 +1162,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         loop {
             match &cur.kind {
                 fe::check::CheckedExprKind::Str(parts) => return Some(parts),
-                fe::check::CheckedExprKind::Cast { expr, .. }
-                | fe::check::CheckedExprKind::Convert { expr, .. } => cur = expr,
+                fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => cur = expr,
                 _ => return None,
             }
         }
@@ -1376,32 +1179,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             return Some(n);
         }
         match &e.kind {
-            fe::check::CheckedExprKind::LabelAddr(name) => {
-                self.sema.label_ids.get(name).map(|id| *id as i128)
-            }
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => self.fold_label_const(expr),
+            fe::check::CheckedExprKind::LabelAddr(name) => self.sema.label_ids.get(name).map(|id| *id as i128),
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.fold_label_const(expr),
             fe::check::CheckedExprKind::Binary(op, lhs, rhs) => {
                 let l = self.fold_label_const(lhs)?;
                 let r = self.fold_label_const(rhs)?;
                 let lhs_ptr = matches!(lhs.ty.unqualified(), fe::parse::Ty::Pointer { .. });
                 let rhs_ptr = matches!(rhs.ty.unqualified(), fe::parse::Ty::Pointer { .. });
                 match op {
-                    fe::parse::BinaryOp::Add if lhs_ptr => {
-                        Some(l + r * self.pointee_step(&lhs.ty)?)
-                    }
-                    fe::parse::BinaryOp::Add if rhs_ptr => {
-                        Some(r + l * self.pointee_step(&rhs.ty)?)
-                    }
+                    fe::parse::BinaryOp::Add if lhs_ptr => Some(l + r * self.pointee_step(&lhs.ty)?),
+                    fe::parse::BinaryOp::Add if rhs_ptr => Some(r + l * self.pointee_step(&rhs.ty)?),
                     fe::parse::BinaryOp::Add => Some(l + r),
                     // Pointer difference scales down; pointer minus
                     // integer scales up; integer minus integer is plain.
-                    fe::parse::BinaryOp::Sub if lhs_ptr && rhs_ptr => {
-                        Some((l - r) / self.pointee_step(&lhs.ty)?)
-                    }
-                    fe::parse::BinaryOp::Sub if lhs_ptr => {
-                        Some(l - r * self.pointee_step(&lhs.ty)?)
-                    }
+                    fe::parse::BinaryOp::Sub if lhs_ptr && rhs_ptr => Some((l - r) / self.pointee_step(&lhs.ty)?),
+                    fe::parse::BinaryOp::Sub if lhs_ptr => Some(l - r * self.pointee_step(&lhs.ty)?),
                     fe::parse::BinaryOp::Sub => Some(l - r),
                     _ => None,
                 }
@@ -1436,29 +1228,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         ty: &fe::parse::Ty,
         init: &fe::parse::Initializer,
     ) -> mir::Global {
-        let size = self
-            .sema
-            .type_size(ty, self.interner)
-            .expect("compound literal of complete type") as usize;
+        let size = self.sema.type_size(ty, self.interner).expect("compound literal of complete type") as usize;
         let mir_ty = lower_ty(ty, self.sema, self.interner);
         let mut image = vec![0u8; size];
         let mut relocs = Vec::new();
-        self.fold_global_bytes(
-            module, &mut image, 0, ty, &mir_ty, init, None, funcs, externs, globals,
-            &mut relocs,
-        );
+        self.fold_global_bytes(module, &mut image, 0, ty, &mir_ty, init, None, funcs, externs, globals, &mut relocs);
         let n = self.str_count.get();
         self.str_count.set(n + 1);
-        let gid = module
-            .module
-            .push_global(&format!("__compound.{n}"), mir_ty, Some(mir::Const::Bytes(image)));
+        let gid = module.module.push_global(&format!("__compound.{n}"), mir_ty, Some(mir::Const::Bytes(image)));
         let global = &mut module.module.globals[gid];
         global.local = true;
-        global.align = Some(
-            self.sema
-                .type_align(ty, self.interner)
-                .expect("compound literal of complete type"),
-        );
+        global.align = Some(self.sema.type_align(ty, self.interner).expect("compound literal of complete type"));
         global.relocs = relocs;
         gid
     }
@@ -1478,15 +1258,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         off: u64,
         e: &fe::check::CheckedExpr,
     ) {
-        if matches!(
-            fe::eval::eval_const(e, self.sema, self.interner),
-            Some(fe::eval::Value::Int(0))
-        ) {
+        if matches!(fe::eval::eval_const(e, self.sema, self.interner), Some(fe::eval::Value::Int(0))) {
             return;
         }
         match &e.kind {
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => {
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => {
                 self.reloc_global_addr(module, funcs, externs, globals, relocs, off, expr);
             }
             fe::check::CheckedExprKind::Str(parts) => {
@@ -1494,10 +1270,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 relocs.push((off, mir::DataReloc::Global { target, addend: 0 }));
             }
             fe::check::CheckedExprKind::Unary(op, inner) => {
-                assert!(
-                    matches!(op, fe::parse::UnaryOp::AddrOf),
-                    "only address constants reach relocs"
-                );
+                assert!(matches!(op, fe::parse::UnaryOp::AddrOf), "only address constants reach relocs");
                 self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, inner, 0);
             }
             fe::check::CheckedExprKind::Ident(id) => {
@@ -1534,18 +1307,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     _ => panic!("non-constant global initializer"),
                 };
                 let elem = match addr_side.ty.unqualified() {
-                    fe::parse::Ty::Pointer { pointee, .. } => {
-                        self.sema.type_size(pointee, self.interner).unwrap() as i128
-                    }
+                    fe::parse::Ty::Pointer { pointee, .. } => self.sema.type_size(pointee, self.interner).unwrap() as i128,
                     _ => 1,
                 };
                 let addend = if neg { -c * elem } else { c * elem };
                 // The address side roots at a declared object, a string
                 // literal, or a compound literal; casts and conversions
                 // are looked through there.
-                self.reloc_global_pointed(
-                    module, funcs, externs, globals, relocs, off, addr_side, addend as i64,
-                );
+                self.reloc_global_pointed(module, funcs, externs, globals, relocs, off, addr_side, addend as i64);
             }
             _ => panic!("non-constant global initializer"),
         }
@@ -1559,25 +1328,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         match &expr.kind {
             fe::check::CheckedExprKind::Ident(id) => {
                 let binding = &self.sema.decls[id.0 as usize];
-                let decays = matches!(binding.kind, fe::sema::BindingKind::Func)
-                    || matches!(binding.ty.unqualified(), fe::parse::Ty::Array { .. });
+                let decays = matches!(binding.kind, fe::sema::BindingKind::Func) || matches!(binding.ty.unqualified(), fe::parse::Ty::Array { .. });
                 assert!(decays, "non-constant global initializer");
                 (AddrRoot::Decl(*id), 0)
             }
             fe::check::CheckedExprKind::Str(parts) => (AddrRoot::Str(parts), 0),
-            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => {
-                (AddrRoot::Compound(ty, init), 0)
-            }
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => self.global_ptr_root(expr),
-            fe::check::CheckedExprKind::Unary(op, inner)
-                if matches!(op, fe::parse::UnaryOp::AddrOf) =>
-            {
-                self.global_pointed_root(inner, 0)
-            }
-            fe::check::CheckedExprKind::Binary(op, lhs, rhs)
-                if matches!(op, fe::parse::BinaryOp::Add | fe::parse::BinaryOp::Sub) =>
-            {
+            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => (AddrRoot::Compound(ty, init), 0),
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.global_ptr_root(expr),
+            fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::AddrOf) => self.global_pointed_root(inner, 0),
+            fe::check::CheckedExprKind::Binary(op, lhs, rhs) if matches!(op, fe::parse::BinaryOp::Add | fe::parse::BinaryOp::Sub) => {
                 let neg = matches!(op, fe::parse::BinaryOp::Sub);
                 let (ptr, int) = if matches!(lhs.ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                     (lhs.as_ref(), rhs.as_ref())
@@ -1643,8 +1402,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 relocs.push((off, mir::DataReloc::Global { target, addend: disp }));
             }
             AddrRoot::Compound(lit_ty, lit_init) => {
-                let target =
-                    self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
+                let target = self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
                 relocs.push((off, mir::DataReloc::Global { target, addend: disp }));
             }
             AddrRoot::Decl(id) => {
@@ -1672,26 +1430,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// members add each layer's own total `offset`, subscripts stride
     /// by their level's element size, conversions look through.
     /// Anything else is not an address constant.
-    fn global_pointed_root<'a>(
-        &self,
-        pointed: &'a fe::check::CheckedExpr,
-        extra: i64,
-    ) -> (AddrRoot<'a>, i64) {
+    fn global_pointed_root<'a>(&self, pointed: &'a fe::check::CheckedExpr, extra: i64) -> (AddrRoot<'a>, i64) {
         match &pointed.kind {
             fe::check::CheckedExprKind::Ident(id) => (AddrRoot::Decl(*id), extra),
             fe::check::CheckedExprKind::Str(parts) => (AddrRoot::Str(parts), extra),
-            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => {
-                (AddrRoot::Compound(ty, init), extra)
-            }
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => {
-                self.global_pointed_root(expr, extra)
-            }
-            fe::check::CheckedExprKind::Unary(op, inner)
-                if matches!(op, fe::parse::UnaryOp::AddrOf) =>
-            {
-                self.global_pointed_root(inner, extra)
-            }
+            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => (AddrRoot::Compound(ty, init), extra),
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.global_pointed_root(expr, extra),
+            fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::AddrOf) => self.global_pointed_root(inner, extra),
             fe::check::CheckedExprKind::Member { base, offset, arrow, .. } => {
                 // `&(p->m)`: the base is a pointer value, so walk it as
                 // one; a plain `s.m` recurses into the object.
@@ -1733,22 +1478,18 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// arrays are addresses. Keep in sync with `reloc_global_addr`.
     fn is_global_address(&self, e: &fe::check::CheckedExpr) -> bool {
         match &e.kind {
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => self.is_global_address(expr),
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.is_global_address(expr),
             fe::check::CheckedExprKind::Unary(op, _) => {
                 matches!(op, fe::parse::UnaryOp::AddrOf)
             }
             fe::check::CheckedExprKind::Ident(id) => {
                 let binding = &self.sema.decls[id.0 as usize];
-                matches!(binding.kind, fe::sema::BindingKind::Func)
-                    || matches!(binding.ty.unqualified(), fe::parse::Ty::Array { .. })
+                matches!(binding.kind, fe::sema::BindingKind::Func) || matches!(binding.ty.unqualified(), fe::parse::Ty::Array { .. })
             }
             fe::check::CheckedExprKind::Binary(op, _, _) => {
                 matches!(op, fe::parse::BinaryOp::Add | fe::parse::BinaryOp::Sub)
             }
-            fe::check::CheckedExprKind::Subscript { .. }
-            | fe::check::CheckedExprKind::Member { .. }
-            | fe::check::CheckedExprKind::Str(_) => true,
+            fe::check::CheckedExprKind::Subscript { .. } | fe::check::CheckedExprKind::Member { .. } | fe::check::CheckedExprKind::Str(_) => true,
             fe::check::CheckedExprKind::CompoundLiteral { ty, .. } => {
                 matches!(ty.unqualified(), fe::parse::Ty::Array { .. })
             }
@@ -1777,13 +1518,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// Patch one folded complex part into a global image at `off`:
     /// integers as little-endian bytes, floats as their target bits.
-    fn write_complex_part(
-        &self,
-        image: &mut [u8],
-        off: u64,
-        component: &fe::parse::Ty,
-        v: &fe::eval::Value,
-    ) {
+    fn write_complex_part(&self, image: &mut [u8], off: u64, component: &fe::parse::Ty, v: &fe::eval::Value) {
         let comp_mir = lower_ty(component, self.sema, self.interner);
         let len = comp_mir.size_bytes() as usize;
         match v {
@@ -1872,21 +1607,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.terminate(func, frame, mir::Terminator::Return { val: None });
             } else if binding.name.is_some_and(|n| self.interner.resolve(n) == Some("main")) {
                 let zero = self.iconst(func, 32, 0);
-                self.terminate(
-                    func,
-                    frame,
-                    mir::Terminator::Return { val: Some(zero) },
-                );
+                self.terminate(func, frame, mir::Terminator::Return { val: Some(zero) });
             } else {
                 let undef = func.values.push(mir::ValueData {
                     ty: result_ty,
                     def: mir::Def::Const(mir::Const::Undef),
                 });
-                self.terminate(
-                    func,
-                    frame,
-                    mir::Terminator::Return { val: Some(undef) },
-                );
+                self.terminate(func, frame, mir::Terminator::Return { val: Some(undef) });
             }
         }
         // Computed gotos dispatch here: one switch over the function's
@@ -1913,13 +1640,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             });
         }
         frame.loc = self.debug_location(module, binding.span);
-        func.debug = Some(self.build_function_debug(
-            module,
-            &frame.slots,
-            &self.sema.bodies[&id],
-            id,
-            globals,
-        ));
+        func.debug = Some(self.build_function_debug(module, &frame.slots, &self.sema.bodies[&id], id, globals));
         let _ = funcs;
     }
 
@@ -1940,9 +1661,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         self.lower_local(module, func, frame, funcs, externs, globals, *id);
                     }
                 }
-                fe::parse::BlockItem::Stmt(stmt) => {
-                    self.lower_stmt(module, func, frame, funcs, externs, globals, stmt)
-                }
+                fe::parse::BlockItem::Stmt(stmt) => self.lower_stmt(module, func, frame, funcs, externs, globals, stmt),
             }
         }
     }
@@ -1976,8 +1695,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         if matches!(binding.kind, fe::sema::BindingKind::Func) {
             return;
         }
-        if binding.linkage == fe::sema::Linkage::External && !binding.defined && !binding.tentative
-        {
+        if binding.linkage == fe::sema::Linkage::External && !binding.defined && !binding.tentative {
             debug_assert!(globals.contains_key(&id), "extern import missing");
             return;
         }
@@ -2049,15 +1767,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             volatile: bool,
         }
         let mut operands = Vec::with_capacity(asm.outputs.len() + asm.inputs.len());
-        let mut conversion: Vec<(fe::parse::Ty, Option<fe::parse::Ty>)> =
-            Vec::with_capacity(asm.outputs.len());
+        let mut conversion: Vec<(fe::parse::Ty, Option<fe::parse::Ty>)> = Vec::with_capacity(asm.outputs.len());
         let mut bitfield_outs: Vec<BitfieldOut> = Vec::new();
         for output in &asm.outputs {
             let (addr, _) = self.place(module, func, frame, funcs, externs, globals, &output.expr);
-            let name = output
-                .name
-                .and_then(|sym| self.interner.resolve(sym))
-                .map(str::to_string);
+            let name = output.name.and_then(|sym| self.interner.resolve(sym)).map(str::to_string);
             let bitfield = match &output.expr.kind {
                 fe::check::CheckedExprKind::Member {
                     bitfield: Some((bit, width)),
@@ -2072,17 +1786,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     let temp = self.alloca(func, frame, unit_mir.clone());
                     let volatile = access_volatile(&output.expr, &self.sema.decls);
                     if output.constraint.contains('+') {
-                        let field = self.bitfield_load(
-                            func,
-                            frame,
-                            addr,
-                            &decl_ty,
-                            &output.expr.ty,
-                            bit,
-                            width,
-                            is_signed(&decl_ty, self.sema),
-                            volatile,
-                        );
+                        let field = self.bitfield_load(func, frame, addr, &decl_ty, &output.expr.ty, bit, width, is_signed(&decl_ty, self.sema), volatile);
                         let unit = self.convert(func, frame, field, &output.expr.ty, &decl_ty);
                         self.store(func, frame, temp, unit, false);
                     }
@@ -2117,10 +1821,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             }
         }
         for (i, input) in asm.inputs.iter().enumerate() {
-            let name = input
-                .name
-                .and_then(|sym| self.interner.resolve(sym))
-                .map(str::to_string);
+            let name = input.name.and_then(|sym| self.interner.resolve(sym)).map(str::to_string);
             let mir_ty = lower_ty(&input.expr.ty, self.sema, self.interner);
             let aggregate = mir_ty.is_aggregate();
             let memory = fe::check::memory_only_constraint(&input.constraint, self.sema.target.arch);
@@ -2147,11 +1848,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             };
             // An aggregate in a register constraint crosses as its
             // address, like an array operand in GCC.
-            let ty = if aggregate && !memory {
-                mir::Ty::ptr(mir::Ty::Void)
-            } else {
-                mir_ty
-            };
+            let ty = if aggregate && !memory { mir::Ty::ptr(mir::Ty::Void) } else { mir_ty };
             operands.push(mir::AsmOperand {
                 value,
                 constraint: input.constraint.clone(),
@@ -2160,11 +1857,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 name,
             });
         }
-        let labels: Vec<String> = asm
-            .labels
-            .iter()
-            .map(|label| self.interner.resolve(*label).unwrap_or("?").to_string())
-            .collect();
+        let labels: Vec<String> = asm.labels.iter().map(|label| self.interner.resolve(*label).unwrap_or("?").to_string()).collect();
         let block = mir::AsmBlock {
             template: asm.template.clone(),
             operands,
@@ -2177,37 +1870,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         // `asm goto` needs the wrapper's selector as an instruction
         // result; plain asm ignores it.
         let selector = if asm.is_goto {
-            Some(self.emit(
-                func,
-                frame,
-                mir::InstKind::InlineAsm {
-                    block: Box::new(block),
-                },
-                mir::Ty::int(64),
-            ))
+            Some(self.emit(func, frame, mir::InstKind::InlineAsm { block: Box::new(block) }, mir::Ty::int(64)))
         } else {
-            self.emit_unit(
-                func,
-                frame,
-                mir::InstKind::InlineAsm {
-                    block: Box::new(block),
-                },
-            );
+            self.emit_unit(func, frame, mir::InstKind::InlineAsm { block: Box::new(block) });
             None
         };
         for out in bitfield_outs {
             let unit_mir = lower_ty(&out.decl_ty, self.sema, self.interner);
             let value = self.load(func, frame, out.temp, unit_mir, false);
-            self.bitfield_store(
-                func,
-                frame,
-                out.addr,
-                &out.decl_ty,
-                value,
-                out.bit,
-                out.width,
-                out.volatile,
-            );
+            self.bitfield_store(func, frame, out.addr, &out.decl_ty, value, out.bit, out.width, out.volatile);
         }
         if let Some(selector) = selector {
             // The wrapper returns 0 when the template fell through and
@@ -2258,9 +1929,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             frame.loc = Some(loc);
         }
         match stmt {
-            fe::parse::Stmt::Expr { expr, .. } => {
-                Some(self.expr_value(module, func, frame, funcs, externs, globals, expr))
-            }
+            fe::parse::Stmt::Expr { expr, .. } => Some(self.expr_value(module, func, frame, funcs, externs, globals, expr)),
             fe::parse::Stmt::Label { name, stmt, .. } => {
                 let target = match frame.labels.get(name) {
                     Some(block) => *block,
@@ -2307,9 +1976,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.lower_asm_stmt(module, func, frame, funcs, externs, globals, asm);
             }
             fe::parse::Stmt::Return { expr, .. } => {
-                let val = expr
-                    .as_ref()
-                    .map(|e| self.expr_value(module, func, frame, funcs, externs, globals, e));
+                let val = expr.as_ref().map(|e| self.expr_value(module, func, frame, funcs, externs, globals, e));
                 // A void return carries no value (a `return f();` of a
                 // void `f`), and a bare `return;` in a value-returning
                 // function (C89 legacy code) returns an undefined value,
@@ -2329,12 +1996,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.terminate(func, frame, mir::Terminator::Return { val });
             }
-            fe::parse::Stmt::Compound(inner) => {
-                self.lower_compound(module, func, frame, funcs, externs, globals, inner)
-            }
-            fe::parse::Stmt::If {
-                cond, then, els, ..
-            } => {
+            fe::parse::Stmt::Compound(inner) => self.lower_compound(module, func, frame, funcs, externs, globals, inner),
+            fe::parse::Stmt::If { cond, then, els, .. } => {
                 let test = self.bool_of(module, func, frame, funcs, externs, globals, cond);
                 let then_block = func.push_block(vec![]);
                 let else_block = func.push_block(vec![]);
@@ -2427,9 +2090,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 );
                 frame.current = Some(exit);
             }
-            fe::parse::Stmt::For {
-                init, cond, step, body, ..
-            } => {
+            fe::parse::Stmt::For { init, cond, step, body, .. } => {
                 match init {
                     fe::parse::ForInit::Decl(ids) => {
                         for id in ids {
@@ -2505,8 +2166,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // with it. A narrow `char` switch would otherwise
                 // miscompare high cases.
                 let promoted = fe::eval::promoted(&cond.ty);
-                let scrutinee =
-                    self.expr_value(module, func, frame, funcs, externs, globals, cond);
+                let scrutinee = self.expr_value(module, func, frame, funcs, externs, globals, cond);
                 let scrutinee = self.convert(func, frame, scrutinee, &cond.ty, &promoted);
                 let dispatch = self.live_block(func, frame);
                 let body_entry = func.push_block(vec![]);
@@ -2694,13 +2354,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
     }
 
-    fn branch(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        dest: mir::Block,
-        args: Vec<mir::Value>,
-    ) {
+    fn branch(&self, func: &mut mir::Function, frame: &mut Frame, dest: mir::Block, args: Vec<mir::Value>) {
         self.terminate(
             func,
             frame,
@@ -2717,13 +2371,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// expression compares through ordinary conditional branches.
     /// Enters with the dispatch block current; every test compares
     /// full 128-bit values for equality.
-    fn switch_128(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        ctx: SwitchTarget,
-        default: mir::Block,
-    ) {
+    fn switch_128(&self, func: &mut mir::Function, frame: &mut Frame, ctx: SwitchTarget, default: mir::Block) {
         if ctx.cases.is_empty() {
             self.branch(func, frame, default, vec![]);
             return;
@@ -2771,53 +2419,35 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     ) -> mir::Value {
         let mir_ty = lower_ty(&expr.ty, self.sema, self.interner);
         match &expr.kind {
-            fe::check::CheckedExprKind::Int(_)
-            | fe::check::CheckedExprKind::Char(_)
-            | fe::check::CheckedExprKind::Float(_) => {
+            fe::check::CheckedExprKind::Int(_) | fe::check::CheckedExprKind::Char(_) | fe::check::CheckedExprKind::Float(_) => {
                 // A GNU imaginary literal (`1i`, `1.0i`) is an
                 // `Int`/`Float` node with complex type: zero real
                 // part, literal imaginary part.
                 if is_complex(&expr.ty) {
                     return self.complex_literal(func, frame, expr);
                 }
-                let folded = fe::eval::eval_const(expr, self.sema, self.interner)
-                    .unwrap_or_else(|| panic!("literal must fold"));
+                let folded = fe::eval::eval_const(expr, self.sema, self.interner).unwrap_or_else(|| panic!("literal must fold"));
                 func.push_const(self.const_of_folded(&folded, &mir_ty))
             }
             fe::check::CheckedExprKind::Ident(id) => {
                 let binding = &self.sema.decls[id.0 as usize];
                 match binding.kind {
-                    fe::sema::BindingKind::EnumConst { value } => {
-                        self.iconst(func, int_bits(&mir_ty), value)
-                    }
+                    fe::sema::BindingKind::EnumConst { value } => self.iconst(func, int_bits(&mir_ty), value),
                     fe::sema::BindingKind::Func => {
                         if let Some(target) = funcs.get(id) {
                             let target = *target;
-                            self.emit(
-                                func,
-                                frame,
-                                mir::InstKind::FuncAddr { func: target },
-                                mir_ty,
-                            )
+                            self.emit(func, frame, mir::InstKind::FuncAddr { func: target }, mir_ty)
                         } else {
                             // Prototype-only functions are foreign
                             // imports; their address is an import
                             // address like any other.
                             let Some(target) = externs.get(id) else {
                                 let binding = &self.sema.decls[id.0 as usize];
-                                let name = binding
-                                    .name
-                                    .and_then(|n| self.interner.resolve(n))
-                                    .unwrap_or("<anon>");
+                                let name = binding.name.and_then(|n| self.interner.resolve(n)).unwrap_or("<anon>");
                                 panic!("address of undefined function '{name}'");
                             };
                             let target = *target;
-                            self.emit(
-                                func,
-                                frame,
-                                mir::InstKind::ExternAddr { target },
-                                mir_ty,
-                            )
+                            self.emit(func, frame, mir::InstKind::ExternAddr { target }, mir_ty)
                         }
                     }
                     fe::sema::BindingKind::Var => {
@@ -2828,18 +2458,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     _ => panic!("identifier is not a value"),
                 }
             }
-            fe::check::CheckedExprKind::Cast { ty, expr: inner }
-            | fe::check::CheckedExprKind::Convert { expr: inner, ty } => {
+            fe::check::CheckedExprKind::Cast { ty, expr: inner } | fe::check::CheckedExprKind::Convert { expr: inner, ty } => {
                 let from_ty = &inner.ty;
                 let from = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                 self.convert(func, frame, from, from_ty, ty)
             }
             fe::check::CheckedExprKind::Unary(op, inner) => {
                 use fe::parse::UnaryOp::*;
-                if matches!(
-                    op,
-                    PreInc | PreDec | PostInc | PostDec
-                ) {
+                if matches!(op, PreInc | PreDec | PostInc | PostDec) {
                     let (addr, _) = self.place(module, func, frame, funcs, externs, globals, inner);
                     let inner_ty = lower_ty(&inner.ty, self.sema, self.interner);
                     // Pointer steps scale by the frontend pointee size
@@ -2847,17 +2473,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // erased (structs become `void`), so a GEP element
                     // step cannot know the stride.
                     if matches!(inner_ty, mir::Ty::Ptr(_)) {
-                        let fe::parse::Ty::Pointer { pointee, .. } =
-                            inner.ty.unqualified().clone()
-                        else {
+                        let fe::parse::Ty::Pointer { pointee, .. } = inner.ty.unqualified().clone() else {
                             panic!("pointer step without a pointer");
                         };
                         let scale = match pointee.unqualified() {
                             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-                            _ => self
-                                .sema
-                                .type_size(&pointee, self.interner)
-                                .expect("step over sized pointee"),
+                            _ => self.sema.type_size(&pointee, self.interner).expect("step over sized pointee"),
                         };
                         let mir::Ty::Ptr(pointee_mir) = &inner_ty else {
                             panic!("pointer step without a pointer");
@@ -2868,22 +2489,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         let mag = if matches!(op, PreInc | PostInc) {
                             one
                         } else {
-                            self.emit(
-                                func,
-                                frame,
-                                mir::InstKind::Neg(one),
-                                mir::Ty::int(64),
-                            )
+                            self.emit(func, frame, mir::InstKind::Neg(one), mir::Ty::int(64))
                         };
-                        let (next, _) = self.scaled_index_addr(
-                            func,
-                            frame,
-                            cur,
-                            mag,
-                            &fe::parse::Ty::LongLong,
-                            scale,
-                            pointee_mir,
-                        );
+                        let (next, _) = self.scaled_index_addr(func, frame, cur, mag, &fe::parse::Ty::LongLong, scale, pointee_mir);
                         self.store(func, frame, addr, next, access_volatile(inner, &self.sema.decls));
                         return if matches!(op, PreInc | PreDec) { next } else { cur };
                     }
@@ -2918,14 +2526,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         // `++f` yields the value stored, narrowed to the
                         // field: the step above wraps at the unit width.
                         return if matches!(op, PreInc | PreDec) {
-                            self.reduce_to_bits(
-                                func,
-                                frame,
-                                next,
-                                *width,
-                                is_signed(decl_ty, self.sema),
-                                inner_ty,
-                            )
+                            self.reduce_to_bits(func, frame, next, *width, is_signed(decl_ty, self.sema), inner_ty)
                         } else {
                             cur
                         };
@@ -2939,18 +2540,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             let bits = match float_kind(&inner_ty) {
                                 mir::FloatKind::F32 => u128::from(1.0f32.to_bits()),
                                 mir::FloatKind::F64 => u128::from(1.0f64.to_bits()),
-                                mir::FloatKind::F80 => float_bits(
-                                    fe::eval::FloatValue::long_double_one_in(
-                                        fe::target::LongDoubleKind::F80,
-                                    ),
-                                    &inner_ty,
-                                ),
-                                mir::FloatKind::F128 => float_bits(
-                                    fe::eval::FloatValue::long_double_one_in(
-                                        fe::target::LongDoubleKind::F128,
-                                    ),
-                                    &inner_ty,
-                                ),
+                                mir::FloatKind::F80 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F80), &inner_ty),
+                                mir::FloatKind::F128 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F128), &inner_ty),
                             };
                             func.push_const(mir::Const::Float {
                                 kind: float_kind(&inner_ty),
@@ -2977,24 +2568,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // this match double-evaluated side effects (`&a[j++]`
                 // stepped twice and stored the wrong address).
                 match op {
-                    fe::parse::UnaryOp::Pos => {
-                        self.expr_value(module, func, frame, funcs, externs, globals, inner)
-                    }
+                    fe::parse::UnaryOp::Pos => self.expr_value(module, func, frame, funcs, externs, globals, inner),
                     fe::parse::UnaryOp::Neg => {
                         if is_complex(&inner.ty) {
-                            let value =
-                                self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                            let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                             return self.complex_neg(func, frame, value, &inner.ty);
                         }
-                        let value =
-                            self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                        let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                         match operand_ty {
-                            mir::Ty::Float(_) => self.emit(
-                                func,
-                                frame,
-                                mir::InstKind::FNeg(value),
-                                mir_ty,
-                            ),
+                            mir::Ty::Float(_) => self.emit(func, frame, mir::InstKind::FNeg(value), mir_ty),
                             _ => {
                                 let neg = self.emit(func, frame, mir::InstKind::Neg(value), mir_ty.clone());
                                 self.reduce_bitfield_precision(func, frame, neg, expr, mir_ty)
@@ -3006,36 +2588,26 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         // conjugate (negated imaginary part), not a
                         // bitwise complement.
                         if is_complex(&inner.ty) {
-                            let value =
-                                self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                            let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                             return self.complex_conj(func, frame, value, &inner.ty);
                         }
-                        let value =
-                            self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                        let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                         let not = self.emit(func, frame, mir::InstKind::Not(value), mir_ty.clone());
                         self.reduce_bitfield_precision(func, frame, not, expr, mir_ty)
                     }
                     fe::parse::UnaryOp::Not => {
                         if is_complex(&inner.ty) {
-                            let value =
-                                self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                            let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                             let nz = self.complex_nonzero(func, frame, value, &inner.ty);
                             let one = self.iconst(func, 1, 1);
-                            let is_zero =
-                                self.emit(func, frame, mir::InstKind::Xor(nz, one), mir::Ty::Bool);
+                            let is_zero = self.emit(func, frame, mir::InstKind::Xor(nz, one), mir::Ty::Bool);
                             return self.convert_bool(func, frame, is_zero, &mir_ty);
                         }
-                        let value =
-                            self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                        let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                         let zero = match &operand_ty {
-                            mir::Ty::Bool | mir::Ty::Int { .. } => {
-                                self.iconst(func, int_bits(&operand_ty), 0)
-                            }
+                            mir::Ty::Bool | mir::Ty::Int { .. } => self.iconst(func, int_bits(&operand_ty), 0),
                             mir::Ty::Ptr(_) => self.iconst(func, 64, 0),
-                            mir::Ty::Float(kind) => func.push_const(mir::Const::Float {
-                                kind: *kind,
-                                bits: 0,
-                            }),
+                            mir::Ty::Float(kind) => func.push_const(mir::Const::Float { kind: *kind, bits: 0 }),
                             _ => todo!("logical negation lowering"),
                         };
                         let test = match &operand_ty {
@@ -3066,51 +2638,29 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         // Bit-fields have no addressable storage (C17
                         // §6.5.3.2p1); the checker should reject this,
                         // so reaching here is a loud backstop.
-                        if matches!(
-                            &inner.kind,
-                            fe::check::CheckedExprKind::Member { bitfield: Some(_), .. }
-                        ) {
+                        if matches!(&inner.kind, fe::check::CheckedExprKind::Member { bitfield: Some(_), .. }) {
                             panic!("cannot take address of bit-field");
                         }
                         match &inner.kind {
-                        // Function designators decay without a load.
-                        fe::check::CheckedExprKind::Ident(id)
-                            if matches!(
-                                self.sema.decls[id.0 as usize].kind,
-                                fe::sema::BindingKind::Func
-                            ) =>
-                        {
-                            if let Some(target) = funcs.get(id) {
-                                let target = *target;
-                                self.emit(
-                                    func,
-                                    frame,
-                                    mir::InstKind::FuncAddr { func: target },
-                                    mir_ty,
-                                )
-                            } else {
-                                let Some(target) = externs.get(id) else {
-                                    panic!("address of undefined function");
-                                };
-                                let target = *target;
-                                self.emit(
-                                    func,
-                                    frame,
-                                    mir::InstKind::ExternAddr { target },
-                                    mir_ty,
-                                )
+                            // Function designators decay without a load.
+                            fe::check::CheckedExprKind::Ident(id) if matches!(self.sema.decls[id.0 as usize].kind, fe::sema::BindingKind::Func) => {
+                                if let Some(target) = funcs.get(id) {
+                                    let target = *target;
+                                    self.emit(func, frame, mir::InstKind::FuncAddr { func: target }, mir_ty)
+                                } else {
+                                    let Some(target) = externs.get(id) else {
+                                        panic!("address of undefined function");
+                                    };
+                                    let target = *target;
+                                    self.emit(func, frame, mir::InstKind::ExternAddr { target }, mir_ty)
+                                }
                             }
+                            _ => self.place(module, func, frame, funcs, externs, globals, inner).0,
                         }
-                        _ => {
-                            self.place(module, func, frame, funcs, externs, globals, inner).0
-                        }
-                        }
-                    },
+                    }
                     fe::parse::UnaryOp::Deref => {
                         let ptr = self.expr_value(module, func, frame, funcs, externs, globals, inner);
-                        let fe::parse::Ty::Pointer { pointee, .. } =
-                            inner.ty.unqualified().clone()
-                        else {
+                        let fe::parse::Ty::Pointer { pointee, .. } = inner.ty.unqualified().clone() else {
                             panic!("dereference of non-pointer");
                         };
                         if matches!(pointee.unqualified(), fe::parse::Ty::Func { .. }) {
@@ -3137,19 +2687,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             | fe::check::CheckedExprKind::Subscript { .. }
                             | fe::check::CheckedExprKind::CompoundLiteral { .. }
                             | fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, _)
-                            | fe::check::CheckedExprKind::Unary(
-                                fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag,
-                                _,
-                            ) => {
-                                let (addr, _) = self.place(
-                                    module, func, frame, funcs, externs, globals, expr,
-                                );
+                            | fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag, _) => {
+                                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, expr);
                                 self.load(func, frame, addr, mir_ty, access_volatile(inner, &self.sema.decls))
                             }
                             _ => {
-                                let agg = self.expr_value(
-                                    module, func, frame, funcs, externs, globals, inner,
-                                );
+                                let agg = self.expr_value(module, func, frame, funcs, externs, globals, inner);
                                 self.complex_extract(func, frame, agg, &inner.ty, index)
                             }
                         }
@@ -3175,9 +2718,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let lhs_ptr = matches!(lhs_ty, mir::Ty::Ptr(_));
                 let rhs_ptr = matches!(lower_ty(&rhs.ty, self.sema, self.interner), mir::Ty::Ptr(_));
                 if lhs_ptr || rhs_ptr {
-                    return self.pointer_binary(
-                        module, func, frame, funcs, externs, globals, op, lhs, rhs, &mir_ty,
-                    );
+                    return self.pointer_binary(module, func, frame, funcs, externs, globals, op, lhs, rhs, &mir_ty);
                 }
                 // Complex operands compute part-wise: `==`/`!=`
                 // conjoin part equality, arithmetic follows the C
@@ -3196,10 +2737,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
                     let x = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                     let y = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
-                    let (signed, float) = (
-                        is_signed(&lhs.ty, self.sema),
-                        matches!(lhs_ty, mir::Ty::Float(_)),
-                    );
+                    let (signed, float) = (is_signed(&lhs.ty, self.sema), matches!(lhs_ty, mir::Ty::Float(_)));
                     let kind = match (op, float, signed) {
                         (Lt, true, _) => mir::InstKind::Fcmp {
                             pred: mir::FcmpPred::Lt,
@@ -3268,7 +2806,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let x = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                 let y = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
-                let kind = match (op, &lhs_ty) {                    (Add, mir::Ty::Float(_)) => mir::InstKind::FAdd(x, y),
+                let kind = match (op, &lhs_ty) {
+                    (Add, mir::Ty::Float(_)) => mir::InstKind::FAdd(x, y),
                     (Sub, mir::Ty::Float(_)) => mir::InstKind::FSub(x, y),
                     (Mul, mir::Ty::Float(_)) => mir::InstKind::FMul(x, y),
                     (Div, mir::Ty::Float(_)) => mir::InstKind::FDiv(x, y),
@@ -3316,10 +2855,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Bit-field stores read-modify-write the covering
                     // unit; the assignment evaluates to the stored
                     // (width-clamped) value, so re-read it.
-                    let (addr, _) =
-                        self.place(module, func, frame, funcs, externs, globals, lhs);
-                    let rhs_val =
-                        self.expr_value(module, func, frame, funcs, externs, globals, rhs);
+                    let (addr, _) = self.place(module, func, frame, funcs, externs, globals, lhs);
+                    let rhs_val = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
                     let narrowed = self.convert(func, frame, rhs_val, &rhs.ty, &lhs.ty);
                     let unit = self.convert(func, frame, narrowed, &lhs.ty, decl_ty);
                     self.bitfield_store(func, frame, addr, decl_ty, unit, *bit, *width, access_volatile(lhs, &self.sema.decls));
@@ -3378,10 +2915,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     None => self.load(func, frame, addr, mir_ty.clone(), access_volatile(lhs, &self.sema.decls)),
                 };
                 let cur = self.convert(func, frame, cur, &lhs.ty, op_ty);
-                let combined = self.compound_op(
-                    module, func, frame, funcs, externs, globals, op, cur, op_ty, rhs_val, rhs_ty,
-                    &mir_ty,
-                );
+                let combined = self.compound_op(module, func, frame, funcs, externs, globals, op, cur, op_ty, rhs_val, rhs_ty, &mir_ty);
                 let narrowed = self.convert(func, frame, combined, op_ty, &lhs.ty);
                 match &bitfield {
                     Some((bit, width, unit_ty)) => {
@@ -3411,23 +2945,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // member, or arbitrary expression) evaluates to a code
                 // address for an indirect call.
                 let direct = match &callee.kind {
-                    fe::check::CheckedExprKind::Ident(id) => {
-                        matches!(
-                            self.sema.decls[id.0 as usize].kind,
-                            fe::sema::BindingKind::Func
-                        )
-                        .then_some(*id)
-                    }
-                    fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => {
-                        match &inner.kind {
-                            fe::check::CheckedExprKind::Ident(id) => matches!(
-                                self.sema.decls[id.0 as usize].kind,
-                                fe::sema::BindingKind::Func
-                            )
-                            .then_some(*id),
-                            _ => None,
-                        }
-                    }
+                    fe::check::CheckedExprKind::Ident(id) => matches!(self.sema.decls[id.0 as usize].kind, fe::sema::BindingKind::Func).then_some(*id),
+                    fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => match &inner.kind {
+                        fe::check::CheckedExprKind::Ident(id) => matches!(self.sema.decls[id.0 as usize].kind, fe::sema::BindingKind::Func).then_some(*id),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 if let Some(id) = direct {
@@ -3435,10 +2957,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // compiler builtins by name; they lower to dedicated
                     // MIR ops.
                     if let Some(builtin) = self.va_builtin(id) {
-                        return self.lower_va_builtin(
-                            module, func, frame, funcs, externs, globals, builtin, args,
-                            &mir_ty,
-                        );
+                        return self.lower_va_builtin(module, func, frame, funcs, externs, globals, builtin, args, &mir_ty);
                     }
                     // Single-instruction compiler builtins
                     // (`__builtin_clzll`, `__builtin_ceil`, ...): no
@@ -3446,10 +2965,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // inline like the legacy backend instead of calling
                     // out.
                     if let Some(builtin) = self.scalar_builtin(id) {
-                        return self.lower_scalar_builtin(
-                            module, func, frame, funcs, externs, globals, builtin, args,
-                            &expr.ty, &mir_ty,
-                        );
+                        return self.lower_scalar_builtin(module, func, frame, funcs, externs, globals, builtin, args, &expr.ty, &mir_ty);
                     }
                     // NaN/infinity constructors (`__builtin_nanf`,
                     // `__builtin_inff`, ...): no library symbol stands
@@ -3467,16 +2983,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // so same-named user functions still call out
                     // normally.
                     if self.complex_builtin(id).is_some() {
-                        if let Some(value) = self.lower_complex_builtin(
-                            module, func, frame, funcs, externs, globals, id, args,
-                        ) {
+                        if let Some(value) = self.lower_complex_builtin(module, func, frame, funcs, externs, globals, id, args) {
                             return value;
                         }
                     }
                     if let Some(target) = funcs.get(&id) {
                         let target = *target;
                         return self.emit_call(
-                            module, func, frame, funcs, externs, globals, args, &mir_ty,
+                            module,
+                            func,
+                            frame,
+                            funcs,
+                            externs,
+                            globals,
+                            args,
+                            &mir_ty,
                             mir::InstKind::Call {
                                 callee: target,
                                 args: Default::default(),
@@ -3486,36 +3007,39 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Prototype-only functions are foreign imports.
                     let Some(target) = externs.get(&id) else {
                         let binding = &self.sema.decls[id.0 as usize];
-                        let name = binding
-                            .name
-                            .and_then(|n| self.interner.resolve(n))
-                            .unwrap_or("<anon>");
+                        let name = binding.name.and_then(|n| self.interner.resolve(n)).unwrap_or("<anon>");
                         panic!("call to undefined function '{name}'");
                     };
                     let target = *target;
                     // The runtime `setjmp`: the function can be
                     // re-entered here by `longjmp`, so passes must keep
                     // its slots in memory.
-                    if self.sema.decls[id.0 as usize]
-                        .name
-                        .and_then(|n| self.interner.resolve(n))
-                        == Some("__glccrt_setjmp")
-                    {
+                    if self.sema.decls[id.0 as usize].name.and_then(|n| self.interner.resolve(n)) == Some("__glccrt_setjmp") {
                         func.returns_twice = true;
                     }
                     return self.emit_call(
-                        module, func, frame, funcs, externs, globals, args, &mir_ty,
-                        mir::InstKind::CallExtern {
-                            target,
-                            args: Default::default(),
-                        },
+                        module,
+                        func,
+                        frame,
+                        funcs,
+                        externs,
+                        globals,
+                        args,
+                        &mir_ty,
+                        mir::InstKind::CallExtern { target, args: Default::default() },
                     );
                 }
-                let callee_addr =
-                    self.expr_value(module, func, frame, funcs, externs, globals, callee);
+                let callee_addr = self.expr_value(module, func, frame, funcs, externs, globals, callee);
                 let sig = self.indirect_sig(callee);
                 return self.emit_call(
-                    module, func, frame, funcs, externs, globals, args, &mir_ty,
+                    module,
+                    func,
+                    frame,
+                    funcs,
+                    externs,
+                    globals,
+                    args,
+                    &mir_ty,
                     mir::InstKind::CallIndirect {
                         callee: callee_addr,
                         args: Default::default(),
@@ -3631,8 +3155,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             } => {
                 // Bit-field reads extract from the covering unit; the
                 // address resolves like any member.
-                let (addr, _) =
-                    self.place(module, func, frame, funcs, externs, globals, expr);
+                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, expr);
                 self.bitfield_load(
                     func,
                     frame,
@@ -3646,20 +3169,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 )
             }
             fe::check::CheckedExprKind::Member { .. } => {
-                let (addr, _) =
-                    self.place(module, func, frame, funcs, externs, globals, expr);
+                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
                 self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
             fe::check::CheckedExprKind::Subscript { .. } => {
-                let (addr, _) =
-                    self.place(module, func, frame, funcs, externs, globals, expr);
+                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
                 self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
             fe::check::CheckedExprKind::CompoundLiteral { .. } => {
-                let (addr, _) =
-                    self.place(module, func, frame, funcs, externs, globals, expr);
+                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, expr);
                 let array = self.expr_denotes_array(expr);
                 self.rvalue_of_place(func, frame, addr, array, mir_ty, access_volatile(expr, &self.sema.decls))
             }
@@ -3690,8 +3210,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.iconst(func, 64, id as i128)
             }
             fe::check::CheckedExprKind::VaArg { ap, .. } => {
-                let (addr, _) =
-                    self.place(module, func, frame, funcs, externs, globals, ap);
+                let (addr, _) = self.place(module, func, frame, funcs, externs, globals, ap);
                 self.emit(func, frame, mir::InstKind::VaArg { ap: addr }, mir_ty)
             }
             fe::check::CheckedExprKind::StmtExpr { items } => {
@@ -3710,16 +3229,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     match item {
                         fe::parse::BlockItem::Decl { ids, .. } => {
                             for id in ids {
-                                self.lower_local(
-                                    module, func, frame, funcs, externs, globals, *id,
-                                );
+                                self.lower_local(module, func, frame, funcs, externs, globals, *id);
                             }
                         }
                         fe::parse::BlockItem::Stmt(stmt) => {
                             if i + 1 == n && has_value {
-                                result = self.lower_value_stmt(
-                                    module, func, frame, funcs, externs, globals, stmt,
-                                );
+                                result = self.lower_value_stmt(module, func, frame, funcs, externs, globals, stmt);
                                 continue;
                             }
                             self.lower_stmt(module, func, frame, funcs, externs, globals, stmt);
@@ -3730,16 +3245,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // calls and void ternary arms.
                 result.unwrap_or_else(|| self.iconst(func, 32, 0))
             }
-            fe::check::CheckedExprKind::SizeofTy(ty)
-            | fe::check::CheckedExprKind::AlignofTy(ty) => {
-                let is_size = matches!(
-                    expr.kind,
-                    fe::check::CheckedExprKind::SizeofTy(_)
-                );
+            fe::check::CheckedExprKind::SizeofTy(ty) | fe::check::CheckedExprKind::AlignofTy(ty) => {
+                let is_size = matches!(expr.kind, fe::check::CheckedExprKind::SizeofTy(_));
                 if is_size && Self::ty_is_vm(ty) {
-                    return self.vla_type_size(
-                        module, func, frame, funcs, externs, globals, ty,
-                    );
+                    return self.vla_type_size(module, func, frame, funcs, externs, globals, ty);
                 }
                 let laid = if is_size {
                     fe::eval::sizeof_of(self.sema, ty, self.interner)
@@ -3751,16 +3260,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
-            fe::check::CheckedExprKind::SizeofExpr(inner)
-            | fe::check::CheckedExprKind::AlignofExpr(inner) => {
-                let is_size = matches!(
-                    expr.kind,
-                    fe::check::CheckedExprKind::SizeofExpr(_)
-                );
+            fe::check::CheckedExprKind::SizeofExpr(inner) | fe::check::CheckedExprKind::AlignofExpr(inner) => {
+                let is_size = matches!(expr.kind, fe::check::CheckedExprKind::SizeofExpr(_));
                 if is_size && Self::ty_is_vm(&inner.ty) {
-                    return self.vla_sizeof(
-                        module, func, frame, funcs, externs, globals, inner,
-                    );
+                    return self.vla_sizeof(module, func, frame, funcs, externs, globals, inner);
                 }
                 let laid = if is_size {
                     fe::eval::sizeof_of(self.sema, &inner.ty, self.interner)
@@ -3772,47 +3275,26 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
-            fe::check::CheckedExprKind::Offsetof { offset, .. } => {
-                self.iconst(func, int_bits(&mir_ty), *offset as i128)
-            }
+            fe::check::CheckedExprKind::Offsetof { offset, .. } => self.iconst(func, int_bits(&mir_ty), *offset as i128),
             fe::check::CheckedExprKind::Generic { index, assocs, .. } => {
                 let Some((_, chosen)) = assocs.get(*index) else {
                     panic!("generic association index out of range");
                 };
                 self.expr_value(module, func, frame, funcs, externs, globals, chosen)
             }
-            fe::check::CheckedExprKind::ConstantP(b) => {
-                self.iconst(func, int_bits(&mir_ty), i128::from(*b))
-            }
-            fe::check::CheckedExprKind::ClassifyType(code) => {
-                self.iconst(func, int_bits(&mir_ty), i128::from(*code))
-            }
+            fe::check::CheckedExprKind::ConstantP(b) => self.iconst(func, int_bits(&mir_ty), i128::from(*b)),
+            fe::check::CheckedExprKind::ClassifyType(code) => self.iconst(func, int_bits(&mir_ty), i128::from(*code)),
             fe::check::CheckedExprKind::FpClass { op, arg } => {
-                return self.lower_fp_class(
-                    module, func, frame, funcs, externs, globals, op, arg, &mir_ty,
-                );
+                return self.lower_fp_class(module, func, frame, funcs, externs, globals, op, arg, &mir_ty);
             }
             fe::check::CheckedExprKind::FpClassify { codes, arg } => {
-                return self.lower_fp_classify(
-                    module, func, frame, funcs, externs, globals, codes, arg, &mir_ty,
-                );
+                return self.lower_fp_classify(module, func, frame, funcs, externs, globals, codes, arg, &mir_ty);
             }
             fe::check::CheckedExprKind::Atomic { op, args } => {
-                return self.lower_atomic(
-                    module, func, frame, funcs, externs, globals, op, args, &expr.ty, &mir_ty,
-                );
+                return self.lower_atomic(module, func, frame, funcs, externs, globals, op, args, &expr.ty, &mir_ty);
             }
-            fe::check::CheckedExprKind::Overflow {
-                op,
-                lhs,
-                rhs,
-                res,
-                res_ty,
-            } => {
-                return self.lower_overflow(
-                    module, func, frame, funcs, externs, globals, op, lhs, rhs, res, res_ty,
-                    &mir_ty,
-                );
+            fe::check::CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => {
+                return self.lower_overflow(module, func, frame, funcs, externs, globals, op, lhs, rhs, res, res_ty, &mir_ty);
             }
             fe::check::CheckedExprKind::Alloca { size } => {
                 return self.lower_alloca(module, func, frame, funcs, externs, globals, size);
@@ -3845,11 +3327,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     let one = self.iconst(func, int_bits(&operand_mir), 1);
                     self.emit(func, frame, mir::InstKind::Sub(one, value), operand_mir.clone())
                 } else {
-                    let kind = if *ctz {
-                        mir::InstKind::Ctz(value)
-                    } else {
-                        mir::InstKind::Clz(value)
-                    };
+                    let kind = if *ctz { mir::InstKind::Ctz(value) } else { mir::InstKind::Clz(value) };
                     self.emit(func, frame, kind, operand_mir.clone())
                 };
                 let count = self.convert(func, frame, count, &arg.ty, &expr.ty);
@@ -4092,10 +3570,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         arg: &fe::check::CheckedExpr,
         mir_ty: &mir::Ty,
     ) -> mir::Value {
-        let code: Vec<mir::Value> = codes
-            .iter()
-            .map(|code| self.expr_value(module, func, frame, funcs, externs, globals, code))
-            .collect();
+        let code: Vec<mir::Value> = codes.iter().map(|code| self.expr_value(module, func, frame, funcs, externs, globals, code)).collect();
         let arg_mir = lower_ty(&arg.ty, self.sema, self.interner);
         let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
         let kind = float_kind(&arg_mir);
@@ -4204,13 +3679,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// One operand of an overflow builtin widened to the i128 the
     /// exact computation runs in, extended by its own signedness.
-    fn overflow_operand(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        value: mir::Value,
-        ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn overflow_operand(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, ty: &fe::parse::Ty) -> mir::Value {
         let wide = mir::Ty::int(128);
         if int_bits(&lower_ty(ty, self.sema, self.interner)) == 128 {
             return value;
@@ -4224,20 +3693,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// A comparison yielding a `Bool`.
-    fn icmp(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        pred: mir::IcmpPred,
-        lhs: mir::Value,
-        rhs: mir::Value,
-    ) -> mir::Value {
-        self.emit(
-            func,
-            frame,
-            mir::InstKind::Icmp { pred, lhs, rhs },
-            mir::Ty::Bool,
-        )
+    fn icmp(&self, func: &mut mir::Function, frame: &mut Frame, pred: mir::IcmpPred, lhs: mir::Value, rhs: mir::Value) -> mir::Value {
+        self.emit(func, frame, mir::InstKind::Icmp { pred, lhs, rhs }, mir::Ty::Bool)
     }
 
     /// GCC's overflow builtins: the operation runs exactly in i128
@@ -4269,15 +3726,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let b = self.overflow_operand(func, frame, b, &rhs.ty);
         let wide = mir::Ty::int(128);
         let value = match op {
-            fe::check::OverflowOp::Add => {
-                self.emit(func, frame, mir::InstKind::Add(a, b), wide.clone())
-            }
-            fe::check::OverflowOp::Sub => {
-                self.emit(func, frame, mir::InstKind::Sub(a, b), wide.clone())
-            }
-            fe::check::OverflowOp::Mul => {
-                self.emit(func, frame, mir::InstKind::Mul(a, b), wide.clone())
-            }
+            fe::check::OverflowOp::Add => self.emit(func, frame, mir::InstKind::Add(a, b), wide.clone()),
+            fe::check::OverflowOp::Sub => self.emit(func, frame, mir::InstKind::Sub(a, b), wide.clone()),
+            fe::check::OverflowOp::Mul => self.emit(func, frame, mir::InstKind::Mul(a, b), wide.clone()),
         };
         let res_mir = lower_ty(res_ty, self.sema, self.interner);
         let res_bits = int_bits(&res_mir);
@@ -4294,11 +3745,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             if res_bits == 128 {
                 self.iconst(func, 1, 0)
             } else {
-                let max = if signed {
-                    (1i128 << (res_bits - 1)) - 1
-                } else {
-                    (1i128 << res_bits) - 1
-                };
+                let max = if signed { (1i128 << (res_bits - 1)) - 1 } else { (1i128 << res_bits) - 1 };
                 let hi = self.iconst(func, 128, max);
                 self.icmp(func, frame, mir::IcmpPred::Ugt, value, hi)
             }
@@ -4335,26 +3782,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// The module extern for `name`, declaring it on first use so a
     /// source declaration of the same function is reused instead of
     /// declared twice.
-    fn extern_fn(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        name: &str,
-        params: Vec<mir::Ty>,
-        ret: mir::Ty,
-    ) -> mir::Extern {
+    fn extern_fn(&self, module: &mut mir::ModuleBuilder, name: &str, params: Vec<mir::Ty>, ret: mir::Ty) -> mir::Extern {
         for (id, ext) in module.module.externs.iter_enumerated() {
             if ext.name == name {
                 return id;
             }
         }
-        module.module.push_extern(
-            name,
-            mir::Signature {
-                params,
-                ret,
-                variadic: false,
-            },
-        )
+        module.module.push_extern(name, mir::Signature { params, ret, variadic: false })
     }
 
     /// Head slot of the `alloca` block list, created empty in the entry
@@ -4430,12 +3864,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Free the `alloca` list at every return. Returns keep their
     /// value through a block parameter; the walk itself is a loop over
     /// the links, so any number of allocations drains.
-    fn drain_allocas(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-    ) {
+    fn drain_allocas(&self, module: &mut mir::ModuleBuilder, func: &mut mir::Function, frame: &mut Frame) {
         let head = frame.alloca_head;
         let slots = frame.vla_slots.clone();
         if head.is_none() && slots.is_empty() {
@@ -4512,18 +3941,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 },
             );
             self.store(func, frame, head, next, false);
-            let args: Vec<mir::Value> = if has_val {
-                vec![func.blocks[check].params[0]]
-            } else {
-                Vec::new()
-            };
+            let args: Vec<mir::Value> = if has_val { vec![func.blocks[check].params[0]] } else { Vec::new() };
             self.branch(func, frame, check, args);
             frame.current = Some(done);
-            let val = if has_val {
-                Some(func.blocks[done].params[0])
-            } else {
-                None
-            };
+            let val = if has_val { Some(func.blocks[done].params[0]) } else { None };
             self.terminate(func, frame, mir::Terminator::Return { val });
         }
     }
@@ -4587,13 +4008,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Byte size of a variably modified type from an extent map
     /// (`ArrayBound::Vla` index to value): the ultimate element's
     /// static size times every fixed count times every mapped extent.
-    fn vla_size_with(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        ty: &fe::parse::Ty,
-        extents: &HashMap<u32, mir::Value>,
-    ) -> mir::Value {
+    fn vla_size_with(&self, func: &mut mir::Function, frame: &mut Frame, ty: &fe::parse::Ty, extents: &HashMap<u32, mir::Value>) -> mir::Value {
         let mut fixed: u64 = 1;
         let mut cur = ty.clone();
         let mut dyn_ids = Vec::new();
@@ -4609,10 +4024,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             }
             cur = *elem;
         }
-        let elem = self
-            .sema
-            .type_size(&cur, self.interner)
-            .expect("vla over a sized element");
+        let elem = self.sema.type_size(&cur, self.interner).expect("vla over a sized element");
         let mut total = self.iconst(func, 64, fixed.wrapping_mul(elem) as i128);
         for id in dyn_ids {
             let e = extents[&id];
@@ -4649,17 +4061,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// subscripts (and transparent conversions) to the declared array.
     /// Anything else (`*p`, plain pointers) evaluates bounds fresh at
     /// the use site instead.
-    fn vla_cached_extents(
-        &self,
-        frame: &Frame,
-        e: &fe::check::CheckedExpr,
-    ) -> Option<HashMap<u32, mir::Value>> {
+    fn vla_cached_extents(&self, frame: &Frame, e: &fe::check::CheckedExpr) -> Option<HashMap<u32, mir::Value>> {
         let mut cur = e;
         loop {
             match &cur.kind {
                 fe::check::CheckedExprKind::Subscript { base, .. } => cur = base,
-                fe::check::CheckedExprKind::Cast { expr, .. }
-                | fe::check::CheckedExprKind::Convert { expr, .. } => cur = expr,
+                fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => cur = expr,
                 fe::check::CheckedExprKind::Ident(id) => {
                     return frame.vla_extents.get(id).cloned();
                 }
@@ -4693,10 +4100,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn pointee_size(&self, pointee: &fe::parse::Ty) -> u64 {
         match pointee.unqualified() {
             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-            _ => self
-                .sema
-                .type_size(pointee, self.interner)
-                .unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
+            _ => self.sema.type_size(pointee, self.interner).unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
         }
     }
 
@@ -4726,13 +4130,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Free one heap block through libc.
-    fn call_free(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        ptr: mir::Value,
-    ) {
+    fn call_free(&self, module: &mut mir::ModuleBuilder, func: &mut mir::Function, frame: &mut Frame, ptr: mir::Value) {
         let ptr_ty = mir::Ty::ptr(mir::Ty::Void);
         let free = self.extern_fn(module, "free", vec![ptr_ty], mir::Ty::Void);
         self.emit_unit(
@@ -4831,13 +4229,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// Install an atomic instruction, returning its result (or the unit
     /// value statements discard for resultless ones).
-    fn atomic_finish(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        kind: mir::InstKind,
-        result: Option<mir::Value>,
-    ) -> mir::Value {
+    fn atomic_finish(&self, func: &mut mir::Function, frame: &mut Frame, kind: mir::InstKind, result: Option<mir::Value>) -> mir::Value {
         let block = self.live_block(func, frame);
         let inst = func.insts.push(mir::InstData {
             block,
@@ -4887,12 +4279,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
                 let result = self.atomic_result(func, mir_ty.clone());
-                self.atomic_finish(
-                    func,
-                    frame,
-                    mir::InstKind::AtomicLoad { addr: ptr },
-                    Some(result),
-                )
+                self.atomic_finish(func, frame, mir::InstKind::AtomicLoad { addr: ptr }, Some(result))
             }
             AtomicOp::Load => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
@@ -4900,27 +4287,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
                 let pointed = Self::atomic_pointee_of(&args[0]);
                 if is_mir_scalar(&lower_ty(&pointed, self.sema, self.interner)) {
-                    let loaded = self.emit(
-                        func,
-                        frame,
-                        mir::InstKind::AtomicLoad { addr: ptr },
-                        lower_ty(&pointed, self.sema, self.interner),
-                    );
+                    let loaded = self.emit(func, frame, mir::InstKind::AtomicLoad { addr: ptr }, lower_ty(&pointed, self.sema, self.interner));
                     self.store(func, frame, ret, loaded, ty_is_volatile(&pointed));
                 } else {
-                    let size = self
-                        .sema
-                        .type_size(&pointed, self.interner)
-                        .expect("atomic object of complete type");
-                    self.emit_unit(
-                        func,
-                        frame,
-                        mir::InstKind::Memcpy {
-                            dst: ret,
-                            src: ptr,
-                            len: size,
-                        },
-                    );
+                    let size = self.sema.type_size(&pointed, self.interner).expect("atomic object of complete type");
+                    self.emit_unit(func, frame, mir::InstKind::Memcpy { dst: ret, src: ptr, len: size });
                 }
                 self.iconst(func, 32, 0)
             }
@@ -4947,10 +4318,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     let v = self.load(func, frame, val_ptr, pointed_mir, ty_is_volatile(&Self::atomic_pointee_of(&args[1])));
                     self.emit_unit(func, frame, mir::InstKind::AtomicStore { addr: ptr, val: v });
                 } else {
-                    let size = self
-                        .sema
-                        .type_size(&pointed, self.interner)
-                        .expect("atomic object of complete type");
+                    let size = self.sema.type_size(&pointed, self.interner).expect("atomic object of complete type");
                     self.emit_unit(
                         func,
                         frame,
@@ -5003,8 +4371,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             AtomicOp::CmpXchgN { .. } => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let expected_ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[1]);
-                let desired =
-                    self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                let desired = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
                 for arg in &args[3..] {
                     let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
                 }
@@ -5096,12 +4463,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         }
                     }
                 };
-                let old = self.emit(
-                    func,
-                    frame,
-                    mir::InstKind::AtomicRmw { op: rmw, addr: ptr, val: v },
-                    mir_ty.clone(),
-                );
+                let old = self.emit(func, frame, mir::InstKind::AtomicRmw { op: rmw, addr: ptr, val: v }, mir_ty.clone());
                 if *fetch {
                     return old;
                 }
@@ -5124,11 +4486,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             (false, false) => mir::IcmpPred::Ugt,
                         };
                         let cond = self.icmp(func, frame, pred, old, v);
-                        mir::InstKind::Select {
-                            cond,
-                            then_val: old,
-                            else_val: v,
-                        }
+                        mir::InstKind::Select { cond, then_val: old, else_val: v }
                     }
                 };
                 self.emit(func, frame, combined, mir_ty.clone())
@@ -5139,11 +4497,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.iconst(func, 32, 0)
             }
             AtomicOp::LockFree { .. } => {
-                let size_v =
-                    self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let size_v = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 if args.len() > 1 {
-                    let _ =
-                        self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
                 }
                 let t = lower_ty(&args[0].ty, self.sema, self.interner);
                 let one = self.iconst(func, int_bits(&t), 1);
@@ -5232,11 +4588,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let rhs_block = func.push_block(vec![]);
         let bypass = func.push_block(vec![]);
         let merge = func.push_block(vec![]);
-        let (go, stop) = if is_and {
-            (rhs_block, bypass)
-        } else {
-            (bypass, rhs_block)
-        };
+        let (go, stop) = if is_and { (rhs_block, bypass) } else { (bypass, rhs_block) };
         self.terminate(
             func,
             frame,
@@ -5269,15 +4621,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// null pointer, not a 4-byte zero over garbage), aggregates
     /// copy whole (their value is the address).
     #[allow(clippy::too_many_arguments)]
-    fn store_ternary_arm(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        slot: mir::Value,
-        val: mir::Value,
-        arm_fe_ty: &fe::parse::Ty,
-        res_fe_ty: &fe::parse::Ty,
-    ) {
+    fn store_ternary_arm(&self, func: &mut mir::Function, frame: &mut Frame, slot: mir::Value, val: mir::Value, arm_fe_ty: &fe::parse::Ty, res_fe_ty: &fe::parse::Ty) {
         let arm_mir = lower_ty(arm_fe_ty, self.sema, self.interner);
         let res_mir = lower_ty(res_fe_ty, self.sema, self.interner);
         if arm_mir.is_aggregate() {
@@ -5321,30 +4665,16 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             return None;
         }
         match binding.name.and_then(|n| self.interner.resolve(n)) {
-            Some("__builtin_clz" | "__builtin_clzl" | "__builtin_clzll") => {
-                Some(ScalarBuiltin::Clz)
-            }
-            Some("__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll") => {
-                Some(ScalarBuiltin::Ctz)
-            }
-            Some("__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll") => {
-                Some(ScalarBuiltin::Clrsb)
-            }
-            Some("__builtin_parity" | "__builtin_parityl" | "__builtin_parityll") => {
-                Some(ScalarBuiltin::Parity)
-            }
-            Some("copysign" | "copysignf" | "copysignl" | "__builtin_copysign" | "__builtin_copysignf" | "__builtin_copysignl") => {
-                match binding.ty.unqualified() {
-                    fe::parse::Ty::Func { params, .. } if params.len() == 2 => Some(ScalarBuiltin::Copysign),
-                    _ => None,
-                }
-            }
-            Some("__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll") => {
-                Some(ScalarBuiltin::Popcnt)
-            }
-            Some("__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64") => {
-                Some(ScalarBuiltin::Bswap)
-            }
+            Some("__builtin_clz" | "__builtin_clzl" | "__builtin_clzll") => Some(ScalarBuiltin::Clz),
+            Some("__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll") => Some(ScalarBuiltin::Ctz),
+            Some("__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll") => Some(ScalarBuiltin::Clrsb),
+            Some("__builtin_parity" | "__builtin_parityl" | "__builtin_parityll") => Some(ScalarBuiltin::Parity),
+            Some("copysign" | "copysignf" | "copysignl" | "__builtin_copysign" | "__builtin_copysignf" | "__builtin_copysignl") => match binding.ty.unqualified() {
+                fe::parse::Ty::Func { params, .. } if params.len() == 2 => Some(ScalarBuiltin::Copysign),
+                _ => None,
+            },
+            Some("__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll") => Some(ScalarBuiltin::Popcnt),
+            Some("__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64") => Some(ScalarBuiltin::Bswap),
             Some("__builtin_ceil" | "__builtin_ceill") => Some(ScalarBuiltin::Ceil),
             Some("__builtin_floor" | "__builtin_floorl") => Some(ScalarBuiltin::Floor),
             Some("__builtin_trap") => Some(ScalarBuiltin::Trap),
@@ -5356,15 +4686,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             Some("abs" | "__builtin_abs") => unary_builtin(binding, ScalarBuiltin::Abs),
             Some("labs" | "__builtin_labs") => unary_builtin(binding, ScalarBuiltin::Abs),
             Some("llabs" | "__builtin_llabs") => unary_builtin(binding, ScalarBuiltin::Abs),
-            Some("fabs" | "fabsf" | "fabsl" | "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl") => {
-                unary_builtin(binding, ScalarBuiltin::Abs)
-            }
-            Some("floor" | "floorf" | "floorl" | "__builtin_floorf") => {
-                unary_builtin(binding, ScalarBuiltin::Floor)
-            }
-            Some("ceil" | "ceilf" | "ceill" | "__builtin_ceilf") => {
-                unary_builtin(binding, ScalarBuiltin::Ceil)
-            }
+            Some("fabs" | "fabsf" | "fabsl" | "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl") => unary_builtin(binding, ScalarBuiltin::Abs),
+            Some("floor" | "floorf" | "floorl" | "__builtin_floorf") => unary_builtin(binding, ScalarBuiltin::Floor),
+            Some("ceil" | "ceilf" | "ceill" | "__builtin_ceilf") => unary_builtin(binding, ScalarBuiltin::Ceil),
             _ => None,
         }
     }
@@ -5373,12 +4697,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// the result type, or `None`. Covers every spelling the parser
     /// declares (`nanf`/`nan`/`nanl`, `inff`/`inf`/`infl`,
     /// `huge_valf`/`huge_val`/`huge_vall`).
-    fn fp_const_builtin(
-        &self,
-        id: fe::sema::DeclId,
-        mir_ty: &mir::Ty,
-        func: &mut mir::Function,
-    ) -> Option<mir::Value> {
+    fn fp_const_builtin(&self, id: fe::sema::DeclId, mir_ty: &mir::Ty, func: &mut mir::Function) -> Option<mir::Value> {
         let binding = &self.sema.decls[id.0 as usize];
         if !matches!(binding.kind, fe::sema::BindingKind::Func) {
             return None;
@@ -5387,12 +4706,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let nan = matches!(name, "__builtin_nanf" | "__builtin_nan" | "__builtin_nanl");
         let inf = matches!(
             name,
-            "__builtin_inff"
-                | "__builtin_inf"
-                | "__builtin_infl"
-                | "__builtin_huge_valf"
-                | "__builtin_huge_val"
-                | "__builtin_huge_vall"
+            "__builtin_inff" | "__builtin_inf" | "__builtin_infl" | "__builtin_huge_valf" | "__builtin_huge_val" | "__builtin_huge_vall"
         );
         if !nan && !inf {
             return None;
@@ -5402,9 +4716,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         };
         let bits = match kind {
             mir::FloatKind::F32 => u128::from(if nan { 0x7fc00000u32 } else { 0x7f800000u32 }),
-            mir::FloatKind::F64 => {
-                u128::from(if nan { 0x7ff8000000000000u64 } else { 0x7ff0000000000000u64 })
-            }
+            mir::FloatKind::F64 => u128::from(if nan { 0x7ff8000000000000u64 } else { 0x7ff0000000000000u64 }),
             mir::FloatKind::F80 | mir::FloatKind::F128 => {
                 let ld = if matches!(kind, mir::FloatKind::F80) {
                     fe::target::LongDoubleKind::F80
@@ -5552,12 +4864,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             ScalarBuiltin::Bswap => mir::InstKind::Bswap(value),
             ScalarBuiltin::Ceil => mir::InstKind::Ceil(value),
             ScalarBuiltin::Floor => mir::InstKind::Floor(value),
-            ScalarBuiltin::Trap
-            | ScalarBuiltin::Sync
-            | ScalarBuiltin::Abs
-            | ScalarBuiltin::Clrsb
-            | ScalarBuiltin::Parity
-            | ScalarBuiltin::Copysign => {
+            ScalarBuiltin::Trap | ScalarBuiltin::Sync | ScalarBuiltin::Abs | ScalarBuiltin::Clrsb | ScalarBuiltin::Parity | ScalarBuiltin::Copysign => {
                 unreachable!("handled above")
             }
         };
@@ -5573,23 +4880,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         if !matches!(binding.kind, fe::sema::BindingKind::Func) {
             return None;
         }
-        Some(
-            match binding.name.and_then(|n| self.interner.resolve(n))? {
-                "creal" | "crealf" | "creall" | "__builtin_creal" | "__builtin_crealf" | "__builtin_creall" => {
-                    ComplexBuiltin::Real
-                }
-                "cimag" | "cimagf" | "cimagl" | "__builtin_cimag" | "__builtin_cimagf" | "__builtin_cimagl" => {
-                    ComplexBuiltin::Imag
-                }
-                "conj" | "conjf" | "conjl" | "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" => {
-                    ComplexBuiltin::Conj
-                }
-                "cabs" | "cabsf" | "cabsl" | "__builtin_cabs" | "__builtin_cabsf" | "__builtin_cabsl" => {
-                    ComplexBuiltin::Abs
-                }
-                _ => return None,
-            },
-        )
+        Some(match binding.name.and_then(|n| self.interner.resolve(n))? {
+            "creal" | "crealf" | "creall" | "__builtin_creal" | "__builtin_crealf" | "__builtin_creall" => ComplexBuiltin::Real,
+            "cimag" | "cimagf" | "cimagl" | "__builtin_cimag" | "__builtin_cimagf" | "__builtin_cimagl" => ComplexBuiltin::Imag,
+            "conj" | "conjf" | "conjl" | "__builtin_conj" | "__builtin_conjf" | "__builtin_conjl" => ComplexBuiltin::Conj,
+            "cabs" | "cabsf" | "cabsl" | "__builtin_cabs" | "__builtin_cabsf" | "__builtin_cabsl" => ComplexBuiltin::Abs,
+            _ => return None,
+        })
     }
 
     /// Lower a complex accessor call directly off the components, or
@@ -5611,9 +4908,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         args: &[fe::check::CheckedExpr],
     ) -> Option<mir::Value> {
         let op = self.complex_builtin(id)?;
-        let name = self.sema.decls[id.0 as usize]
-            .name
-            .and_then(|n| self.interner.resolve(n))?;
+        let name = self.sema.decls[id.0 as usize].name.and_then(|n| self.interner.resolve(n))?;
         // Compiler builtins need no signature check: the parser
         // declares their exact prototypes.
         if !name.starts_with("__builtin_") {
@@ -5635,12 +4930,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             if ret.unqualified() != want_ret.unqualified() {
                 return None;
             }
-            if matches!(op, ComplexBuiltin::Abs)
-                && !matches!(
-                    comp.unqualified(),
-                    fe::parse::Ty::Float | fe::parse::Ty::Double | fe::parse::Ty::LongDouble
-                )
-            {
+            if matches!(op, ComplexBuiltin::Abs) && !matches!(comp.unqualified(), fe::parse::Ty::Float | fe::parse::Ty::Double | fe::parse::Ty::LongDouble) {
                 return None;
             }
         }
@@ -5796,20 +5086,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::parse::Ty::Func { .. } => callee.ty.clone(),
             _ => panic!("indirect call to non-function"),
         };
-        let fe::parse::Ty::Func {
-            ret,
-            params,
-            variadic,
-            ..
-        } = func_ty.unqualified()
-        else {
+        let fe::parse::Ty::Func { ret, params, variadic, .. } = func_ty.unqualified() else {
             panic!("indirect call to non-function");
         };
         let mut sig = mir::Signature::new(
-            params
-                .iter()
-                .map(|p| lower_ty(p, self.sema, self.interner))
-                .collect(),
+            params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(),
             lower_ty(ret, self.sema, self.interner),
         );
         sig.variadic = *variadic;
@@ -5818,18 +5099,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// GEP with a properly typed result: walks `pointee_ty` through
     /// the steps so verification sees the structural type, not `Void`.
-    fn gep(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        base: mir::Value,
-        pointee_ty: &mir::Ty,
-        indices: Vec<mir::GepIndex>,
-    ) -> (mir::Value, mir::Ty) {
+    fn gep(&self, func: &mut mir::Function, frame: &mut Frame, base: mir::Value, pointee_ty: &mir::Ty, indices: Vec<mir::GepIndex>) -> (mir::Value, mir::Ty) {
         let mut cur = pointee_ty.clone();
         for idx in &indices {
-            cur = mir::Signature::gep_step(&cur, idx)
-                .unwrap_or_else(|| panic!("bad gep step"));
+            cur = mir::Signature::gep_step(&cur, idx).unwrap_or_else(|| panic!("bad gep step"));
         }
         let v = self.emit(
             func,
@@ -5857,12 +5130,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         scale: u64,
         obj: mir::Ty,
     ) -> (mir::Value, mir::Ty) {
-        let base = self.emit(
-            func,
-            frame,
-            mir::InstKind::PtrToInt(ptr),
-            mir::Ty::int(64),
-        );
+        let base = self.emit(func, frame, mir::InstKind::PtrToInt(ptr), mir::Ty::int(64));
         let wide = self.convert(func, frame, idx, idx_ty, &fe::parse::Ty::LongLong);
         let step = if scale == 1 {
             wide
@@ -5871,12 +5139,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             self.emit(func, frame, mir::InstKind::Mul(wide, n), mir::Ty::int(64))
         };
         let sum = self.emit(func, frame, mir::InstKind::Add(base, step), mir::Ty::int(64));
-        let out = self.emit(
-            func,
-            frame,
-            mir::InstKind::IntToPtr(sum),
-            mir::Ty::ptr(obj.clone()),
-        );
+        let out = self.emit(func, frame, mir::InstKind::IntToPtr(sum), mir::Ty::ptr(obj.clone()));
         (out, obj)
     }
 
@@ -5892,21 +5155,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         scale: mir::Value,
         obj: mir::Ty,
     ) -> (mir::Value, mir::Ty) {
-        let base = self.emit(
-            func,
-            frame,
-            mir::InstKind::PtrToInt(ptr),
-            mir::Ty::int(64),
-        );
+        let base = self.emit(func, frame, mir::InstKind::PtrToInt(ptr), mir::Ty::int(64));
         let wide = self.convert(func, frame, idx, idx_ty, &fe::parse::Ty::LongLong);
         let step = self.emit(func, frame, mir::InstKind::Mul(wide, scale), mir::Ty::int(64));
         let sum = self.emit(func, frame, mir::InstKind::Add(base, step), mir::Ty::int(64));
-        let out = self.emit(
-            func,
-            frame,
-            mir::InstKind::IntToPtr(sum),
-            mir::Ty::ptr(obj.clone()),
-        );
+        let out = self.emit(func, frame, mir::InstKind::IntToPtr(sum), mir::Ty::ptr(obj.clone()));
         (out, obj)
     }
 
@@ -5946,14 +5199,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// GCC reduces an operation on bit-fields to the widest operand's
     /// precision: `unsigned long long b : 40` wraps at 40 bits through
     /// `<<`, `+`, `-`, and so on (see `check::bitfield_precision`).
-    fn reduce_bitfield_precision(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        value: mir::Value,
-        expr: &fe::check::CheckedExpr,
-        mir_ty: mir::Ty,
-    ) -> mir::Value {
+    fn reduce_bitfield_precision(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, expr: &fe::check::CheckedExpr, mir_ty: mir::Ty) -> mir::Value {
         let Some(bits) = fe::check::bitfield_precision(expr) else {
             return value;
         };
@@ -5962,15 +5208,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// A value narrowed to `bits` of `mir_ty`, sign-extended when the
     /// type is signed: the stored value of a bit-field, in a register.
-    fn reduce_to_bits(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        value: mir::Value,
-        bits: u32,
-        signed: bool,
-        mir_ty: mir::Ty,
-    ) -> mir::Value {
+    fn reduce_to_bits(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, bits: u32, signed: bool, mir_ty: mir::Ty) -> mir::Value {
         let width = int_bits(&mir_ty);
         if bits >= width {
             return value;
@@ -6021,11 +5259,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let b = self.iconst(func, unit_bits, bit as i128);
             self.emit(func, frame, mir::InstKind::LShr(raw, b), unit_mir.clone())
         };
-        let mask: u128 = if width >= unit_bits {
-            u128::MAX
-        } else {
-            (1u128 << width) - 1
-        };
+        let mask: u128 = if width >= unit_bits { u128::MAX } else { (1u128 << width) - 1 };
         let m = self.iconst(func, unit_bits, mask as i128);
         let masked = self.emit(func, frame, mir::InstKind::And(shifted, m), unit_mir.clone());
         let widened = if unit_bits == val_bits {
@@ -6047,17 +5281,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// the value to the field width first. The value arrives at the
     /// declared width (callers convert); signedness is irrelevant
     /// under the mask, so stores need none.
-    fn bitfield_store(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        addr: mir::Value,
-        unit_fe: &fe::parse::Ty,
-        value: mir::Value,
-        bit: u32,
-        width: u32,
-        vol: bool,
-    ) {
+    fn bitfield_store(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, unit_fe: &fe::parse::Ty, value: mir::Value, bit: u32, width: u32, vol: bool) {
         let unit_mir = self.bitfield_unit_ty(unit_fe);
         let unit_bits = int_bits(&unit_mir);
         // `_Bool` is a 1-bit value type whose registers hold a byte —
@@ -6077,11 +5301,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         };
         let flags = if vol { mir::MemFlags::vol() } else { mir::MemFlags::plain() };
         let raw = self.emit(func, frame, mir::InstKind::Load { addr, flags }, unit_mir.clone());
-        let mask: u128 = if width >= unit_bits {
-            u128::MAX
-        } else {
-            (1u128 << width) - 1
-        };
+        let mask: u128 = if width >= unit_bits { u128::MAX } else { (1u128 << width) - 1 };
         let m = self.iconst(func, unit_bits, mask as i128);
         let clamped = self.emit(func, frame, mir::InstKind::And(value, m), unit_mir.clone());
         let field = if bit == 0 {
@@ -6103,11 +5323,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Shared by every initializer and designator walk so the layout
     /// query lives once. Unnamed bit-fields resolve to `None`: they
     /// are unreachable by name, and positional items skip them.
-    fn bitfield_target_of(
-        &self,
-        id: fe::sema::StructId,
-        index: usize,
-    ) -> Option<BitfieldTarget> {
+    fn bitfield_target_of(&self, id: fe::sema::StructId, index: usize) -> Option<BitfieldTarget> {
         let def = &self.sema.structs[id.0 as usize];
         let member = def.members.get(index)?;
         let width_expr = member.bitfield.as_ref()?;
@@ -6149,45 +5365,22 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// pointer value by a frontend-computed offset. The result
     /// retypes to the addressed object so further direct steps (as in
     /// `p->s.x`) resolve against its complete type.
-    fn ptr_offset_addr(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        ptr: mir::Value,
-        offset: u64,
-        obj: mir::Ty,
-    ) -> (mir::Value, mir::Ty) {
-        let base = self.emit(
-            func,
-            frame,
-            mir::InstKind::PtrToInt(ptr),
-            mir::Ty::int(64),
-        );
+    fn ptr_offset_addr(&self, func: &mut mir::Function, frame: &mut Frame, ptr: mir::Value, offset: u64, obj: mir::Ty) -> (mir::Value, mir::Ty) {
+        let base = self.emit(func, frame, mir::InstKind::PtrToInt(ptr), mir::Ty::int(64));
         let addr = if offset == 0 {
             base
         } else {
             let off = self.iconst(func, 64, offset as i128);
             self.emit(func, frame, mir::InstKind::Add(base, off), mir::Ty::int(64))
         };
-        let out = self.emit(
-            func,
-            frame,
-            mir::InstKind::IntToPtr(addr),
-            mir::Ty::ptr(obj.clone()),
-        );
+        let out = self.emit(func, frame, mir::InstKind::IntToPtr(addr), mir::Ty::ptr(obj.clone()));
         (out, obj)
     }
 
     /// Retype an address value without moving it: overlaid storage
     /// (union members, brace-elided initializers) shares the base
     /// address, but MIR steps need the member's type on the value.
-    fn retype_addr(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        addr: mir::Value,
-        ty: mir::Ty,
-    ) -> mir::Value {
+    fn retype_addr(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, ty: mir::Ty) -> mir::Value {
         self.ptr_offset_addr(func, frame, addr, 0, ty).0
     }
 
@@ -6241,13 +5434,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // pointers in value position (`u.arr[i]`), and loading
                 // through the decayed type would read the address
                 // itself as data.
-                if *arrow
-                    || matches!(
-                        base.kind,
-                        fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, _)
-                    )
-                    || self.descent_needs_bytes(&base.ty, path)
-                {
+                if *arrow || matches!(base.kind, fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, _)) || self.descent_needs_bytes(&base.ty, path) {
                     // Arrow takes the pointer value itself; dereference
                     // and direct bases take their address (an rvalue
                     // would copy the whole object and strand stores).
@@ -6257,19 +5444,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         self.place(module, func, frame, funcs, externs, globals, base).0
                     };
                     let obj = lower_ty(decl_ty, self.sema, self.interner);
-                    let (addr, obj) =
-                        self.ptr_offset_addr(func, frame, ptr, *offset as u64, obj);
+                    let (addr, obj) = self.ptr_offset_addr(func, frame, ptr, *offset as u64, obj);
                     return (addr, obj);
                 }
                 let (mut addr, mut obj) = self.place(module, func, frame, funcs, externs, globals, base);
                 for field in path {
-                    let (next, ty) = self.gep(
-                        func,
-                        frame,
-                        addr,
-                        &obj,
-                        vec![mir::GepIndex::Field(*field as u32)],
-                    );
+                    let (next, ty) = self.gep(func, frame, addr, &obj, vec![mir::GepIndex::Field(*field as u32)]);
                     addr = next;
                     obj = ty;
                 }
@@ -6280,12 +5460,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // The base address: array storage itself, or the pointer
                 // value for pointer bases.
                 let addr = match &base_ty {
-                    fe::parse::Ty::Array { .. } => {
-                        self.place(module, func, frame, funcs, externs, globals, base).0
-                    }
-                    fe::parse::Ty::Pointer { .. } => {
-                        self.expr_value(module, func, frame, funcs, externs, globals, base)
-                    }
+                    fe::parse::Ty::Array { .. } => self.place(module, func, frame, funcs, externs, globals, base).0,
+                    fe::parse::Ty::Pointer { .. } => self.expr_value(module, func, frame, funcs, externs, globals, base),
                     _ => panic!("subscript of non-array, non-pointer"),
                 };
                 // Step by the frontend element size through byte
@@ -6312,26 +5488,19 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // for a declared object, fresh through pointers.
                     let scale = match self.vla_cached_extents(frame, base) {
                         Some(map) => self.vla_size_with(func, frame, &elem_fe, &map),
-                        None => self.vla_type_size(
-                            module, func, frame, funcs, externs, globals, &elem_fe,
-                        ),
+                        None => self.vla_type_size(module, func, frame, funcs, externs, globals, &elem_fe),
                     };
                     return self.scaled_index_addr_dyn(func, frame, addr, idx, &index.ty, scale, obj);
                 }
                 let scale = match elem_fe.unqualified() {
                     fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-                    _ => self
-                        .sema
-                        .type_size(&elem_fe, self.interner)
-                        .expect("index into sized element"),
+                    _ => self.sema.type_size(&elem_fe, self.interner).expect("index into sized element"),
                 };
                 return self.scaled_index_addr(func, frame, addr, idx, &index.ty, scale, obj);
             }
             fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => {
                 let ptr = self.expr_value(module, func, frame, funcs, externs, globals, inner);
-                let fe::parse::Ty::Pointer { pointee, .. } =
-                    inner.ty.unqualified().clone()
-                else {
+                let fe::parse::Ty::Pointer { pointee, .. } = inner.ty.unqualified().clone() else {
                     panic!("dereference of non-pointer");
                 };
                 (ptr, lower_ty(&pointee, self.sema, self.interner))
@@ -6342,30 +5511,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // (the checker rejects stores, increments, and
             // address-of on rvalue parts), so the base always has
             // its own storage.
-            fe::check::CheckedExprKind::Unary(op, inner)
-                if matches!(
-                    op,
-                    fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag
-                ) =>
-            {
+            fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag) => {
                 let base = match &inner.kind {
                     fe::check::CheckedExprKind::Ident(_)
                     | fe::check::CheckedExprKind::Member { .. }
                     | fe::check::CheckedExprKind::Subscript { .. }
                     | fe::check::CheckedExprKind::CompoundLiteral { .. }
                     | fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, _)
-                    | fe::check::CheckedExprKind::Unary(
-                        fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag,
-                        _,
-                    ) => {
+                    | fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag, _) => {
                         self.place(module, func, frame, funcs, externs, globals, inner).0
                     }
                     _ => panic!("address of a complex rvalue part"),
                 };
                 let pair = lower_ty(&inner.ty, self.sema, self.interner);
                 let index = if matches!(op, fe::parse::UnaryOp::Real) { 0 } else { 1 };
-                let (addr, obj) =
-                    self.gep(func, frame, base, &pair, vec![mir::GepIndex::Field(index)]);
+                let (addr, obj) = self.gep(func, frame, base, &pair, vec![mir::GepIndex::Field(index)]);
                 (addr, obj)
             }
             fe::check::CheckedExprKind::CompoundLiteral { ty, init } => {
@@ -6402,20 +5562,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// copies aggregates per the MIR convention. Decay keys off the
     /// declared object type, since the checker pre-decays array
     /// expressions to pointers.
-    fn rvalue_of_place(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        addr: mir::Value,
-        obj_is_array: bool,
-        mir_ty: mir::Ty,
-        vol: bool,
-    ) -> mir::Value {
-        if obj_is_array {
-            addr
-        } else {
-            self.load(func, frame, addr, mir_ty, vol)
-        }
+    fn rvalue_of_place(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, obj_is_array: bool, mir_ty: mir::Ty, vol: bool) -> mir::Value {
+        if obj_is_array { addr } else { self.load(func, frame, addr, mir_ty, vol) }
     }
 
     /// Whether `va_list` behaves as GCC's array-of-one-tag (value is
@@ -6443,24 +5591,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             _ => {}
         }
         match &e.kind {
-            fe::check::CheckedExprKind::Cast { expr, .. }
-            | fe::check::CheckedExprKind::Convert { expr, .. } => self.expr_denotes_array(expr),
+            fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.expr_denotes_array(expr),
             // A decayed array literal (`(int[]){1, 2}` as an `int *`):
             // the kind keeps the pre-decay array type while the node
             // carries the pointer, so the object is the address.
             fe::check::CheckedExprKind::CompoundLiteral { ty, .. } => {
                 matches!(ty.unqualified(), fe::parse::Ty::Array { .. })
             }
-            fe::check::CheckedExprKind::Subscript { base, .. } => {
-                match self.subscript_step_ty(base) {
-                    Some(t) => match t.unqualified() {
-                        fe::parse::Ty::Array { .. } => true,
-                        fe::parse::Ty::BuiltinVaList => self.va_list_is_array(),
-                        _ => false,
-                    },
-                    None => false,
-                }
-            }
+            fe::check::CheckedExprKind::Subscript { base, .. } => match self.subscript_step_ty(base) {
+                Some(t) => match t.unqualified() {
+                    fe::parse::Ty::Array { .. } => true,
+                    fe::parse::Ty::BuiltinVaList => self.va_list_is_array(),
+                    _ => false,
+                },
+                None => false,
+            },
             // Dereference to an object type (`*app` for a `va_list`,
             // `*p` for an array): the value is the address. The
             // checker decays array-typed dereferences to pointers in
@@ -6483,9 +5628,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn subscript_step_ty(&self, base: &fe::check::CheckedExpr) -> Option<fe::parse::Ty> {
         let ty = match &base.kind {
             fe::check::CheckedExprKind::Ident(id) => self.sema.decls[id.0 as usize].ty.clone(),
-            fe::check::CheckedExprKind::Member { base: inner, path, .. } => {
-                self.member_path_ty(inner, path)?
-            }
+            fe::check::CheckedExprKind::Member { base: inner, path, .. } => self.member_path_ty(inner, path)?,
             // `m[i][j]`: step over elements of `m[i]`'s row.
             fe::check::CheckedExprKind::Subscript { base: inner, .. } => {
                 let row = self.subscript_step_ty(inner)?;
@@ -6540,9 +5683,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // checker decays the row to a pointer (same `kind`, new
             // `ty`), which a type test cannot see through. A loaded
             // pointer row (`pp[i][j]`) recurses to `false`.
-            fe::check::CheckedExprKind::Subscript { base: inner, .. } => {
-                self.subscript_base_is_array(inner)
-            }
+            fe::check::CheckedExprKind::Subscript { base: inner, .. } => self.subscript_base_is_array(inner),
             _ => false,
         }
     }
@@ -6550,11 +5691,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Declared type at the end of a member path, for array-storage
     /// questions: walks struct definitions from the base, so checker
     /// decay along the way cannot hide an array member.
-    fn member_path_ty(
-        &self,
-        inner: &fe::check::CheckedExpr,
-        path: &[usize],
-    ) -> Option<fe::parse::Ty> {
+    fn member_path_ty(&self, inner: &fe::check::CheckedExpr, path: &[usize]) -> Option<fe::parse::Ty> {
         let mut ty: fe::parse::Ty = match inner.ty.unqualified() {
             fe::parse::Ty::Struct(id) => fe::parse::Ty::Struct(*id),
             fe::parse::Ty::Pointer { pointee, .. } => (**pointee).unqualified().clone(),
@@ -6644,39 +5781,24 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// A string literal as a fresh `char[N]` global holding the decoded
     /// bytes plus terminator. Wide literals are rejected by the decoder.
-    fn string_literal(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        parts: &[fe::lexer::StringLiteral],
-    ) -> mir::Value {
+    fn string_literal(&self, module: &mut mir::ModuleBuilder, func: &mut mir::Function, frame: &mut Frame, parts: &[fe::lexer::StringLiteral]) -> mir::Value {
         let (global, elem, len) = self.materialize_string_global(module, parts);
         self.emit(
             func,
             frame,
             mir::InstKind::GlobalAddr { global },
-            mir::Ty::ptr(mir::Ty::Array {
-                elem: Box::new(elem),
-                len,
-            }),
+            mir::Ty::ptr(mir::Ty::Array { elem: Box::new(elem), len }),
         )
     }
 
     /// Emit a string literal into a fresh anonymous global, returning
     /// it with its element type and element count for an address reloc
     /// or a `GlobalAddr`.
-    fn materialize_string_global(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        parts: &[fe::lexer::StringLiteral],
-    ) -> (mir::Global, mir::Ty, u64) {
-        let elem = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar())
-            .expect("checked literal has one prefix kind");
+    fn materialize_string_global(&self, module: &mut mir::ModuleBuilder, parts: &[fe::lexer::StringLiteral]) -> (mir::Global, mir::Ty, u64) {
+        let elem = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()).expect("checked literal has one prefix kind");
         let elem_mir = lower_ty(&elem, self.sema, self.interner);
         let width = elem_mir.size_bytes();
-        let mut image = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar())
-            .expect("checked string folds to bytes");
+        let mut image = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar()).expect("checked string folds to bytes");
         let len = image.len() as u64 / width + 1;
         image.resize(len as usize * width as usize, 0);
         let n = self.str_count.get();
@@ -6718,26 +5840,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // bytes that fit. The literal may be shorter than the
                 // array (`char s[2] = ""`), never longer in bytes than
                 // the literal plus its terminator.
-                if let (fe::check::CheckedExprKind::Str(parts), mir::Ty::Array { elem, .. }) =
-                    (&e.kind, &mir_ty)
-                {
-                    let lit_elem = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar())
-                        .map(|lit| lower_ty(&lit, self.sema, self.interner));
+                if let (fe::check::CheckedExprKind::Str(parts), mir::Ty::Array { elem, .. }) = (&e.kind, &mir_ty) {
+                    let lit_elem = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()).map(|lit| lower_ty(&lit, self.sema, self.interner));
                     if lit_elem.as_ref() == Some(&**elem) {
                         let lit_len = fe::eval::string_bytes_in(parts, self.interner, self.sema.target.wchar())
                             .expect("checked string folds to bytes")
                             .len() as u64
                             + elem.size_bytes();
                         let len = mir_ty.size_bytes();
-                        self.emit_unit(
-                            func,
-                            frame,
-                            mir::InstKind::Memset {
-                                dst: slot,
-                                byte: 0,
-                                len,
-                            },
-                        );
+                        self.emit_unit(func, frame, mir::InstKind::Memset { dst: slot, byte: 0, len });
                         let src = self.string_literal(module, func, frame, parts);
                         let src_addr = self.emit(
                             func,
@@ -6778,24 +5889,18 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::parse::Ty::Array { elem, .. } => {
                         let mut index = 0u64;
                         for item in items {
-                            index = self.array_init_item(
-                                module, func, frame, funcs, externs, globals, slot, elem, item, index,
-                            );
+                            index = self.array_init_item(module, func, frame, funcs, externs, globals, slot, elem, item, index);
                         }
                     }
                     fe::parse::Ty::Struct(id) => {
                         let mut field = 0usize;
                         for item in items {
-                            field = self.struct_init_item(
-                                module, func, frame, funcs, externs, globals, slot, *id, item, field,
-                            );
+                            field = self.struct_init_item(module, func, frame, funcs, externs, globals, slot, *id, item, field);
                         }
                     }
                     // `int x = {1}` is legal C: bare scalar braces.
                     _ if items.len() == 1 && items[0].designators.is_empty() => {
-                        self.lower_init(
-                            module, func, frame, funcs, externs, globals, slot, fe_ty, &items[0].init,
-                        );
+                        self.lower_init(module, func, frame, funcs, externs, globals, slot, fe_ty, &items[0].init);
                     }
                     _ => panic!("braced list for scalar type"),
                 }
@@ -6825,63 +5930,35 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let (index, rest) = match item.designators.split_first() {
             None => {
                 let mut i = cursor;
-                while def
-                    .members
-                    .get(i)
-                    .is_some_and(|m| m.name.is_none() && m.bitfield.is_some())
-                {
+                while def.members.get(i).is_some_and(|m| m.name.is_none() && m.bitfield.is_some()) {
                     i += 1;
                 }
                 (i, &[][..])
             }
-            Some((
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }),
-                rest,
-            )) => (designated_member(self.sema, struct_id, des) as usize, rest),
+            Some((des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }), rest)) => (designated_member(self.sema, struct_id, des) as usize, rest),
             Some((fe::parse::Designator::Index { .. }, _)) => {
                 panic!("index designator into struct")
             }
         };
-        let member = def
-            .members
-            .get(index)
-            .expect("excess initializer for struct")
-            .clone();
-        let layout = self
-            .sema
-            .struct_layout(struct_id, self.interner)
-            .expect("layout of initialized struct");
-        let (addr, _) = self.ptr_offset_addr(
-            func,
-            frame,
-            slot,
-            layout.member_offsets[index],
-            lower_ty(&member.ty, self.sema, self.interner),
-        );
+        let member = def.members.get(index).expect("excess initializer for struct").clone();
+        let layout = self.sema.struct_layout(struct_id, self.interner).expect("layout of initialized struct");
+        let (addr, _) = self.ptr_offset_addr(func, frame, slot, layout.member_offsets[index], lower_ty(&member.ty, self.sema, self.interner));
         let next = match item.designators.first() {
-            Some(
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }),
-            ) => designated_member(self.sema, struct_id, des) as usize + 1,
+            Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => designated_member(self.sema, struct_id, des) as usize + 1,
             Some(_) => cursor,
             None => index + 1,
         };
         if rest.is_empty() {
             if let Some(t) = self.bitfield_target_of(struct_id, index) {
-                self.init_bitfield(
-                    module, func, frame, funcs, externs, globals, addr, &t, &item.init,
-                );
+                self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init);
             } else {
-                self.lower_init(
-                    module, func, frame, funcs, externs, globals, addr, &member.ty, &item.init,
-                );
+                self.lower_init(module, func, frame, funcs, externs, globals, addr, &member.ty, &item.init);
             }
             return next;
         }
         let (addr, fe, bf) = self.init_addr(func, frame, addr, member.ty.clone(), rest);
         match bf {
-            Some(t) => self.init_bitfield(
-                module, func, frame, funcs, externs, globals, addr, &t, &item.init,
-            ),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
             None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, &item.init),
         }
         next
@@ -6914,9 +5991,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Overlaid union members share the base address;
                     // only the type advances.
                     if self.sema.structs[id.0 as usize].is_union {
-                        fe_ty = self.sema.structs[id.0 as usize].members[index as usize]
-                            .ty
-                            .clone();
+                        fe_ty = self.sema.structs[id.0 as usize].members[index as usize].ty.clone();
                         mir_ty = lower_ty(&fe_ty, self.sema, self.interner);
                         addr = self.retype_addr(func, frame, addr, mir_ty.clone());
                         bf = self.bitfield_target_of(id, index as usize);
@@ -6927,25 +6002,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     // Coalesced units shift field indices: address
                     // bit-field levels by layout bytes instead.
-                    if self.sema.structs[id.0 as usize]
-                        .members
-                        .iter()
-                        .any(|m| m.bitfield.is_some())
-                    {
-                        let layout = self
-                            .sema
-                            .struct_layout(id, self.interner)
-                            .expect("layout of initialized struct");
-                        fe_ty = self.sema.structs[id.0 as usize].members[index as usize]
-                            .ty
-                            .clone();
-                        let (addr2, _) = self.ptr_offset_addr(
-                            func,
-                            frame,
-                            addr,
-                            layout.member_offsets[index as usize],
-                            lower_ty(&fe_ty, self.sema, self.interner),
-                        );
+                    if self.sema.structs[id.0 as usize].members.iter().any(|m| m.bitfield.is_some()) {
+                        let layout = self.sema.struct_layout(id, self.interner).expect("layout of initialized struct");
+                        fe_ty = self.sema.structs[id.0 as usize].members[index as usize].ty.clone();
+                        let (addr2, _) = self.ptr_offset_addr(func, frame, addr, layout.member_offsets[index as usize], lower_ty(&fe_ty, self.sema, self.interner));
                         addr = addr2;
                         mir_ty = lower_ty(&fe_ty, self.sema, self.interner);
                         bf = self.bitfield_target_of(id, index as usize);
@@ -6954,33 +6014,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         }
                         continue;
                     }
-                    (addr, mir_ty) = self.gep(
-                        func,
-                        frame,
-                        addr,
-                        &mir_ty,
-                        vec![mir::GepIndex::Field(index)],
-                    );
-                    fe_ty = self.sema.structs[id.0 as usize].members[index as usize]
-                        .ty
-                        .clone();
+                    (addr, mir_ty) = self.gep(func, frame, addr, &mir_ty, vec![mir::GepIndex::Field(index)]);
+                    fe_ty = self.sema.structs[id.0 as usize].members[index as usize].ty.clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) =
-                        fe::eval::eval_const(index, self.sema, self.interner)
-                    else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     let fe::parse::Ty::Array { elem, .. } = fe_ty.unqualified() else {
                         panic!("index designator into non-array");
                     };
-                    (addr, mir_ty) = self.gep(
-                        func,
-                        frame,
-                        addr,
-                        &mir_ty,
-                        vec![mir::GepIndex::ConstIndex(k as u64)],
-                    );
+                    (addr, mir_ty) = self.gep(func, frame, addr, &mir_ty, vec![mir::GepIndex::ConstIndex(k as u64)]);
                     fe_ty = elem.as_ref().clone();
                 }
             }
@@ -7010,13 +6054,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let mir::Ty::Ptr(inner) = func.values[slot].ty.clone() else {
                 panic!("array initializer slot is not an address");
             };
-            let (addr, _) = self.gep(
-                func,
-                frame,
-                slot,
-                inner.as_ref(),
-                vec![mir::GepIndex::ConstIndex(cursor)],
-            );
+            let (addr, _) = self.gep(func, frame, slot, inner.as_ref(), vec![mir::GepIndex::ConstIndex(cursor)]);
             (addr, elem_ty.clone(), None)
         } else {
             let array_ty = fe::parse::Ty::Array {
@@ -7027,20 +6065,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             self.init_addr(func, frame, slot, array_ty, &item.designators)
         };
         match bf {
-            Some(t) => self.init_bitfield(
-                module, func, frame, funcs, externs, globals, addr, &t, &item.init,
-            ),
-            None => self.lower_init(
-                module, func, frame, funcs, externs, globals, addr, &ty, &item.init,
-            ),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
+            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, &item.init),
         }
         match item.designators.first() {
-            Some(fe::parse::Designator::Index { index, .. }) => {
-                match fe::eval::eval_const(index, self.sema, self.interner) {
-                    Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
-                    _ => cursor,
-                }
-            }
+            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
+                Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
+                _ => cursor,
+            },
             Some(_) => cursor,
             None => cursor + 1,
         }
@@ -7064,32 +6096,18 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         // member's address, with the type selected by position or
         // designator. Deeper designators walk from the member.
         if self.sema.structs[struct_id.0 as usize].is_union {
-            return self.union_init_item(
-                module, func, frame, funcs, externs, globals, slot, struct_id, item, cursor,
-            );
+            return self.union_init_item(module, func, frame, funcs, externs, globals, slot, struct_id, item, cursor);
         }
         // Bit-field structs address by layout bytes (coalesced units
         // shift field indices), with stores read-modify-writing.
-        if self.sema.structs[struct_id.0 as usize]
-            .members
-            .iter()
-            .any(|m| m.bitfield.is_some())
-        {
-            return self.bitfield_struct_init_item(
-                module, func, frame, funcs, externs, globals, slot, struct_id, item, cursor,
-            );
+        if self.sema.structs[struct_id.0 as usize].members.iter().any(|m| m.bitfield.is_some()) {
+            return self.bitfield_struct_init_item(module, func, frame, funcs, externs, globals, slot, struct_id, item, cursor);
         }
         let (addr, ty, bf) = if item.designators.is_empty() {
             // Same typed-base discipline as above: the address feeds
             // nested initializers and must resolve steps.
             let mir_struct = lower_ty(&fe::parse::Ty::Struct(struct_id), self.sema, self.interner);
-            let (addr, _) = self.gep(
-                func,
-                frame,
-                slot,
-                &mir_struct,
-                vec![mir::GepIndex::Field(cursor as u32)],
-            );
+            let (addr, _) = self.gep(func, frame, slot, &mir_struct, vec![mir::GepIndex::Field(cursor as u32)]);
             let ty = self.sema.structs[struct_id.0 as usize].members[cursor].ty.clone();
             (addr, ty, None)
         } else {
@@ -7097,17 +6115,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             self.init_addr(func, frame, slot, struct_ty, &item.designators)
         };
         match bf {
-            Some(t) => self.init_bitfield(
-                module, func, frame, funcs, externs, globals, addr, &t, &item.init,
-            ),
-            None => self.lower_init(
-                module, func, frame, funcs, externs, globals, addr, &ty, &item.init,
-            ),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
+            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, &item.init),
         }
         match item.designators.first() {
-            Some(
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }),
-            ) => designated_member(self.sema, struct_id, des) as usize + 1,
+            Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => designated_member(self.sema, struct_id, des) as usize + 1,
             Some(_) => cursor,
             None => cursor + 1,
         }
@@ -7136,33 +6148,19 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let (index, rest) = match item.designators.split_first() {
             None => {
                 let mut i = cursor;
-                while def
-                    .members
-                    .get(i)
-                    .is_some_and(|m| m.name.is_none() && m.bitfield.is_some())
-                {
+                while def.members.get(i).is_some_and(|m| m.name.is_none() && m.bitfield.is_some()) {
                     i += 1;
                 }
                 (i, &[][..])
             }
-            Some((
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }),
-                rest,
-            )) => (designated_member(self.sema, struct_id, des) as usize, rest),
+            Some((des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }), rest)) => (designated_member(self.sema, struct_id, des) as usize, rest),
             Some((fe::parse::Designator::Index { .. }, _)) => {
                 panic!("index designator into union")
             }
         };
-        let member_fe = def
-            .members
-            .get(index)
-            .expect("excess initializer for union")
-            .ty
-            .clone();
+        let member_fe = def.members.get(index).expect("excess initializer for union").ty.clone();
         let next = match item.designators.first() {
-            Some(
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }),
-            ) => designated_member(self.sema, struct_id, des) as usize + 1,
+            Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => designated_member(self.sema, struct_id, des) as usize + 1,
             Some(_) => cursor,
             None => index + 1,
         };
@@ -7172,23 +6170,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let slot = self.retype_addr(func, frame, slot, member_mir);
         if rest.is_empty() {
             if let Some(t) = self.bitfield_target_of(struct_id, index) {
-                self.init_bitfield(
-                    module, func, frame, funcs, externs, globals, slot, &t, &item.init,
-                );
+                self.init_bitfield(module, func, frame, funcs, externs, globals, slot, &t, &item.init);
             } else {
-                self.lower_init(
-                    module, func, frame, funcs, externs, globals, slot, &member_fe, &item.init,
-                );
+                self.lower_init(module, func, frame, funcs, externs, globals, slot, &member_fe, &item.init);
             }
         } else {
             let (addr, fe, bf) = self.init_addr(func, frame, slot, member_fe, rest);
             match bf {
-                Some(t) => self.init_bitfield(
-                    module, func, frame, funcs, externs, globals, addr, &t, &item.init,
-                ),
-                None => self.lower_init(
-                    module, func, frame, funcs, externs, globals, addr, &fe, &item.init,
-                ),
+                Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
+                None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, &item.init),
             }
         }
         next
@@ -7212,48 +6202,23 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let positional = |id: fe::sema::StructId, cursor: u64| -> usize {
             let def = &self.sema.structs[id.0 as usize];
             let mut i = cursor as usize;
-            while def
-                .members
-                .get(i)
-                .is_some_and(|m| m.name.is_none() && m.bitfield.is_some())
-            {
+            while def.members.get(i).is_some_and(|m| m.name.is_none() && m.bitfield.is_some()) {
                 i += 1;
             }
             i
         };
         if designators.is_empty() {
             return match (fe_ty.unqualified(), mir_ty) {
-                (
-                    fe::parse::Ty::Array { elem, .. },
-                    mir::Ty::Array { elem: mir_elem, .. },
-                ) => {
-                    let elem_size = self
-                        .sema
-                        .type_size(elem, self.interner)
-                        .expect("sized array element");
-                    (
-                        base + cursor * elem_size,
-                        elem.as_ref().clone(),
-                        mir_elem.as_ref().clone(),
-                        cursor + 1,
-                        None,
-                    )
+                (fe::parse::Ty::Array { elem, .. }, mir::Ty::Array { elem: mir_elem, .. }) => {
+                    let elem_size = self.sema.type_size(elem, self.interner).expect("sized array element");
+                    (base + cursor * elem_size, elem.as_ref().clone(), mir_elem.as_ref().clone(), cursor + 1, None)
                 }
                 // Bit-field structs address by layout bytes; the flag
                 // marks bit-field targets for read-modify-write.
-                (fe::parse::Ty::Struct(id), _)
-                    if self.sema.structs[id.0 as usize]
-                        .members
-                        .iter()
-                        .any(|m| m.bitfield.is_some())
-                        && !self.sema.structs[id.0 as usize].is_union =>
-                {
+                (fe::parse::Ty::Struct(id), _) if self.sema.structs[id.0 as usize].members.iter().any(|m| m.bitfield.is_some()) && !self.sema.structs[id.0 as usize].is_union => {
                     let slot = positional(*id, cursor);
                     let member_fe = self.sema.structs[id.0 as usize].members[slot].ty.clone();
-                    let layout = self
-                        .sema
-                        .struct_layout(*id, self.interner)
-                        .expect("layout of initialized struct");
+                    let layout = self.sema.struct_layout(*id, self.interner).expect("layout of initialized struct");
                     let member_mir = lower_ty(&member_fe, self.sema, self.interner);
                     (
                         base + layout.member_offsets[slot],
@@ -7276,23 +6241,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 // Union members overlay at the base: position selects
                 // the type, the offset never advances.
-                (fe::parse::Ty::Struct(id), mir::Ty::Array { .. })
-                    if self.sema.structs[id.0 as usize].is_union =>
-                {
+                (fe::parse::Ty::Struct(id), mir::Ty::Array { .. }) if self.sema.structs[id.0 as usize].is_union => {
                     let slot = positional(*id, cursor);
-                    let member_fe = self.sema.structs[id.0 as usize].members
-                        .get(slot)
-                        .expect("excess initializer for union")
-                        .ty
-                        .clone();
+                    let member_fe = self.sema.structs[id.0 as usize].members.get(slot).expect("excess initializer for union").ty.clone();
                     let member_mir = lower_ty(&member_fe, self.sema, self.interner);
-                    (
-                        base,
-                        member_fe,
-                        member_mir,
-                        slot as u64 + 1,
-                        self.bitfield_target_of(*id, slot),
-                    )
+                    (base, member_fe, member_mir, slot as u64 + 1, self.bitfield_target_of(*id, slot))
                 }
                 _ => panic!("positional initializer into scalar"),
             };
@@ -7323,15 +6276,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     // Coalesced units shift field indices: address
                     // bit-field levels by layout bytes instead.
-                    if self.sema.structs[id.0 as usize]
-                        .members
-                        .iter()
-                        .any(|m| m.bitfield.is_some())
-                    {
-                        let layout = self
-                            .sema
-                            .struct_layout(id, self.interner)
-                            .expect("layout of initialized struct");
+                    if self.sema.structs[id.0 as usize].members.iter().any(|m| m.bitfield.is_some()) {
+                        let layout = self.sema.struct_layout(id, self.interner).expect("layout of initialized struct");
                         off += layout.member_offsets[slot];
                         fe = self.sema.structs[id.0 as usize].members[slot].ty.clone();
                         mi = lower_ty(&fe, self.sema, self.interner);
@@ -7349,37 +6295,23 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mi = fields[slot].clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) =
-                        fe::eval::eval_const(index, self.sema, self.interner)
-                    else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     // A flexible array member decays to a pointer in
                     // MIR, but its elements still address by element
                     // stride from the member's offset.
-                    if let (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr(_)) =
-                        (fe.unqualified(), &mi)
-                    {
-                        let elem_size = self
-                            .sema
-                            .type_size(elem, self.interner)
-                            .expect("sized array element");
+                    if let (fe::parse::Ty::Array { elem, bound: None, .. }, mir::Ty::Ptr(_)) = (fe.unqualified(), &mi) {
+                        let elem_size = self.sema.type_size(elem, self.interner).expect("sized array element");
                         off += (k as u64) * elem_size;
                         fe = elem.as_ref().clone();
                         mi = lower_ty(&fe, self.sema, self.interner);
                         continue;
                     }
-                    let (
-                        fe::parse::Ty::Array { elem, .. },
-                        mir::Ty::Array { elem: mir_elem, .. },
-                    ) = (fe.unqualified(), &mi)
-                    else {
+                    let (fe::parse::Ty::Array { elem, .. }, mir::Ty::Array { elem: mir_elem, .. }) = (fe.unqualified(), &mi) else {
                         panic!("index designator into non-array");
                     };
-                    let elem_size = self
-                        .sema
-                        .type_size(elem, self.interner)
-                        .expect("sized array element");
+                    let elem_size = self.sema.type_size(elem, self.interner).expect("sized array element");
                     off += (k as u64) * elem_size;
                     fe = elem.as_ref().clone();
                     mi = mir_elem.as_ref().clone();
@@ -7388,19 +6320,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         let next = if designators.len() == 1 {
             match &designators[0] {
-                fe::parse::Designator::Index { index, .. } => {
-                    match fe::eval::eval_const(index, self.sema, self.interner) {
-                        Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
-                        _ => cursor,
-                    }
-                }
+                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(index, self.sema, self.interner) {
+                    Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
+                    _ => cursor,
+                },
                 des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }) => {
                     // Only exact when the field addresses this level;
                     // nested paths keep the cursor (pathological).
                     match (fe_ty.unqualified(), mir_ty) {
-                        (fe::parse::Ty::Struct(id), mir::Ty::Struct { .. }) => {
-                            designated_member(self.sema, *id, des) as u64 + 1
-                        }
+                        (fe::parse::Ty::Struct(id), mir::Ty::Struct { .. }) => designated_member(self.sema, *id, des) as u64 + 1,
                         _ => cursor,
                     }
                 }
@@ -7411,13 +6339,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         (off, fe, mi, next, bf)
     }
 
-    fn place_of_var(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        globals: &HashMap<fe::sema::DeclId, mir::Global>,
-        id: fe::sema::DeclId,
-    ) -> mir::Value {
+    fn place_of_var(&self, func: &mut mir::Function, frame: &mut Frame, globals: &HashMap<fe::sema::DeclId, mir::Global>, id: fe::sema::DeclId) -> mir::Value {
         if let Some(slot) = frame.slots.get(&id) {
             // A VLA object's home is the slot holding its heap pointer:
             // the address of the object is the loaded value.
@@ -7430,12 +6352,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             panic!("variable has no address in this frame");
         };
         let pointee = lower_ty(&self.sema.decls[id.0 as usize].ty, self.sema, self.interner);
-        self.emit(
-            func,
-            frame,
-            mir::InstKind::GlobalAddr { global: *global },
-            mir::Ty::ptr(pointee),
-        )
+        self.emit(func, frame, mir::InstKind::GlobalAddr { global: *global }, mir::Ty::ptr(pointee))
     }
 
     /// Explicit conversion between scalar MIR values, directed by the
@@ -7443,14 +6360,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// through [`Self::convert_complex`]: the pair type erases the
     /// complex/real distinction, so this must branch on the frontend
     /// types first.
-    fn convert(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        from: mir::Value,
-        from_ty: &fe::parse::Ty,
-        to_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn convert(&self, func: &mut mir::Function, frame: &mut Frame, from: mir::Value, from_ty: &fe::parse::Ty, to_ty: &fe::parse::Ty) -> mir::Value {
         let from_mir = lower_ty(from_ty, self.sema, self.interner);
         let to_mir = lower_ty(to_ty, self.sema, self.interner);
         if from_mir == to_mir {
@@ -7583,59 +6493,22 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// *addresses* (for stores through `__real__`/`__imag__`) use
     /// field GEPs in `place` instead: values carry the pair struct
     /// type and have no address of their own.
-    fn complex_extract(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        agg: mir::Value,
-        fe_ty: &fe::parse::Ty,
-        index: u32,
-    ) -> mir::Value {
+    fn complex_extract(&self, func: &mut mir::Function, frame: &mut Frame, agg: mir::Value, fe_ty: &fe::parse::Ty, index: u32) -> mir::Value {
         let comp_mir = lower_ty(&complex_component(fe_ty), self.sema, self.interner);
-        self.emit(
-            func,
-            frame,
-            mir::InstKind::ExtractValue { agg, index },
-            comp_mir,
-        )
+        self.emit(func, frame, mir::InstKind::ExtractValue { agg, index }, comp_mir)
     }
 
     /// Assemble a complex value from its component values: two
     /// `InsertValue` steps over an `undef` base, which lowers to
     /// stores into a fresh slot (no initial copy).
-    fn complex_build(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        fe_ty: &fe::parse::Ty,
-        re: mir::Value,
-        im: mir::Value,
-    ) -> mir::Value {
+    fn complex_build(&self, func: &mut mir::Function, frame: &mut Frame, fe_ty: &fe::parse::Ty, re: mir::Value, im: mir::Value) -> mir::Value {
         let pair = lower_ty(fe_ty, self.sema, self.interner);
         let base = func.values.push(mir::ValueData {
             ty: pair.clone(),
             def: mir::Def::Const(mir::Const::Undef),
         });
-        let with_re = self.emit(
-            func,
-            frame,
-            mir::InstKind::InsertValue {
-                agg: base,
-                elem: re,
-                index: 0,
-            },
-            pair.clone(),
-        );
-        self.emit(
-            func,
-            frame,
-            mir::InstKind::InsertValue {
-                agg: with_re,
-                elem: im,
-                index: 1,
-            },
-            pair,
-        )
+        let with_re = self.emit(func, frame, mir::InstKind::InsertValue { agg: base, elem: re, index: 0 }, pair.clone());
+        self.emit(func, frame, mir::InstKind::InsertValue { agg: with_re, elem: im, index: 1 }, pair)
     }
 
     /// The zero of a complex component type: integer zero, or
@@ -7654,14 +6527,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// (real part, imaginary discarded), and complex to `_Bool`
     /// (nonzero when either part is). Same-type conversions never
     /// reach here (the caller returns the value untouched).
-    fn convert_complex(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        from: mir::Value,
-        from_ty: &fe::parse::Ty,
-        to_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn convert_complex(&self, func: &mut mir::Function, frame: &mut Frame, from: mir::Value, from_ty: &fe::parse::Ty, to_ty: &fe::parse::Ty) -> mir::Value {
         let from_cx = is_complex(from_ty);
         let to_cx = is_complex(to_ty);
         match (from_cx, to_cx) {
@@ -7696,13 +6562,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// Whether a complex value is nonzero, as a `Bool`: either part
     /// nonzero (NaN parts count as nonzero, like scalar floats).
-    fn complex_nonzero(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        agg: mir::Value,
-        fe_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn complex_nonzero(&self, func: &mut mir::Function, frame: &mut Frame, agg: mir::Value, fe_ty: &fe::parse::Ty) -> mir::Value {
         let comp_fe = complex_component(fe_ty);
         let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
         let re = self.complex_extract(func, frame, agg, fe_ty, 0);
@@ -7763,13 +6623,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Negate one loaded component value.
-    fn complex_neg_part(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        v: mir::Value,
-        comp_mir: &mir::Ty,
-    ) -> mir::Value {
+    fn complex_neg_part(&self, func: &mut mir::Function, frame: &mut Frame, v: mir::Value, comp_mir: &mir::Ty) -> mir::Value {
         match comp_mir {
             mir::Ty::Float(_) => self.emit(func, frame, mir::InstKind::FNeg(v), comp_mir.clone()),
             _ => self.emit(func, frame, mir::InstKind::Neg(v), comp_mir.clone()),
@@ -7777,13 +6631,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Unary `-x` on a complex value: both parts negated.
-    fn complex_neg(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        agg: mir::Value,
-        fe_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn complex_neg(&self, func: &mut mir::Function, frame: &mut Frame, agg: mir::Value, fe_ty: &fe::parse::Ty) -> mir::Value {
         let comp_fe = complex_component(fe_ty);
         let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
         let re = self.complex_extract(func, frame, agg, fe_ty, 0);
@@ -7795,13 +6643,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// GNU `~x` on a complex value: the conjugate (real part kept,
     /// imaginary part negated).
-    fn complex_conj(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        agg: mir::Value,
-        fe_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn complex_conj(&self, func: &mut mir::Function, frame: &mut Frame, agg: mir::Value, fe_ty: &fe::parse::Ty) -> mir::Value {
         let comp_fe = complex_component(fe_ty);
         let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
         let re = self.complex_extract(func, frame, agg, fe_ty, 0);
@@ -7813,16 +6655,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Materialize a complex literal (a GNU imaginary literal like
     /// `1i` or `1.0i`, whose checked form is an `Int`/`Float` node
     /// with complex type): zero real part, literal imaginary part.
-    fn complex_literal(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        expr: &fe::check::CheckedExpr,
-    ) -> mir::Value {
+    fn complex_literal(&self, func: &mut mir::Function, frame: &mut Frame, expr: &fe::check::CheckedExpr) -> mir::Value {
         let comp_fe = complex_component(&expr.ty);
         let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
-        let folded = fe::eval::eval_const(expr, self.sema, self.interner)
-            .unwrap_or_else(|| panic!("complex literal must fold"));
+        let folded = fe::eval::eval_const(expr, self.sema, self.interner).unwrap_or_else(|| panic!("complex literal must fold"));
         let fe::eval::Value::Complex(re, im) = folded else {
             panic!("complex literal without complex parts");
         };
@@ -7840,15 +6676,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// division follows the component's signedness; float parts
     /// (including `long double`, whose MIR ops lower through the
     /// runtime helpers) round once per component operation.
-    fn complex_binop(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        op: &fe::parse::BinaryOp,
-        lhs: mir::Value,
-        rhs: mir::Value,
-        fe_ty: &fe::parse::Ty,
-    ) -> mir::Value {
+    fn complex_binop(&self, func: &mut mir::Function, frame: &mut Frame, op: &fe::parse::BinaryOp, lhs: mir::Value, rhs: mir::Value, fe_ty: &fe::parse::Ty) -> mir::Value {
         let comp_fe = complex_component(fe_ty);
         let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
         let a = self.complex_extract(func, frame, lhs, fe_ty, 0);
@@ -7856,14 +6684,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let c = self.complex_extract(func, frame, rhs, fe_ty, 0);
         let d = self.complex_extract(func, frame, rhs, fe_ty, 1);
         let (re, im) = match op {
-            fe::parse::BinaryOp::Add => (
-                self.complex_add(func, frame, a, c, &comp_mir, true),
-                self.complex_add(func, frame, b, d, &comp_mir, true),
-            ),
-            fe::parse::BinaryOp::Sub => (
-                self.complex_add(func, frame, a, c, &comp_mir, false),
-                self.complex_add(func, frame, b, d, &comp_mir, false),
-            ),
+            fe::parse::BinaryOp::Add => (self.complex_add(func, frame, a, c, &comp_mir, true), self.complex_add(func, frame, b, d, &comp_mir, true)),
+            fe::parse::BinaryOp::Sub => (self.complex_add(func, frame, a, c, &comp_mir, false), self.complex_add(func, frame, b, d, &comp_mir, false)),
             fe::parse::BinaryOp::Mul => {
                 let ac = self.complex_mul(func, frame, a, c, &comp_mir);
                 let bd = self.complex_mul(func, frame, b, d, &comp_mir);
@@ -7895,15 +6717,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// One component addition or subtraction.
-    fn complex_add(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        x: mir::Value,
-        y: mir::Value,
-        comp_mir: &mir::Ty,
-        add: bool,
-    ) -> mir::Value {
+    fn complex_add(&self, func: &mut mir::Function, frame: &mut Frame, x: mir::Value, y: mir::Value, comp_mir: &mir::Ty, add: bool) -> mir::Value {
         let kind = match (add, comp_mir) {
             (true, mir::Ty::Float(_)) => mir::InstKind::FAdd(x, y),
             (false, mir::Ty::Float(_)) => mir::InstKind::FSub(x, y),
@@ -7914,14 +6728,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// One component multiplication.
-    fn complex_mul(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        x: mir::Value,
-        y: mir::Value,
-        comp_mir: &mir::Ty,
-    ) -> mir::Value {
+    fn complex_mul(&self, func: &mut mir::Function, frame: &mut Frame, x: mir::Value, y: mir::Value, comp_mir: &mir::Ty) -> mir::Value {
         let kind = match comp_mir {
             mir::Ty::Float(_) => mir::InstKind::FMul(x, y),
             _ => mir::InstKind::Mul(x, y),
@@ -7932,15 +6739,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// One component division: float parts round once, integer parts
     /// divide by the signedness of the component (truncating, like
     /// scalar division).
-    fn complex_div(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        x: mir::Value,
-        y: mir::Value,
-        comp_fe: &fe::parse::Ty,
-        comp_mir: &mir::Ty,
-    ) -> mir::Value {
+    fn complex_div(&self, func: &mut mir::Function, frame: &mut Frame, x: mir::Value, y: mir::Value, comp_fe: &fe::parse::Ty, comp_mir: &mir::Ty) -> mir::Value {
         let kind = match comp_mir {
             mir::Ty::Float(_) => mir::InstKind::FDiv(x, y),
             _ if is_signed(comp_fe, self.sema) => mir::InstKind::Sdiv(x, y),
@@ -8054,33 +6853,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // pointees step by one byte.
             let scale = match pointee.unqualified() {
                 fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-                _ => self
-                    .sema
-                    .type_size(pointee, self.interner)
-                    .expect("sized pointee"),
+                _ => self.sema.type_size(pointee, self.interner).expect("sized pointee"),
             };
             let index = if matches!(op, fe::parse::AssignOp::Sub) {
-                self.emit(
-                    func,
-                    frame,
-                    mir::InstKind::Neg(y),
-                    lower_ty(rhs_ty, self.sema, self.interner),
-                )
+                self.emit(func, frame, mir::InstKind::Neg(y), lower_ty(rhs_ty, self.sema, self.interner))
             } else {
                 y
             };
             let mir::Ty::Ptr(obj) = mir_ty.clone() else {
                 panic!("compound pointer assignment without a pointer result");
             };
-            let (addr, _) = self.scaled_index_addr(
-                func,
-                frame,
-                x,
-                index,
-                rhs_ty,
-                scale,
-                obj.as_ref().clone(),
-            );
+            let (addr, _) = self.scaled_index_addr(func, frame, x, index, rhs_ty, scale, obj.as_ref().clone());
             return addr;
         }
         let bin_op = compound_bin_op(op);
@@ -8153,10 +6936,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // the frontend pointee size through byte arithmetic:
                 // the MIR pointee is erased, so a GEP element step
                 // cannot know the stride.
-                let (ptr_expr, idx_expr) = match (
-                    lhs.ty.unqualified(),
-                    rhs.ty.unqualified(),
-                ) {
+                let (ptr_expr, idx_expr) = match (lhs.ty.unqualified(), rhs.ty.unqualified()) {
                     (fe::parse::Ty::Pointer { .. }, _) => (lhs, rhs),
                     (_, fe::parse::Ty::Pointer { .. }) => (rhs, lhs),
                     _ => panic!("pointer addition without a pointer"),
@@ -8190,30 +6970,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     let scale = self.pointee_stride(module, func, frame, funcs, externs, globals, lhs, pointee);
                     let x = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                     let y = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
-                    let wide_x = self.emit(
-                        func,
-                        frame,
-                        mir::InstKind::PtrToInt(x),
-                        mir::Ty::int(64),
-                    );
-                    let wide_y = self.emit(
-                        func,
-                        frame,
-                        mir::InstKind::PtrToInt(y),
-                        mir::Ty::int(64),
-                    );
-                    let diff = self.emit(
-                        func,
-                        frame,
-                        mir::InstKind::Sub(wide_x, wide_y),
-                        mir::Ty::int(64),
-                    );
-                    let quot = self.emit(
-                        func,
-                        frame,
-                        mir::InstKind::Sdiv(diff, scale),
-                        mir::Ty::int(64),
-                    );
+                    let wide_x = self.emit(func, frame, mir::InstKind::PtrToInt(x), mir::Ty::int(64));
+                    let wide_y = self.emit(func, frame, mir::InstKind::PtrToInt(y), mir::Ty::int(64));
+                    let diff = self.emit(func, frame, mir::InstKind::Sub(wide_x, wide_y), mir::Ty::int(64));
+                    let quot = self.emit(func, frame, mir::InstKind::Sdiv(diff, scale), mir::Ty::int(64));
                     return self.convert_int_width(func, frame, quot, 64, mir_ty);
                 }
                 if !lhs_ptr {
@@ -8224,12 +6984,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 let base = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
                 let index = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
-                let neg = self.emit(
-                    func,
-                    frame,
-                    mir::InstKind::Neg(index),
-                    lower_ty(&rhs.ty, self.sema, self.interner),
-                );
+                let neg = self.emit(func, frame, mir::InstKind::Neg(index), lower_ty(&rhs.ty, self.sema, self.interner));
                 let mir::Ty::Ptr(obj) = mir_ty.clone() else {
                     panic!("pointer subtraction without a pointer result");
                 };
@@ -8253,16 +7008,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     Ne => mir::IcmpPred::Ne,
                     _ => panic!("not a comparison operator"),
                 };
-                let test = self.emit(
-                    func,
-                    frame,
-                    mir::InstKind::Icmp {
-                        pred,
-                        lhs: x,
-                        rhs: y,
-                    },
-                    mir::Ty::Bool,
-                );
+                let test = self.emit(func, frame, mir::InstKind::Icmp { pred, lhs: x, rhs: y }, mir::Ty::Bool);
                 self.convert_bool(func, frame, test, mir_ty)
             }
             _ => panic!("pointer operator lowering: {op:?}"),
@@ -8270,14 +7016,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Resize an integer value to a result type by width.
-    fn convert_int_width(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        value: mir::Value,
-        from_bits: u32,
-        to_mir: &mir::Ty,
-    ) -> mir::Value {
+    fn convert_int_width(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, from_bits: u32, to_mir: &mir::Ty) -> mir::Value {
         let to_bits = int_bits(to_mir);
         if to_bits == from_bits {
             return value;
@@ -8290,13 +7029,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
 
     /// Unsigned integer comparison. Signed and float cases are built
     /// inline at the use site; this covers what remains.
-    fn int_cmp(
-        &self,
-        op: &fe::parse::BinaryOp,
-        signed: bool,
-        x: mir::Value,
-        y: mir::Value,
-    ) -> mir::InstKind {
+    fn int_cmp(&self, op: &fe::parse::BinaryOp, signed: bool, x: mir::Value, y: mir::Value) -> mir::InstKind {
         use fe::parse::BinaryOp::*;
         let pred = match (op, signed) {
             (Lt, false) => mir::IcmpPred::Ult,
@@ -8309,20 +7042,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             (Ge, true) => mir::IcmpPred::Sge,
             _ => panic!("not a comparison operator"),
         };
-        mir::InstKind::Icmp {
-            pred,
-            lhs: x,
-            rhs: y,
-        }
+        mir::InstKind::Icmp { pred, lhs: x, rhs: y }
     }
 
-    fn convert_bool(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        test: mir::Value,
-        to_mir: &mir::Ty,
-    ) -> mir::Value {
+    fn convert_bool(&self, func: &mut mir::Function, frame: &mut Frame, test: mir::Value, to_mir: &mir::Ty) -> mir::Value {
         if *to_mir == mir::Ty::Bool {
             return test;
         }
@@ -8357,37 +7080,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         result
     }
 
-    fn load(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        addr: mir::Value,
-        ty: mir::Ty,
-        vol: bool,
-    ) -> mir::Value {
+    fn load(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, ty: mir::Ty, vol: bool) -> mir::Value {
         let flags = if vol { mir::MemFlags::vol() } else { mir::MemFlags::plain() };
         self.emit(func, frame, mir::InstKind::Load { addr, flags }, ty)
     }
 
-    fn store(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        addr: mir::Value,
-        val: mir::Value,
-        vol: bool,
-    ) {
+    fn store(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, val: mir::Value, vol: bool) {
         let flags = if vol { mir::MemFlags::vol() } else { mir::MemFlags::plain() };
         self.emit_unit(func, frame, mir::InstKind::Store { addr, val, flags });
     }
 
-    fn emit(
-        &self,
-        func: &mut mir::Function,
-        frame: &mut Frame,
-        kind: mir::InstKind,
-        ty: mir::Ty,
-    ) -> mir::Value {
+    fn emit(&self, func: &mut mir::Function, frame: &mut Frame, kind: mir::InstKind, ty: mir::Ty) -> mir::Value {
         let block = self.live_block(func, frame);
         let result = func.values.push(mir::ValueData {
             ty,
@@ -8468,33 +7171,13 @@ fn access_volatile(e: &fe::check::CheckedExpr, decls: &[fe::sema::Binding]) -> b
     }
     match &e.kind {
         fe::check::CheckedExprKind::Ident(id) => ty_is_volatile(&decls[id.0 as usize].ty),
-        fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => {
-            pointee_volatile(&inner.ty)
-        }
+        fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => pointee_volatile(&inner.ty),
         fe::check::CheckedExprKind::Subscript { base, .. } => pointee_volatile(&base.ty),
-        fe::check::CheckedExprKind::Member {
-            base,
-            arrow,
-            decl_ty,
-            ..
-        } => {
-            ty_is_volatile(decl_ty)
-                || if *arrow {
-                    pointee_volatile(&base.ty)
-                } else {
-                    access_volatile(base, decls)
-                }
+        fe::check::CheckedExprKind::Member { base, arrow, decl_ty, .. } => {
+            ty_is_volatile(decl_ty) || if *arrow { pointee_volatile(&base.ty) } else { access_volatile(base, decls) }
         }
-        fe::check::CheckedExprKind::Unary(op, inner)
-            if matches!(
-                op,
-                fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag
-            ) =>
-        {
-            access_volatile(inner, decls)
-        }
-        fe::check::CheckedExprKind::Cast { expr: inner, .. }
-        | fe::check::CheckedExprKind::Convert { expr: inner, .. } => access_volatile(inner, decls),
+        fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::Real | fe::parse::UnaryOp::Imag) => access_volatile(inner, decls),
+        fe::check::CheckedExprKind::Cast { expr: inner, .. } | fe::check::CheckedExprKind::Convert { expr: inner, .. } => access_volatile(inner, decls),
         _ => false,
     }
 }
@@ -8543,10 +7226,7 @@ fn compound_bin_op(op: &fe::parse::AssignOp) -> fe::parse::BinaryOp {
 /// scalar instructions): integers, bools, floats, and pointers.
 /// Aggregates copy plain bytes instead.
 fn is_mir_scalar(ty: &mir::Ty) -> bool {
-    matches!(
-        ty,
-        mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Ptr(_)
-    )
+    matches!(ty, mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Ptr(_))
 }
 
 fn float_bits(value: fe::eval::FloatValue, ty: &mir::Ty) -> u128 {
@@ -8576,14 +7256,8 @@ fn float_inf_bits(ty: &mir::Ty) -> u128 {
     match float_kind(ty) {
         mir::FloatKind::F32 => u128::from(0x7f800000u32),
         mir::FloatKind::F64 => u128::from(0x7ff0000000000000u64),
-        mir::FloatKind::F80 => float_bits(
-            fe::eval::FloatValue::long_double_infinity_in(fe::target::LongDoubleKind::F80),
-            ty,
-        ),
-        mir::FloatKind::F128 => float_bits(
-            fe::eval::FloatValue::long_double_infinity_in(fe::target::LongDoubleKind::F128),
-            ty,
-        ),
+        mir::FloatKind::F80 => float_bits(fe::eval::FloatValue::long_double_infinity_in(fe::target::LongDoubleKind::F80), ty),
+        mir::FloatKind::F128 => float_bits(fe::eval::FloatValue::long_double_infinity_in(fe::target::LongDoubleKind::F128), ty),
     }
 }
 
@@ -8639,11 +7313,7 @@ mod tests {
         let mut module = lower_module(src);
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
-        let check = module
-            .funcs
-            .iter()
-            .find(|f| f.name == "check")
-            .expect("check lowered");
+        let check = module.funcs.iter().find(|f| f.name == "check").expect("check lowered");
         let zext_results: std::collections::HashSet<mir::Value> = check
             .blocks
             .iter()
@@ -8655,10 +7325,7 @@ mod tests {
             .collect();
         for inst in check.blocks.iter().flat_map(|block| block.insts.iter()) {
             if let mir::InstKind::Icmp { lhs, rhs, .. } = &check.insts[*inst].kind {
-                assert!(
-                    !zext_results.contains(lhs) && !zext_results.contains(rhs),
-                    "promotion survived in check:\n{dump}"
-                );
+                assert!(!zext_results.contains(lhs) && !zext_results.contains(rhs), "promotion survived in check:\n{dump}");
             }
         }
         assert_eq!(jit_run_main(module), 1);
@@ -8673,11 +7340,7 @@ mod tests {
         let mut module = lower_module(src);
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
-        let low = module
-            .funcs
-            .iter()
-            .find(|f| f.name == "low")
-            .expect("low lowered");
+        let low = module.funcs.iter().find(|f| f.name == "low").expect("low lowered");
         let has_and = low
             .blocks
             .iter()
@@ -8696,11 +7359,7 @@ mod tests {
         let mut module = lower_module(src);
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
-        let twice = module
-            .funcs
-            .iter()
-            .find(|f| f.name == "twice")
-            .expect("twice lowered");
+        let twice = module.funcs.iter().find(|f| f.name == "twice").expect("twice lowered");
         let adds = twice
             .blocks
             .iter()
@@ -8721,11 +7380,7 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         let f = module.funcs.iter().find(|f| f.name == "f").expect("f lowered");
-        let live = f
-            .blocks
-            .iter()
-            .filter(|block| !matches!(block.term, Some(mir::Terminator::Unreachable)))
-            .count();
+        let live = f.blocks.iter().filter(|block| !matches!(block.term, Some(mir::Terminator::Unreachable))).count();
         assert_eq!(live, 1, "join block survived in f:\n{dump}");
         assert_eq!(jit_run_main(module), 9);
     }
@@ -8794,10 +7449,7 @@ mod tests {
             f.blocks.iter().flat_map(|b| b.insts.iter()).any(|inst| {
                 matches!(
                     f.insts[*inst].kind,
-                    mir::InstKind::Udiv(..)
-                        | mir::InstKind::Sdiv(..)
-                        | mir::InstKind::Urem(..)
-                        | mir::InstKind::Srem(..)
+                    mir::InstKind::Udiv(..) | mir::InstKind::Sdiv(..) | mir::InstKind::Urem(..) | mir::InstKind::Srem(..)
                 )
             })
         });
@@ -8827,11 +7479,7 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         fn muls(module: &mir::Module, name: &str) -> usize {
-            let func = module
-                .funcs
-                .iter()
-                .find(|f| f.name == name)
-                .expect("function is lowered");
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function is lowered");
             func.blocks
                 .iter()
                 .flat_map(|block| block.insts.iter())
@@ -8859,10 +7507,7 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         let sink = module.funcs.iter().find(|f| f.name == "sink").expect("sink is lowered");
-        assert!(
-            sink.blocks[sink.entry].insts.len() <= 1,
-            "the entry keeps only the branch test:\n{dump}"
-        );
+        assert!(sink.blocks[sink.entry].insts.len() <= 1, "the entry keeps only the branch test:\n{dump}");
         assert_eq!(jit_run_main(module), 123);
     }
 
@@ -8894,20 +7539,13 @@ mod tests {
             "__inline int wrap(void) { return 7; } int main(void) { return wrap(); }",
             fe::target::Target::WINDOWS_X86_64,
         );
-        let wrap = module
-            .funcs
-            .iter()
-            .find(|f| f.name == "wrap")
-            .expect("referenced wrapper revived");
+        let wrap = module.funcs.iter().find(|f| f.name == "wrap").expect("referenced wrapper revived");
         assert!(wrap.local, "the revived copy is TU-local");
         assert!(module.externs.iter().any(|e| e.name == "wrap"));
         assert!(module.funcs.iter().any(|f| f.name == "main"));
 
         // An unreferenced wrapper stays dropped: declaration-only.
-        let module = lower_module_for(
-            "__inline int unused(void) { return 7; } int main(void) { return 0; }",
-            fe::target::Target::WINDOWS_X86_64,
-        );
+        let module = lower_module_for("__inline int unused(void) { return 7; } int main(void) { return 0; }", fe::target::Target::WINDOWS_X86_64);
         assert!(!module.funcs.iter().any(|f| f.name == "unused"));
         assert!(module.externs.iter().any(|e| e.name == "unused"));
 
@@ -8920,10 +7558,7 @@ mod tests {
 
         // Other targets keep the plain C behavior: the definition
         // emits (glcc has no COMDAT, but ELF libc exports no twin).
-        let module = lower_module_for(
-            "__inline int wrap(void) { return 7; } int main(void) { return wrap(); }",
-            fe::target::Target::LP64,
-        );
+        let module = lower_module_for("__inline int wrap(void) { return 7; } int main(void) { return wrap(); }", fe::target::Target::LP64);
         assert!(module.funcs.iter().any(|f| f.name == "wrap"));
     }
 
@@ -8951,11 +7586,7 @@ mod tests {
         assert!(!module.funcs.iter().any(|f| f.name == "defined"));
         assert!(module.funcs.iter().any(|f| f.name == "elsewhere"));
         assert!(!module.externs.iter().any(|e| e.name == "renamed"));
-        let (target_id, _) = module
-            .externs
-            .iter_enumerated()
-            .find(|(_, e)| e.name == "target")
-            .expect("import carries the label");
+        let (target_id, _) = module.externs.iter_enumerated().find(|(_, e)| e.name == "target").expect("import carries the label");
         let caller = module.funcs.iter().find(|f| f.name == "caller").unwrap();
         assert!(
             caller
@@ -8977,21 +7608,13 @@ mod tests {
     fn asm_labels_survive_to_the_jit() {
         // The C name keeps calling the labeled definition, and an
         // import still resolves through its label (libc's `rand`).
-        assert_eq!(
-            run_main("int f(void) __asm__(\"g\") { return 40; } int main(void) { return f() + 2; }"),
-            42
-        );
-        assert_eq!(
-            run_main("int roll(void) __asm__(\"rand\"); int main(void) { return roll() >= 0; }"),
-            1
-        );
+        assert_eq!(run_main("int f(void) __asm__(\"g\") { return 40; } int main(void) { return f() + 2; }"), 42);
+        assert_eq!(run_main("int roll(void) __asm__(\"rand\"); int main(void) { return roll() >= 0; }"), 1);
     }
 
     #[test]
     fn naked_functions_emit_asm_text_and_import() {
-        let (module, text) = lower_with_asm(
-            "__attribute__((naked)) int f(void) { __asm__(\"mov $42, %eax\\n\\tret\"); }\nint main(void){ return f(); }",
-        );
+        let (module, text) = lower_with_asm("__attribute__((naked)) int f(void) { __asm__(\"mov $42, %eax\\n\\tret\"); }\nint main(void){ return f(); }");
         assert!(text.contains(".globl f\n"), "{text}");
         assert!(text.contains("f:\n"), "{text}");
         assert!(text.contains("mov $42, %eax"), "{text}");
@@ -9031,19 +7654,11 @@ mod tests {
             if cfg!(windows) {
                 flags.push(("enable_llvm_abi_extensions", "true"));
             }
-            let builder = JITBuilder::with_flags(
-                &flags,
-                cranelift_module::default_libcall_names(),
-            )
-            .expect("jit builder");
+            let builder = JITBuilder::with_flags(&flags, cranelift_module::default_libcall_names()).expect("jit builder");
             let mut jit = JITModule::new(builder);
             let ids = glcc_lower_cl::lower_module(&mir_module, &mut jit, glcc_lower_cl::Target::native());
             jit.finalize_definitions().expect("jit finalize");
-            let main = *ids
-                .iter()
-                .find(|(id, _)| mir_module.funcs[**id].name == "main")
-                .map(|(_, fid)| fid)
-                .expect("main function");
+            let main = *ids.iter().find(|(id, _)| mir_module.funcs[**id].name == "main").map(|(_, fid)| fid).expect("main function");
             let addr = jit.get_finalized_function(main);
             let func: extern "C" fn() -> i32 = std::mem::transmute(addr);
             func()
@@ -9053,10 +7668,7 @@ mod tests {
     #[test]
     fn vla_objects() {
         // A runtime bound allocates, indexes, and round-trips values.
-        assert_eq!(
-            run_main("int main(){int n = 5; int a[n]; for (int i = 0; i < n; i++) a[i] = i * i; return a[4];}"),
-            16
-        );
+        assert_eq!(run_main("int main(){int n = 5; int a[n]; for (int i = 0; i < n; i++) a[i] = i * i; return a[4];}"), 16);
         // Rows of a multidimensional VLA stride by the runtime extent.
         assert_eq!(
             run_main("int main(){int n = 3, m = 4; int a[n][m]; int i, j; for (i = 0; i < n; i++) for (j = 0; j < m; j++) a[i][j] = i * m + j; return a[2][3];}"),
@@ -9064,15 +7676,9 @@ mod tests {
         );
         // The declaration captures its extents: later writes to the
         // bound variable do not resize the object.
-        assert_eq!(
-            run_main("int main(){int n = 4; int a[n]; n = 99; return sizeof a;}"),
-            16
-        );
+        assert_eq!(run_main("int main(){int n = 4; int a[n]; n = 99; return sizeof a;}"), 16);
         // `sizeof` on a type-name evaluates the bounds where it is used.
-        assert_eq!(
-            run_main("int main(){int n = 6; typedef int t[n]; return sizeof(t);}"),
-            24
-        );
+        assert_eq!(run_main("int main(){int n = 6; typedef int t[n]; return sizeof(t);}"), 24);
         // Through a pointer-to-VLA the bound re-evaluates: both the row
         // stride and `sizeof *a` read the parameter.
         assert_eq!(
@@ -9082,22 +7688,10 @@ mod tests {
         // Pointer arithmetic steps by the runtime extent: `p + 2 - p`,
         // `*p + 3 - *p`, `p - i`, and element addresses all scale with
         // the variably modified pointee (tcctest.c's `c99_vla_test_2`).
-        assert_eq!(
-            run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return (p + 2) - p;}"),
-            2
-        );
-        assert_eq!(
-            run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return (*p + 3) - *p;}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; p = p + 2; p = p - 1; return p - a;}"),
-            1
-        );
-        assert_eq!(
-            run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return &p[2][0] - &p[0][0];}"),
-            8
-        );
+        assert_eq!(run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return (p + 2) - p;}"), 2);
+        assert_eq!(run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return (*p + 3) - *p;}"), 3);
+        assert_eq!(run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; p = p + 2; p = p - 1; return p - a;}"), 1);
+        assert_eq!(run_main("int main(){int m = 4; int a[3][4]; int (*p)[m] = a; return &p[2][0] - &p[0][0];}"), 8);
     }
 
     #[test]
@@ -9145,14 +7739,8 @@ mod tests {
         // The declaration site frees its own previous block; each of the
         // two returns drains the live allocation. No drain loop: the
         // only branch is the source `if`.
-        let module = lower_module(
-            "int f(int n){ if (n) { int a[n]; a[0] = 1; return a[0]; } return 2; } int main(){return f(1);}",
-        );
-        let free = module
-            .externs
-            .iter()
-            .position(|e| e.name == "free")
-            .expect("free import");
+        let module = lower_module("int f(int n){ if (n) { int a[n]; a[0] = 1; return a[0]; } return 2; } int main(){return f(1);}");
+        let free = module.externs.iter().position(|e| e.name == "free").expect("free import");
         let dump = mir::display::dump_module(&module);
         let f = dump.split("func @main").next().unwrap();
         assert_eq!(f.matches(&format!("call.ext e{free}(")).count(), 3, "{f}");
@@ -9187,10 +7775,7 @@ mod tests {
             1110
         );
         // `break` leaves the switch, not the function.
-        assert_eq!(
-            run_main("int main(){int s = 0; switch(1){case 1: s = 7; break; default: s = 9;} return s;}"),
-            7
-        );
+        assert_eq!(run_main("int main(){int s = 0; switch(1){case 1: s = 7; break; default: s = 9;} return s;}"), 7);
         // Empty body and bare default still dispatch.
         assert_eq!(run_main("int main(){switch(5){} return 1;}"), 1);
         assert_eq!(run_main("int main(){switch(5){default: return 4;}}"), 4);
@@ -9217,10 +7802,7 @@ mod tests {
             run_main("int main(){unsigned char c = 255; switch(c){case 255: return 1; case -1: return 2; default: return 3;}}"),
             1
         );
-        assert_eq!(
-            run_main("int main(){short s = 4464; switch(s){case 4464: return 1; default: return 2;}}"),
-            1
-        );
+        assert_eq!(run_main("int main(){short s = 4464; switch(s){case 4464: return 1; default: return 2;}}"), 1);
     }
 
     #[test]
@@ -9274,28 +7856,16 @@ mod tests {
     fn goto_labels() {
         // Forward and backward jumps, including over declarations.
         assert_eq!(run_main("int main(){goto mid; int x = 1; mid: return 42;}"), 42);
-        assert_eq!(
-            run_main("int main(){int i = 0; int s = 0; again: i++; s += i; if(i < 10) goto again; return s;}"),
-            55
-        );
+        assert_eq!(run_main("int main(){int i = 0; int s = 0; again: i++; s += i; if(i < 10) goto again; return s;}"), 55);
         // Jumping out of a loop, and into a switch body.
-        assert_eq!(
-            run_main("int main(){for(int i = 0; i < 100; i++){if(i == 4) goto done;} done: return 7;}"),
-            7
-        );
-        assert_eq!(
-            run_main("int main(){goto inner; switch(1){case 1: return 1; inner: return 2; default: return 3;}}"),
-            2
-        );
+        assert_eq!(run_main("int main(){for(int i = 0; i < 100; i++){if(i == 4) goto done;} done: return 7;}"), 7);
+        assert_eq!(run_main("int main(){goto inner; switch(1){case 1: return 1; inner: return 2; default: return 3;}}"), 2);
     }
 
     #[test]
     fn computed_goto() {
         // A label address held in a local, dispatched on.
-        assert_eq!(
-            run_main("int main(){void *p = &&l; goto *p; l: return 5;}"),
-            5
-        );
+        assert_eq!(run_main("int main(){void *p = &&l; goto *p; l: return 5;}"), 5);
         // Jumping between labels through a table, with arithmetic on
         // the addresses (`&&b - &&a` counts labels).
         assert_eq!(
@@ -9320,10 +7890,7 @@ mod tests {
     fn computed_goto_in_statement_expression_scope() {
         // A label defined beside a statement expression's `goto` stays
         // local to it: the jump resolves inside.
-        assert_eq!(
-            run_main("int main(){int x = 0; ({ l: x++; if (x < 3) goto l; }); return x;}"),
-            3
-        );
+        assert_eq!(run_main("int main(){int x = 0; ({ l: x++; if (x < 3) goto l; }); return x;}"), 3);
     }
 
     #[test]
@@ -9333,9 +7900,7 @@ mod tests {
         // function-scoped label of the same spelling
         // (tcctest.c's `statement_expr_test`).
         assert_eq!(
-            run_main(
-                "int main(){ int i = 0; ({ { __label__ LBL; LBL: if (i++ == 0) goto LBL; } goto LBL; }); LBL: return i; }"
-            ),
+            run_main("int main(){ int i = 0; ({ { __label__ LBL; LBL: if (i++ == 0) goto LBL; } goto LBL; }); LBL: return i; }"),
             2
         );
         // A statement-expression label set that cycles through itself
@@ -9364,9 +7929,7 @@ mod tests {
         assert_eq!(run_main("int main(){int x = ({ l: 42; }); return x;}"), 42);
         assert_eq!(run_main("int main(){int x = ({ a: b: 43; }); return x;}"), 43);
         assert_eq!(
-            run_main(
-                "int main(){int s = 0; int v = ({ void *p; l: p = &&l, s < 2 ? ({ s++; goto *p; 0; }) : 66; }); return v + s;}"
-            ),
+            run_main("int main(){int s = 0; int v = ({ void *p; l: p = &&l, s < 2 ? ({ s++; goto *p; 0; }) : 66; }); return v + s;}"),
             68
         );
     }
@@ -9374,34 +7937,21 @@ mod tests {
     #[test]
     fn member_access_on_aggregate_rvalues() {
         assert_eq!(
-            run_main(
-                "struct S{int x;int y[2];}; struct S f(void){struct S s; s.x=3; s.y[1]=4; return s;} int main(){return f().x + f().y[1];}"
-            ),
+            run_main("struct S{int x;int y[2];}; struct S f(void){struct S s; s.x=3; s.y[1]=4; return s;} int main(){return f().x + f().y[1];}"),
             7
         );
         assert_eq!(
-            run_main(
-                "struct S{int x;}; int main(){struct S a,b; a.x=1; b.x=2; return (1 ? a : b).x + ({ struct S t; t.x=4; t; }).x;}"
-            ),
+            run_main("struct S{int x;}; int main(){struct S a,b; a.x=1; b.x=2; return (1 ? a : b).x + ({ struct S t; t.x=4; t; }).x;}"),
             5
         );
     }
 
     #[test]
     fn alloca_memory_is_usable() {
-        assert_eq!(
-            run_main("int main(){char *p = __builtin_alloca(4); p[0] = 3; return p[0];}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){int *p = (int *)alloca(sizeof(int) * 4); p[3] = 7; return p[3];}"),
-            7
-        );
+        assert_eq!(run_main("int main(){char *p = __builtin_alloca(4); p[0] = 3; return p[0];}"), 3);
+        assert_eq!(run_main("int main(){int *p = (int *)alloca(sizeof(int) * 4); p[3] = 7; return p[3];}"), 7);
         // malloc's 16-byte alignment survives the header.
-        assert_eq!(
-            run_main("int main(){return ((unsigned long)__builtin_alloca(1) % 16) == 0 ? 5 : 6;}"),
-            5
-        );
+        assert_eq!(run_main("int main(){return ((unsigned long)__builtin_alloca(1) % 16) == 0 ? 5 : 6;}"), 5);
     }
 
     #[test]
@@ -9409,20 +7959,10 @@ mod tests {
         // Every return routes through its own drain loop, so an
         // allocation from an earlier loop iteration is freed even when
         // the return precedes the `alloca` in source order.
-        let module = lower_module(
-            "int f(int n){ if (n) { char *p = __builtin_alloca(8); p[0] = 1; return p[0]; } return 2; } int main(){return f(1);}",
-        );
-        let frees = module
-            .externs
-            .iter()
-            .filter(|e| e.name == "free")
-            .count();
+        let module = lower_module("int f(int n){ if (n) { char *p = __builtin_alloca(8); p[0] = 1; return p[0]; } return 2; } int main(){return f(1);}");
+        let frees = module.externs.iter().filter(|e| e.name == "free").count();
         assert_eq!(frees, 1, "one shared `free` import");
-        let free = module
-            .externs
-            .iter()
-            .position(|e| e.name == "free")
-            .expect("free import");
+        let free = module.externs.iter().position(|e| e.name == "free").expect("free import");
         let dump = mir::display::dump_module(&module);
         let f = dump.split("func @main").next().unwrap();
         assert_eq!(f.matches(&format!("call.ext e{free}(")).count(), 2, "{f}");
@@ -9431,45 +7971,34 @@ mod tests {
     }
 
     #[test]
-    fn overflow_builtins() {        // The wrapped result stores through the pointer; the return
+    fn overflow_builtins() {
+        // The wrapped result stores through the pointer; the return
         // value says whether the exact value fit.
         assert_eq!(
-            run_main(
-                "int main(){int r; return __builtin_add_overflow(2147483647, 1, &r) + (r == (-2147483647 - 1)) * 2;}"
-            ),
+            run_main("int main(){int r; return __builtin_add_overflow(2147483647, 1, &r) + (r == (-2147483647 - 1)) * 2;}"),
             3
         );
         assert_eq!(
-            run_main(
-                "int main(){unsigned char r; return __builtin_sub_overflow((unsigned char)3, (unsigned char)5, &r) + (r == 254) * 2;}"
-            ),
+            run_main("int main(){unsigned char r; return __builtin_sub_overflow((unsigned char)3, (unsigned char)5, &r) + (r == 254) * 2;}"),
             3
         );
         // `u64 * u64` overflows i128: the exact u128 product compares
         // unsigned against the result type's maximum.
         assert_eq!(
-            run_main(
-                "int main(){unsigned long r; return __builtin_mul_overflow(0x100000000ul, 0x100000000ul, &r) + (r == 0) * 2;}"
-            ),
+            run_main("int main(){unsigned long r; return __builtin_mul_overflow(0x100000000ul, 0x100000000ul, &r) + (r == 0) * 2;}"),
             3
         );
         assert_eq!(
-            run_main(
-                "int main(){long long r; return __builtin_mul_overflow(0x100000000ull, 0x80000000ull, &r) + (r == (-9223372036854775807LL - 1)) * 2;}"
-            ),
+            run_main("int main(){long long r; return __builtin_mul_overflow(0x100000000ull, 0x80000000ull, &r) + (r == (-9223372036854775807LL - 1)) * 2;}"),
             3
         );
         assert_eq!(
-            run_main(
-                "int main(){long long r; return __builtin_mul_overflow(0x100000000ull, 0x7FFFFFFFull, &r) + (r == 0x7FFFFFFF00000000LL) * 2;}"
-            ),
+            run_main("int main(){long long r; return __builtin_mul_overflow(0x100000000ull, 0x7FFFFFFFull, &r) + (r == 0x7FFFFFFF00000000LL) * 2;}"),
             2
         );
         // Signed operands multiply exactly in i128.
         assert_eq!(
-            run_main(
-                "int main(){long long r; return __builtin_mul_overflow(-4611686018427387904LL, 4LL, &r) + (r == 0) * 2;}"
-            ),
+            run_main("int main(){long long r; return __builtin_mul_overflow(-4611686018427387904LL, 4LL, &r) + (r == 0) * 2;}"),
             3
         );
     }
@@ -9502,10 +8031,7 @@ mod tests {
     fn sizeof_string_literal_lowers() {
         // The literal's type carries its bound (NUL included), so
         // `sizeof` lowers even where it does not fold.
-        assert_eq!(
-            run_main("int main(){return (int) sizeof \"ab\" + (int) sizeof \"a\\n\";}"),
-            6
-        );
+        assert_eq!(run_main("int main(){return (int) sizeof \"ab\" + (int) sizeof \"a\\n\";}"), 6);
     }
 
     #[test]
@@ -9668,12 +8194,7 @@ mod tests {
             11 * 100 + 1 + 22 * 10000 + 1
         );
         // Pointer targets step once as well.
-        assert_eq!(
-            run_main(
-                "int main() { char b[4] = {0, 0, 0, 0}; char *p = b; *p++ += 3; return b[0] * 10 + (p - b); }"
-            ),
-            31
-        );
+        assert_eq!(run_main("int main() { char b[4] = {0, 0, 0, 0}; char *p = b; *p++ += 3; return b[0] * 10 + (p - b); }"), 31);
         // Bit-field targets read-modify-write their covering unit and
         // evaluate to the stored (width-clamped) value.
         assert_eq!(
@@ -9685,9 +8206,7 @@ mod tests {
         );
         // Pointer arithmetic scales by the pointee size.
         assert_eq!(
-            run_main(
-                "int main() { int a[4] = {1, 2, 3, 4}; int *p = a; p += 2; *p -= 1; return a[2] * 10 + (p - a); }"
-            ),
+            run_main("int main() { int a[4] = {1, 2, 3, 4}; int *p = a; p += 2; *p -= 1; return a[2] * 10 + (p - a); }"),
             2 * 10 + 2
         );
         // The combination runs in the operator's type even when the
@@ -9725,31 +8244,19 @@ mod tests {
         // A definition without a prototype fixes its own arity: extra
         // arguments still evaluate (their side effects happen), but
         // only the declared parameters pass.
-        assert_eq!(
-            run_main("f(){return 3;} int main(){int x = 0; return f(x = 1) + x;}"),
-            4
-        );
-        assert_eq!(
-            run_main("int g; g2(){g = 7; return 1;} int main(){return g2(1, 2) + g;}"),
-            8
-        );
+        assert_eq!(run_main("f(){return 3;} int main(){int x = 0; return f(x = 1) + x;}"), 4);
+        assert_eq!(run_main("int g; g2(){g = 7; return 1;} int main(){return g2(1, 2) + g;}"), 8);
     }
 
     #[test]
     fn builtin_fp_class_classify_and_prefetch() {
         // `signbit` sees the sign bit (`-0.0` counts) and converts
         // integers to `double` first.
-        assert_eq!(
-            run_main("int main(){return __builtin_signbit(-0.0) + 2 * __builtin_signbit(0.0);}"),
-            1
-        );
+        assert_eq!(run_main("int main(){return __builtin_signbit(-0.0) + 2 * __builtin_signbit(0.0);}"), 1);
         assert_eq!(run_main("int main(){return __builtin_signbit(-1) ? 3 : 4;}"), 3);
         // Long doubles classify through their own sign bit (the JIT
         // lacks the x87 negate helper, so this stays positive).
-        assert_eq!(
-            run_main("int main(){long double x = 2.5L; return __builtin_signbit(x) ? 5 : 6;}"),
-            6
-        );
+        assert_eq!(run_main("int main(){long double x = 2.5L; return __builtin_signbit(x) ? 5 : 6;}"), 6);
         // Classify-type codes fold from the type alone, so a long
         // double field is real (the 20040709 pattern).
         assert_eq!(run_main("int main(){return __builtin_classify_type(1.5);}"), 8);
@@ -9760,10 +8267,7 @@ mod tests {
         );
         // The prefetch address still evaluates; the hint itself is
         // nothing.
-        assert_eq!(
-            run_main("int main(){int *p = 0; __builtin_prefetch(p, 0, 3); return 0;}"),
-            0
-        );
+        assert_eq!(run_main("int main(){int *p = 0; __builtin_prefetch(p, 0, 3); return 0;}"), 0);
     }
 
     #[test]
@@ -9780,23 +8284,29 @@ mod tests {
         assert_eq!(run_main(list), 60 * 100 + 30 + 30);
         // Struct arrays through pointers scale by element size.
         assert_eq!(
-            run_main("struct P{int x; int y;}; struct P a[3] = {{1,2},{3,4},{5,6}};\
+            run_main(
+                "struct P{int x; int y;}; struct P a[3] = {{1,2},{3,4},{5,6}};\
                 int at(struct P *p, int i){return p[i].x + p[i].y;}\
-                int main(){return at(a, 0) + at(a, 1) * 10 + at(a, 2) * 100;}"),
+                int main(){return at(a, 0) + at(a, 1) * 10 + at(a, 2) * 100;}"
+            ),
             3 + 7 * 10 + 11 * 100
         );
         // Mutual recursion across two definitions.
         assert_eq!(
-            run_main("struct A{struct B *b; int x;}; struct B{struct A *a; int y;};\
+            run_main(
+                "struct A{struct B *b; int x;}; struct B{struct A *a; int y;};\
                 int main(){struct A a; struct B b;\
                 a.x = 5; b.y = 7; a.b = &b; b.a = &a;\
-                return a.b->y * 10 + b.a->x;}"),
+                return a.b->y * 10 + b.a->x;}"
+            ),
             75
         );
         // Pointers to never-defined structs pass through opaquely.
         assert_eq!(
-            run_main("int isnull(struct Opaque *p){return p == 0;}\
-                int main(){return isnull(0) + isnull((void *)1);}"),
+            run_main(
+                "int isnull(struct Opaque *p){return p == 0;}\
+                int main(){return isnull(0) + isnull((void *)1);}"
+            ),
             1
         );
     }
@@ -9833,13 +8343,17 @@ mod tests {
         // any other aggregate value: storing it to a local must copy
         // from the reassembled slot, not the raw register.
         assert_eq!(
-            run_main("struct P{int x; int y;}; struct P mk(int n){struct P p; p.x = n; p.y = n+1; return p;}\
-                int main(){struct P p = mk(10); return p.x + p.y;}"),
+            run_main(
+                "struct P{int x; int y;}; struct P mk(int n){struct P p; p.x = n; p.y = n+1; return p;}\
+                int main(){struct P p = mk(10); return p.x + p.y;}"
+            ),
             21
         );
         assert_eq!(
-            run_main("union N{int a; int b;}; union N mk(int n){union N u; u.b = n; return u;}\
-                int main(){union N w = mk(7); return w.a;}"),
+            run_main(
+                "union N{int a; int b;}; union N mk(int n){union N u; u.b = n; return u;}\
+                int main(){union N w = mk(7); return w.a;}"
+            ),
             7
         );
     }
@@ -9847,39 +8361,28 @@ mod tests {
     #[test]
     fn unions() {
         // Overlaid members share storage; access resolves per member.
-        assert_eq!(
-            run_main("union N{int a; int b;}; int main(){union N u; u.a = 42; return u.a + u.b;}"),
-            84
-        );
-        assert_eq!(
-            run_main("union N{int a; int b;}; int main(){union N u; u.b = 42; return u.a;}"),
-            42
-        );
+        assert_eq!(run_main("union N{int a; int b;}; int main(){union N u; u.a = 42; return u.a + u.b;}"), 84);
+        assert_eq!(run_main("union N{int a; int b;}; int main(){union N u; u.b = 42; return u.a;}"), 42);
         // By value in both directions, including larger blobs.
         assert_eq!(
-            run_main("union N{int a; int b;}; int get(union N u){return u.a;}\
-                int main(){union N u; u.b = 9; return get(u);}"),
+            run_main(
+                "union N{int a; int b;}; int get(union N u){return u.a;}\
+                int main(){union N u; u.b = 9; return get(u);}"
+            ),
             9
         );
         assert_eq!(
-            run_main("union Big{long l[3]; int i;}; long sum(union Big u){return u.l[0]+u.l[1]+u.l[2];}\
-                int main(){union Big u; u.l[0] = 1; u.l[1] = 2; u.l[2] = 3; return (int)sum(u);}"),
+            run_main(
+                "union Big{long l[3]; int i;}; long sum(union Big u){return u.l[0]+u.l[1]+u.l[2];}\
+                int main(){union Big u; u.l[0] = 1; u.l[1] = 2; u.l[2] = 3; return (int)sum(u);}"
+            ),
             6
         );
         // Nested, designated, and global initializers address offset
         // zero with the selected member's type.
-        assert_eq!(
-            run_main("union N{int a; int b;}; int main(){union N u = {5}; return u.a + u.b;}"),
-            10
-        );
-        assert_eq!(
-            run_main("union N{int a; int b;}; int main(){union N u = {.b = 6}; return u.a;}"),
-            6
-        );
-        assert_eq!(
-            run_main("union N{int a; int b;}; union N g = {7}; int main(){return g.a + g.b;}"),
-            14
-        );
+        assert_eq!(run_main("union N{int a; int b;}; int main(){union N u = {5}; return u.a + u.b;}"), 10);
+        assert_eq!(run_main("union N{int a; int b;}; int main(){union N u = {.b = 6}; return u.a;}"), 6);
+        assert_eq!(run_main("union N{int a; int b;}; union N g = {7}; int main(){return g.a + g.b;}"), 14);
         assert_eq!(
             run_main("union N{int a; int b;}; struct W{union N u; int t;}; int main(){struct W w; w.u.a = 3; w.t = 4; return w.u.b + w.t;}"),
             7
@@ -9900,10 +8403,7 @@ mod tests {
         );
         // Assignment evaluates to the stored value; out-of-range
         // stores wrap like GCC (which warns and yields -12 here).
-        assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; int main(){struct S s; int q = (s.y = 20); return q;}"),
-            -12
-        );
+        assert_eq!(run_main("struct S{int x:3; int y:5;}; int main(){struct S s; int q = (s.y = 20); return q;}"), -12);
         // Shared units preserve neighbors; `:0` and unnamed widths
         // shape layout without values.
         assert_eq!(
@@ -9923,48 +8423,32 @@ mod tests {
             run_main("struct M{char c:2; long long l:40;}; int main(){struct M m; m.c = 1; m.l = 5; return m.c + (int)m.l + (int)sizeof(struct M);}"),
             1 + 5 + 8
         );
-        assert_eq!(
-            run_main("struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 5; return (int)w.u;}"),
-            5
-        );
-        assert_eq!(
-            run_main("struct S{int z:17;}; int main(){struct S s; s.z = -1000; return s.z;}"),
-            -1000
-        );
+        assert_eq!(run_main("struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 5; return (int)w.u;}"), 5);
+        assert_eq!(run_main("struct S{int z:17;}; int main(){struct S s; s.z = -1000; return s.z;}"), -1000);
         // Positional (skipping unnamed), designated, nested, and
         // global initializers.
-        assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; int main(){struct S s = {5, 20}; return s.x + s.y;}"),
-            -3 + -12
-        );
-        assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; int main(){struct S s = {.y = 9}; return s.x + s.y;}"),
-            9
-        );
+        assert_eq!(run_main("struct S{int x:3; int y:5;}; int main(){struct S s = {5, 20}; return s.x + s.y;}"), -3 + -12);
+        assert_eq!(run_main("struct S{int x:3; int y:5;}; int main(){struct S s = {.y = 9}; return s.x + s.y;}"), 9);
         assert_eq!(
             run_main("struct U{int a:3; int :5; int b:8;}; int main(){struct U u = {7, 200}; return u.a + u.b;}"),
             -1 + -56
         );
-        assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; struct S g = {5, 20}; int main(){return g.x + g.y;}"),
-            -3 + -12
-        );
+        assert_eq!(run_main("struct S{int x:3; int y:5;}; struct S g = {5, 20}; int main(){return g.x + g.y;}"), -3 + -12);
         assert_eq!(
             run_main("struct I{int v;}; struct S{struct I i; int x:3;}; int main(){struct S s; s.i.v = 1; s.x = 2; return s.i.v + s.x;}"),
             3
         );
         // By value across calls, exercising unit classification.
         assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; int get(struct S s){return s.x + s.y;}\
-                int main(){struct S s; s.x = 1; s.y = 2; return get(s);}"),
+            run_main(
+                "struct S{int x:3; int y:5;}; int get(struct S s){return s.x + s.y;}\
+                int main(){struct S s; s.x = 1; s.y = 2; return get(s);}"
+            ),
             3
         );
         // Compound literals, arrays of bit-field structs, and nested
         // designated initializers compose through the same paths.
-        assert_eq!(
-            run_main("struct S{int x:3; int y:5;}; int main(){return ((struct S){1, 2}).x + ((struct S){1, 2}).y;}"),
-            3
-        );
+        assert_eq!(run_main("struct S{int x:3; int y:5;}; int main(){return ((struct S){1, 2}).x + ((struct S){1, 2}).y;}"), 3);
         assert_eq!(
             run_main("struct S{int x:3; int y:5;}; int main(){struct S a[2] = {{1, 2}, {3, 4}}; return a[0].x + a[0].y + a[1].x + a[1].y;}"),
             10
@@ -9987,11 +8471,7 @@ mod tests {
 
     /// The module global with this exact symbol name.
     fn global_named<'m>(module: &'m mir::Module, name: &str) -> &'m mir::GlobalData {
-        module
-            .globals
-            .iter()
-            .find(|g| g.name == name)
-            .unwrap_or_else(|| panic!("no global named {name}"))
+        module.globals.iter().find(|g| g.name == name).unwrap_or_else(|| panic!("no global named {name}"))
     }
 
     #[test]
@@ -10003,10 +8483,7 @@ mod tests {
                    float fx(x) float x; { return x + 0.25; }\
                    float inita(){ return 3.0; }";
         let module = lower_module(src);
-        assert!(
-            module.externs.iter().all(|e| e.name != "fx" && e.name != "inita"),
-            "block-scope prototypes became imports"
-        );
+        assert!(module.externs.iter().all(|e| e.name != "fx" && e.name != "inita"), "block-scope prototypes became imports");
         assert_eq!(run_main(src), 5);
     }
 
@@ -10066,11 +8543,7 @@ mod tests {
         assert!(global_named(&module, "x").tls, "file-scope TLS");
         assert!(global_named(&module, "y").tls, "extern TLS import");
         assert!(global_named(&module, "y").external);
-        let block: Vec<_> = module
-            .globals
-            .iter()
-            .filter(|g| g.tls && g.local && g.name.starts_with("z."))
-            .collect();
+        let block: Vec<_> = module.globals.iter().filter(|g| g.tls && g.local && g.name.starts_with("z.")).collect();
         assert_eq!(block.len(), 1, "block-scope static TLS");
     }
 
@@ -10116,10 +8589,7 @@ mod tests {
         );
         assert_eq!(global_named(&module, "d").align, Some(8));
         assert_eq!(global_named(&module, "buf").align, Some(1));
-        assert_eq!(
-            global_named(&module, "s").align,
-            Some(fe::target::Target::native().long_align)
-        );
+        assert_eq!(global_named(&module, "s").align, Some(fe::target::Target::native().long_align));
         // `aligned` sets the alignment, raising or lowering it (GCC).
         assert_eq!(global_named(&module, "page").align, Some(4096));
         assert_eq!(global_named(&module, "slot").align, Some(64));
@@ -10141,10 +8611,7 @@ mod tests {
         assert!(ctor.local);
         assert_eq!(ctor.section.as_deref(), Some(".init_array"));
         assert_eq!(ctor.align, Some(8));
-        assert_eq!(
-            ctor.relocs.iter().map(|(off, _)| *off).collect::<Vec<_>>(),
-            [0, 8, 16]
-        );
+        assert_eq!(ctor.relocs.iter().map(|(off, _)| *off).collect::<Vec<_>>(), [0, 8, 16]);
         let names: Vec<&str> = ctor
             .relocs
             .iter()
@@ -10174,31 +8641,13 @@ mod tests {
 
     #[test]
     fn complex_literals() {
-        assert_eq!(
-            run_main("int main(){double _Complex x = 1.0 + 2.0i; return (int)(__real__ x + __imag__ x);}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){double _Complex x = 2.0i; return (int)(__real__ x + __imag__ x);}"),
-            2
-        );
+        assert_eq!(run_main("int main(){double _Complex x = 1.0 + 2.0i; return (int)(__real__ x + __imag__ x);}"), 3);
+        assert_eq!(run_main("int main(){double _Complex x = 2.0i; return (int)(__real__ x + __imag__ x);}"), 2);
         lower("int main(){double _Complex x = 2.0i; return (int)(__real__ x + __imag__ x);}");
-        assert_eq!(
-            run_main("int main(){double _Complex x = 2.0i; return (int)(__real__ x + __imag__ x);}"),
-            2
-        );
-        assert_eq!(
-            run_main("int main(){float _Complex x = 1.0fi; return (int)(__real__ x + __imag__ x);}"),
-            1
-        );
-        assert_eq!(
-            run_main("int main(){__complex__ int x = 1 + 2i; return __real__ x + __imag__ x;}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){__complex__ double x = 1j; return (int)(__real__ x + __imag__ x);}"),
-            1
-        );
+        assert_eq!(run_main("int main(){double _Complex x = 2.0i; return (int)(__real__ x + __imag__ x);}"), 2);
+        assert_eq!(run_main("int main(){float _Complex x = 1.0fi; return (int)(__real__ x + __imag__ x);}"), 1);
+        assert_eq!(run_main("int main(){__complex__ int x = 1 + 2i; return __real__ x + __imag__ x;}"), 3);
+        assert_eq!(run_main("int main(){__complex__ double x = 1j; return (int)(__real__ x + __imag__ x);}"), 1);
     }
 
     #[test]
@@ -10225,7 +8674,9 @@ mod tests {
         );
         // Mixed complex/real through the usual conversions.
         assert_eq!(
-            run_main("float __complex__ p(float __complex__ a, float __complex__ b){return a + b;} int main(){float __complex__ x = 1.0f + 2.0fi; return (int)__real__ p(x, 3.0f) * 10 + (int)__imag__ p(x, 3.0f);}"),
+            run_main(
+                "float __complex__ p(float __complex__ a, float __complex__ b){return a + b;} int main(){float __complex__ x = 1.0f + 2.0fi; return (int)__real__ p(x, 3.0f) * 10 + (int)__imag__ p(x, 3.0f);}"
+            ),
             42
         );
         // Integer complex wraps and truncates like scalars.
@@ -10233,14 +8684,8 @@ mod tests {
             run_main("int main(){__complex__ int a = 1 + 2i; __complex__ int b = 3 + 4i; __complex__ int c = a * b; return __real__ c * 100 + __imag__ c;}"),
             -490
         );
-        assert_eq!(
-            run_main("int main(){__complex__ int a = 7; __complex__ int b = 2; return __real__(a / b);}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){__complex__ int a = -7; __complex__ int b = 2; return __real__(a / b);}"),
-            -3
-        );
+        assert_eq!(run_main("int main(){__complex__ int a = 7; __complex__ int b = 2; return __real__(a / b);}"), 3);
+        assert_eq!(run_main("int main(){__complex__ int a = -7; __complex__ int b = 2; return __real__(a / b);}"), -3);
         assert_eq!(
             run_main("int main(){__complex__ unsigned a = 7; __complex__ unsigned b = 2; return (int)__real__(a / b);}"),
             3
@@ -10260,14 +8705,13 @@ mod tests {
     #[test]
     fn complex_comparisons_and_conditions() {
         assert_eq!(
-            run_main("int f(double _Complex a, double _Complex b){return (a == b) + (a != b) * 10;} int main(){double _Complex a = 1.0 + 2.0i; return f(a, a) * 100 + f(a, 1.0 + 3.0i);}"),
+            run_main(
+                "int f(double _Complex a, double _Complex b){return (a == b) + (a != b) * 10;} int main(){double _Complex a = 1.0 + 2.0i; return f(a, a) * 100 + f(a, 1.0 + 3.0i);}"
+            ),
             110
         );
         // Ordered equality: +0.0 equals -0.0 in both parts.
-        assert_eq!(
-            run_main("int main(){if ((__complex__ double)0.0 != (__complex__ double)(-0.0)) return 1; return 0;}"),
-            0
-        );
+        assert_eq!(run_main("int main(){if ((__complex__ double)0.0 != (__complex__ double)(-0.0)) return 1; return 0;}"), 0);
         // A complex condition holds when either part is nonzero.
         assert_eq!(
             run_main("int f(double _Complex a){if (a) return 1; return 0;} int main(){return f(0.0) * 100 + f(1.0i) * 10 + f(1.0);}"),
@@ -10296,10 +8740,7 @@ mod tests {
             20
         );
         // Complex to real: the real part, imaginary discarded.
-        assert_eq!(
-            run_main("int main(){double _Complex c = 2.5 + 3.5i; double r = c; int n = c; return (int)r * 10 + n;}"),
-            22
-        );
+        assert_eq!(run_main("int main(){double _Complex c = 2.5 + 3.5i; double r = c; int n = c; return (int)r * 10 + n;}"), 22);
         // Complex to `_Bool`: nonzero when either part is.
         assert_eq!(
             run_main("int main(){double _Complex z = 0.0; double _Complex i = 1.0i; _Bool a = z; _Bool b = i; return a * 10 + b;}"),
@@ -10325,7 +8766,8 @@ mod tests {
     }
 
     #[test]
-    fn complex_real_imag_lvalues() {        assert_eq!(
+    fn complex_real_imag_lvalues() {
+        assert_eq!(
             run_main("double f(double _Complex x){return __real__ x + __imag__ x;} int main(){double _Complex a = 0.0; __real__ a = 1.5; __imag__ a = 2.5; return (int)f(a);}"),
             4
         );
@@ -10355,10 +8797,7 @@ mod tests {
             run_main("int main(){double _Complex a = 1.0 + 2.0i; double _Complex b = 3.0 + 4.0i; return (int)__real__(a + b) * 10 + (int)__imag__(a + b);}"),
             46
         );
-        assert_eq!(
-            run_main("int main(){double _Complex a = 1.0 + 2.0i; return (int)__real__ +a + (int)__imag__ -a;}"),
-            -1
-        );
+        assert_eq!(run_main("int main(){double _Complex a = 1.0 + 2.0i; return (int)__real__ +a + (int)__imag__ -a;}"), -1);
     }
 
     #[test]
@@ -10372,7 +8811,9 @@ mod tests {
             11
         );
         assert_eq!(
-            run_main("double _Complex g(void); double _Complex f(void){double _Complex x = g(); return x;} double _Complex g(void){return 1.0 + 2.0i;} int main(){return (int)__real__ f() + (int)__imag__ f();}"),
+            run_main(
+                "double _Complex g(void); double _Complex f(void){double _Complex x = g(); return x;} double _Complex g(void){return 1.0 + 2.0i;} int main(){return (int)__real__ f() + (int)__imag__ f();}"
+            ),
             3
         );
         // Complex inside structs and arrays, by value and by address.
@@ -10381,7 +8822,9 @@ mod tests {
             4
         );
         assert_eq!(
-            run_main("struct S{double _Complex v; int k;}; struct S id(struct S s){return s;} int main(){struct S s; s.v = 1.0 + 2.0i; s.k = 5; struct S t = id(s); return (int)__real__ t.v + (int)__imag__ t.v + t.k;}"),
+            run_main(
+                "struct S{double _Complex v; int k;}; struct S id(struct S s){return s;} int main(){struct S s; s.v = 1.0 + 2.0i; s.k = 5; struct S t = id(s); return (int)__real__ t.v + (int)__imag__ t.v + t.k;}"
+            ),
             8
         );
         assert_eq!(
@@ -10411,7 +8854,9 @@ mod tests {
         );
         // Glibc spellings with exact signatures lower inline.
         assert_eq!(
-            run_main("double creal(double _Complex); double cimag(double _Complex); double cabs(double _Complex); int main(){double _Complex x = 3.0 + 4.0i; return (int)(creal(x) + cimag(x) + cabs(x));}"),
+            run_main(
+                "double creal(double _Complex); double cimag(double _Complex); double cabs(double _Complex); int main(){double _Complex x = 3.0 + 4.0i; return (int)(creal(x) + cimag(x) + cabs(x));}"
+            ),
             12
         );
         assert_eq!(
@@ -10420,11 +8865,15 @@ mod tests {
         );
         // `f`-suffixed glibc spellings, and `~` over float complex.
         assert_eq!(
-            run_main("float crealf(float _Complex); float cimagf(float _Complex); float cabsf(float _Complex); int main(){float _Complex x = 3.0f + 4.0fi; return (int)(crealf(x) + cimagf(x) + cabsf(x));}"),
+            run_main(
+                "float crealf(float _Complex); float cimagf(float _Complex); float cabsf(float _Complex); int main(){float _Complex x = 3.0f + 4.0fi; return (int)(crealf(x) + cimagf(x) + cabsf(x));}"
+            ),
             12
         );
         assert_eq!(
-            run_main("float _Complex conjf(float _Complex); int main(){float _Complex x = 1.0f + 2.0fi; float _Complex y = conjf(x) + ~x; return (int)__real__ y * 10 + (int)__imag__ y;}"),
+            run_main(
+                "float _Complex conjf(float _Complex); int main(){float _Complex x = 1.0f + 2.0fi; float _Complex y = conjf(x) + ~x; return (int)__real__ y * 10 + (int)__imag__ y;}"
+            ),
             16
         );
         // Same-named user functions with other signatures still call out.
@@ -10434,23 +8883,11 @@ mod tests {
 
     #[test]
     fn complex_globals() {
-        assert_eq!(
-            run_main("double _Complex g = 1.0 + 2.0i; int main(){return (int)__real__ g + (int)__imag__ g;}"),
-            3
-        );
-        assert_eq!(
-            run_main("float _Complex g; int main(){g = 3.0fi; return (int)__imag__ g + (int)__real__ g;}"),
-            3
-        );
-        assert_eq!(
-            run_main("__complex__ int g = 4 + 5i; int main(){return __real__ g + __imag__ g;}"),
-            9
-        );
+        assert_eq!(run_main("double _Complex g = 1.0 + 2.0i; int main(){return (int)__real__ g + (int)__imag__ g;}"), 3);
+        assert_eq!(run_main("float _Complex g; int main(){g = 3.0fi; return (int)__imag__ g + (int)__real__ g;}"), 3);
+        assert_eq!(run_main("__complex__ int g = 4 + 5i; int main(){return __real__ g + __imag__ g;}"), 9);
         // Remainder-zeroed globals read back their parts.
-        assert_eq!(
-            run_main("double _Complex g = 5.0i; int main(){return (int)__real__ g * 10 + (int)__imag__ g;}"),
-            5
-        );
+        assert_eq!(run_main("double _Complex g = 5.0i; int main(){return (int)__real__ g * 10 + (int)__imag__ g;}"), 5);
         // Block-scope statics fold once and persist across calls.
         assert_eq!(
             run_main("int f(){static double _Complex c = 1.0 + 2.0i; __real__ c += 1.0; return (int)__real__ c;} int main(){f(); return f();}"),
@@ -10466,10 +8903,7 @@ mod tests {
             run_main("struct F { int i; int j[]; }; struct F x = { 1, { 2, 3 } }; int main(){return x.i + x.j[0] + x.j[1];}"),
             6
         );
-        assert_eq!(
-            run_main("struct F { int i; int j[]; }; struct F x = { 1, { 2, 3 } }; int main(){return sizeof x;}"),
-            4
-        );
+        assert_eq!(run_main("struct F { int i; int j[]; }; struct F x = { 1, { 2, 3 } }; int main(){return sizeof x;}"), 4);
         // A string literal fills a flexible char member, and a
         // designator into one sizes the object by the element it
         // lands on.
@@ -10477,15 +8911,9 @@ mod tests {
             run_main("struct C { char c; char p[]; }; struct C s = { 'o', \"wx\" }; int main(){return s.p[0] + s.p[1] - 'w' - 'x';}"),
             0
         );
-        assert_eq!(
-            run_main("struct F { int i; int j[]; }; struct F x = { .j[1] = 9 }; int main(){return x.j[0] + x.j[1];}"),
-            9
-        );
+        assert_eq!(run_main("struct F { int i; int j[]; }; struct F x = { .j[1] = 9 }; int main(){return x.j[0] + x.j[1];}"), 9);
         // An empty flexible initializer adds nothing.
-        assert_eq!(
-            run_main("struct F { int i; int j[]; }; struct F x = { .i = 4, .j = {} }; int main(){return x.i;}"),
-            4
-        );
+        assert_eq!(run_main("struct F { int i; int j[]; }; struct F x = { .i = 4, .j = {} }; int main(){return x.i;}"), 4);
     }
 
     #[test]
@@ -10523,17 +8951,16 @@ mod tests {
         assert_eq!(run_main("int main(){static int n = 5; n += 1; return n;}"), 6);
         // Aggregates fold once; unsized arrays complete from the init.
         assert_eq!(run_main("int f(){static int a[3] = {1,2,3}; return a[1];} int main(){return f();}"), 2);
-        assert_eq!(
-            run_main("struct P{int x; int y;}; int main(){static struct P p = {1,2}; return p.x + p.y;}"),
-            3
-        );
+        assert_eq!(run_main("struct P{int x; int y;}; int main(){static struct P p = {1,2}; return p.x + p.y;}"), 3);
         assert_eq!(run_main("int main(){static char s[] = \"hi\"; return s[0] + s[1];}"), 209);
         // Addressable storage shared across calls.
         assert_eq!(run_main("int *f(){static int x = 7; return &x;} int main(){*f() = 10; return *f();}"), 10);
         // Same spelling in different scopes is separate storage.
         assert_eq!(
-            run_main("int f(){static int x = 1; x += 10; return x;} int g(){static int x = 2; x += 100; return x;}\
-                int main(){int a = f(); int b = g(); return a + b;}"),
+            run_main(
+                "int f(){static int x = 1; x += 10; return x;} int g(){static int x = 2; x += 100; return x;}\
+                int main(){int a = f(); int b = g(); return a + b;}"
+            ),
             11 + 102
         );
     }
@@ -10542,26 +8969,24 @@ mod tests {
     fn padded_struct_layout() {
         // Trailing padding counts in the size: member access, array
         // stride, assignment, and globals all agree with C layout.
+        assert_eq!(run_main("struct P{char c; int x;}; int main(){struct P p; p.c = 1; p.x = 2; return p.c + p.x;}"), 3);
         assert_eq!(
-            run_main("struct P{char c; int x;}; int main(){struct P p; p.c = 1; p.x = 2; return p.c + p.x;}"),
-            3
-        );
-        assert_eq!(
-            run_main("struct P{char c; int x;}; int main(){struct P a[3]; a[0].x = 1; a[1].x = 10; a[2].x = 100;\
-                a[0].c = 0; a[1].c = 0; a[2].c = 0; return a[0].x + a[1].x + a[2].x;}"),
+            run_main(
+                "struct P{char c; int x;}; int main(){struct P a[3]; a[0].x = 1; a[1].x = 10; a[2].x = 100;\
+                a[0].c = 0; a[1].c = 0; a[2].c = 0; return a[0].x + a[1].x + a[2].x;}"
+            ),
             111
         );
         assert_eq!(
             run_main("struct P{char c; int x;}; int main(){struct P a = {7, 8}; struct P b; b = a; return b.c + b.x;}"),
             15
         );
+        assert_eq!(run_main("struct P{char c; int x;}; struct P g = {3, 4}; int main(){return g.c + g.x;}"), 7);
         assert_eq!(
-            run_main("struct P{char c; int x;}; struct P g = {3, 4}; int main(){return g.c + g.x;}"),
-            7
-        );
-        assert_eq!(
-            run_main("struct R{char t[3]; int v;}; struct R rs[2] = {{\"ab\", 1}, {\"cd\", 2}};\
-                int main(){return rs[0].v * 10 + rs[1].v + rs[1].t[0];}"),
+            run_main(
+                "struct R{char t[3]; int v;}; struct R rs[2] = {{\"ab\", 1}, {\"cd\", 2}};\
+                int main(){return rs[0].v * 10 + rs[1].v + rs[1].t[0];}"
+            ),
             10 + 2 + 99
         );
         assert_eq!(run_main("struct P{char c; int x;}; int main(){return (int)sizeof(struct P);}"), 8);
@@ -10573,18 +8998,24 @@ mod tests {
         // its first element — even though the checker pre-decays the
         // base (and the row) to pointers.
         assert_eq!(
-            run_main("int sum(const int *r){return r[0]+r[1]+r[2];}\
-                int main(){int m[2][3] = {{1,2,3},{4,5,6}}; return sum(m[0]) + sum(m[1]);}"),
+            run_main(
+                "int sum(const int *r){return r[0]+r[1]+r[2];}\
+                int main(){int m[2][3] = {{1,2,3},{4,5,6}}; return sum(m[0]) + sum(m[1]);}"
+            ),
             21
         );
         assert_eq!(
-            run_main("const char *pick(const char **t, int i){return t[i];}\
-                int main(){const char *t[2] = {\"ab\", \"c\"}; return (int)(pick(t, 1)[0]);}"),
+            run_main(
+                "const char *pick(const char **t, int i){return t[i];}\
+                int main(){const char *t[2] = {\"ab\", \"c\"}; return (int)(pick(t, 1)[0]);}"
+            ),
             99
         );
         assert_eq!(
-            run_main("int first(int *p){return p[0];}\
-                int main(){int a[4] = {7, 8, 9, 10}; return first(a + 2);}"),
+            run_main(
+                "int first(int *p){return p[0];}\
+                int main(){int a[4] = {7, 8, 9, 10}; return first(a + 2);}"
+            ),
             9
         );
     }
@@ -10595,18 +9026,24 @@ mod tests {
         // address operator used to evaluate its operand twice (once
         // as a value, once for the address), double-stepping.
         assert_eq!(
-            run_main("int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
-                int *p = &a[j++]; return j * 100 + *p;}"),
+            run_main(
+                "int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
+                int *p = &a[j++]; return j * 100 + *p;}"
+            ),
             110
         );
         assert_eq!(
-            run_main("int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
-                int x = (*&a[j++]); return j * 100 + x;}"),
+            run_main(
+                "int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
+                int x = (*&a[j++]); return j * 100 + x;}"
+            ),
             110
         );
         assert_eq!(
-            run_main("int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
-                int x = *(a + (j++)); return j * 100 + x;}"),
+            run_main(
+                "int main(){int a[4] = {10, 20, 30, 40}; int j = 0;\
+                int x = *(a + (j++)); return j * 100 + x;}"
+            ),
             110
         );
     }
@@ -10619,8 +9056,10 @@ mod tests {
         assert_eq!(run_main("static int *p = 0; int main(){return p != 0;}"), 0);
         assert_eq!(run_main("static void *q = (void *)0; int main(){return q != 0;}"), 0);
         assert_eq!(
-            run_main("static const char *cmd[3] = {\"a\", ((void *)0), \"b\"};\
-                int main(){return (cmd[1] != 0) + (cmd[0][0] != 'a');}"),
+            run_main(
+                "static const char *cmd[3] = {\"a\", ((void *)0), \"b\"};\
+                int main(){return (cmd[1] != 0) + (cmd[0][0] != 'a');}"
+            ),
             0
         );
         assert_eq!(run_main("static _Bool t = 1; static _Bool f; int main(){return t + f * 2;}"), 1);
@@ -10632,30 +9071,40 @@ mod tests {
         // the narrowing and compare-exchange reporting matter. Orders
         // ride as raw integers (the harness lacks the macros).
         assert_eq!(
-            run_main("int main(){int x = 0; __atomic_store_n(&x, 41, 0);\
-                return __atomic_load_n(&x, 0);}"),
+            run_main(
+                "int main(){int x = 0; __atomic_store_n(&x, 41, 0);\
+                return __atomic_load_n(&x, 0);}"
+            ),
             41
         );
         assert_eq!(
-            run_main("int main(){int x = 7; int e = __atomic_exchange_n(&x, 3, 0);\
-                return e * 100 + x;}"),
+            run_main(
+                "int main(){int x = 7; int e = __atomic_exchange_n(&x, 3, 0);\
+                return e * 100 + x;}"
+            ),
             700 + 3
         );
         assert_eq!(
-            run_main("int main(){int x = 7; int old = __atomic_fetch_add(&x, 10, 0);\
-                return old * 100 + x;}"),
+            run_main(
+                "int main(){int x = 7; int old = __atomic_fetch_add(&x, 10, 0);\
+                return old * 100 + x;}"
+            ),
             700 + 17
         );
         assert_eq!(
-            run_main("int main(){int x = 17; int e = 17;\
+            run_main(
+                "int main(){int x = 17; int e = 17;\
                 int ok = __atomic_compare_exchange_n(&x, &e, 99, 0, 0, 0);\
-                return ok * 10000 + x * 100 + e;}"),
+                return ok * 10000 + x * 100 + e;}"
+            ),
             10000 + 9900 + 17
         );
         assert_eq!(
-            run_main("int main(){int x = 17; int e = 18;\
+            run_main(
+                "int main(){int x = 17; int e = 18;\
                 int ok = __atomic_compare_exchange_n(&x, &e, 99, 0, 0, 0);\
-                return ok * 10000 + x * 100 + e;}"),
+                return ok * 10000 + x * 100 + e;}"
+            ),
             1700 + 17
         );
     }
@@ -10666,47 +9115,63 @@ mod tests {
         // behavior as the GCC forms, minus the `_n` suffix and the
         // explicit weak flag.
         assert_eq!(
-            run_main("int main(){int x = 0; __c11_atomic_store(&x, 41, 5);\
-                return __c11_atomic_load(&x, 5);}"),
+            run_main(
+                "int main(){int x = 0; __c11_atomic_store(&x, 41, 5);\
+                return __c11_atomic_load(&x, 5);}"
+            ),
             41
         );
         assert_eq!(run_main("int main(){int x; __c11_atomic_init(&x, 7); return x;}"), 7);
         assert_eq!(
-            run_main("int main(){int x = 7; int e = __c11_atomic_exchange(&x, 3, 5);\
-                return e * 100 + x;}"),
+            run_main(
+                "int main(){int x = 7; int e = __c11_atomic_exchange(&x, 3, 5);\
+                return e * 100 + x;}"
+            ),
             700 + 3
         );
         assert_eq!(
-            run_main("int main(){int x = 7; int old = __c11_atomic_fetch_add(&x, 10, 5);\
-                return old * 100 + x;}"),
+            run_main(
+                "int main(){int x = 7; int old = __c11_atomic_fetch_add(&x, 10, 5);\
+                return old * 100 + x;}"
+            ),
             700 + 17
         );
         assert_eq!(
-            run_main("int main(){int x = 17; int e = 17;\
+            run_main(
+                "int main(){int x = 17; int e = 17;\
                 int ok = __c11_atomic_compare_exchange_strong(&x, &e, 99, 5, 5);\
-                return ok * 10000 + x * 100 + e;}"),
+                return ok * 10000 + x * 100 + e;}"
+            ),
             10000 + 9900 + 17
         );
         assert_eq!(
-            run_main("int main(){int x = 17; int e = 18;\
+            run_main(
+                "int main(){int x = 17; int e = 18;\
                 int ok = __c11_atomic_compare_exchange_weak(&x, &e, 99, 5, 5);\
-                return ok * 10000 + x * 100 + e;}"),
+                return ok * 10000 + x * 100 + e;}"
+            ),
             1700 + 17
         );
         assert_eq!(
-            run_main("int main(){int x = 5;\
+            run_main(
+                "int main(){int x = 5;\
                 int a = __c11_atomic_fetch_max(&x, 9, 5); int b = __c11_atomic_fetch_min(&x, 2, 5);\
-                return a * 100 + b;}"),
+                return a * 100 + b;}"
+            ),
             500 + 9
         );
         assert_eq!(
-            run_main("int main(){int x = 2;\
-                int c = __c11_atomic_fetch_nand(&x, 1, 5); return c * 100 + (x == -1);}"),
+            run_main(
+                "int main(){int x = 2;\
+                int c = __c11_atomic_fetch_nand(&x, 1, 5); return c * 100 + (x == -1);}"
+            ),
             200 + 1
         );
         assert_eq!(
-            run_main("int main(){int x = 0; __c11_atomic_thread_fence(5); __c11_atomic_signal_fence(5);\
-                return __c11_atomic_is_lock_free(sizeof(int)) + (x == 0);}"),
+            run_main(
+                "int main(){int x = 0; __c11_atomic_thread_fence(5); __c11_atomic_signal_fence(5);\
+                return __c11_atomic_is_lock_free(sizeof(int)) + (x == 0);}"
+            ),
             2
         );
     }
@@ -10717,21 +9182,27 @@ mod tests {
         // `Smin`/`Umax` split), and the `min_fetch`/`max_fetch` forms
         // compute the new value with a select.
         assert_eq!(
-            run_main("int main(){int x = -5;\
+            run_main(
+                "int main(){int x = -5;\
                 int a = __atomic_fetch_max(&x, -9, 5); int b = __atomic_fetch_min(&x, -9, 5);\
-                return (a == -5) + (x == -9) * 2;}"),
+                return (a == -5) + (x == -9) * 2;}"
+            ),
             1 + 2
         );
         assert_eq!(
-            run_main("int main(){unsigned u = 3u;\
+            run_main(
+                "int main(){unsigned u = 3u;\
                 unsigned c = __atomic_max_fetch(&u, 10u, 5);\
-                return (c == 10) + (u == 10) * 2;}"),
+                return (c == 10) + (u == 10) * 2;}"
+            ),
             1 + 2
         );
         assert_eq!(
-            run_main("int main(){int x = -5;\
+            run_main(
+                "int main(){int x = -5;\
                 int r = __atomic_min_fetch(&x, -9, 5);\
-                return (r == -9) + (x == -9) * 2;}"),
+                return (r == -9) + (x == -9) * 2;}"
+            ),
             1 + 2
         );
     }
@@ -10742,19 +9213,25 @@ mod tests {
         // size (the MIR pointee is erased): `p++`, `p + i`, `p - i`,
         // and `p[i]` all agree.
         assert_eq!(
-            run_main("struct P{char c; int x;}; int main(){struct P a[3]; struct P *p = a;\
+            run_main(
+                "struct P{char c; int x;}; int main(){struct P a[3]; struct P *p = a;\
                 p->x = 1; p++; p->x = 10; p += 1; p->x = 100; p -= 2;\
-                return a[0].x + a[1].x + a[2].x + (p == a); }"),
+                return a[0].x + a[1].x + a[2].x + (p == a); }"
+            ),
             111 + 1
         );
         assert_eq!(
-            run_main("struct P{char c; int x;}; int get(struct P *p, int i){return (p + i)->x;}\
-                int main(){struct P a[2]; a[0].x = 5; a[1].x = 6; return get(a, 0) + get(a, 1);}"),
+            run_main(
+                "struct P{char c; int x;}; int get(struct P *p, int i){return (p + i)->x;}\
+                int main(){struct P a[2]; a[0].x = 5; a[1].x = 6; return get(a, 0) + get(a, 1);}"
+            ),
             11
         );
         assert_eq!(
-            run_main("struct P{char c; int x;}; int main(){struct P a[3]; struct P *p = a + 2;\
-                return (p - a) * 100 + (p - 2 == a);}"),
+            run_main(
+                "struct P{char c; int x;}; int main(){struct P a[3]; struct P *p = a + 2;\
+                return (p - a) * 100 + (p - 2 == a);}"
+            ),
             200 + 1
         );
     }
@@ -10765,11 +9242,13 @@ mod tests {
         // object: parameters alias it rather than spilling the pointer
         // into a slot (which reads as cursor garbage).
         assert_eq!(
-            run_main("int fwd(int n, __builtin_va_list ap){int s = 0;\
+            run_main(
+                "int fwd(int n, __builtin_va_list ap){int s = 0;\
                 for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int); return s;}\
                 int sum(int n, ...){__builtin_va_list ap; __builtin_va_start(ap, n);\
                 int s = fwd(n, ap); __builtin_va_end(ap); return s;}\
-                int main(){return sum(4, 10, 20, 30, 40);}"),
+                int main(){return sum(4, 10, 20, 30, 40);}"
+            ),
             100
         );
     }
@@ -10809,19 +9288,10 @@ mod tests {
     fn scalar_builtins_lower_inline() {
         // Single-instruction builtins have no library symbol: they
         // lower inline instead of calling out.
-        assert_eq!(
-            run_main("int main(){return __builtin_clzll(0x1000000000000000ULL);}"),
-            3
-        );
+        assert_eq!(run_main("int main(){return __builtin_clzll(0x1000000000000000ULL);}"), 3);
         assert_eq!(run_main("int main(){return __builtin_ctz(8) + __builtin_popcount(7);}"), 6);
-        assert_eq!(
-            run_main("int main(){return (int)__builtin_ceil(1.5) * 10 + (int)__builtin_floor(1.5);}"),
-            21
-        );
-        assert_eq!(
-            run_main("int main(){return (__builtin_bswap32(0x12345678U) == 0x78563412U);}"),
-            1
-        );
+        assert_eq!(run_main("int main(){return (int)__builtin_ceil(1.5) * 10 + (int)__builtin_floor(1.5);}"), 21);
+        assert_eq!(run_main("int main(){return (__builtin_bswap32(0x12345678U) == 0x78563412U);}"), 1);
     }
 
     #[test]
@@ -10895,24 +9365,13 @@ mod tests {
     fn ternary_arms_convert_to_result() {
         // `cond ? ptr : 0` must store a full null pointer, not a
         // 4-byte zero over stack garbage.
-        assert_eq!(
-            run_main("int x = 5; int main(){int *p = x ? &x : 0; return *p;}"),
-            5
-        );
-        assert_eq!(
-            run_main("int x = 0; int main(){int *p = x ? &x : 0; return p == 0;}"),
-            1
-        );
-        assert_eq!(
-            run_main("int main(){int a = 1, b = 2; int c = 0; int r = c ? a : b; return r;}"),
-            2
-        );
+        assert_eq!(run_main("int x = 5; int main(){int *p = x ? &x : 0; return *p;}"), 5);
+        assert_eq!(run_main("int x = 0; int main(){int *p = x ? &x : 0; return p == 0;}"), 1);
+        assert_eq!(run_main("int main(){int a = 1, b = 2; int c = 0; int r = c ? a : b; return r;}"), 2);
         // A null-constant `(void *)0` arm keeps the other arm's
         // pointer type, so member access survives (tcctest.c shape).
         assert_eq!(
-            run_main(
-                "struct S{int i;}; int f(int i, struct S *s){return (i == 0 ? (void *)0 : s)->i;} int main(){struct S s; s.i = 7; return f(1, &s);}"
-            ),
+            run_main("struct S{int i;}; int f(int i, struct S *s){return (i == 0 ? (void *)0 : s)->i;} int main(){struct S s; s.i = 7; return f(1, &s);}"),
             7
         );
     }
@@ -10943,14 +9402,8 @@ mod tests {
     fn inline_end_to_end_through_jit() {
         // `inline` callees (including multi-block bodies) execute
         // correctly, whether or not the pass inlines them here.
-        assert_eq!(
-            run_main("inline int add1(int x){return x+1;} int main(){return add1(41);}"),
-            42
-        );
-        assert_eq!(
-            run_main("inline int pick(int x){if(x>0) return 1; return 0;} int main(){return pick(5)*10+pick(-3);}"),
-            10
-        );
+        assert_eq!(run_main("inline int add1(int x){return x+1;} int main(){return add1(41);}"), 42);
+        assert_eq!(run_main("inline int pick(int x){if(x>0) return 1; return 0;} int main(){return pick(5)*10+pick(-3);}"), 10);
     }
 
     #[test]
@@ -10987,10 +9440,7 @@ mod tests {
                     }
                 }
             }
-            assert!(
-                mir::verify::verify_module(&module).is_empty(),
-                "verify errors in {src}"
-            );
+            assert!(mir::verify::verify_module(&module).is_empty(), "verify errors in {src}");
         }
         // The non-volatile cases leave no spill traffic behind.
         let src = "int f(int x){int y = x; return y+1;} int main(){return f(41);}";
@@ -11005,10 +9455,10 @@ mod tests {
         assert!(mir::verify::verify_module(&module).is_empty());
         let f = module.funcs.iter().find(|f| f.name == "f").expect("f lowered");
         assert!(
-            !f.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| matches!(
-                f.insts[*i].kind,
-                mir::InstKind::Alloca { .. } | mir::InstKind::Load { .. } | mir::InstKind::Store { .. }
-            )),
+            !f.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .any(|i| matches!(f.insts[*i].kind, mir::InstKind::Alloca { .. } | mir::InstKind::Load { .. } | mir::InstKind::Store { .. })),
             "spills survived in f"
         );
         // ...while a volatile global access keeps its memory traffic.
@@ -11053,11 +9503,7 @@ mod tests {
                    int plain(int n) { return n + 2; }\n\
                    int main(void) { return local() + dot(); }";
         let volatile_accesses = |module: &mir::Module, name: &str| -> (usize, usize) {
-            let f = module
-                .funcs
-                .iter()
-                .find(|f| f.name == name)
-                .unwrap_or_else(|| panic!("{name} lowered"));
+            let f = module.funcs.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{name} lowered"));
             let mut loads = 0;
             let mut stores = 0;
             for inst in f.blocks.iter().flat_map(|b| b.insts.iter()) {
@@ -11093,11 +9539,7 @@ mod tests {
             assert_eq!(loads > 0, want_load, "volatile loads in {name} after optimization: {loads}");
             assert_eq!(stores > 0, want_store, "volatile stores in {name} after optimization: {stores}");
         }
-        assert_eq!(
-            volatile_accesses(&module, "plain"),
-            (0, 0),
-            "plain parameter marked volatile after optimization"
-        );
+        assert_eq!(volatile_accesses(&module, "plain"), (0, 0), "plain parameter marked volatile after optimization");
         assert_eq!(jit_run_main(module), 6);
     }
 
@@ -11106,13 +9548,17 @@ mod tests {
         // C indices are signed: `p[-1]` walks backwards ( lowered
         // with a sign-extending step, not zero-extending).
         assert_eq!(
-            run_main("int main(){char s[] = \"abc\"; char *p = s + 2;\
-                return (p[0] == 'c') + (p[-1] == 'b') + (p[-2] == 'a');}"),
+            run_main(
+                "int main(){char s[] = \"abc\"; char *p = s + 2;\
+                return (p[0] == 'c') + (p[-1] == 'b') + (p[-2] == 'a');}"
+            ),
             3
         );
         assert_eq!(
-            run_main("int main(){int a[4] = {10, 20, 30, 40}; int *q = a + 3;\
-                return (q[-3] == 10) + (q[0] == 40);}"),
+            run_main(
+                "int main(){int a[4] = {10, 20, 30, 40}; int *q = a + 3;\
+                return (q[-3] == 10) + (q[0] == 40);}"
+            ),
             2
         );
     }
@@ -11122,11 +9568,13 @@ mod tests {
         // Flexible array members have no MIR array form: indexing
         // must stride by the frontend element size, not pointer size.
         assert_eq!(
-            run_main("struct F{int n; unsigned vals[];};\
+            run_main(
+                "struct F{int n; unsigned vals[];};\
                 int at(struct F *f, int i){return (int)f->vals[i];}\
                 int main(){static unsigned backing[8] = {0, 11, 22, 33};\
                 struct F *f = (struct F *)backing;\
-                f->n = 3; return at(f, 0) + at(f, 1) + at(f, 2);}"),
+                f->n = 3; return at(f, 0) + at(f, 1) + at(f, 2);}"
+            ),
             66
         );
     }
@@ -11141,9 +9589,7 @@ mod tests {
     #[test]
     fn asm_empty_templates() {
         // Matching constraint: the input ties to the output's location.
-        let (module, _) = lower_with_asm(
-            "int main(){int x=7; int y; __asm__(\"\" : \"=r\"(y) : \"0\"(x)); return y;}",
-        );
+        let (module, _) = lower_with_asm("int main(){int x=7; int y; __asm__(\"\" : \"=r\"(y) : \"0\"(x)); return y;}");
         let main = module.funcs.iter().find(|f| f.name == "main").expect("main");
         let asm = main
             .insts
@@ -11169,9 +9615,7 @@ mod tests {
     fn asm_immediate_operands_fold_constants() {
         // `"i"` takes any integer constant expression, not just a
         // literal: `-5` must reach the wrapper as a constant.
-        let (module, _) = lower_with_asm(
-            "int main(){int y; asm(\"movl %1, %0\" : \"=r\"(y) : \"i\"(-5)); return y;}",
-        );
+        let (module, _) = lower_with_asm("int main(){int y; asm(\"movl %1, %0\" : \"=r\"(y) : \"i\"(-5)); return y;}");
         let main = module.funcs.iter().find(|f| f.name == "main").expect("main");
         let block = main
             .insts
@@ -11181,10 +9625,7 @@ mod tests {
                 _ => None,
             })
             .expect("inline asm instruction");
-        assert_eq!(
-            main.const_value(block.operands[1].value),
-            Some(&mir::Const::Int { bits: 32, value: -5 })
-        );
+        assert_eq!(main.const_value(block.operands[1].value), Some(&mir::Const::Int { bits: 32, value: -5 }));
     }
 
     #[test]
@@ -11208,17 +9649,12 @@ mod tests {
             operand_value("int main(){int y; asm(\"add %1, %0\" : \"+r\"(y) : \"Ir\"(5)); return y;}"),
             Some(mir::Const::Int { bits: 32, value: 5 })
         );
-        assert_eq!(
-            operand_value("int main(){int y, x; asm(\"add %1, %0\" : \"+r\"(y) : \"Ir\"(x)); return y;}"),
-            None
-        );
+        assert_eq!(operand_value("int main(){int y, x; asm(\"add %1, %0\" : \"+r\"(y) : \"Ir\"(x)); return y;}"), None);
     }
 
     #[test]
     fn asm_goto_dispatches_on_the_selector() {
-        let (module, _) = lower_with_asm(
-            "int main(){int x=0; asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2;}",
-        );
+        let (module, _) = lower_with_asm("int main(){int x=0; asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2;}");
         let main = module.funcs.iter().find(|f| f.name == "main").expect("main");
         let asm = main
             .insts
@@ -11234,11 +9670,7 @@ mod tests {
             .blocks
             .iter()
             .find_map(|block| match &block.term {
-                Some(mir::Terminator::Switch {
-                    scrutinee,
-                    cases,
-                    default,
-                }) if *scrutinee == selector => Some((cases.clone(), *default)),
+                Some(mir::Terminator::Switch { scrutinee, cases, default }) if *scrutinee == selector => Some((cases.clone(), *default)),
                 _ => None,
             })
             .expect("selector switch");
@@ -11259,10 +9691,7 @@ mod tests {
     #[test]
     fn calls_and_recursion() {
         assert_eq!(run_main("int sq(int v){return v*v;} int main(){return sq(7);}"), 49);
-        assert_eq!(
-            run_main("int fib(int n){if(n<2) return n; return fib(n-1)+fib(n-2);} int main(){return fib(10);}"),
-            55
-        );
+        assert_eq!(run_main("int fib(int n){if(n<2) return n; return fib(n-1)+fib(n-2);} int main(){return fib(10);}"), 55);
     }
 
     #[test]
@@ -11278,18 +9707,9 @@ mod tests {
 
     #[test]
     fn loops() {
-        assert_eq!(
-            run_main("int main(){int s = 0; int i = 1; while(i<=100){s += i; i++;} return s;}"),
-            5050
-        );
-        assert_eq!(
-            run_main("int main(){int s = 0; int i = 1; do { s += i; i++; } while(i<=10); return s;}"),
-            55
-        );
-        assert_eq!(
-            run_main("int main(){int s = 0; for(int i = 1; i<=10; i++){s += i;} return s;}"),
-            55
-        );
+        assert_eq!(run_main("int main(){int s = 0; int i = 1; while(i<=100){s += i; i++;} return s;}"), 5050);
+        assert_eq!(run_main("int main(){int s = 0; int i = 1; do { s += i; i++; } while(i<=10); return s;}"), 55);
+        assert_eq!(run_main("int main(){int s = 0; for(int i = 1; i<=10; i++){s += i;} return s;}"), 55);
         assert_eq!(
             run_main("int main(){int s = 0; for(int i = 0; i<10; i++){if(i%2==0) continue; if(i>7) break; s += i;} return s;}"),
             16
@@ -11300,22 +9720,10 @@ mod tests {
     fn wide_conditions_test_full_width() {
         // Conditions test the whole value: narrowing to I32 dropped
         // the high half, so `while (1ULL << 32)` never ran.
-        assert_eq!(
-            run_main("int main(){unsigned long long v = 1ULL << 32; int n = 0; while(v){n++; v >>= 33;} return n;}"),
-            1
-        );
-        assert_eq!(
-            run_main("int main(){long long v = -9223372036854775807LL - 1; if(v){return 1;} return 0;}"),
-            1
-        );
-        assert_eq!(
-            run_main("int main(){unsigned long long v = 1ULL << 32; return v ? 7 : 8;}"),
-            7
-        );
-        assert_eq!(
-            run_main("int main(){unsigned long long v = 0; return v ? 7 : 8;}"),
-            8
-        );
+        assert_eq!(run_main("int main(){unsigned long long v = 1ULL << 32; int n = 0; while(v){n++; v >>= 33;} return n;}"), 1);
+        assert_eq!(run_main("int main(){long long v = -9223372036854775807LL - 1; if(v){return 1;} return 0;}"), 1);
+        assert_eq!(run_main("int main(){unsigned long long v = 1ULL << 32; return v ? 7 : 8;}"), 7);
+        assert_eq!(run_main("int main(){unsigned long long v = 0; return v ? 7 : 8;}"), 8);
     }
 
     #[test]
@@ -11330,14 +9738,8 @@ mod tests {
             run_main("int sum(int *p, int n){int s = 0; for(int i = 0; i<n; i++) s += p[i]; return s;} int a[4] = {1,2,3,4}; int main(){return sum(a, 4);}"),
             10
         );
-        assert_eq!(
-            run_main("int main(){int a[4]; int *p = &a[0]; int *q = &a[3]; return q-p;}"),
-            3
-        );
-        assert_eq!(
-            run_main("int main(){int a[3] = {10,20,30}; int *p = a+1; return *p + *(p+1);}"),
-            50
-        );
+        assert_eq!(run_main("int main(){int a[4]; int *p = &a[0]; int *q = &a[3]; return q-p;}"), 3);
+        assert_eq!(run_main("int main(){int a[3] = {10,20,30}; int *p = a+1; return *p + *(p+1);}"), 50);
     }
 
     #[test]
@@ -11362,22 +9764,13 @@ mod tests {
 
     #[test]
     fn structs() {
-        assert_eq!(
-            run_main("struct P{int x; int y;}; int main(){struct P p; p.x = 3; p.y = 4; return p.x+p.y;}"),
-            7
-        );
-        assert_eq!(
-            run_main("struct P{int x; int y;}; int main(){struct P p = {3,4}; return p.x+p.y;}"),
-            7
-        );
+        assert_eq!(run_main("struct P{int x; int y;}; int main(){struct P p; p.x = 3; p.y = 4; return p.x+p.y;}"), 7);
+        assert_eq!(run_main("struct P{int x; int y;}; int main(){struct P p = {3,4}; return p.x+p.y;}"), 7);
         assert_eq!(
             run_main("struct P{int x; int y;}; int get(struct P p){return p.x+p.y;} int main(){return get((struct P){3,4});}"),
             7
         );
-        assert_eq!(
-            run_main("struct P{int x; int y;}; struct P g = {.y = 5}; int main(){return g.x+g.y;}"),
-            5
-        );
+        assert_eq!(run_main("struct P{int x; int y;}; struct P g = {.y = 5}; int main(){return g.x+g.y;}"), 5);
     }
 
     #[test]
@@ -11401,22 +9794,23 @@ mod tests {
     /// sentinel leans on this).
     #[test]
     fn integer_to_pointer_casts_respect_signedness() {
-        assert_eq!(
-            run_main("int main(){const void *p = (const void*)-1; return (p == (const void*)-1) + ((long)p == -1);}"),
-            2
-        );
+        assert_eq!(run_main("int main(){const void *p = (const void*)-1; return (p == (const void*)-1) + ((long)p == -1);}"), 2);
         // Plain `char` is signed on x86-64 but unsigned on aarch64 and
         // riscv64, so spell out the signedness this check needs.
         assert_eq!(
-            run_main("int main(){volatile int i = -1; volatile short s = -1; volatile signed char c = -1;\
-                return ((long)(void*)i == -1) + ((long)(void*)s == -1) * 2 + ((long)(void*)c == -1) * 4;}"),
+            run_main(
+                "int main(){volatile int i = -1; volatile short s = -1; volatile signed char c = -1;\
+                return ((long)(void*)i == -1) + ((long)(void*)s == -1) * 2 + ((long)(void*)c == -1) * 4;}"
+            ),
             7
         );
         // Unsigned narrow sources stay zero-extended, including the
         // full-width unsigned value whose sign bit is set.
         assert_eq!(
-            run_main("int main(){volatile unsigned u = 4294967295u; volatile unsigned short h = 65535; volatile unsigned char b = 255;\
-                return ((unsigned long)(void*)u == 4294967295UL) + ((unsigned long)(void*)h == 65535UL) * 2 + ((unsigned long)(void*)b == 255UL) * 4;}"),
+            run_main(
+                "int main(){volatile unsigned u = 4294967295u; volatile unsigned short h = 65535; volatile unsigned char b = 255;\
+                return ((unsigned long)(void*)u == 4294967295UL) + ((unsigned long)(void*)h == 65535UL) * 2 + ((unsigned long)(void*)b == 255UL) * 4;}"
+            ),
             7
         );
         assert_eq!(run_main("int main(){volatile long l = -1; return (long)(void*)l == -1;}"), 1);
@@ -11461,11 +9855,7 @@ mod tests {
                     let mir::InstKind::IntToPtr(v) = &inst.kind else {
                         continue;
                     };
-                    let def = func
-                        .insts
-                        .iter()
-                        .find(|i| i.result == Some(*v))
-                        .expect("inttoptr source widens to pointer width first");
+                    let def = func.insts.iter().find(|i| i.result == Some(*v)).expect("inttoptr source widens to pointer width first");
                     exts.push(match &def.kind {
                         mir::InstKind::Sext(_) => "sext",
                         mir::InstKind::Zext(_) => "zext",
@@ -11496,14 +9886,8 @@ mod tests {
         // `_Bool` registers hold a byte, so a conversion to an 8-bit
         // integer is already the target representation: no
         // zero-extension (which Cranelift rejects at equal widths).
-        assert_eq!(
-            run_main("unsigned char f(_Bool b){ return (unsigned char)b; } int main(){ return f(1) + f(0); }"),
-            1
-        );
-        assert_eq!(
-            run_main("int f(_Bool b){ char c = b; return c; } int main(){ return f(1); }"),
-            1
-        );
+        assert_eq!(run_main("unsigned char f(_Bool b){ return (unsigned char)b; } int main(){ return f(1) + f(0); }"), 1);
+        assert_eq!(run_main("int f(_Bool b){ char c = b; return c; } int main(){ return f(1); }"), 1);
     }
 
     #[test]
@@ -11524,10 +9908,7 @@ mod tests {
         );
         assert_eq!(module.files.len(), 1, "one source file");
         assert_eq!(module.files[0].path, "<__glcc_source>");
-        assert!(
-            module.funcs.iter().all(|f| f.debug.is_some()),
-            "every defined function carries a debug record"
-        );
+        assert!(module.funcs.iter().all(|f| f.debug.is_some()), "every defined function carries a debug record");
 
         fn collect(vars: &[mir::VarDebug], scopes: &[mir::ScopeDebug], out: &mut Vec<String>) {
             out.extend(vars.iter().filter_map(|v| v.name.clone()));
@@ -11539,13 +9920,7 @@ mod tests {
         let add = module.funcs.iter().find(|f| f.name == "add").unwrap();
         let dbg = add.debug.as_ref().expect("add debug record");
         assert!(dbg.decl.is_some());
-        assert_eq!(
-            dbg.params
-                .iter()
-                .filter_map(|p| p.name.as_deref())
-                .collect::<Vec<_>>(),
-            ["a", "b"]
-        );
+        assert_eq!(dbg.params.iter().filter_map(|p| p.name.as_deref()).collect::<Vec<_>>(), ["a", "b"]);
         let mut names = Vec::new();
         collect(&dbg.vars, &dbg.scopes, &mut names);
         for expected in ["sum", "i", "shadow"] {
@@ -11576,10 +9951,7 @@ mod tests {
                 assert_eq!(members[0].name.as_deref(), Some("x"));
                 assert_eq!(members[0].location, mir::MemberLocation::Byte(0));
                 assert_eq!(members[1].name.as_deref(), Some("y"));
-                assert_eq!(
-                    members[1].location,
-                    mir::MemberLocation::Bit { offset: 32, size: 3 }
-                );
+                assert_eq!(members[1].location, mir::MemberLocation::Bit { offset: 32, size: 3 });
             }
             other => panic!("struct P lowered as {other:?}"),
         }
@@ -11595,11 +9967,7 @@ mod tests {
 }
 
 /// Positional index of a named struct member.
-fn member_index(
-    sema: &fe::sema::Sema,
-    id: fe::sema::StructId,
-    name: string_interner::symbol::SymbolU32,
-) -> u32 {
+fn member_index(sema: &fe::sema::Sema, id: fe::sema::StructId, name: string_interner::symbol::SymbolU32) -> u32 {
     sema.structs[id.0 as usize]
         .members
         .iter()
@@ -11610,11 +9978,7 @@ fn member_index(
 /// The member a struct-level designator names: `Field` searches by
 /// name, `AnonField` is a hop through an anonymous member that the
 /// checker already resolved to an index.
-fn designated_member(
-    sema: &fe::sema::Sema,
-    id: fe::sema::StructId,
-    des: &fe::parse::Designator,
-) -> u32 {
+fn designated_member(sema: &fe::sema::Sema, id: fe::sema::StructId, des: &fe::parse::Designator) -> u32 {
     match des {
         fe::parse::Designator::Field { name, .. } => member_index(sema, id, *name),
         fe::parse::Designator::AnonField { index, .. } => *index,

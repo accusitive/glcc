@@ -42,13 +42,7 @@ pub(super) struct FnCtx<'l, 'd> {
 /// Entry-block parameters for a body: one MIR parameter per HIR
 /// parameter pattern at the pattern's type, preceded by the closure
 /// environment when `env` is set.
-fn entry_params<'d>(
-    lw: &mut Lowerer<'d>,
-    func: &mut mir::Function,
-    params: &[HirPat],
-    subst: &HashMap<String, Ty>,
-    env: bool,
-) -> KResult<Vec<(mir::Ty, mir::Value)>> {
+fn entry_params<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, params: &[HirPat], subst: &HashMap<String, Ty>, env: bool) -> KResult<Vec<(mir::Ty, mir::Value)>> {
     let entry = func.entry;
     let base = if env {
         let value = func.values.push(mir::ValueData {
@@ -73,14 +67,7 @@ fn entry_params<'d>(
     Ok(out)
 }
 
-pub(super) fn lower_fn<'d>(
-    lw: &mut Lowerer<'d>,
-    func: &mut mir::Function,
-    hir: &'d HirFn,
-    subst: &HashMap<String, Ty>,
-    span: Span,
-    name: String,
-) -> KResult<()> {
+pub(super) fn lower_fn<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, hir: &'d HirFn, subst: &HashMap<String, Ty>, span: Span, name: String) -> KResult<()> {
     let params = entry_params(lw, func, &hir.params, subst, false)?;
     let _ = lw.types.get(&hir.ret.substitute(subst), span)?;
     let mut cx = FnCtx::new(lw, func, name, subst);
@@ -101,14 +88,7 @@ pub(super) fn lower_fn<'d>(
     Ok(())
 }
 
-pub(super) fn lower_closure<'d>(
-    lw: &mut Lowerer<'d>,
-    func: &mut mir::Function,
-    closure: &'d HirClosure,
-    subst: &HashMap<String, Ty>,
-    span: Span,
-    name: String,
-) -> KResult<()> {
+pub(super) fn lower_closure<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, closure: &'d HirClosure, subst: &HashMap<String, Ty>, span: Span, name: String) -> KResult<()> {
     let params = entry_params(lw, func, &closure.params, subst, true)?;
     let _ = lw.types.get(&closure.ret.substitute(subst), span)?;
     let env = func.blocks[func.entry].params[0];
@@ -118,11 +98,7 @@ pub(super) fn lower_closure<'d>(
         let ty = cx.ty_of(&local.ty, local.span)?;
         cx.declare_local(ty)?;
     }
-    let cap_tys: Vec<Ty> = closure
-        .captures
-        .iter()
-        .map(|c| c.ty.substitute(&cx.sub))
-        .collect();
+    let cap_tys: Vec<Ty> = closure.captures.iter().map(|c| c.ty.substitute(&cx.sub)).collect();
     let env_layout = cx.lw.types.env_layout(&cap_tys, span)?;
     for (i, cap) in closure.captures.iter().enumerate() {
         let ty = cx.lw.types.get(&cap_tys[i], span)?;
@@ -143,12 +119,7 @@ pub(super) fn lower_closure<'d>(
 }
 
 impl<'l, 'd> FnCtx<'l, 'd> {
-    fn new(
-        lw: &'l mut Lowerer<'d>,
-        func: &'l mut mir::Function,
-        name: String,
-        subst: &HashMap<String, Ty>,
-    ) -> FnCtx<'l, 'd> {
+    fn new(lw: &'l mut Lowerer<'d>, func: &'l mut mir::Function, name: String, subst: &HashMap<String, Ty>) -> FnCtx<'l, 'd> {
         let cur = func.entry;
         FnCtx {
             lw,
@@ -185,10 +156,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
 
     pub(super) fn emit(&mut self, kind: mir::InstKind, ty: mir::Ty) -> KResult<mir::Value> {
         if self.terminated {
-            return Err(Diag::new(
-                "code generated after a diverging expression",
-                Span::new(0, 0),
-            ));
+            return Err(Diag::new("code generated after a diverging expression", Span::new(0, 0)));
         }
         let block = self.cur;
         let result = self.func.values.push(mir::ValueData {
@@ -207,10 +175,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
 
     pub(super) fn emit_void(&mut self, kind: mir::InstKind) -> KResult<()> {
         if self.terminated {
-            return Err(Diag::new(
-                "code generated after a diverging expression",
-                Span::new(0, 0),
-            ));
+            return Err(Diag::new("code generated after a diverging expression", Span::new(0, 0)));
         }
         let block = self.cur;
         let inst = self.func.insts.push(mir::InstData {
@@ -249,10 +214,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     }
 
     pub(super) fn branch(&mut self, dest: mir::Block, args: Vec<mir::Value>) {
-        self.terminate(mir::Terminator::Br {
-            dest,
-            args: args.into(),
-        });
+        self.terminate(mir::Terminator::Br { dest, args: args.into() });
     }
 
     /// Branch to a fresh continuation when `cond` holds, else to `fail`.
@@ -336,12 +298,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// Bind `pat` against a value, branching to `fail` on any mismatch.
     /// The value is in local representation: a scalar, or an address for
     /// tuple storage, a data cell, or a closure cell.
-    pub(super) fn bind_pattern(
-        &mut self,
-        pat: &HirPat,
-        value: mir::Value,
-        fail: mir::Block,
-    ) -> KResult<()> {
+    pub(super) fn bind_pattern(&mut self, pat: &HirPat, value: mir::Value, fail: mir::Block) -> KResult<()> {
         if self.terminated {
             return Ok(());
         }
@@ -373,10 +330,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 self.branch_on(cond, fail)
             }
             HirPatKind::Tuple(fields) => {
-                let layout = self
-                    .lw
-                    .types
-                    .tuple_layout(&pat.ty.substitute(&self.sub), pat.span)?;
+                let layout = self.lw.types.tuple_layout(&pat.ty.substitute(&self.sub), pat.span)?;
                 for (i, f) in fields.iter().enumerate() {
                     let addr = self.offset_addr(value.clone(), layout.offsets[i])?;
                     let v = self.load(addr, &layout.field_tys[i])?;
@@ -385,10 +339,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 Ok(())
             }
             HirPatKind::Ctor { ctor, fields, .. } => {
-                let layout = self
-                    .lw
-                    .types
-                    .data_layout(&pat.ty.substitute(&self.sub), pat.span)?;
+                let layout = self.lw.types.data_layout(&pat.ty.substitute(&self.sub), pat.span)?;
                 let tag = self.load(value.clone(), &mir::Ty::int(32))?;
                 let want = self.iconst(32, *ctor as i128);
                 let cond = self.emit(

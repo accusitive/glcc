@@ -12,9 +12,7 @@
 //! frame.
 
 use cranelift_object::ObjectProduct;
-use cranelift_object::object::write::{
-    Object, Relocation, SectionId, SectionKind, Symbol, SymbolFlags, SymbolId, SymbolKind, SymbolScope, SymbolSection,
-};
+use cranelift_object::object::write::{Object, Relocation, SectionId, SectionKind, Symbol, SymbolFlags, SymbolId, SymbolKind, SymbolScope, SymbolSection};
 use cranelift_object::object::{RelocationEncoding, RelocationFlags, RelocationKind};
 use glcc_lower_cl::WinUnwindEntry;
 
@@ -55,11 +53,7 @@ pub fn emit(product: &mut ObjectProduct, entries: &[WinUnwindEntry]) -> Result<(
 
     for (i, entry) in entries.iter().enumerate() {
         let row = i as u64 * 12;
-        let relocs = [
-            (row, func_syms[i], 0),
-            (row + 4, func_syms[i], entry.size as i64),
-            (row + 8, anchors[i], 0),
-        ];
+        let relocs = [(row, func_syms[i], 0), (row + 4, func_syms[i], entry.size as i64), (row + 8, anchors[i], 0)];
         for (offset, symbol, addend) in relocs {
             add_rva(object, pdata, offset, symbol, addend)?;
         }

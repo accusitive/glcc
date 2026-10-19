@@ -13,15 +13,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use cranelift_module::{DataId, FuncId};
-use glcc_mir as mir;
-use glcc_mir::debug::{
-    BaseEncoding, DebugType, DebugTypeId, Location, MemberLocation, Qualifier,
-};
 use gimli::write::{
-    Address, AttributeValue, DwarfUnit, EndianVec, Expression, FileId, LineProgram, LineString,
-    RelocateWriter, Relocation, RelocationTarget, Sections, Unit, UnitEntryId,
+    Address, AttributeValue, DwarfUnit, EndianVec, Expression, FileId, LineProgram, LineString, RelocateWriter, Relocation, RelocationTarget, Sections, Unit, UnitEntryId,
 };
 use gimli::{Encoding, Format, LineEncoding, SectionId};
+use glcc_mir as mir;
+use glcc_mir::debug::{BaseEncoding, DebugType, DebugTypeId, Location, MemberLocation, Qualifier};
 use object::write::{Object, SectionKind, SymbolId};
 use object::{RelocationEncoding, RelocationKind};
 
@@ -130,10 +127,7 @@ impl LoweredDebug {
 
     /// The location behind one interned index, if any.
     pub fn location(&self, index: u32) -> Option<Location> {
-        self.locations
-            .get(index as usize)
-            .copied()
-            .flatten()
+        self.locations.get(index as usize).copied().flatten()
     }
 }
 
@@ -210,13 +204,7 @@ fn ate(encoding: BaseEncoding) -> gimli::constants::DwAte {
 /// table index (the table is already structurally deduplicated). Struct
 /// and enum DIEs insert themselves before their members so pointers
 /// back to the same type terminate.
-fn ty_die(
-    unit: &mut Unit,
-    root: UnitEntryId,
-    cache: &mut [Option<UnitEntryId>],
-    types: &[DebugType],
-    id: DebugTypeId,
-) -> Option<UnitEntryId> {
+fn ty_die(unit: &mut Unit, root: UnitEntryId, cache: &mut [Option<UnitEntryId>], types: &[DebugType], id: DebugTypeId) -> Option<UnitEntryId> {
     use gimli::constants::*;
     let index = id as usize;
     if let Some(cached) = cache.get(index).copied().flatten() {
@@ -224,11 +212,7 @@ fn ty_die(
     }
     let ty = types.get(index)?;
     let die = match ty {
-        DebugType::Base {
-            name,
-            encoding,
-            size,
-        } => base_die(unit, root, name, ate(*encoding), *size),
+        DebugType::Base { name, encoding, size } => base_die(unit, root, name, ate(*encoding), *size),
         DebugType::Pointer { pointee } => {
             // LP64: every pointer is 8 bytes.
             let pointee_id = pointee.and_then(|p| ty_die(unit, root, cache, types, p));
@@ -336,11 +320,7 @@ fn ty_die(
             }
             return Some(id);
         }
-        DebugType::Func {
-            ret,
-            params,
-            variadic,
-        } => {
+        DebugType::Func { ret, params, variadic } => {
             let id = unit.add(root, DW_TAG_subroutine_type);
             if let Some(rid) = ret.and_then(|r| ty_die(unit, root, cache, types, r)) {
                 unit.get_mut(id).set(DW_AT_type, AttributeValue::UnitRef(rid));
@@ -369,30 +349,18 @@ fn split_dir_file<'a>(path: &'a str, comp_dir: &'a str) -> (&'a str, &'a str) {
         (Some(dir), Some(_)) if !dir.as_os_str().is_empty() => {
             let dir_s = dir.to_str().unwrap_or(comp_dir);
             let file_s = p.file_name().and_then(|f| f.to_str()).unwrap_or(path);
-            if dir_s.is_empty() {
-                (comp_dir, file_s)
-            } else {
-                (dir_s, file_s)
-            }
+            if dir_s.is_empty() { (comp_dir, file_s) } else { (dir_s, file_s) }
         }
         _ => (comp_dir, path),
     }
 }
 
 fn comp_dir_string() -> String {
-    std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| ".".to_string())
+    std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".to_string())
 }
 
 /// Register one module file table entry in the line program.
-fn intern_file(
-    file_ids: &mut [Option<FileId>],
-    line_prog: &mut LineProgram,
-    files: &[mir::File],
-    comp_dir: &str,
-    index: u32,
-) -> Option<FileId> {
+fn intern_file(file_ids: &mut [Option<FileId>], line_prog: &mut LineProgram, files: &[mir::File], comp_dir: &str, index: u32) -> Option<FileId> {
     let slot = file_ids.get_mut(index as usize)?;
     if let Some(id) = *slot {
         return Some(id);
@@ -489,11 +457,7 @@ fn emit_var(
 
 /// Source map rows of one function, sorted, with locations resolved.
 fn resolve_rows(debug: &LoweredDebug, func: &FuncDebug) -> Vec<(u32, u32, Option<Location>)> {
-    let mut rows: Vec<(u32, u32, Option<Location>)> = func
-        .srclocs
-        .iter()
-        .map(|row| (row.start, row.end, debug.location(row.loc)))
-        .collect();
+    let mut rows: Vec<(u32, u32, Option<Location>)> = func.srclocs.iter().map(|row| (row.start, row.end, debug.location(row.loc))).collect();
     rows.sort_by_key(|row| row.0);
     rows
 }
@@ -509,18 +473,12 @@ fn scope_range(scope: &ScopeDebug, rows: &[(u32, u32, Option<Location>)]) -> Opt
         if loc.file != scope.start.file {
             continue;
         }
-        if (loc.line, loc.column) >= (scope.start.line, scope.start.column)
-            && (loc.line, loc.column) <= (scope.end.line, scope.end.column)
-        {
+        if (loc.line, loc.column) >= (scope.start.line, scope.start.column) && (loc.line, loc.column) <= (scope.end.line, scope.end.column) {
             start = start.min(*s);
             end = end.max(*e);
         }
     }
-    if end > start {
-        Some((start, end))
-    } else {
-        None
-    }
+    if end > start { Some((start, end)) } else { None }
 }
 
 struct ScopeCtx<'a> {
@@ -534,14 +492,7 @@ struct ScopeCtx<'a> {
 /// Emit one scope level's children under `parent`: ranged scopes become
 /// lexical-block DIEs, scopes that generated no code hoist their
 /// variables and ranged descendants into `parent`.
-fn emit_scopes(
-    unit: &mut Unit,
-    parent: UnitEntryId,
-    root: UnitEntryId,
-    type_cache: &mut [Option<UnitEntryId>],
-    ctx: &ScopeCtx<'_>,
-    scopes: &[ScopeDebug],
-) {
+fn emit_scopes(unit: &mut Unit, parent: UnitEntryId, root: UnitEntryId, type_cache: &mut [Option<UnitEntryId>], ctx: &ScopeCtx<'_>, scopes: &[ScopeDebug]) {
     use gimli::constants::*;
     for scope in scopes {
         match scope_range(scope, ctx.rows) {
@@ -559,33 +510,13 @@ fn emit_scopes(
                     entry.set(DW_AT_high_pc, AttributeValue::Udata(u64::from(end - start)));
                 }
                 for var in &scope.vars {
-                    emit_var(
-                        unit,
-                        die,
-                        root,
-                        DW_TAG_variable,
-                        var_die(var, false),
-                        ctx.file_ids,
-                        ctx.types,
-                        type_cache,
-                        ctx.data_sym,
-                    );
+                    emit_var(unit, die, root, DW_TAG_variable, var_die(var, false), ctx.file_ids, ctx.types, type_cache, ctx.data_sym);
                 }
                 emit_scopes(unit, die, root, type_cache, ctx, &scope.children);
             }
             None => {
                 for var in &scope.vars {
-                    emit_var(
-                        unit,
-                        parent,
-                        root,
-                        DW_TAG_variable,
-                        var_die(var, false),
-                        ctx.file_ids,
-                        ctx.types,
-                        type_cache,
-                        ctx.data_sym,
-                    );
+                    emit_var(unit, parent, root, DW_TAG_variable, var_die(var, false), ctx.file_ids, ctx.types, type_cache, ctx.data_sym);
                 }
                 emit_scopes(unit, parent, root, type_cache, ctx, &scope.children);
             }
@@ -607,11 +538,7 @@ fn var_die(var: &VarDebug, external: bool) -> VarDie<'_> {
 /// compile unit with subprograms (parameters, scoped variables),
 /// file-scope variables, and the deduplicated type tree. Unwind
 /// (`.eh_frame`) is already handled by `cranelift-object`.
-pub fn emit_with_debug(
-    product: cranelift_object::ObjectProduct,
-    debug: &LoweredDebug,
-    module: &mir::Module,
-) -> Vec<u8> {
+pub fn emit_with_debug(product: cranelift_object::ObjectProduct, debug: &LoweredDebug, module: &mir::Module) -> Vec<u8> {
     let cranelift_object::ObjectProduct {
         mut object,
         functions,
@@ -700,10 +627,7 @@ pub fn emit_with_debug(
     // Line rows, one sequence per function. Offsets are relative to the
     // function symbol, so everything survives PIE and ASLR.
     for (sym_idx, func) in debug.funcs.iter().enumerate() {
-        line_prog.begin_sequence(Some(Address::Symbol {
-            symbol: sym_idx,
-            addend: 0,
-        }));
+        line_prog.begin_sequence(Some(Address::Symbol { symbol: sym_idx, addend: 0 }));
         let mut rows: Vec<(u32, FileId, u64, u64)> = Vec::new();
         for (start, _end, loc) in resolve_rows(debug, func) {
             let Some(loc) = loc else { continue };
@@ -747,41 +671,22 @@ pub fn emit_with_debug(
         .first()
         .and_then(|f| f.decl)
         .and_then(|loc| module.files.get(loc.file as usize))
-        .or_else(|| {
-            debug
-                .globals
-                .first()
-                .and_then(|g| g.decl)
-                .and_then(|loc| module.files.get(loc.file as usize))
-        })
+        .or_else(|| debug.globals.first().and_then(|g| g.decl).and_then(|loc| module.files.get(loc.file as usize)))
         .map(|f| f.path.clone())
         .unwrap_or_else(|| "glcc".to_string());
     {
         let root_die = dwarf.unit.get_mut(root);
-        root_die.set(
-            gimli::constants::DW_AT_name,
-            AttributeValue::String(cu_name.as_bytes().to_vec()),
-        );
-        root_die.set(
-            gimli::constants::DW_AT_comp_dir,
-            AttributeValue::String(comp_dir.as_bytes().to_vec()),
-        );
-        root_die.set(
-            gimli::constants::DW_AT_producer,
-            AttributeValue::String(b"glcc".to_vec()),
-        );
-        root_die.set(
-            gimli::constants::DW_AT_language,
-            AttributeValue::Language(gimli::constants::DW_LANG_C),
-        );
+        root_die.set(gimli::constants::DW_AT_name, AttributeValue::String(cu_name.as_bytes().to_vec()));
+        root_die.set(gimli::constants::DW_AT_comp_dir, AttributeValue::String(comp_dir.as_bytes().to_vec()));
+        root_die.set(gimli::constants::DW_AT_producer, AttributeValue::String(b"glcc".to_vec()));
+        root_die.set(gimli::constants::DW_AT_language, AttributeValue::Language(gimli::constants::DW_LANG_C));
     }
     // Shared type cache for the whole unit: identical table entries
     // reuse one DIE no matter which variable references them.
     let mut type_cache: Vec<Option<UnitEntryId>> = vec![None; module.debug_types.len()];
     // Data-symbol resolver for `DW_OP_addr` locations. Symbols were
     // pre-resolved above, so this never mutates.
-    let data_sym =
-        |did: DataId| data_idx.iter().find(|(d, _)| *d == did).map(|(_, i)| *i);
+    let data_sym = |did: DataId| data_idx.iter().find(|(d, _)| *d == did).map(|(_, i)| *i);
     for global in &debug.globals {
         emit_var(
             &mut dwarf.unit,
@@ -804,44 +709,20 @@ pub fn emit_with_debug(
     for (sym_idx, func) in debug.funcs.iter().enumerate() {
         let die = dwarf.unit.add(root, gimli::constants::DW_TAG_subprogram);
         let entry = dwarf.unit.get_mut(die);
-        entry.set(
-            gimli::constants::DW_AT_name,
-            AttributeValue::String(func.name.as_bytes().to_vec()),
-        );
+        entry.set(gimli::constants::DW_AT_name, AttributeValue::String(func.name.as_bytes().to_vec()));
         if let Some(decl) = func.decl {
             if let Some(Some(file)) = file_ids.get(decl.file as usize) {
-                entry.set(
-                    gimli::constants::DW_AT_decl_file,
-                    AttributeValue::FileIndex(Some(*file)),
-                );
+                entry.set(gimli::constants::DW_AT_decl_file, AttributeValue::FileIndex(Some(*file)));
             }
-            entry.set(
-                gimli::constants::DW_AT_decl_line,
-                AttributeValue::Udata(u64::from(decl.line)),
-            );
+            entry.set(gimli::constants::DW_AT_decl_line, AttributeValue::Udata(u64::from(decl.line)));
         }
-        entry.set(
-            gimli::constants::DW_AT_low_pc,
-            AttributeValue::Address(Address::Symbol {
-                symbol: sym_idx,
-                addend: 0,
-            }),
-        );
-        entry.set(
-            gimli::constants::DW_AT_high_pc,
-            AttributeValue::Udata(u64::from(func.size)),
-        );
+        entry.set(gimli::constants::DW_AT_low_pc, AttributeValue::Address(Address::Symbol { symbol: sym_idx, addend: 0 }));
+        entry.set(gimli::constants::DW_AT_high_pc, AttributeValue::Udata(u64::from(func.size)));
         let mut frame_base = Expression::new();
         frame_base.op(gimli::constants::DW_OP_call_frame_cfa);
-        entry.set(
-            gimli::constants::DW_AT_frame_base,
-            AttributeValue::Exprloc(frame_base),
-        );
+        entry.set(gimli::constants::DW_AT_frame_base, AttributeValue::Exprloc(frame_base));
         if func.external {
-            entry.set(
-                gimli::constants::DW_AT_external,
-                AttributeValue::Flag(true),
-            );
+            entry.set(gimli::constants::DW_AT_external, AttributeValue::Flag(true));
         }
         // Parameters in order, then body-level variables, then nested
         // lexical blocks.
@@ -892,11 +773,7 @@ pub fn emit_with_debug(
     object.write().unwrap()
 }
 
-fn append_debug_sections(
-    object: &mut Object,
-    sections: Sections<DebugSection>,
-    symbols: &[SymbolId],
-) {
+fn append_debug_sections(object: &mut Object, sections: Sections<DebugSection>, symbols: &[SymbolId]) {
     let Sections {
         debug_abbrev,
         debug_info,
@@ -975,11 +852,7 @@ fn append_debug_sections(
                         map.insert(target_id, obj_id);
                         object.section_symbol(obj_id)
                     };
-                    let kind = if coff {
-                        RelocationKind::SectionOffset
-                    } else {
-                        RelocationKind::Absolute
-                    };
+                    let kind = if coff { RelocationKind::SectionOffset } else { RelocationKind::Absolute };
                     (sym, kind)
                 }
             };

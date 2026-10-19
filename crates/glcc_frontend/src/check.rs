@@ -17,8 +17,8 @@
 //! check member-by-member and need no layout, only member types
 //! and positions.
 
-use alloc::{boxed::Box, format, vec};
 use alloc::vec::Vec;
+use alloc::{boxed::Box, format, vec};
 
 use string_interner::symbol::SymbolU32;
 
@@ -122,19 +122,35 @@ fn typed_overflow_builtin(name: &str) -> Option<(OverflowOp, Ty)> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AtomicOp {
-    LoadN { sized: Option<u8> },
+    LoadN {
+        sized: Option<u8>,
+    },
     Load,
     /// C11 `__c11_atomic_init(ptr, val)`: a store with no memory order.
     Init,
-    StoreN { sized: Option<u8> },
+    StoreN {
+        sized: Option<u8>,
+    },
     Store,
-    ExchangeN { sized: Option<u8> },
+    ExchangeN {
+        sized: Option<u8>,
+    },
     Exchange,
-    CmpXchgN { sized: Option<u8> },
+    CmpXchgN {
+        sized: Option<u8>,
+    },
     CmpXchg,
-    Rmw { op: RmwOp, fetch: bool, sized: Option<u8> },
-    Fence { signal: bool },
-    LockFree { always: bool },
+    Rmw {
+        op: RmwOp,
+        fetch: bool,
+        sized: Option<u8>,
+    },
+    Fence {
+        signal: bool,
+    },
+    LockFree {
+        always: bool,
+    },
     TestAndSet,
     Clear,
 }
@@ -375,27 +391,17 @@ pub fn bitfield_precision(expr: &CheckedExpr) -> Option<u32> {
     match &expr.kind {
         CheckedExprKind::Member { bitfield: Some((_, width)), .. } if *width > 32 => Some(*width),
         CheckedExprKind::Unary(op, operand) => match op {
-            UnaryOp::Neg
-            | UnaryOp::BitNot
-            | UnaryOp::PreInc
-            | UnaryOp::PreDec
-            | UnaryOp::PostInc
-            | UnaryOp::PostDec => bitfield_precision(operand),
+            UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => bitfield_precision(operand),
             _ => None,
         },
         CheckedExprKind::Binary(op, lhs, rhs) => match op {
             BinaryOp::Shl | BinaryOp::Shr => bitfield_precision(lhs),
-            BinaryOp::Add
-            | BinaryOp::Sub
-            | BinaryOp::Mul
-            | BinaryOp::Div
-            | BinaryOp::Rem
-            | BinaryOp::BitAnd
-            | BinaryOp::BitOr
-            | BinaryOp::BitXor => match (bitfield_precision(lhs), bitfield_precision(rhs)) {
-                (Some(a), Some(b)) => Some(a.max(b)),
-                _ => None,
-            },
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                match (bitfield_precision(lhs), bitfield_precision(rhs)) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    _ => None,
+                }
+            }
             _ => None,
         },
         CheckedExprKind::Assign(_, lhs, _) => bitfield_precision(lhs),
@@ -428,10 +434,7 @@ pub fn is_integer(ty: &Ty) -> bool {
 }
 
 fn is_real_float(ty: &Ty) -> bool {
-    matches!(
-        ty.unqualified(),
-        Ty::Float | Ty::Double | Ty::LongDouble | Ty::Float128
-    )
+    matches!(ty.unqualified(), Ty::Float | Ty::Double | Ty::LongDouble | Ty::Float128)
 }
 
 pub fn is_complex(ty: &Ty) -> bool {
@@ -532,8 +535,7 @@ pub fn is_lvalue(expr: &CheckedExpr, decls: &[Binding]) -> bool {
         CheckedExprKind::Unary(crate::parse::UnaryOp::Deref, _) => true,
         // A complex part of an lvalue is itself an lvalue
         // (`__real__ x = 1.0`), like a struct member of one.
-        CheckedExprKind::Unary(crate::parse::UnaryOp::Real, inner)
-        | CheckedExprKind::Unary(crate::parse::UnaryOp::Imag, inner) => is_lvalue(inner, decls),
+        CheckedExprKind::Unary(crate::parse::UnaryOp::Real, inner) | CheckedExprKind::Unary(crate::parse::UnaryOp::Imag, inner) => is_lvalue(inner, decls),
         CheckedExprKind::Subscript { .. } => true,
         // Compound literals are lvalues (C17 §6.5.2.5p5).
         CheckedExprKind::CompoundLiteral { .. } => true,
@@ -581,9 +583,7 @@ pub fn constraint_letters(body: &str) -> Vec<&str> {
     while let Some(first) = rest.chars().next() {
         let len = if first == 'U' {
             // `U` plus its lowercase suffix (`Ump`, `Ush`, ...).
-            1 + rest[1..]
-                .find(|c: char| !c.is_ascii_lowercase())
-                .unwrap_or(rest.len() - 1)
+            1 + rest[1..].find(|c: char| !c.is_ascii_lowercase()).unwrap_or(rest.len() - 1)
         } else {
             first.len_utf8()
         };
@@ -624,9 +624,7 @@ pub fn constraint_letter(arch: Arch, letter: &str) -> Option<LetterClass> {
         // Letters these targets have that this frontend cannot honor.
         (Aarch64 | Riscv64, "S") => LetterClass::Unsupported("a symbolic address"),
         (Aarch64, "k") => LetterClass::Unsupported("the stack pointer"),
-        (Aarch64, "w" | "x" | "y") => {
-            LetterClass::Unsupported("a floating-point or SIMD register")
-        }
+        (Aarch64, "w" | "x" | "y") => LetterClass::Unsupported("a floating-point or SIMD register"),
         (Aarch64, "Upl" | "Upa") => LetterClass::Unsupported("an SVE predicate register"),
         (_, "f") => LetterClass::Unsupported("a floating-point register"),
         _ => return None,
@@ -837,12 +835,16 @@ impl Sema {
         if !self.decls[id.0 as usize].is_async {
             return ty;
         }
-        let Ty::Func { ret, params, variadic, prototyped } = ty else {
+        let Ty::Func {
+            ret,
+            params,
+            variadic,
+            prototyped,
+        } = ty
+        else {
             return ty;
         };
-        let handle = self
-            .future_handle_of(&ret)
-            .expect("async function without a registered future handle");
+        let handle = self.future_handle_of(&ret).expect("async function without a registered future handle");
         Ty::Func {
             ret: Box::new(handle),
             params,
@@ -998,9 +1000,7 @@ impl Sema {
             // diagnosed by GCC and clang (`-Wincompatible-pointer-types`,
             // `-Wdiscarded-qualifiers`), and `-w` silences them: every
             // pointer is one machine word, so the bits move untouched.
-            self.warnings
-                .borrow_mut()
-                .push(CompileError::new("incompatible pointer types in assignment", span));
+            self.warnings.borrow_mut().push(CompileError::new("incompatible pointer types in assignment", span));
             return Ok(self.convert(expr, target.clone()));
         }
         // Windows `va_list` is a plain `char *` (MSVC's own headers
@@ -1008,12 +1008,7 @@ impl Sema {
         // builtin spelling and pointers interconvert freely there.
         // Retyped rather than converted — like the struct case above,
         // so lvalue uses (`va_start(ap, x)`) keep their place.
-        if self.target.os == Os::Windows
-            && matches!(
-                (target, &expr.ty),
-                (Ty::BuiltinVaList, Ty::Pointer { .. }) | (Ty::Pointer { .. }, Ty::BuiltinVaList)
-            )
-        {
+        if self.target.os == Os::Windows && matches!((target, &expr.ty), (Ty::BuiltinVaList, Ty::Pointer { .. }) | (Ty::Pointer { .. }, Ty::BuiltinVaList)) {
             let CheckedExpr { span, kind, .. } = expr;
             return Ok(CheckedExpr { ty: target.clone(), span, kind });
         }
@@ -1082,9 +1077,7 @@ impl Sema {
     /// enums stay distinct types even with equal representations.
     fn enum_repr_pair(&self, t: &Ty, s: &Ty) -> bool {
         match (t.unqualified(), s.unqualified()) {
-            (Ty::Enum(id), other) | (other, Ty::Enum(id)) => {
-                !matches!(other, Ty::Enum(_)) && *other == self.enums[id.0 as usize].repr
-            }
+            (Ty::Enum(id), other) | (other, Ty::Enum(id)) => !matches!(other, Ty::Enum(_)) && *other == self.enums[id.0 as usize].repr,
             _ => false,
         }
     }
@@ -1104,10 +1097,7 @@ impl Sema {
             // `const char (*)[4]` from `char (*)[4]` is silent, matching
             // the `const char *` from `char *` rule, so element qualifiers
             // added here count as the outermost level.
-            (
-                Ty::Array { elem: et, quals: qt, bound: bt },
-                Ty::Array { elem: es, quals: qs, bound: bs },
-            ) => {
+            (Ty::Array { elem: et, quals: qt, bound: bt }, Ty::Array { elem: es, quals: qs, bound: bs }) => {
                 if !qs.iter().all(|q| qt.contains(q)) {
                     return PointeeConversion::No;
                 }
@@ -1170,7 +1160,8 @@ impl Sema {
     /// pairs like `long`/`unsigned int` under LLP64 out. Plain `char`
     /// follows `char_signed` (unsigned on AArch64/RISC-V, so there
     /// `char` pairs with `unsigned char`, not `signed char`).
-    fn signedness_only_pair(t: &Ty, s: &Ty, target: &crate::target::Target) -> bool {        if matches!(t.unqualified(), Ty::Bool | Ty::Enum(_)) || matches!(s.unqualified(), Ty::Bool | Ty::Enum(_)) {
+    fn signedness_only_pair(t: &Ty, s: &Ty, target: &crate::target::Target) -> bool {
+        if matches!(t.unqualified(), Ty::Bool | Ty::Enum(_)) || matches!(s.unqualified(), Ty::Bool | Ty::Enum(_)) {
             return false;
         }
         let (Some(t_sign), Some(s_sign)) = (is_signed_int_in(t, target.char_signed), is_signed_int_in(s, target.char_signed)) else {
@@ -1230,8 +1221,7 @@ impl Sema {
                 if let Ty::Array { elem, bound, .. } = target.unqualified() {
                     if matches!(expr.ty.unqualified(), Ty::Array { .. }) {
                         if let CheckedExprKind::Str(parts) = &expr.kind {
-                            let lit_elem =
-                                crate::eval::string_elem_ty_in(parts, self.target.wchar());
+                            let lit_elem = crate::eval::string_elem_ty_in(parts, self.target.wchar());
                             if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                 // Same overlong-literal warning the
                                 // braced path gets; only the fit check
@@ -1274,9 +1264,7 @@ impl Sema {
                         if item.designators.is_empty() {
                             if let Initializer::Expr(expr) = &*item.init {
                                 if let CheckedExprKind::Str(parts) = &expr.kind {
-                                    if crate::eval::string_elem_ty_in(parts, self.target.wchar())
-                                        .is_some_and(|lit| Self::string_elem_matches(elem, &lit))
-                                    {
+                                    if crate::eval::string_elem_ty_in(parts, self.target.wchar()).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                         return Ok(Initializer::Expr(expr.clone()));
                                     }
                                 }
@@ -1430,9 +1418,7 @@ impl Sema {
         match member_ty.unqualified() {
             Ty::Array { elem, .. } => {
                 if let CheckedExprKind::Str(parts) = &expr.kind {
-                    if let Some(lit_elem) =
-                        crate::eval::string_elem_ty_in(parts, self.target.wchar())
-                    {
+                    if let Some(lit_elem) = crate::eval::string_elem_ty_in(parts, self.target.wchar()) {
                         return !Self::string_elem_matches(elem, &lit_elem);
                     }
                 }
@@ -1459,10 +1445,7 @@ impl Sema {
         let mut j = i;
         match ty.unqualified() {
             Ty::Array { elem, bound, .. } => {
-                if self
-                    .string_item(items, j)
-                    .is_some_and(|lit| Self::string_elem_matches(elem, &lit))
-                {
+                if self.string_item(items, j).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                     return j + 1;
                 }
                 match bound {
@@ -1488,11 +1471,7 @@ impl Sema {
                 let Some(def) = self.structs.get(id.0 as usize) else {
                     return j;
                 };
-                let members = if def.is_union {
-                    &def.members[..def.members.len().min(1)]
-                } else {
-                    &def.members
-                };
+                let members = if def.is_union { &def.members[..def.members.len().min(1)] } else { &def.members };
                 for member in members {
                     let next = self.elision_span(&member.ty, items, j);
                     if next == j {
@@ -1513,9 +1492,7 @@ impl Sema {
     /// Whether `items[j]` is a bare expression item: brace elision
     /// feeds only un-designated expression items to a member.
     fn bare_item(items: &[InitItem], j: usize) -> bool {
-        items
-            .get(j)
-            .is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
+        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
     }
 
     /// Element type of the bare string-literal item at `items[j]`, if
@@ -1669,10 +1646,7 @@ impl Sema {
                     // member indices: the backend addresses members
                     // positionally and never searches by name.
                     for &index in &path[..path.len() - 1] {
-                        expanded.push(Designator::AnonField {
-                            index: index as u32,
-                            span: *span,
-                        });
+                        expanded.push(Designator::AnonField { index: index as u32, span: *span });
                     }
                     expanded.push(Designator::Field { name: *name, span: *span });
                     for &index in &path {
@@ -1772,13 +1746,10 @@ impl Sema {
             unreachable!("array initializer needs an array type")
         };
         if let [item] = items {
-            if item.designators.is_empty()
-                && matches!(&*item.init, Initializer::Expr(expr) if matches!(expr.ty.unqualified(), Ty::Array { .. }))
-            {
+            if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
                 if let Initializer::Expr(expr) = &*item.init {
                     if let CheckedExprKind::Str(parts) = &expr.kind {
-                        let lit_elem =
-                            crate::eval::string_elem_ty_in(parts, self.target.wchar());
+                        let lit_elem = crate::eval::string_elem_ty_in(parts, self.target.wchar());
                         if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                             self.check_string_fit(parts, bound, item.span, interner);
                             return Ok(vec![item.clone()]);
@@ -2073,10 +2044,7 @@ impl Sema {
             // caller to reject.
             Expr::Str { parts, .. } => Ok(CheckedExpr {
                 ty: Ty::Array {
-                    elem: Box::new(
-                        crate::eval::string_elem_ty_in(parts, self.target.wchar())
-                            .unwrap_or(Ty::Char),
-                    ),
+                    elem: Box::new(crate::eval::string_elem_ty_in(parts, self.target.wchar()).unwrap_or(Ty::Char)),
                     quals: Vec::new(),
                     bound: crate::eval::string_length(parts, interner).map(|len| ArrayBound::Fixed(len + 1)),
                 },
@@ -2233,9 +2201,7 @@ impl Sema {
                 return Ok(());
             }
             Ty::Void => {
-                self.warnings
-                    .borrow_mut()
-                    .push(CompileError::new("invalid application of `sizeof` to a void type", span));
+                self.warnings.borrow_mut().push(CompileError::new("invalid application of `sizeof` to a void type", span));
                 return Ok(());
             }
             _ => {}
@@ -2341,9 +2307,7 @@ impl Sema {
                 // `char *` and the `&` is usually redundant.
                 let operand = operand;
                 if matches!(operand.kind, CheckedExprKind::Str(_)) {
-                    self.warnings
-                        .borrow_mut()
-                        .push(CompileError::new("taking the address of a string literal", span));
+                    self.warnings.borrow_mut().push(CompileError::new("taking the address of a string literal", span));
                 }
                 let is_str = matches!(operand.kind, CheckedExprKind::Str(_));
                 if !is_func && !is_str && !self.is_lvalue(&operand) {
@@ -3193,7 +3157,10 @@ impl Sema {
     /// `void __atomic_exchange(T *ptr, T *val, T *ret, int order)`.
     fn check_atomic_exchange(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
         let [ptr, val, ret, order] = args else {
-            return Err(CompileError::new("`__atomic_exchange` takes a pointer, a value pointer, a result pointer, and a memory order", span));
+            return Err(CompileError::new(
+                "`__atomic_exchange` takes a pointer, a value pointer, a result pointer, and a memory order",
+                span,
+            ));
         };
         let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
         let val = self.decay_checked(self.check_expr(val, interner)?);
@@ -3508,8 +3475,7 @@ impl Sema {
         // A string literal is a constant-pool entry: GCC reports it
         // constant even though its value is an address (`&global` is
         // not).
-        let is_const = matches!(checked.kind, CheckedExprKind::Str(_))
-            || crate::eval::eval_const(&checked, self, interner).is_some();
+        let is_const = matches!(checked.kind, CheckedExprKind::Str(_)) || crate::eval::eval_const(&checked, self, interner).is_some();
         Ok(CheckedExpr {
             ty: Ty::Int,
             span,
@@ -3654,28 +3620,15 @@ impl Sema {
     /// converts to; the operation itself is exact, and the builtin
     /// returns whether the exact value fit. A typed spelling pins the
     /// operand type, converting operands like prototyped parameters.
-    fn check_overflow(
-        &self,
-        op: OverflowOp,
-        args: &[Expr],
-        interner: &Interner,
-        span: Span,
-        operand_ty: Option<Ty>,
-    ) -> Result<CheckedExpr, CompileError> {
+    fn check_overflow(&self, op: OverflowOp, args: &[Expr], interner: &Interner, span: Span, operand_ty: Option<Ty>) -> Result<CheckedExpr, CompileError> {
         let [lhs, rhs, res] = args else {
-            return Err(CompileError::new(
-                "overflow builtin needs two operands and a result pointer",
-                span,
-            ));
+            return Err(CompileError::new("overflow builtin needs two operands and a result pointer", span));
         };
         let mut lhs = self.check_expr(lhs, interner)?;
         let mut rhs = self.check_expr(rhs, interner)?;
         for operand in [&lhs, &rhs] {
             if int_rank(&operand.ty).is_none() {
-                return Err(CompileError::new(
-                    "overflow builtin operands must be integers",
-                    operand.span,
-                ));
+                return Err(CompileError::new("overflow builtin operands must be integers", operand.span));
             }
         }
         if let Some(ty) = &operand_ty {
@@ -3684,17 +3637,11 @@ impl Sema {
         }
         let res = self.decay_checked(self.check_expr(res, interner)?);
         let Ty::Pointer { pointee, .. } = res.ty.unqualified() else {
-            return Err(CompileError::new(
-                "overflow builtin result must be a pointer to integer",
-                res.span,
-            ));
+            return Err(CompileError::new("overflow builtin result must be a pointer to integer", res.span));
         };
         let res_ty = pointee.as_ref().clone();
         if int_rank(&res_ty).is_none() {
-            return Err(CompileError::new(
-                "overflow builtin result must be a pointer to integer",
-                res.span,
-            ));
+            return Err(CompileError::new("overflow builtin result must be a pointer to integer", res.span));
         }
         Ok(CheckedExpr {
             ty: Ty::Int,
@@ -3712,12 +3659,7 @@ impl Sema {
     /// `alloca`/`__builtin_alloca`: allocate `size` bytes that stay
     /// live until the enclosing function returns. The frontend only
     /// marks the call; the heap block and its cleanup lower in MIR.
-    fn check_alloca(
-        &self,
-        args: &[Expr],
-        interner: &Interner,
-        span: Span,
-    ) -> Result<CheckedExpr, CompileError> {
+    fn check_alloca(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
         let [size] = args else {
             return Err(CompileError::new("`alloca` needs exactly one argument", span));
         };
@@ -3729,9 +3671,7 @@ impl Sema {
                 pointee: Box::new(Ty::Void),
             },
             span,
-            kind: CheckedExprKind::Alloca {
-                size: Box::new(size),
-            },
+            kind: CheckedExprKind::Alloca { size: Box::new(size) },
         })
     }
 
@@ -3740,13 +3680,7 @@ impl Sema {
     /// `level`-th enclosing frame. GCC requires the level to be a
     /// constant integer, so a non-constant one is rejected here;
     /// lowering walks the frame-pointer chain from the current frame.
-    fn check_frame_address(
-        &self,
-        args: &[Expr],
-        interner: &Interner,
-        span: Span,
-        returns_address: bool,
-    ) -> Result<CheckedExpr, CompileError> {
+    fn check_frame_address(&self, args: &[Expr], interner: &Interner, span: Span, returns_address: bool) -> Result<CheckedExpr, CompileError> {
         let what = if returns_address { "__builtin_return_address" } else { "__builtin_frame_address" };
         let [level] = args else {
             return Err(CompileError::new(format!("`{what}` needs exactly one argument"), span));
@@ -3764,10 +3698,7 @@ impl Sema {
                 pointee: Box::new(Ty::Void),
             },
             span,
-            kind: CheckedExprKind::FrameAddress {
-                level,
-                returns_address,
-            },
+            kind: CheckedExprKind::FrameAddress { level, returns_address },
         })
     }
 
@@ -3779,12 +3710,19 @@ impl Sema {
     fn type_class(&self, ty: &Ty) -> u8 {
         match ty.unqualified() {
             Ty::Void => 0,
-            Ty::Char | Ty::SignedChar | Ty::UnsignedChar
-            | Ty::Short | Ty::UnsignedShort
-            | Ty::Int | Ty::UnsignedInt
-            | Ty::Long | Ty::UnsignedLong
-            | Ty::LongLong | Ty::UnsignedLongLong
-            | Ty::Int128 | Ty::UnsignedInt128 => 1,
+            Ty::Char
+            | Ty::SignedChar
+            | Ty::UnsignedChar
+            | Ty::Short
+            | Ty::UnsignedShort
+            | Ty::Int
+            | Ty::UnsignedInt
+            | Ty::Long
+            | Ty::UnsignedLong
+            | Ty::LongLong
+            | Ty::UnsignedLongLong
+            | Ty::Int128
+            | Ty::UnsignedInt128 => 1,
             Ty::Enum(_) => 3,
             Ty::Bool => 4,
             Ty::Pointer { .. } => 5,
@@ -3883,9 +3821,7 @@ impl Sema {
             if level + 1 == path.len() {
                 if let Some(width_expr) = &member.bitfield {
                     let decl_size = self.type_size(&member.ty, interner).expect("bit-field has a declared type");
-                    let w = self
-                        .bit_width(width_expr, decl_size * 8, interner)
-                        .expect("bit-field width was checked to fit");
+                    let w = self.bit_width(width_expr, decl_size * 8, interner).expect("bit-field width was checked to fit");
                     // The unit byte this field starts in, relative to
                     // the containing struct: `member_offsets` holds the
                     // byte of the unit start, and `members` the exact
@@ -4143,9 +4079,7 @@ impl Sema {
         // A cast to a compatible struct/union type is a no-op, like
         // GCC (`(struct S)s`, qualified or not); the value's
         // representation is unchanged.
-        if matches!(ty.unqualified(), Ty::Struct(_))
-            && types_compatible(ty.unqualified(), operand.ty.unqualified())
-        {
+        if matches!(ty.unqualified(), Ty::Struct(_)) && types_compatible(ty.unqualified(), operand.ty.unqualified()) {
             return Ok(CheckedExpr {
                 ty: ty.clone(),
                 span,
@@ -4164,8 +4098,7 @@ impl Sema {
             if def.is_union {
                 let matched = def.members.iter().find_map(|member| {
                     let name = member.name?;
-                    let compatible = types_compatible(member.ty.unqualified(), operand.ty.unqualified())
-                        || types_compatible(operand.ty.unqualified(), member.ty.unqualified());
+                    let compatible = types_compatible(member.ty.unqualified(), operand.ty.unqualified()) || types_compatible(operand.ty.unqualified(), member.ty.unqualified());
                     compatible.then_some(name)
                 });
                 let Some(name) = matched else {

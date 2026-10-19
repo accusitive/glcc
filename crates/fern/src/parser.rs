@@ -36,10 +36,7 @@ struct Parser {
 
 impl Parser {
     fn peek(&self) -> &Tok {
-        self.tokens
-            .get(self.pos)
-            .map(|t| &t.tok)
-            .unwrap_or(&Tok::Eof)
+        self.tokens.get(self.pos).map(|t| &t.tok).unwrap_or(&Tok::Eof)
     }
 
     fn bump(&mut self) -> Token {
@@ -53,18 +50,12 @@ impl Parser {
 
     /// Span of the upcoming token.
     fn span(&self) -> Span {
-        self.tokens
-            .get(self.pos)
-            .map(|t| t.span)
-            .unwrap_or(Span::new(0, 0))
+        self.tokens.get(self.pos).map(|t| t.span).unwrap_or(Span::new(0, 0))
     }
 
     /// Span of the token just consumed.
     fn prev_span(&self) -> Span {
-        self.tokens
-            .get(self.pos.saturating_sub(1))
-            .map(|t| t.span)
-            .unwrap_or(Span::new(0, 0))
+        self.tokens.get(self.pos.saturating_sub(1)).map(|t| t.span).unwrap_or(Span::new(0, 0))
     }
 
     fn is(&self, want: &Tok) -> bool {
@@ -75,10 +66,7 @@ impl Parser {
         if self.is(want) {
             return Ok(self.bump());
         }
-        Err(Diag::new(
-            format!("expected {what}, found {}", self.peek().describe()),
-            self.span(),
-        ))
+        Err(Diag::new(format!("expected {what}, found {}", self.peek().describe()), self.span()))
     }
 
     fn eat(&mut self, want: &Tok) -> bool {
@@ -92,27 +80,15 @@ impl Parser {
 
     fn upper(&mut self, what: &str) -> KResult<String> {
         match self.bump() {
-            Token {
-                tok: Tok::Upper(name),
-                ..
-            } => Ok(name),
-            other => Err(Diag::new(
-                format!("expected {what}, found {}", other.tok.describe()),
-                other.span,
-            )),
+            Token { tok: Tok::Upper(name), .. } => Ok(name),
+            other => Err(Diag::new(format!("expected {what}, found {}", other.tok.describe()), other.span)),
         }
     }
 
     fn lower(&mut self, what: &str) -> KResult<String> {
         match self.bump() {
-            Token {
-                tok: Tok::Lower(name),
-                ..
-            } => Ok(name),
-            other => Err(Diag::new(
-                format!("expected {what}, found {}", other.tok.describe()),
-                other.span,
-            )),
+            Token { tok: Tok::Lower(name), .. } => Ok(name),
+            other => Err(Diag::new(format!("expected {what}, found {}", other.tok.describe()), other.span)),
         }
     }
 
@@ -146,12 +122,9 @@ impl Parser {
             Tok::Let => ItemKind::Let(self.let_item()?),
             other => {
                 return Err(Diag::new(
-                    format!(
-                        "expected an item (`data`, `class`, `instance`, `fun`, or `let`), found {}",
-                        other.describe()
-                    ),
+                    format!("expected an item (`data`, `class`, `instance`, `fun`, or `let`), found {}", other.describe()),
                     self.span(),
-                ))
+                ));
             }
         };
         Ok(Item {
@@ -175,10 +148,7 @@ impl Parser {
             let ctor_span = self.span();
             let name = self.upper("a constructor name")?;
             if ctor_names.contains(&name) {
-                return Err(Diag::new(
-                    format!("duplicate constructor `{name}`"),
-                    ctor_span,
-                ));
+                return Err(Diag::new(format!("duplicate constructor `{name}`"), ctor_span));
             }
             ctor_names.push(name.clone());
             let mut fields = Vec::new();
@@ -218,10 +188,7 @@ impl Parser {
             params.push(self.lower("a class parameter")?);
         }
         if let Some(i) = (0..params.len()).find(|&i| params[i + 1..].contains(&params[i])) {
-            return Err(Diag::new(
-                format!("duplicate class parameter `{}`", params[i]),
-                start,
-            ));
+            return Err(Diag::new(format!("duplicate class parameter `{}`", params[i]), start));
         }
         self.expect(&Tok::LBrace, "`{` opening the class body")?;
         let mut method_names = Vec::new();
@@ -233,10 +200,7 @@ impl Parser {
             }
             let name = self.lower("a method name")?;
             if method_names.contains(&name) {
-                return Err(Diag::new(
-                    format!("duplicate class method `{name}`"),
-                    self.span(),
-                ));
+                return Err(Diag::new(format!("duplicate class method `{name}`"), self.span()));
             }
             method_names.push(name.clone());
             self.expect(&Tok::Colon, "`:` before the method type")?;
@@ -431,10 +395,7 @@ impl Parser {
                     })
                 }
             }
-            other => Err(Diag::new(
-                format!("expected a type, found {}", other.describe()),
-                span,
-            )),
+            other => Err(Diag::new(format!("expected a type, found {}", other.describe()), span)),
         }
     }
 
@@ -478,10 +439,7 @@ impl Parser {
                 self.bump();
                 Ok(Pat::Bool(false))
             }
-            Tok::Float(_) => Err(Diag::new(
-                "float literals cannot be matched; compare with `==` instead".to_string(),
-                self.span(),
-            )),
+            Tok::Float(_) => Err(Diag::new("float literals cannot be matched; compare with `==` instead".to_string(), self.span())),
             Tok::Lower(_) => {
                 let name = self.lower("a pattern")?;
                 Ok(Pat::Bind(name))
@@ -503,10 +461,7 @@ impl Parser {
                     self.expect(&Tok::RParen, "`)` after the constructor pattern")?;
                     Ok(Pat::Ctor { name, fields })
                 } else {
-                    Ok(Pat::Ctor {
-                        name,
-                        fields: Vec::new(),
-                    })
+                    Ok(Pat::Ctor { name, fields: Vec::new() })
                 }
             }
             Tok::LParen => {
@@ -543,10 +498,7 @@ impl Parser {
                 self.expect(&Tok::RBracket, "`]` closing the list pattern")?;
                 Ok(Pat::List(items))
             }
-            other => Err(Diag::new(
-                format!("expected a pattern, found {}", other.describe()),
-                self.span(),
-            )),
+            other => Err(Diag::new(format!("expected a pattern, found {}", other.describe()), self.span())),
         }
     }
 
@@ -609,11 +561,7 @@ impl Parser {
     fn match_arm(&mut self) -> KResult<MatchArm> {
         self.expect(&Tok::Case, "`case` starting an arm")?;
         let pat = self.pat()?;
-        let guard = if self.eat(&Tok::When) {
-            Some(self.expr()?)
-        } else {
-            None
-        };
+        let guard = if self.eat(&Tok::When) { Some(self.expr()?) } else { None };
         self.expect(&Tok::FatArrow, "`=>` before the arm body")?;
         let body = self.expr()?;
         Ok(MatchArm { pat, guard, body })
@@ -644,10 +592,7 @@ impl Parser {
                     } else {
                         self.expect(&Tok::RBrace, "`;` or `}` after the expression")?;
                         let out = Expr {
-                            kind: ExprKind::Let {
-                                binds,
-                                body: Box::new(expr),
-                            },
+                            kind: ExprKind::Let { binds, body: Box::new(expr) },
                             span: lo.to(self.prev_span()),
                         };
                         return Ok(out);
@@ -656,15 +601,9 @@ impl Parser {
             }
         }
         self.expect(&Tok::RBrace, "`}` closing the block")?;
-        let body = Expr {
-            kind: ExprKind::Unit,
-            span: lo,
-        };
+        let body = Expr { kind: ExprKind::Unit, span: lo };
         Ok(Expr {
-            kind: ExprKind::Let {
-                binds,
-                body: Box::new(body),
-            },
+            kind: ExprKind::Let { binds, body: Box::new(body) },
             span: lo.to(self.prev_span()),
         })
     }
@@ -682,11 +621,7 @@ impl Parser {
                 let rhs = self.binary(level)?;
                 let span = lhs.span.to(rhs.span);
                 return Ok(Expr {
-                    kind: ExprKind::BinOp(
-                        BinOp::Cons,
-                        Box::new(lhs),
-                        Box::new(rhs),
-                    ),
+                    kind: ExprKind::BinOp(BinOp::Cons, Box::new(lhs), Box::new(rhs)),
                     span,
                 });
             }
@@ -774,29 +709,16 @@ impl Parser {
     fn atom(&mut self) -> KResult<Expr> {
         let lo = self.span();
         if self.is(&Tok::Eof) {
-            return Err(Diag::new(
-                "expected an expression here",
-                lo,
-            ));
+            return Err(Diag::new("expected an expression here", lo));
         }
         match self.peek() {
             Tok::Int(_) => {
-                let Token { tok: Tok::Int(v), span } = self.bump() else {
-                    unreachable!()
-                };
-                Ok(Expr {
-                    kind: ExprKind::Int(v),
-                    span,
-                })
+                let Token { tok: Tok::Int(v), span } = self.bump() else { unreachable!() };
+                Ok(Expr { kind: ExprKind::Int(v), span })
             }
             Tok::Float(_) => {
-                let Token { tok: Tok::Float(v), span } = self.bump() else {
-                    unreachable!()
-                };
-                Ok(Expr {
-                    kind: ExprKind::Float(v),
-                    span,
-                })
+                let Token { tok: Tok::Float(v), span } = self.bump() else { unreachable!() };
+                Ok(Expr { kind: ExprKind::Float(v), span })
             }
             Tok::True | Tok::False => {
                 let Token { tok, span } = self.bump();
@@ -807,19 +729,13 @@ impl Parser {
             }
             Tok::Underscore => {
                 self.bump();
-                Err(Diag::new(
-                    "`_` is not a value; use it only in patterns",
-                    lo,
-                ))
+                Err(Diag::new("`_` is not a value; use it only in patterns", lo))
             }
             Tok::Upper(_) => {
                 let name = self.upper("a value")?;
                 if self.eat(&Tok::ColonColon) {
                     let method = self.lower("a method name")?;
-                    self.expect(
-                        &Tok::LParen,
-                        "`(` after the method name: a class method is always applied",
-                    )?;
+                    self.expect(&Tok::LParen, "`(` after the method name: a class method is always applied")?;
                     let mut args = Vec::new();
                     if !self.is(&Tok::RParen) {
                         loop {
@@ -872,10 +788,7 @@ impl Parser {
                     span: lo.to(self.prev_span()),
                 })
             }
-            other => Err(Diag::new(
-                format!("expected an expression, found {}", other.describe()),
-                lo,
-            )),
+            other => Err(Diag::new(format!("expected an expression, found {}", other.describe()), lo)),
         }
     }
 
@@ -890,10 +803,7 @@ impl Parser {
                 self.expect(&Tok::Arrow, "`->` for a lambda")?;
                 let body = self.expr()?;
                 return Ok(Expr {
-                    kind: ExprKind::Lambda {
-                        params,
-                        body: Box::new(body),
-                    },
+                    kind: ExprKind::Lambda { params, body: Box::new(body) },
                     span: open.to(self.prev_span()),
                 });
             }
@@ -925,18 +835,9 @@ impl Parser {
     fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
         if self.is(&Tok::RParen) {
             self.bump();
-            return Ok(self.is(&Tok::Arrow)).map(|is_arrow| {
-                if is_arrow {
-                    Some(Vec::new())
-                } else {
-                    None
-                }
-            });
+            return Ok(self.is(&Tok::Arrow)).map(|is_arrow| if is_arrow { Some(Vec::new()) } else { None });
         }
-        if !matches!(
-            self.peek(),
-            Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket
-        ) {
+        if !matches!(self.peek(), Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket) {
             return Ok(None);
         }
         let mut params = Vec::new();
@@ -948,11 +849,7 @@ impl Parser {
             break;
         }
         self.expect(&Tok::RParen, "`)` closing the parameters")?;
-        if self.is(&Tok::Arrow) {
-            Ok(Some(params))
-        } else {
-            Ok(None)
-        }
+        if self.is(&Tok::Arrow) { Ok(Some(params)) } else { Ok(None) }
     }
 
     fn list_expr(&mut self, open: Span) -> KResult<Expr> {

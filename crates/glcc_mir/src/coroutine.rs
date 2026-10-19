@@ -35,12 +35,9 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use crate::ir::{
-    Block, Const, Def, Extern, Func, Function, Inst, InstData, InstKind, MemFlags, Module,
-    Terminator, Value, ValueData,
-};
+use crate::ir::{Block, Const, Def, Extern, Func, Function, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData};
 use crate::pass::ModulePass;
-use crate::ty::{dense_field_offsets, ty_align, GepIndex, Signature, Ty};
+use crate::ty::{GepIndex, Signature, Ty, dense_field_offsets, ty_align};
 
 /// The poll result the coroutine has not finished: the frame stays
 /// alive and `poll` must be called again once the child completes.
@@ -97,12 +94,7 @@ impl ModulePass for LowerCoroutines {
     }
 
     fn run(&mut self, module: &mut Module) -> bool {
-        let work: Vec<Func> = module
-            .funcs
-            .iter_enumerated()
-            .filter(|(_, f)| f.coroutine.is_some())
-            .map(|(id, _)| id)
-            .collect();
+        let work: Vec<Func> = module.funcs.iter_enumerated().filter(|(_, f)| f.coroutine.is_some()).map(|(id, _)| id).collect();
         if work.is_empty() {
             return false;
         }
@@ -112,13 +104,10 @@ impl ModulePass for LowerCoroutines {
         // The awaits themselves stay in the arena (their results feed
         // the fresh child-frame loads) but must be in no block list.
         debug_assert!(
-            module.funcs.iter().all(|f| f
-                .blocks
+            module
+                .funcs
                 .iter()
-                .all(|b| b
-                    .insts
-                    .iter()
-                    .all(|i| !matches!(f.insts[*i].kind, InstKind::Await { .. })))),
+                .all(|f| f.blocks.iter().all(|b| b.insts.iter().all(|i| !matches!(f.insts[*i].kind, InstKind::Await { .. })))),
             "await instruction survived coroutine lowering"
         );
         true
@@ -175,12 +164,7 @@ fn new_inst(func: &mut Function, block: Block, kind: InstKind, ty: Option<Ty>) -
             def: Def::Inst(Inst::from_usize(func.insts.len())),
         })
     });
-    let inst = func.insts.push(InstData {
-        block,
-        kind,
-        result,
-        loc: None,
-    });
+    let inst = func.insts.push(InstData { block, kind, result, loc: None });
     if let Some(v) = result {
         func.values[v].def = Def::Inst(inst);
     }
@@ -219,7 +203,16 @@ fn load(func: &mut Function, block: Block, addr: Value, ty: Ty) -> Value {
 }
 
 fn store(func: &mut Function, block: Block, addr: Value, val: Value) {
-    emit(func, block, InstKind::Store { addr, val, flags: MemFlags::plain() }, None);
+    emit(
+        func,
+        block,
+        InstKind::Store {
+            addr,
+            val,
+            flags: MemFlags::plain(),
+        },
+        None,
+    );
 }
 
 // ---- the resume body ----
@@ -252,11 +245,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
 
     // Entry parameters (stored by the start function) and stack slots
     // (their storage moves into the frame).
-    let params: Vec<(Value, Ty)> = resume.blocks[old_entry]
-        .params
-        .iter()
-        .map(|&v| (v, resume.values[v].ty.clone()))
-        .collect();
+    let params: Vec<(Value, Ty)> = resume.blocks[old_entry].params.iter().map(|&v| (v, resume.values[v].ty.clone())).collect();
     let mut allocas: Vec<(Inst, Value, Ty, u64)> = Vec::new();
     for (inst, data) in resume.insts.iter_enumerated() {
         if let InstKind::Alloca { pointee, count } = &data.kind {
@@ -343,11 +332,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
         size = size.max(o + f.size_bytes());
     }
     let size = size.next_multiple_of(align);
-    let frame_ty = Ty::Struct {
-        fields,
-        offsets,
-        size,
-    };
+    let frame_ty = Ty::Struct { fields, offsets, size };
 
     // The dispatch block becomes the entry: it intercepts every start
     // and every resume, warms up the frame-derived values (parameter
@@ -358,42 +343,21 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
     let old_preds: Vec<Block> = resume
         .blocks
         .iter_enumerated()
-        .filter(|(b, data)| {
-            *b != old_entry
-                && data
-                    .term
-                    .as_ref()
-                    .is_some_and(|t| t.successors().contains(&old_entry))
-        })
+        .filter(|(b, data)| *b != old_entry && data.term.as_ref().is_some_and(|t| t.successors().contains(&old_entry)))
         .map(|(b, _)| b)
         .collect();
-    debug_assert!(
-        old_preds.is_empty(),
-        "entry block is a jump target; the coroutine dispatch cannot replace its parameters"
-    );
+    debug_assert!(old_preds.is_empty(), "entry block is a jump target; the coroutine dispatch cannot replace its parameters");
     resume.entry = dispatch;
     resume.blocks[old_entry].params.clear();
 
-    let state_addr = gep(
-        resume,
-        dispatch,
-        frame,
-        &[GepIndex::Field(state_field)],
-        Ty::ptr(Ty::int(32)),
-    );
+    let state_addr = gep(resume, dispatch, frame, &[GepIndex::Field(state_field)], Ty::ptr(Ty::int(32)));
     let state_val = load(resume, dispatch, state_addr, Ty::int(32));
 
     // Parameters: the resume entry has none, so every use loads its
     // slot (written by the start function). The prologue stores that
     // lower_mir emitted keep working unchanged on top of these loads.
     for (i, (p, ty)) in params.iter().enumerate() {
-        let addr = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(param_fields[i])],
-            Ty::ptr(ty.clone()),
-        );
+        let addr = gep(resume, dispatch, frame, &[GepIndex::Field(param_fields[i])], Ty::ptr(ty.clone()));
         let v = load(resume, dispatch, addr, ty.clone());
         resume.replace_uses(*p, v);
     }
@@ -403,61 +367,23 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
     let alloca_set: HashSet<Inst> = allocas.iter().map(|(i, ..)| *i).collect();
     for (inst, val, pointee, _) in &allocas {
         let (field, _) = alloca_field[inst];
-        let addr = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(field), GepIndex::ConstIndex(0)],
-            Ty::ptr(pointee.clone()),
-        );
+        let addr = gep(resume, dispatch, frame, &[GepIndex::Field(field), GepIndex::ConstIndex(0)], Ty::ptr(pointee.clone()));
         resume.replace_uses(*val, addr);
     }
     // Slot addresses warming up in dispatch: handle fields, the result,
     // and the spill slots.
-    let result_addr = result_field.map(|f| {
-        gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(f)],
-            Ty::ptr(result_ty.clone()),
-        )
-    });
+    let result_addr = result_field.map(|f| gep(resume, dispatch, frame, &[GepIndex::Field(f)], Ty::ptr(result_ty.clone())));
     let mut handle_slots: Vec<(Value, Value, Value)> = Vec::new();
     for &hf in &handle_fields {
-        let slot = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(hf)],
-            Ty::ptr(handle_ty.clone()),
-        );
-        let f0 = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(hf), GepIndex::Field(0)],
-            Ty::ptr(Ty::ptr(Ty::Void)),
-        );
-        let f1 = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(hf), GepIndex::Field(1)],
-            Ty::ptr(Ty::ptr(Ty::Void)),
-        );
+        let slot = gep(resume, dispatch, frame, &[GepIndex::Field(hf)], Ty::ptr(handle_ty.clone()));
+        let f0 = gep(resume, dispatch, frame, &[GepIndex::Field(hf), GepIndex::Field(0)], Ty::ptr(Ty::ptr(Ty::Void)));
+        let f1 = gep(resume, dispatch, frame, &[GepIndex::Field(hf), GepIndex::Field(1)], Ty::ptr(Ty::ptr(Ty::Void)));
         handle_slots.push((slot, f0, f1));
     }
     let mut spill_addr: HashMap<Value, Value> = HashMap::new();
     for v in &spill {
         let ty = resume.values[*v].ty.clone();
-        let addr = gep(
-            resume,
-            dispatch,
-            frame,
-            &[GepIndex::Field(spill_field[v])],
-            Ty::ptr(ty),
-        );
+        let addr = gep(resume, dispatch, frame, &[GepIndex::Field(spill_field[v])], Ty::ptr(ty));
         spill_addr.insert(*v, addr);
     }
 
@@ -490,12 +416,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
             let wait = resume.push_block(vec![]);
             let after = resume.push_block(vec![]);
             let pending = resume.push_block(vec![]);
-            Site {
-                wait,
-                after,
-                pending,
-                ..s
-            }
+            Site { wait, after, pending, ..s }
         })
         .collect();
     resume.blocks[dispatch].term = Some(dispatch_term(&sites, state_val, old_entry));
@@ -506,16 +427,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
         while j < sites.len() && sites[j].block == sites[k].block {
             j += 1;
         }
-        split_block(
-            resume,
-            &sites[k..j],
-            k,
-            &handle_slots,
-            state_addr,
-            ctx,
-            free,
-            &mut child_frames,
-        );
+        split_block(resume, &sites[k..j], k, &handle_slots, state_addr, ctx, free, &mut child_frames);
         k = j;
     }
     // The awaits are gone and every slot got a frame home: the original
@@ -585,25 +497,10 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
                     continue;
                 }
                 if inst_uses(resume, inst, *v) {
-                    let (ld, lv) = new_inst(
-                        resume,
-                        block,
-                        InstKind::Load {
-                            addr,
-                            flags: MemFlags::plain(),
-                        },
-                        Some(ty.clone()),
-                    );
+                    let (ld, lv) = new_inst(resume, block, InstKind::Load { addr, flags: MemFlags::plain() }, Some(ty.clone()));
                     rebuilt.push(ld);
                     let lv = lv.expect("spill load is typed");
-                    resume.insts[inst].kind =
-                        crate::ir::remap_inst(&resume.insts[inst].kind, |x| {
-                            if x == *v {
-                                lv
-                            } else {
-                                x
-                            }
-                        });
+                    resume.insts[inst].kind = crate::ir::remap_inst(&resume.insts[inst].kind, |x| if x == *v { lv } else { x });
                 }
                 rebuilt.push(inst);
             }
@@ -612,23 +509,9 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
             if let Some(term) = term {
                 let uses = term.operands().iter().any(|&o| o == *v);
                 let term = if uses {
-                    let (ld, lv) = new_inst(
-                        resume,
-                        block,
-                        InstKind::Load {
-                            addr,
-                            flags: MemFlags::plain(),
-                        },
-                        Some(ty.clone()),
-                    );
+                    let (ld, lv) = new_inst(resume, block, InstKind::Load { addr, flags: MemFlags::plain() }, Some(ty.clone()));
                     resume.blocks[block].insts.push(ld);
-                    crate::ir::remap_term(&term, |x| {
-                        if x == *v {
-                            lv.expect("spill load is typed")
-                        } else {
-                            x
-                        }
-                    })
+                    crate::ir::remap_term(&term, |x| if x == *v { lv.expect("spill load is typed") } else { x })
                 } else {
                     term
                 };
@@ -652,16 +535,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
 /// dropped (they belong to no block afterwards). `base` is the global
 /// index of `sites[0]`.
 #[allow(clippy::too_many_arguments)]
-fn split_block(
-    func: &mut Function,
-    sites: &[Site],
-    base: usize,
-    handle_slots: &[(Value, Value, Value)],
-    state_addr: Value,
-    ctx: Value,
-    free: Extern,
-    child_frames: &mut [Value],
-) {
+fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &[(Value, Value, Value)], state_addr: Value, ctx: Value, free: Extern, child_frames: &mut [Value]) {
     let block = sites[0].block;
     let n = sites.len();
     let taken = std::mem::take(&mut func.blocks[block].insts);
@@ -747,12 +621,7 @@ fn split_block(
             }
             let mut args = SmallVec::new();
             args.push(child);
-            let (call, _) = new_inst(
-                func,
-                target,
-                InstKind::CallExtern { target: free, args },
-                None,
-            );
+            let (call, _) = new_inst(func, target, InstKind::CallExtern { target: free, args }, None);
             list.push(call);
         }
         for &inst in &lists[i] {
@@ -821,11 +690,7 @@ fn live_after_awaits(func: &Function, sites: &[Site]) -> Vec<HashSet<Value>> {
     let succs: Vec<Vec<Block>> = (0..n)
         .map(|b| {
             let block = Block::from_usize(b);
-            func.blocks[block]
-                .term
-                .as_ref()
-                .map(|t| t.successors().iter().copied().collect())
-                .unwrap_or_default()
+            func.blocks[block].term.as_ref().map(|t| t.successors().iter().copied().collect()).unwrap_or_default()
         })
         .collect();
     let mut live_in: Vec<HashSet<Value>> = vec![HashSet::new(); n];
@@ -901,14 +766,7 @@ fn inst_uses(func: &Function, inst: Inst, v: Value) -> bool {
 
 // ---- the start function ----
 
-fn build_start(
-    module: &mut Module,
-    id: Func,
-    resume_id: Func,
-    alloc: Extern,
-    layout: &FrameLayout,
-    handle_ty: &Ty,
-) {
+fn build_start(module: &mut Module, id: Func, resume_id: Func, alloc: Extern, layout: &FrameLayout, handle_ty: &Ty) {
     let func = &mut module.funcs[id];
     func.coroutine = None;
     func.inline = false;
@@ -931,37 +789,15 @@ fn build_start(
     let mut args = SmallVec::new();
     args.push(size);
     args.push(align);
-    let raw = emit_val(
-        func,
-        entry,
-        InstKind::CallExtern { target: alloc, args },
-        Ty::ptr(Ty::Void),
-    );
-    let fp = emit_val(
-        func,
-        entry,
-        InstKind::Bitcast(raw),
-        Ty::ptr(layout.ty.clone()),
-    );
+    let raw = emit_val(func, entry, InstKind::CallExtern { target: alloc, args }, Ty::ptr(Ty::Void));
+    let fp = emit_val(func, entry, InstKind::Bitcast(raw), Ty::ptr(layout.ty.clone()));
 
-    let state_addr = gep(
-        func,
-        entry,
-        fp,
-        &[GepIndex::Field(layout.state_field)],
-        Ty::ptr(Ty::int(32)),
-    );
+    let state_addr = gep(func, entry, fp, &[GepIndex::Field(layout.state_field)], Ty::ptr(Ty::int(32)));
     let zero = iconst(func, 32, 0);
     store(func, entry, state_addr, zero);
 
     for (i, ty) in params.iter().enumerate() {
-        let addr = gep(
-            func,
-            entry,
-            fp,
-            &[GepIndex::Field(layout.param_fields[i])],
-            Ty::ptr(ty.clone()),
-        );
+        let addr = gep(func, entry, fp, &[GepIndex::Field(layout.param_fields[i])], Ty::ptr(ty.clone()));
         store(func, entry, addr, func.blocks[entry].params[i]);
     }
 
@@ -976,32 +812,14 @@ fn build_start(
         },
         Ty::ptr(handle_ty.clone()),
     );
-    let f0 = gep(
-        func,
-        entry,
-        slot,
-        &[GepIndex::Field(0)],
-        Ty::ptr(Ty::ptr(Ty::Void)),
-    );
+    let f0 = gep(func, entry, slot, &[GepIndex::Field(0)], Ty::ptr(Ty::ptr(Ty::Void)));
     store(func, entry, f0, raw);
-    let f1 = gep(
-        func,
-        entry,
-        slot,
-        &[GepIndex::Field(1)],
-        Ty::ptr(Ty::ptr(Ty::Void)),
-    );
-    let poll = emit_val(
-        func,
-        entry,
-        InstKind::FuncAddr { func: resume_id },
-        Ty::ptr(Ty::Void),
-    );
+    let f1 = gep(func, entry, slot, &[GepIndex::Field(1)], Ty::ptr(Ty::ptr(Ty::Void)));
+    let poll = emit_val(func, entry, InstKind::FuncAddr { func: resume_id }, Ty::ptr(Ty::Void));
     store(func, entry, f1, poll);
     let handle = load(func, entry, slot, handle_ty.clone());
     func.blocks[entry].term = Some(Terminator::Return { val: Some(handle) });
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1031,18 +849,14 @@ mod tests {
     fn add_param(func: &mut Function, ty: Ty) -> Value {
         let entry = func.entry;
         let i = func.blocks[entry].params.len() as u32;
-        let v = func.values.push(ValueData {
-            ty,
-            def: Def::Param(entry, i),
-        });
+        let v = func.values.push(ValueData { ty, def: Def::Param(entry, i) });
         func.blocks[entry].params.push(v);
         v
     }
 
     fn await_value(func: &mut Function, block: Block) -> Value {
         let fut = handle_value(func);
-        emit(func, block, InstKind::Await { fut }, Some(Ty::int(32)))
-            .expect("await yields the child result")
+        emit(func, block, InstKind::Await { fut }, Some(Ty::int(32))).expect("await yields the child result")
     }
 
     /// `int f(int x)`: `x + 1` is live across the suspension; the
@@ -1071,16 +885,7 @@ mod tests {
         let (mut func, entry) = Function::new("g", Signature::new(vec![Ty::int(32)], handle_ty()));
         func.coroutine = Some(Ty::int(32));
         let x = add_param(&mut func, Ty::int(32));
-        let slot = emit(
-            &mut func,
-            entry,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 2,
-            },
-            Some(Ty::ptr(Ty::int(32))),
-        )
-        .expect("alloca yields an address");
+        let slot = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 2 }, Some(Ty::ptr(Ty::int(32)))).expect("alloca yields an address");
         store(&mut func, entry, slot, x);
         let res = await_value(&mut func, entry);
         let loaded = load(&mut func, entry, slot, Ty::int(32));
@@ -1113,9 +918,7 @@ mod tests {
         func.blocks
             .iter()
             .filter_map(|b| match &b.term {
-                Some(Terminator::Return { val }) => {
-                    Some(val.map(|v| func.const_value(v).cloned().unwrap_or(Const::Undef)))
-                }
+                Some(Terminator::Return { val }) => Some(val.map(|v| func.const_value(v).cloned().unwrap_or(Const::Undef))),
                 _ => None,
             })
             .collect()
@@ -1134,27 +937,14 @@ mod tests {
         assert!(start.coroutine.is_none(), "the flag is consumed");
         assert_eq!(start.sig, Signature::new(vec![Ty::int(32)], handle_ty()));
         assert_eq!(start.blocks.len(), 1);
-        let Some(Terminator::Return { val: Some(handle) }) =
-            start.blocks[start.entry].term.clone()
-        else {
+        let Some(Terminator::Return { val: Some(handle) }) = start.blocks[start.entry].term.clone() else {
             panic!("start returns the handle");
         };
         assert_eq!(start.values[handle].ty, handle_ty());
-        let kinds: Vec<InstKind> = start.blocks[start.entry]
-            .insts
-            .iter()
-            .map(|i| start.insts[*i].kind.clone())
-            .collect();
+        let kinds: Vec<InstKind> = start.blocks[start.entry].insts.iter().map(|i| start.insts[*i].kind.clone()).collect();
+        assert!(kinds.iter().any(|k| matches!(k, InstKind::CallExtern { .. })), "the start allocates the frame");
         assert!(
-            kinds
-                .iter()
-                .any(|k| matches!(k, InstKind::CallExtern { .. })),
-            "the start allocates the frame"
-        );
-        assert!(
-            kinds
-                .iter()
-                .any(|k| matches!(k, InstKind::FuncAddr { func } if *func == resume_id)),
+            kinds.iter().any(|k| matches!(k, InstKind::FuncAddr { func } if *func == resume_id)),
             "the handle points at the resume entry"
         );
 
@@ -1162,9 +952,7 @@ mod tests {
         assert_eq!(resume.name, "f$resume");
         assert_eq!(resume.sig, poll_sig());
         assert_eq!(resume.blocks[resume.entry].params.len(), 2);
-        let Some(Terminator::Switch { cases, default, .. }) =
-            resume.blocks[resume.entry].term.clone()
-        else {
+        let Some(Terminator::Switch { cases, default, .. }) = resume.blocks[resume.entry].term.clone() else {
             panic!("dispatch switches on the resume state");
         };
         assert_eq!(cases.len(), 1);
@@ -1172,26 +960,17 @@ mod tests {
         assert_eq!(default.index(), 0, "state 0 falls back to the body top");
         let wait = cases[0].1;
         assert!(
-            resume.blocks[wait]
-                .insts
-                .iter()
-                .any(|i| matches!(resume.insts[*i].kind, InstKind::CallIndirect { .. })),
+            resume.blocks[wait].insts.iter().any(|i| matches!(resume.insts[*i].kind, InstKind::CallIndirect { .. })),
             "the wait block polls the child"
         );
 
         let returns = returns_of(resume);
         assert!(
-            returns.contains(&Some(Const::Int {
-                bits: 32,
-                value: READY as i128
-            })),
+            returns.contains(&Some(Const::Int { bits: 32, value: READY as i128 })),
             "completion reports READY: {returns:?}"
         );
         assert!(
-            returns.contains(&Some(Const::Int {
-                bits: 32,
-                value: PENDING as i128
-            })),
+            returns.contains(&Some(Const::Int { bits: 32, value: PENDING as i128 })),
             "suspension reports PENDING: {returns:?}"
         );
 
@@ -1222,10 +1001,7 @@ mod tests {
         let reloaded = resume.blocks.iter().any(|b| {
             b.insts.iter().any(|i| match &resume.insts[*i].kind {
                 InstKind::Load { addr, .. } => match resume.values[*addr].def {
-                    Def::Inst(def) => matches!(
-                        resume.insts[def].kind,
-                        InstKind::GetElementPtr { .. }
-                    ),
+                    Def::Inst(def) => matches!(resume.insts[def].kind, InstKind::GetElementPtr { .. }),
                     _ => false,
                 },
                 _ => false,
@@ -1240,10 +1016,10 @@ mod tests {
         let resume = &module.funcs[resume_of(&module)];
 
         assert!(
-            !resume.blocks.iter().any(|b| b
-                .insts
+            !resume
+                .blocks
                 .iter()
-                .any(|i| matches!(resume.insts[*i].kind, InstKind::Alloca { .. }))),
+                .any(|b| b.insts.iter().any(|i| matches!(resume.insts[*i].kind, InstKind::Alloca { .. }))),
             "slots live in the frame, not on the stack"
         );
 
@@ -1255,14 +1031,8 @@ mod tests {
                 match &resume.insts[i].kind {
                     InstKind::Store { addr, .. } | InstKind::Load { addr, .. } => {
                         if let Def::Inst(def) = resume.values[*addr].def {
-                            if let InstKind::GetElementPtr { base, indices } = &resume.insts[def].kind
-                            {
-                                if matches!(
-                                    indices.as_slice(),
-                                    [GepIndex::Field(_), GepIndex::ConstIndex(0)]
-                                ) && resume.values[*base].def
-                                    == Def::Param(resume.entry, 0)
-                                {
+                            if let InstKind::GetElementPtr { base, indices } = &resume.insts[def].kind {
+                                if matches!(indices.as_slice(), [GepIndex::Field(_), GepIndex::ConstIndex(0)]) && resume.values[*base].def == Def::Param(resume.entry, 0) {
                                     addrs.push(*addr);
                                 }
                             }
@@ -1273,10 +1043,7 @@ mod tests {
             }
         }
         assert!(addrs.len() >= 2, "the slot is addressed twice: {addrs:?}");
-        assert!(
-            addrs.iter().all(|a| *a == addrs[0]),
-            "one frame GEP is shared: {addrs:?}"
-        );
+        assert!(addrs.iter().all(|a| *a == addrs[0]), "one frame GEP is shared: {addrs:?}");
     }
 
     #[test]
@@ -1297,13 +1064,7 @@ mod tests {
 
         assert_eq!(start.sig, Signature::new(vec![Ty::int(32)], handle_ty()));
         assert_eq!(resume.blocks.len(), 2, "dispatch plus the body");
-        assert!(
-            matches!(
-                resume.blocks[resume.entry].term,
-                Some(Terminator::Br { .. })
-            ),
-            "no states without suspensions"
-        );
+        assert!(matches!(resume.blocks[resume.entry].term, Some(Terminator::Br { .. })), "no states without suspensions");
         assert!(verify_func(start).is_empty());
         assert!(verify_func(resume).is_empty());
     }

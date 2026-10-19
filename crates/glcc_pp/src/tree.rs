@@ -6,7 +6,7 @@
 use glcc_frontend::lexer::{Interner, PpToken, PpWs, Punctuator};
 
 use crate::expand::Tok;
-use crate::{err, PpError};
+use crate::{PpError, err};
 
 #[derive(Debug, Clone)]
 pub enum ControlLine {
@@ -46,7 +46,10 @@ pub enum ControlLine {
     PragmaOnce,
     /// Any other `#pragma`: the tokens after the directive keyword
     /// (whitespace dropped, `space` flags kept) and the directive line.
-    PragmaOther { tokens: Vec<Tok>, line: u64 },
+    PragmaOther {
+        tokens: Vec<Tok>,
+        line: u64,
+    },
     Line(Vec<Tok>),
     Empty,
 }
@@ -91,7 +94,11 @@ pub struct IntoTokenTree {
 
 impl IntoTokenTree {
     pub fn new(tokens: Vec<Tok>) -> Self {
-        Self { tokens, pos: 0, expecting_opposition: false }
+        Self {
+            tokens,
+            pos: 0,
+            expecting_opposition: false,
+        }
     }
 
     fn peek(&self) -> Option<&Tok> {
@@ -151,9 +158,7 @@ impl IntoTokenTree {
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
                 Ok(Some(TokenTree::IfNDef { macro_name, body, opposition }))
             }
-            ControlLine::Elif { .. } | ControlLine::Else if !self.expecting_opposition => {
-                Err(err(format!("{file}:{}: #elif/#else without #if", tok.line)))
-            }
+            ControlLine::Elif { .. } | ControlLine::Else if !self.expecting_opposition => Err(err(format!("{file}:{}: #elif/#else without #if", tok.line))),
             ControlLine::Elif { condition } => {
                 let body = self.until_closer(file, interner)?;
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
@@ -190,10 +195,7 @@ impl IntoTokenTree {
                     Kind::Other => {}
                 }
             }
-            body.push(
-                self.next_tree(file, interner)?
-                    .ok_or_else(|| err(format!("{file}: unterminated conditional")))?,
-            );
+            body.push(self.next_tree(file, interner)?.ok_or_else(|| err(format!("{file}: unterminated conditional")))?);
         }
     }
 
@@ -399,10 +401,17 @@ fn parse_define(args: &[&Tok], tail: &[Tok], loc: &str, interner: &Interner) -> 
             }
             let parameters = tail[name_idx + 2..j].to_vec();
             let replacement = trim_ws_tokens(&tail[j + 1..]);
-            return Ok(ControlLine::DefineFunction { macro_name, parameters, replacement });
+            return Ok(ControlLine::DefineFunction {
+                macro_name,
+                parameters,
+                replacement,
+            });
         }
     }
-    Ok(ControlLine::DefineObject { macro_name, replacement: trim_ws_tokens(&tail[name_idx.saturating_add(1)..]) })
+    Ok(ControlLine::DefineObject {
+        macro_name,
+        replacement: trim_ws_tokens(&tail[name_idx.saturating_add(1)..]),
+    })
 }
 
 /// Strip leading/trailing `Space`/`Tab` tokens (newlines never occur
@@ -438,5 +447,9 @@ fn parse_include(tail: &[Tok], loc: &str, interner: &Interner, next: bool) -> Re
         return Ok(ControlLine::Include { header, verbatim: true, next });
     }
     let _ = (interner, loc);
-    Ok(ControlLine::Include { header: tail.to_vec(), verbatim: false, next })
+    Ok(ControlLine::Include {
+        header: tail.to_vec(),
+        verbatim: false,
+        next,
+    })
 }

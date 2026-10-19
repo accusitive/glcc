@@ -18,10 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, UnOp};
 use crate::defs::{Bound, Defs, FnId, Scheme, ValueId};
-use crate::hir::{
-    BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn,
-    HirLocal, HirPat, HirPatKind, HirProgram,
-};
+use crate::hir::{BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn, HirLocal, HirPat, HirPatKind, HirProgram};
 use crate::infer::InferCtx;
 use crate::solve::{Obligation, Solution, Solver};
 use crate::span::{Diag, KResult, Span};
@@ -82,10 +79,7 @@ impl BodyState {
     }
 
     fn lookup(&self, name: &str) -> Option<usize> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
+        self.scopes.iter().rev().find_map(|scope| scope.get(name).copied())
     }
 
     /// The local of this body that holds the copy of `outer`, adding
@@ -149,32 +143,21 @@ impl<'d> Check<'d> {
     fn check_fn(&mut self, id: FnId, f: &ast::FnDecl) -> KResult<()> {
         let span = f.span;
         let name = f.name.clone();
-        let (scheme, hir_fn) = self.check_root(
-            BodyKey::Fn(id),
-            name,
-            span,
-            Vec::new(),
-            Vec::new(),
-            false,
-            &mut |this| {
-                check_param_names(&f.params, span)?;
-                let ret = this.infer.fresh();
-                let mut params = Vec::new();
-                let mut param_tys = Vec::new();
-                for p in &f.params {
-                    let t = this.infer.fresh();
-                    param_tys.push(t.clone());
-                    params.push(this.check_pat(p, &t, span)?);
-                }
-                let fn_ty = param_tys
-                    .iter()
-                    .rev()
-                    .fold(ret.clone(), |acc, t| Ty::arrow(t.clone(), acc));
-                this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
-                let body = this.check_expr(&f.body, &ret)?;
-                Ok((params, ret, body, fn_ty))
-            },
-        )?;
+        let (scheme, hir_fn) = self.check_root(BodyKey::Fn(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
+            check_param_names(&f.params, span)?;
+            let ret = this.infer.fresh();
+            let mut params = Vec::new();
+            let mut param_tys = Vec::new();
+            for p in &f.params {
+                let t = this.infer.fresh();
+                param_tys.push(t.clone());
+                params.push(this.check_pat(p, &t, span)?);
+            }
+            let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, t| Ty::arrow(t.clone(), acc));
+            this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
+            let body = this.check_expr(&f.body, &ret)?;
+            Ok((params, ret, body, fn_ty))
+        })?;
         self.fn_schemes[id.index()] = Some(scheme);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -183,20 +166,12 @@ impl<'d> Check<'d> {
     fn check_value(&mut self, id: ValueId, v: &ast::ValueDecl) -> KResult<()> {
         let span = v.span;
         let name = v.name.clone();
-        let (scheme, hir_fn) = self.check_root(
-            BodyKey::Value(id),
-            name,
-            span,
-            Vec::new(),
-            Vec::new(),
-            false,
-            &mut |this| {
-                let ty = this.infer.fresh();
-                this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-                let body = this.check_expr(&v.body, &ty)?;
-                Ok((Vec::new(), ty.clone(), body, ty))
-            },
-        )?;
+        let (scheme, hir_fn) = self.check_root(BodyKey::Value(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
+            let ty = this.infer.fresh();
+            this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+            let body = this.check_expr(&v.body, &ty)?;
+            Ok((Vec::new(), ty.clone(), body, ty))
+        })?;
         self.value_schemes[id.index()] = Some(scheme);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -208,10 +183,7 @@ impl<'d> Check<'d> {
 
         for m in &inst.methods {
             if class.method(&m.name).is_none() {
-                return Err(Diag::new(
-                    format!("class `{}` has no method `{}`", class.name, m.name),
-                    m.span,
-                ));
+                return Err(Diag::new(format!("class `{}` has no method `{}`", class.name, m.name), m.span));
             }
         }
 
@@ -244,8 +216,7 @@ impl<'d> Check<'d> {
         }
         let sig = method.ty.substitute(&map);
 
-        let class_params: HashSet<&str> =
-            class.params.iter().map(|(n, _)| n.as_str()).collect();
+        let class_params: HashSet<&str> = class.params.iter().map(|(n, _)| n.as_str()).collect();
         let mut generics = inst.generics.clone();
         for (name, kind) in &method.vars {
             if !class_params.contains(name.as_str()) {
@@ -320,11 +291,7 @@ impl<'d> Check<'d> {
         let state = self.bodies.pop().unwrap();
 
         let scheme = self.infer.generalize(&fn_ty);
-        let item_generics = if is_method {
-            generics
-        } else {
-            scheme.vars.clone()
-        };
+        let item_generics = if is_method { generics } else { scheme.vars.clone() };
         let allowed: HashSet<String> = item_generics.iter().map(|(n, _)| n.clone()).collect();
         let ids = self.infer.unbound_ids();
         let self_ref = self.self_ref.take();
@@ -399,16 +366,10 @@ impl<'d> Check<'d> {
             ast::ExprKind::Ctor { name } => self.synthesize_ctor(name, &[], span),
             ast::ExprKind::Var(name) => self.synthesize_var(name, span),
             ast::ExprKind::Call(callee, args) => self.synthesize_call(callee, args, span),
-            ast::ExprKind::ClassSel {
-                class,
-                method,
-                args,
-            } => self.synthesize_class_sel(class, method, args, span),
+            ast::ExprKind::ClassSel { class, method, args } => self.synthesize_class_sel(class, method, args, span),
             ast::ExprKind::Lambda { params, body } => self.synthesize_lambda(params, body, span),
             ast::ExprKind::Let { binds, body } => self.synthesize_let(binds, body, span),
-            ast::ExprKind::Match { scrutinee, arms } => {
-                self.synthesize_match(scrutinee, arms, span)
-            }
+            ast::ExprKind::Match { scrutinee, arms } => self.synthesize_match(scrutinee, arms, span),
             ast::ExprKind::Tuple(items) => {
                 let mut hir_items = Vec::with_capacity(items.len());
                 let mut tys = Vec::with_capacity(items.len());
@@ -424,11 +385,7 @@ impl<'d> Check<'d> {
                 })
             }
             ast::ExprKind::List(items) => self.synthesize_list(items, span),
-            ast::ExprKind::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
+            ast::ExprKind::If { cond, then_body, else_body } => {
                 let cond_hir = self.check_expr(cond, &Ty::bool_ty())?;
                 let then_hir = self.synth(then_body)?;
                 let ty = then_hir.ty.clone();
@@ -467,20 +424,14 @@ impl<'d> Check<'d> {
             match self_ref {
                 SelfRef::Fn(id, sname, ty) if sname == name => {
                     return Ok(HirExpr {
-                        kind: HirExprKind::Fn(FnRef::Fn {
-                            id: *id,
-                            args: Vec::new(),
-                        }),
+                        kind: HirExprKind::Fn(FnRef::Fn { id: *id, args: Vec::new() }),
                         ty: ty.clone(),
                         span,
                     });
                 }
                 SelfRef::Value(id, sname, ty) if sname == name => {
                     return Ok(HirExpr {
-                        kind: HirExprKind::Fn(FnRef::Value {
-                            id: *id,
-                            args: Vec::new(),
-                        }),
+                        kind: HirExprKind::Fn(FnRef::Value { id: *id, args: Vec::new() }),
                         ty: ty.clone(),
                         span,
                     });
@@ -490,10 +441,7 @@ impl<'d> Check<'d> {
         }
         if let Some(id) = self.defs.fn_by_name(name) {
             let Some(scheme) = self.fn_schemes[id.index()].clone() else {
-                return Err(Diag::new(
-                    format!("`{name}` is used before it is defined"),
-                    span,
-                ));
+                return Err(Diag::new(format!("`{name}` is used before it is defined"), span));
             };
             let (ty, args) = self.infer.instantiate_args(&scheme.vars, &scheme.ty);
             return Ok(HirExpr {
@@ -504,10 +452,7 @@ impl<'d> Check<'d> {
         }
         if let Some(id) = self.defs.value_by_name(name) {
             let Some(scheme) = self.value_schemes[id.index()].clone() else {
-                return Err(Diag::new(
-                    format!("`{name}` is used before it is defined"),
-                    span,
-                ));
+                return Err(Diag::new(format!("`{name}` is used before it is defined"), span));
             };
             let (ty, args) = self.infer.instantiate_args(&scheme.vars, &scheme.ty);
             return Ok(HirExpr {
@@ -541,12 +486,7 @@ impl<'d> Check<'d> {
     /// A reference to a class method as a value: the class parameters
     /// and the method's own variables are instantiated fresh, and
     /// dispatch happens once a call site has constrained them.
-    fn class_method_value(
-        &mut self,
-        class_id: crate::defs::ClassId,
-        method: usize,
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn class_method_value(&mut self, class_id: crate::defs::ClassId, method: usize, span: Span) -> KResult<HirExpr> {
         let class = self.defs.classes[class_id.index()].clone();
         let mdef = class.methods[method].clone();
         let class_names: HashSet<&str> = class.params.iter().map(|(n, _)| n.as_str()).collect();
@@ -558,30 +498,19 @@ impl<'d> Check<'d> {
         }
         let (ty, args) = self.infer.instantiate_args(&vars, &mdef.ty);
         Ok(HirExpr {
-            kind: HirExprKind::Fn(FnRef::Class {
-                class_id,
-                method,
-                args,
-            }),
+            kind: HirExprKind::Fn(FnRef::Class { class_id, method, args }),
             ty,
             span,
         })
     }
 
     fn synthesize_ctor(&mut self, name: &str, args: &[ast::Expr], span: Span) -> KResult<HirExpr> {
-        let (data_id, tag) = self
-            .defs
-            .ctor_by_name(name)
-            .ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
+        let (data_id, tag) = self.defs.ctor_by_name(name).ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
         let data = self.defs.data[data_id.index()].clone();
         let ctor = data.ctors[tag as usize].clone();
         if ctor.args.len() != args.len() {
             return Err(Diag::new(
-                format!(
-                    "constructor `{name}` takes {} field(s), but {} argument(s) were given",
-                    ctor.args.len(),
-                    args.len()
-                ),
+                format!("constructor `{name}` takes {} field(s), but {} argument(s) were given", ctor.args.len(), args.len()),
                 span,
             ));
         }
@@ -611,12 +540,7 @@ impl<'d> Check<'d> {
         })
     }
 
-    fn synthesize_call(
-        &mut self,
-        callee: &ast::Expr,
-        args: &[ast::Expr],
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> KResult<HirExpr> {
         let callee_hir = self.synth(callee)?;
         let callee_ty = callee_hir.ty.clone();
         // A named callee is fully applied to its declared parameters, so
@@ -633,16 +557,9 @@ impl<'d> Check<'d> {
             None => self.arity_scan(&callee_ty),
         };
         if args.len() < known || (!open && args.len() != known) {
-            let count = if open {
-                format!("at least {known}")
-            } else {
-                format!("{known}")
-            };
+            let count = if open { format!("at least {known}") } else { format!("{known}") };
             return Err(Diag::new(
-                format!(
-                    "this function takes {count} parameter(s), but {} argument(s) were given",
-                    args.len()
-                ),
+                format!("this function takes {count} parameter(s), but {} argument(s) were given", args.len()),
                 span,
             ));
         }
@@ -651,8 +568,7 @@ impl<'d> Check<'d> {
         for _ in args {
             let a = self.infer.fresh();
             let r = self.infer.fresh();
-            self.infer
-                .unify(&cur, &Ty::arrow(a.clone(), r.clone()), callee.span)?;
+            self.infer.unify(&cur, &Ty::arrow(a.clone(), r.clone()), callee.span)?;
             params.push(a);
             cur = r;
         }
@@ -662,21 +578,14 @@ impl<'d> Check<'d> {
         }
         let ty = cur;
         let kind = match callee_hir.kind {
-            HirExprKind::Fn(FnRef::Class {
-                class_id,
-                method,
-                args,
-            }) => self.dispatch_class(class_id, method, args, hir_args, span)?,
+            HirExprKind::Fn(FnRef::Class { class_id, method, args }) => self.dispatch_class(class_id, method, args, hir_args, span)?,
             // A top-level `let` is evaluated to a closure value, so calls
             // go through the value rather than to a function body.
             HirExprKind::Fn(FnRef::Value { .. }) => HirExprKind::Call {
                 callee: Box::new(callee_hir),
                 args: hir_args,
             },
-            HirExprKind::Fn(target) => HirExprKind::CallDirect {
-                target,
-                args: hir_args,
-            },
+            HirExprKind::Fn(target) => HirExprKind::CallDirect { target, args: hir_args },
             kind => HirExprKind::Call {
                 callee: Box::new(HirExpr {
                     kind,
@@ -696,14 +605,7 @@ impl<'d> Check<'d> {
     ///
     /// `args` carries the class arguments followed by the method's own
     /// instantiation, matching the layout [`FnRef::Class`] documents.
-    fn dispatch_class(
-        &mut self,
-        class_id: crate::defs::ClassId,
-        method: usize,
-        args: Vec<Ty>,
-        hir_args: Vec<HirExpr>,
-        span: Span,
-    ) -> KResult<HirExprKind> {
+    fn dispatch_class(&mut self, class_id: crate::defs::ClassId, method: usize, args: Vec<Ty>, hir_args: Vec<HirExpr>, span: Span) -> KResult<HirExprKind> {
         let n_class = self.defs.classes[class_id.index()].params.len();
         let class_args = args[..n_class].to_vec();
         let method_args = args[n_class..].to_vec();
@@ -723,41 +625,21 @@ impl<'d> Check<'d> {
                     args: all,
                 }
             }
-            Solution::Bound | Solution::Deferred => FnRef::Class {
-                class_id,
-                method,
-                args,
-            },
+            Solution::Bound | Solution::Deferred => FnRef::Class { class_id, method, args },
             _ => return Err(self.solver.describe_failure(&goal, &solution, span)),
         };
-        Ok(HirExprKind::CallDirect {
-            target,
-            args: hir_args,
-        })
+        Ok(HirExprKind::CallDirect { target, args: hir_args })
     }
 
-    fn synthesize_class_sel(
-        &mut self,
-        class: &str,
-        method: &str,
-        args: &[ast::Expr],
-        span: Span,
-    ) -> KResult<HirExpr> {
-        let class_id = self
-            .defs
-            .class_by_name(class)
-            .ok_or_else(|| Diag::new(format!("cannot find class `{class}`"), span))?;
+    fn synthesize_class_sel(&mut self, class: &str, method: &str, args: &[ast::Expr], span: Span) -> KResult<HirExpr> {
+        let class_id = self.defs.class_by_name(class).ok_or_else(|| Diag::new(format!("cannot find class `{class}`"), span))?;
         let class_def = self.defs.classes[class_id.index()].clone();
         let Some(mi) = class_def.method(method) else {
-            return Err(Diag::new(
-                format!("class `{class}` has no method `{method}`"),
-                span,
-            ));
+            return Err(Diag::new(format!("class `{class}` has no method `{method}`"), span));
         };
         let mdef = class_def.methods[mi].clone();
 
-        let class_params: HashSet<&str> =
-            class_def.params.iter().map(|(n, _)| n.as_str()).collect();
+        let class_params: HashSet<&str> = class_def.params.iter().map(|(n, _)| n.as_str()).collect();
         let mut vars = class_def.params.clone();
         for (n, k) in &mdef.vars {
             if !class_params.contains(n.as_str()) {
@@ -769,11 +651,7 @@ impl<'d> Check<'d> {
         let (params, ret) = split_arrows(&sig);
         if params.len() != args.len() {
             return Err(Diag::new(
-                format!(
-                    "`{class}::{method}` takes {} parameter(s), but {} argument(s) were given",
-                    params.len(),
-                    args.len()
-                ),
+                format!("`{class}::{method}` takes {} parameter(s), but {} argument(s) were given", params.len(), args.len()),
                 span,
             ));
         }
@@ -783,19 +661,10 @@ impl<'d> Check<'d> {
         }
 
         let kind = self.dispatch_class(class_id, mi, all_args, hir_args, span)?;
-        Ok(HirExpr {
-            kind,
-            ty: ret,
-            span,
-        })
+        Ok(HirExpr { kind, ty: ret, span })
     }
 
-    fn synthesize_lambda(
-        &mut self,
-        params: &[ast::Pat],
-        body: &ast::Expr,
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_lambda(&mut self, params: &[ast::Pat], body: &ast::Expr, span: Span) -> KResult<HirExpr> {
         check_param_names(params, span)?;
         self.bodies.push(BodyState::new());
         let mut param_pats = Vec::new();
@@ -826,13 +695,7 @@ impl<'d> Check<'d> {
             body: body_hir,
             span,
         });
-        let ty = self
-            .hir
-            .closures[id as usize]
-            .params
-            .iter()
-            .rev()
-            .fold(ret, |acc, p| Ty::arrow(p.ty.clone(), acc));
+        let ty = self.hir.closures[id as usize].params.iter().rev().fold(ret, |acc, p| Ty::arrow(p.ty.clone(), acc));
         Ok(HirExpr {
             kind: HirExprKind::Closure { id, captures },
             ty,
@@ -840,12 +703,7 @@ impl<'d> Check<'d> {
         })
     }
 
-    fn synthesize_let(
-        &mut self,
-        binds: &[(ast::Pat, ast::Expr)],
-        body: &ast::Expr,
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_let(&mut self, binds: &[(ast::Pat, ast::Expr)], body: &ast::Expr, span: Span) -> KResult<HirExpr> {
         self.push_scope();
         let built = (|| {
             let mut hir_binds = Vec::new();
@@ -870,12 +728,7 @@ impl<'d> Check<'d> {
         built
     }
 
-    fn synthesize_match(
-        &mut self,
-        scrutinee: &ast::Expr,
-        arms: &[ast::MatchArm],
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_match(&mut self, scrutinee: &ast::Expr, arms: &[ast::MatchArm], span: Span) -> KResult<HirExpr> {
         let scrut = self.synth(scrutinee)?;
         let scrut_ty = scrut.ty.clone();
         let result = self.infer.fresh();
@@ -889,11 +742,7 @@ impl<'d> Check<'d> {
                     None => None,
                 };
                 let body = self.check_expr(&arm.body, &result)?;
-                Ok(HirArm {
-                    pattern: pat,
-                    guard,
-                    body,
-                })
+                Ok(HirArm { pattern: pat, guard, body })
             })();
             self.pop_scope();
             hir_arms.push(built?);
@@ -940,13 +789,7 @@ impl<'d> Check<'d> {
         Ok(result)
     }
 
-    fn synthesize_binop(
-        &mut self,
-        op: BinOp,
-        lhs: &ast::Expr,
-        rhs: &ast::Expr,
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_binop(&mut self, op: BinOp, lhs: &ast::Expr, rhs: &ast::Expr, span: Span) -> KResult<HirExpr> {
         let l = self.synth(lhs)?;
         match op {
             BinOp::Cons => {
@@ -1024,12 +867,7 @@ impl<'d> Check<'d> {
         }
     }
 
-    fn synthesize_unop(
-        &mut self,
-        op: UnOp,
-        operand: &ast::Expr,
-        span: Span,
-    ) -> KResult<HirExpr> {
+    fn synthesize_unop(&mut self, op: UnOp, operand: &ast::Expr, span: Span) -> KResult<HirExpr> {
         let o = self.synth(operand)?;
         let ty = match op {
             UnOp::Neg => {
@@ -1042,10 +880,7 @@ impl<'d> Check<'d> {
             }
         };
         Ok(HirExpr {
-            kind: HirExprKind::Un {
-                op,
-                operand: Box::new(o),
-            },
+            kind: HirExprKind::Un { op, operand: Box::new(o) },
             ty,
             span,
         })
@@ -1062,10 +897,7 @@ impl<'d> Check<'d> {
         let mut seen = HashSet::new();
         for name in p.binds() {
             if !seen.insert(name.clone()) {
-                return Err(Diag::new(
-                    format!("the name `{name}` is bound more than once in this pattern"),
-                    span,
-                ));
+                return Err(Diag::new(format!("the name `{name}` is bound more than once in this pattern"), span));
             }
         }
         Ok(())
@@ -1088,19 +920,12 @@ impl<'d> Check<'d> {
             }
             ast::Pat::Paren(inner) => self.pat_inner(inner, expected, span),
             ast::Pat::Ctor { name, fields } => {
-                let (data_id, tag) = self
-                    .defs
-                    .ctor_by_name(name)
-                    .ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
+                let (data_id, tag) = self.defs.ctor_by_name(name).ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
                 let data = self.defs.data[data_id.index()].clone();
                 let ctor = data.ctors[tag as usize].clone();
                 if ctor.args.len() != fields.len() {
                     return Err(Diag::new(
-                        format!(
-                            "constructor `{name}` takes {} field(s), but the pattern has {}",
-                            ctor.args.len(),
-                            fields.len()
-                        ),
+                        format!("constructor `{name}` takes {} field(s), but the pattern has {}", ctor.args.len(), fields.len()),
                         span,
                     ));
                 }
@@ -1136,8 +961,7 @@ impl<'d> Check<'d> {
                 for _ in items {
                     fresh.push(self.infer.fresh());
                 }
-                self.infer
-                    .unify(expected, &Ty::Tuple(fresh.clone()), span)?;
+                self.infer.unify(expected, &Ty::Tuple(fresh.clone()), span)?;
                 let mut hir_items = Vec::new();
                 for (f, want) in items.iter().zip(fresh) {
                     hir_items.push(self.pat_inner(f, &want, span)?);
@@ -1171,16 +995,10 @@ impl<'d> Check<'d> {
 
     fn list_ctors(&self, span: Span) -> KResult<(crate::defs::DataId, usize, usize)> {
         let Some((data_id, cons)) = self.defs.ctor_by_name("Cons") else {
-            return Err(Diag::new(
-                "the list syntax needs the prelude constructor `Cons`",
-                span,
-            ));
+            return Err(Diag::new("the list syntax needs the prelude constructor `Cons`", span));
         };
         let Some((_, nil)) = self.defs.ctor_by_name("Nil") else {
-            return Err(Diag::new(
-                "the list syntax needs the prelude constructor `Nil`",
-                span,
-            ));
+            return Err(Diag::new("the list syntax needs the prelude constructor `Nil`", span));
         };
         Ok((data_id, cons as usize, nil as usize))
     }
@@ -1217,16 +1035,7 @@ impl<'d> Check<'d> {
             });
         }
         let head = self.pat_inner(&items[index], el, span)?;
-        let tail = self.build_list_pattern(
-            items,
-            index + 1,
-            el,
-            list_ty,
-            data_id,
-            cons_tag,
-            nil_tag,
-            span,
-        )?;
+        let tail = self.build_list_pattern(items, index + 1, el, list_ty, data_id, cons_tag, nil_tag, span)?;
         Ok(HirPat {
             kind: HirPatKind::Ctor {
                 data_id,
@@ -1238,13 +1047,7 @@ impl<'d> Check<'d> {
         })
     }
 
-    fn cons_pattern(
-        &mut self,
-        head: &ast::Pat,
-        tail: &ast::Pat,
-        expected: &Ty,
-        span: Span,
-    ) -> KResult<HirPat> {
+    fn cons_pattern(&mut self, head: &ast::Pat, tail: &ast::Pat, expected: &Ty, span: Span) -> KResult<HirPat> {
         let (data_id, cons_tag, _) = self.list_ctors(span)?;
         let el = self.infer.fresh();
         let list_ty = Ty::named("List", vec![el.clone()]);
@@ -1286,15 +1089,8 @@ impl<'d> Check<'d> {
     fn alloc_local(&mut self, name: &str, ty: Ty, span: Span) -> usize {
         let body = self.bodies.last_mut().expect("a body is being checked");
         let id = body.locals.len();
-        body.locals.push(HirLocal {
-            name: name.to_string(),
-            ty,
-            span,
-        });
-        body.scopes
-            .last_mut()
-            .expect("a scope is open")
-            .insert(name.to_string(), id);
+        body.locals.push(HirLocal { name: name.to_string(), ty, span });
+        body.scopes.last_mut().expect("a scope is open").insert(name.to_string(), id);
         id
     }
 
@@ -1313,31 +1109,16 @@ impl<'d> Check<'d> {
     fn numeric(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args }
-                if args.is_empty() && (name == "Int" || name == "Float") =>
-            {
-                Ok(())
-            }
-            other => Err(Diag::new(
-                format!("expected a numeric type, found `{other}`"),
-                span,
-            )),
+            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float") => Ok(()),
+            other => Err(Diag::new(format!("expected a numeric type, found `{other}`"), span)),
         }
     }
 
     fn comparable(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args }
-                if args.is_empty()
-                    && (name == "Int" || name == "Float" || name == "Bool") =>
-            {
-                Ok(())
-            }
-            other => Err(Diag::new(
-                format!("cannot compare values of type `{other}`"),
-                span,
-            )),
+            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool") => Ok(()),
+            other => Err(Diag::new(format!("cannot compare values of type `{other}`"), span)),
         }
     }
 
@@ -1364,12 +1145,8 @@ impl<'d> Check<'d> {
         match target {
             FnRef::Fn { id, .. } => Some(self.defs.fns[id.index()].params.len()),
             FnRef::Value { .. } => None,
-            FnRef::Instance {
-                instance, method, ..
-            } => Some(self.defs.instances[*instance].methods[*method].params.len()),
-            FnRef::Class {
-                class_id, method, ..
-            } => {
+            FnRef::Instance { instance, method, .. } => Some(self.defs.instances[*instance].methods[*method].params.len()),
+            FnRef::Class { class_id, method, .. } => {
                 let sig = &self.defs.classes[class_id.index()].methods[*method].ty;
                 Some(split_arrows(sig).0.len())
             }
@@ -1394,10 +1171,7 @@ fn check_param_names(params: &[ast::Pat], span: Span) -> KResult<()> {
     for p in params {
         for name in p.binds() {
             if !seen.insert(name.clone()) {
-                return Err(Diag::new(
-                    format!("the parameter `{name}` is bound more than once"),
-                    span,
-                ));
+                return Err(Diag::new(format!("the parameter `{name}` is bound more than once"), span));
             }
         }
     }
@@ -1406,13 +1180,7 @@ fn check_param_names(params: &[ast::Pat], span: Span) -> KResult<()> {
 
 // ------------------------------------------------------------ finalize --
 
-fn finalize_ty(
-    infer: &InferCtx,
-    ids: &[u32],
-    allowed: &HashSet<String>,
-    ty: &mut Ty,
-    span: Span,
-) -> KResult<()> {
+fn finalize_ty(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, ty: &mut Ty, span: Span) -> KResult<()> {
     let resolved = infer.resolve(ty);
     *ty = infer.rigidify(&resolved, ids);
     check_unknown_params(ty, allowed, span)
@@ -1420,10 +1188,7 @@ fn finalize_ty(
 
 fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResult<()> {
     match ty {
-        Ty::Param(name) if name.starts_with("t$") && !allowed.contains(name) => Err(Diag::new(
-            "cannot infer this type; use the value so its type is determined".to_string(),
-            span,
-        )),
+        Ty::Param(name) if name.starts_with("t$") && !allowed.contains(name) => Err(Diag::new("cannot infer this type; use the value so its type is determined".to_string(), span)),
         Ty::Named { args, .. } | Ty::Tuple(args) => {
             for a in args {
                 check_unknown_params(a, allowed, span)?;
@@ -1439,18 +1204,9 @@ fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResu
 }
 
 /// Resolves and rigidifies the types carried by a function reference.
-fn finalize_ref(
-    infer: &InferCtx,
-    ids: &[u32],
-    allowed: &HashSet<String>,
-    target: &mut FnRef,
-    span: Span,
-) -> KResult<()> {
+fn finalize_ref(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, target: &mut FnRef, span: Span) -> KResult<()> {
     let args = match target {
-        FnRef::Fn { args, .. }
-        | FnRef::Value { args, .. }
-        | FnRef::Instance { args, .. }
-        | FnRef::Class { args, .. } => args,
+        FnRef::Fn { args, .. } | FnRef::Value { args, .. } | FnRef::Instance { args, .. } | FnRef::Class { args, .. } => args,
     };
     for a in args {
         finalize_ty(infer, ids, allowed, a, span)?;
@@ -1459,21 +1215,12 @@ fn finalize_ref(
 }
 
 fn fixup_self_ref(self_ref: &Option<SelfRef>, generics: &[(String, Kind)], target: &mut FnRef) {
-    let generic_args = || {
-        generics
-            .iter()
-            .map(|(n, _)| Ty::Param(n.clone()))
-            .collect::<Vec<_>>()
-    };
+    let generic_args = || generics.iter().map(|(n, _)| Ty::Param(n.clone())).collect::<Vec<_>>();
     match (self_ref, target) {
-        (Some(SelfRef::Fn(id, _, _)), FnRef::Fn { id: tid, args })
-            if id == tid && args.is_empty() =>
-        {
+        (Some(SelfRef::Fn(id, _, _)), FnRef::Fn { id: tid, args }) if id == tid && args.is_empty() => {
             *args = generic_args();
         }
-        (Some(SelfRef::Value(id, _, _)), FnRef::Value { id: tid, args })
-            if id == tid && args.is_empty() =>
-        {
+        (Some(SelfRef::Value(id, _, _)), FnRef::Value { id: tid, args }) if id == tid && args.is_empty() => {
             *args = generic_args();
         }
         _ => {}
@@ -1481,12 +1228,7 @@ fn fixup_self_ref(self_ref: &Option<SelfRef>, generics: &[(String, Kind)], targe
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finalize_pat(
-    infer: &InferCtx,
-    ids: &[u32],
-    allowed: &HashSet<String>,
-    p: &mut HirPat,
-) -> KResult<()> {
+fn finalize_pat(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, p: &mut HirPat) -> KResult<()> {
     finalize_ty(infer, ids, allowed, &mut p.ty, p.span)?;
     match &mut p.kind {
         HirPatKind::Ctor { fields, .. } | HirPatKind::Tuple(fields) => {
@@ -1500,14 +1242,7 @@ fn finalize_pat(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finalize_expr(
-    infer: &InferCtx,
-    ids: &[u32],
-    allowed: &HashSet<String>,
-    self_ref: &Option<SelfRef>,
-    generics: &[(String, Kind)],
-    e: &mut HirExpr,
-) -> KResult<()> {
+fn finalize_expr(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, self_ref: &Option<SelfRef>, generics: &[(String, Kind)], e: &mut HirExpr) -> KResult<()> {
     finalize_ty(infer, ids, allowed, &mut e.ty, e.span)?;
     match &mut e.kind {
         HirExprKind::Const(_) | HirExprKind::Local(_) => {}
@@ -1541,11 +1276,7 @@ fn finalize_expr(
             }
             finalize_expr(infer, ids, allowed, self_ref, generics, body)?;
         }
-        HirExprKind::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
+        HirExprKind::If { cond, then_body, else_body } => {
             finalize_expr(infer, ids, allowed, self_ref, generics, cond)?;
             finalize_expr(infer, ids, allowed, self_ref, generics, then_body)?;
             finalize_expr(infer, ids, allowed, self_ref, generics, else_body)?;

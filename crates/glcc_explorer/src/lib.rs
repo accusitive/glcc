@@ -251,9 +251,7 @@ struct MirFailure {
 }
 
 fn needs_preprocess(source: &str) -> bool {
-    source
-        .lines()
-        .any(|l| l.trim_start().starts_with('#'))
+    source.lines().any(|l| l.trim_start().starts_with('#'))
 }
 
 /// clang-compatible binary for the non-native path (`GLCC_PP` names a
@@ -301,19 +299,12 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
     let out = cmd.output().map_err(|e| format!("cannot run preprocessor: {e}"))?;
     let _ = std::fs::remove_file(&dir);
     if !out.status.success() {
-        return Err(format!(
-            "preprocessing failed:\n{}",
-            String::from_utf8_lossy(&out.stderr).trim_end()
-        ));
+        return Err(format!("preprocessing failed:\n{}", String::from_utf8_lossy(&out.stderr).trim_end()));
     }
     Ok(glcc_frontend::decode_source(&out.stdout))
 }
 
-fn lower_to_mir(
-    source: &str,
-    target: FrontendTarget,
-    async_enabled: bool,
-) -> Result<(glcc_mir::Module, String, String), MirFailure> {
+fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String), MirFailure> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut interner = Interner::new();
         let mut sema = Sema::with_target(target);
@@ -329,9 +320,7 @@ fn lower_to_mir(
         // pairs before any other pass and regardless of the opt level
         // (`await` has no lowering of its own); `text` stays pre-split
         // so the raw panels show the awaits.
-        glcc_mir::pass::PassManager::new()
-            .add_module_pass(glcc_mir::coroutine::LowerCoroutines)
-            .run(&mut module);
+        glcc_mir::pass::PassManager::new().add_module_pass(glcc_mir::coroutine::LowerCoroutines).run(&mut module);
         (module, text, text_full)
     }));
     match outcome {
@@ -367,8 +356,7 @@ fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
         return;
     }
     use glcc_mir::pass::PassManager;
-    let pm = PassManager::new()
-        .add_module_pass(glcc_mir::passes::Inline::small());
+    let pm = PassManager::new().add_module_pass(glcc_mir::passes::Inline::small());
     let mut pm = pm
         .add_func_pass(glcc_mir::passes::Mem2Reg)
         .add_func_pass(glcc_mir::passes::ConstFold)
@@ -382,11 +370,7 @@ fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
     pm.run(module);
 }
 
-fn lower_to_object(
-    module: &glcc_mir::Module,
-    target: FrontendTarget,
-    opt: OptLevel,
-) -> Result<Vec<u8>, String> {
+fn lower_to_object(module: &glcc_mir::Module, target: FrontendTarget, opt: OptLevel) -> Result<Vec<u8>, String> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let cl_target = match target.arch {
             glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
@@ -402,30 +386,20 @@ fn lower_to_object(
         let mut flag_builder = cranelift_codegen::settings::builder();
         flag_builder.set("opt_level", opt.flag()).expect("known opt level");
         flag_builder.set("is_pic", "true").expect("pic");
-        flag_builder
-            .set("preserve_frame_pointers", "true")
-            .expect("frame pointers");
+        flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
         flag_builder.set("tls_model", "elf_gd").expect("tls model");
         let flags = cranelift_codegen::settings::Flags::new(flag_builder);
         // `cranelift_native` only knows the host arch; inside wasm the
         // host is wasm32, so every target goes through the triples.
-        let isa: cranelift_codegen::isa::OwnedTargetIsa =
-            if target.is_native() && !cfg!(target_arch = "wasm32") {
-                cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
-            } else {
-                cranelift_codegen::isa::lookup(
-                    target.triple().parse().expect("known target triple"),
-                )
+        let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() && !cfg!(target_arch = "wasm32") {
+            cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
+        } else {
+            cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
                 .expect("known isa")
                 .finish(flags)
                 .expect("isa flags")
-            };
-        let builder = cranelift_object::ObjectBuilder::new(
-            isa,
-            "glcc-explorer",
-            cranelift_module::default_libcall_names(),
-        )
-        .expect("object builder");
+        };
+        let builder = cranelift_object::ObjectBuilder::new(isa, "glcc-explorer", cranelift_module::default_libcall_names()).expect("object builder");
         let mut obj = cranelift_object::ObjectModule::new(builder);
         glcc_lower_cl::lower_module(module, &mut obj, cl_target);
         obj.finish().emit().expect("object emit")
@@ -488,10 +462,7 @@ fn run_disassembler(bin: &str, args: &[&str], path: &Path) -> Result<String, Str
         Ok(stdout.into_owned())
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
-        Err(format!(
-            "{bin} failed:\n{}",
-            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
-        ))
+        Err(format!("{bin} failed:\n{}", if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }))
     }
 }
 
@@ -582,13 +553,9 @@ mod tests {
     /// The asm panel degrades to a message when no disassembler is on
     /// `PATH`, so only assert on real disassembly when one is present.
     fn disassembler_available() -> bool {
-        ["objdump", "llvm-objdump"].iter().any(|bin| {
-            Command::new(bin)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
+        ["objdump", "llvm-objdump"]
+            .iter()
+            .any(|bin| Command::new(bin).arg("--version").output().map(|o| o.status.success()).unwrap_or(false))
     }
 
     #[test]
@@ -613,10 +580,7 @@ mod tests {
 
     #[test]
     fn optimized_mir_is_post_pass() {
-        let opts = Options {
-            opt: OptLevel::Speed,
-            ..opts()
-        };
+        let opts = Options { opt: OptLevel::Speed, ..opts() };
         let out = compile("int add(int a, int b) { return a + b; }", &opts);
         assert!(out.success, "errors: {:?}", out.errors);
         assert!(out.mir_raw.contains("alloca"), "raw mir was:\n{}", out.mir_raw);
@@ -680,26 +644,10 @@ mod tests {
     fn full_mir_carries_source_locations() {
         let out = compile("int add(int a, int b) {\n    return a + b;\n}\n", &opts());
         assert!(out.success, "errors: {:?}", out.errors);
-        assert!(
-            out.mir_full.contains(" ; "),
-            "full mir was:\n{}",
-            out.mir_full
-        );
-        assert!(
-            out.mir_full.contains("<__glcc_source>:2:5"),
-            "full mir was:\n{}",
-            out.mir_full
-        );
-        assert!(
-            !out.mir.contains(" ; "),
-            "compact mir must stay bare:\n{}",
-            out.mir
-        );
-        assert!(
-            out.mir_raw_full.contains("<__glcc_source>:2:5"),
-            "raw full mir was:\n{}",
-            out.mir_raw_full
-        );
+        assert!(out.mir_full.contains(" ; "), "full mir was:\n{}", out.mir_full);
+        assert!(out.mir_full.contains("<__glcc_source>:2:5"), "full mir was:\n{}", out.mir_full);
+        assert!(!out.mir.contains(" ; "), "compact mir must stay bare:\n{}", out.mir);
+        assert!(out.mir_raw_full.contains("<__glcc_source>:2:5"), "raw full mir was:\n{}", out.mir_raw_full);
     }
 
     #[test]
@@ -737,10 +685,7 @@ mod tests {
 
     #[test]
     fn async_pipeline_lowers_coroutines() {
-        let opts = Options {
-            async_enabled: true,
-            ..opts()
-        };
+        let opts = Options { async_enabled: true, ..opts() };
         let src = "_Future(int) add1(int x);\n\
                    __attribute__((async)) int twice(int x) {\n\
                        int r = __builtin_await(add1(x));\n\
@@ -757,11 +702,7 @@ mod tests {
     fn async_flag_off_rejects_futures() {
         let out = compile("_Future(int) f(void);", &opts());
         assert!(!out.success, "errors: {:?}", out.errors);
-        assert!(
-            out.errors.iter().any(|e| e.contains("-fglcc-async")),
-            "errors: {:?}",
-            out.errors
-        );
+        assert!(out.errors.iter().any(|e| e.contains("-fglcc-async")), "errors: {:?}", out.errors);
     }
 
     #[test]

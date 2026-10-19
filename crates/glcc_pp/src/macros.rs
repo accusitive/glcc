@@ -6,7 +6,7 @@
 use glcc_frontend::lexer::{Interner, PpToken, Punctuator};
 
 use crate::expand::Tok;
-use crate::{err, PpError};
+use crate::{PpError, err};
 
 #[derive(Debug, Clone)]
 pub struct MacroParameterList {
@@ -74,7 +74,11 @@ pub fn parse_parameters(inner: &[Tok], loc: &str, interner: &Interner) -> Result
             }
         }
     }
-    Ok(MacroParameterList { parameters, variadic, named_variadic })
+    Ok(MacroParameterList {
+        parameters,
+        variadic,
+        named_variadic,
+    })
 }
 
 fn resolve_ident(t: &Tok, interner: &Interner) -> std::string::String {

@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use glcc_pp::{preprocess, PpOptions};
+use glcc_pp::{PpOptions, preprocess};
 
 fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/clang_pp")
@@ -68,7 +68,10 @@ fn apply_valued(f: &mut RunFlags, flag: &str, val: &str, root: &Path) {
 }
 
 fn parse_flags(flags: &str, root: &Path) -> RunFlags {
-    let mut f = RunFlags { std_key: "default".to_string(), ..RunFlags::default() };
+    let mut f = RunFlags {
+        std_key: "default".to_string(),
+        ..RunFlags::default()
+    };
     let toks: Vec<&str> = flags.split_whitespace().collect();
     let mut i = 0;
     while i < toks.len() {
@@ -186,10 +189,5 @@ fn clang_corpus_matches() {
             failures.push(report(input_name, &expected, &got, verbose));
         }
     }
-    assert!(
-        failures.is_empty(),
-        "{} of {runs} clang corpus runs failed:\n\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
+    assert!(failures.is_empty(), "{} of {runs} clang corpus runs failed:\n\n{}", failures.len(), failures.join("\n"));
 }

@@ -160,7 +160,12 @@ fn dump_stmt(s: &Stmt, sema: &Sema, interner: &Interner) -> String {
         Stmt::Label { name: label, stmt, .. } => format!("(label {} {})", name(interner, *label), dump_stmt(stmt, sema, interner)),
         Stmt::Case { expr, hi, stmt, .. } => match expr {
             Some(expr) => match hi {
-                Some(hi) => format!("(case {} ... {} {})", dump_ex(expr, sema, interner), dump_ex(hi, sema, interner), dump_stmt(stmt, sema, interner)),
+                Some(hi) => format!(
+                    "(case {} ... {} {})",
+                    dump_ex(expr, sema, interner),
+                    dump_ex(hi, sema, interner),
+                    dump_stmt(stmt, sema, interner)
+                ),
                 None => format!("(case {} {})", dump_ex(expr, sema, interner), dump_stmt(stmt, sema, interner)),
             },
             None => format!("(default {})", dump_stmt(stmt, sema, interner)),
@@ -227,12 +232,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             dump_ex(els, sema, interner),
             t
         ),
-        CheckedExprKind::Elvis { cond, els } => format!(
-            "(?: {} {} :{})",
-            dump_ex(cond, sema, interner),
-            dump_ex(els, sema, interner),
-            t
-        ),
+        CheckedExprKind::Elvis { cond, els } => format!("(?: {} {} :{})", dump_ex(cond, sema, interner), dump_ex(els, sema, interner), t),
         CheckedExprKind::Call { func, args } => {
             let mut parts = vec![dump_ex(func, sema, interner)];
             for arg in args {
@@ -250,13 +250,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             }
             format!("(atomic-{:?} {} :{})", op, parts.join(" "), t)
         }
-        CheckedExprKind::Overflow {
-            op,
-            lhs,
-            rhs,
-            res,
-            res_ty,
-        } => format!(
+        CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => format!(
             "({:?}-overflow {} {} {} :{})",
             op,
             dump_ex(lhs, sema, interner),

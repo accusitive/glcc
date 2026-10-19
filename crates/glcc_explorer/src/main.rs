@@ -68,15 +68,13 @@ fn main() {
             "-O1" | "-O2" | "-O3" | "-O" => opt = OptLevel::Speed,
             "-Os" | "-Oz" => opt = OptLevel::Size,
             "-fglcc-async" => async_enabled = true,
-            s if s.starts_with("--target=") => {
-                match glcc_frontend::target::Target::from_name(&s["--target=".len()..]) {
-                    Some(t) => target = Some(t),
-                    None => {
-                        eprintln!("glcc-explorer: unsupported target '{}'", &s["--target=".len()..]);
-                        std::process::exit(1);
-                    }
+            s if s.starts_with("--target=") => match glcc_frontend::target::Target::from_name(&s["--target=".len()..]) {
+                Some(t) => target = Some(t),
+                None => {
+                    eprintln!("glcc-explorer: unsupported target '{}'", &s["--target=".len()..]);
+                    std::process::exit(1);
                 }
-            }
+            },
             s if s.starts_with("--port=") => {}
             "--port" => {
                 i += 1;
@@ -320,10 +318,7 @@ mod tests {
     #[test]
     fn coalesced_headers_and_body_are_preserved() {
         let src = "int add(int a,int b){return a+b;}";
-        let raw = format!(
-            "POST /disasm HTTP/1.1\r\nContent-Length: {}\r\n\r\n{src}",
-            src.len()
-        );
+        let raw = format!("POST /disasm HTTP/1.1\r\nContent-Length: {}\r\n\r\n{src}", src.len());
         let mut reader = BufReader::new(Cursor::new(raw.into_bytes()));
         let (method, path, body) = read_http_request(&mut reader).expect("request");
         assert_eq!(method, "POST");

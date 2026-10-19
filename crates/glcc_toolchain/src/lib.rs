@@ -205,10 +205,7 @@ fn visual_studio_roots() -> Vec<PathBuf> {
             continue;
         };
         let vswhere = PathBuf::from(&pf).join("Microsoft Visual Studio\\Installer\\vswhere.exe");
-        let Ok(outp) = Command::new(&vswhere)
-            .args(["-latest", "-products", "*", "-property", "installationPath"])
-            .output()
-        else {
+        let Ok(outp) = Command::new(&vswhere).args(["-latest", "-products", "*", "-property", "installationPath"]).output() else {
             continue;
         };
         if outp.status.success() {

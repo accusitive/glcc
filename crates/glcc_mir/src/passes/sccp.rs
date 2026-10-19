@@ -22,16 +22,11 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::ir::{
-    Block, Const, Def, FcmpPred, Function, Inst, InstKind, Terminator, Value, ValueData,
-};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, Inst, InstKind, Terminator, Value, ValueData};
 use crate::pass::FunctionPass;
 use crate::ty::{FloatKind, Ty};
 
-use super::{
-    eval_icmp, fold_ashr_bits, fold_div_bits, fold_fcmp_bits, fold_int2_bits, fold_neg_bits,
-    fold_not_bits, fold_shift_bits, int_ty_bits, mask, wrap,
-};
+use super::{eval_icmp, fold_ashr_bits, fold_div_bits, fold_fcmp_bits, fold_int2_bits, fold_neg_bits, fold_not_bits, fold_shift_bits, int_ty_bits, mask, wrap};
 
 /// One value's optimization status.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,11 +93,7 @@ impl State {
                 _ => lattice[i] = Lat::Unknown,
             }
         }
-        let resident: HashSet<Inst> = func
-            .blocks
-            .iter()
-            .flat_map(|b| b.insts.iter().copied())
-            .collect();
+        let resident: HashSet<Inst> = func.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
         for inst in resident {
             func.insts[inst].kind.for_each_operand(&mut |op| users[op.index()].push(inst));
         }
@@ -247,12 +238,7 @@ impl State {
         };
         match term {
             Terminator::Br { dest, .. } => self.mark_edge(block, dest),
-            Terminator::CondBr {
-                cond,
-                then_block,
-                else_block,
-                ..
-            } => match branch_targets(&self.lattice[cond.index()], then_block, else_block) {
+            Terminator::CondBr { cond, then_block, else_block, .. } => match branch_targets(&self.lattice[cond.index()], then_block, else_block) {
                 EdgeSet::None => {}
                 EdgeSet::Only(dest) => self.mark_edge(block, dest),
                 EdgeSet::Both => {
@@ -260,11 +246,7 @@ impl State {
                     self.mark_edge(block, else_block);
                 }
             },
-            Terminator::Switch {
-                scrutinee,
-                cases,
-                default,
-            } => match &self.lattice[scrutinee.index()] {
+            Terminator::Switch { scrutinee, cases, default } => match &self.lattice[scrutinee.index()] {
                 Lat::Unknown => {}
                 Lat::Const(_) => {
                     self.mark_edge(block, switch_take(&self.lattice[scrutinee.index()], &cases, default));
@@ -347,11 +329,10 @@ fn eval(kind: &InstKind, result_ty: &Ty, lats: &[Lat]) -> Lat {
             None => Lat::Over,
         }
     }
-    let int2 =
-        |a: Value, b: Value, f: fn(i128, i128) -> i128| match (lat_int(&at(a)), lat_int(&at(b))) {
-            (Some((bits, x)), Some((_, y))) => folded(fold_int2_bits(bits, x, y, f)),
-            _ => Lat::Over,
-        };
+    let int2 = |a: Value, b: Value, f: fn(i128, i128) -> i128| match (lat_int(&at(a)), lat_int(&at(b))) {
+        (Some((bits, x)), Some((_, y))) => folded(fold_int2_bits(bits, x, y, f)),
+        _ => Lat::Over,
+    };
     match kind {
         InstKind::Add(a, b) => int2(*a, *b, |x, y| x.wrapping_add(y)),
         InstKind::Sub(a, b) => int2(*a, *b, |x, y| x.wrapping_sub(y)),
@@ -360,15 +341,11 @@ fn eval(kind: &InstKind, result_ty: &Ty, lats: &[Lat]) -> Lat {
         InstKind::Or(a, b) => int2(*a, *b, |x, y| x | y),
         InstKind::Xor(a, b) => int2(*a, *b, |x, y| x ^ y),
         InstKind::Shl(a, b) => match (lat_int(&at(*a)), lat_int(&at(*b))) {
-            (Some((bits, x)), Some((_, s))) => {
-                folded(fold_shift_bits(bits, x as u128, s, |x, s| x << s))
-            }
+            (Some((bits, x)), Some((_, s))) => folded(fold_shift_bits(bits, x as u128, s, |x, s| x << s)),
             _ => Lat::Over,
         },
         InstKind::LShr(a, b) => match (lat_int(&at(*a)), lat_int(&at(*b))) {
-            (Some((bits, x)), Some((_, s))) => {
-                folded(fold_shift_bits(bits, x as u128, s, |x, s| x >> s))
-            }
+            (Some((bits, x)), Some((_, s))) => folded(fold_shift_bits(bits, x as u128, s, |x, s| x >> s)),
             _ => Lat::Over,
         },
         InstKind::AShr(a, b) => match (lat_int(&at(*a)), lat_int(&at(*b))) {
@@ -379,12 +356,8 @@ fn eval(kind: &InstKind, result_ty: &Ty, lats: &[Lat]) -> Lat {
         InstKind::Sdiv(a, b) => div_pair(&at(*a), &at(*b), true, false),
         InstKind::Urem(a, b) => div_pair(&at(*a), &at(*b), false, true),
         InstKind::Srem(a, b) => div_pair(&at(*a), &at(*b), true, true),
-        InstKind::Neg(a) => {
-            folded(lat_int(&at(*a)).and_then(|(bits, x)| fold_neg_bits(bits, x)))
-        }
-        InstKind::Not(a) => {
-            folded(lat_int(&at(*a)).and_then(|(bits, x)| fold_not_bits(bits, x)))
-        }
+        InstKind::Neg(a) => folded(lat_int(&at(*a)).and_then(|(bits, x)| fold_neg_bits(bits, x))),
+        InstKind::Not(a) => folded(lat_int(&at(*a)).and_then(|(bits, x)| fold_not_bits(bits, x))),
         InstKind::FNeg(a) => match at(*a) {
             Lat::Const(Const::Float { kind, bits }) => {
                 // F80 rides a 16-byte carrier with the x87 sign at bit
@@ -395,17 +368,12 @@ fn eval(kind: &InstKind, result_ty: &Ty, lats: &[Lat]) -> Lat {
                     FloatKind::F80 => 1u128 << 79,
                     FloatKind::F128 => 1u128 << 127,
                 };
-                folded(Some(Const::Float {
-                    kind,
-                    bits: bits ^ sign,
-                }))
+                folded(Some(Const::Float { kind, bits: bits ^ sign }))
             }
             _ => Lat::Over,
         },
         InstKind::Trunc(a) => conv(&at(*a), result_ty, |x, _, tb| wrap(tb, x)),
-        InstKind::Zext(a) => conv(&at(*a), result_ty, |x, ob, tb| {
-            wrap(tb, ((x as u128) & mask(ob)) as i128)
-        }),
+        InstKind::Zext(a) => conv(&at(*a), result_ty, |x, ob, tb| wrap(tb, ((x as u128) & mask(ob)) as i128)),
         InstKind::Sext(a) => conv(&at(*a), result_ty, |x, _, tb| wrap(tb, x)),
         InstKind::Bitcast(a) => {
             let Some((obits, x)) = lat_int(&at(*a)) else {
@@ -430,11 +398,7 @@ fn eval(kind: &InstKind, result_ty: &Ty, lats: &[Lat]) -> Lat {
             _ => Lat::Over,
         },
         InstKind::Fcmp { pred, lhs, rhs } => float_cmp(*pred, &at(*lhs), &at(*rhs)),
-        InstKind::Select {
-            cond,
-            then_val,
-            else_val,
-        } => match &lats[cond.index()] {
+        InstKind::Select { cond, then_val, else_val } => match &lats[cond.index()] {
             Lat::Unknown => Lat::Unknown,
             Lat::Const(Const::Int { value: 0, .. }) => at(*else_val),
             Lat::Const(_) => at(*then_val),
@@ -478,30 +442,12 @@ fn div_pair(a: &Lat, b: &Lat, signed: bool, is_rem: bool) -> Lat {
 /// mismatched stays overdefined.
 fn float_cmp(pred: FcmpPred, lhs: &Lat, rhs: &Lat) -> Lat {
     let truth = match (lhs, rhs) {
-        (
-            Lat::Const(Const::Float {
-                kind: FloatKind::F32,
-                bits: lb,
-            }),
-            Lat::Const(Const::Float {
-                kind: FloatKind::F32,
-                bits: rb,
-            }),
-        ) => fold_fcmp_bits(
-            pred,
-            f32::from_bits(*lb as u32) as f64,
-            f32::from_bits(*rb as u32) as f64,
-        ),
-        (
-            Lat::Const(Const::Float {
-                kind: FloatKind::F64,
-                bits: lb,
-            }),
-            Lat::Const(Const::Float {
-                kind: FloatKind::F64,
-                bits: rb,
-            }),
-        ) => fold_fcmp_bits(pred, f64::from_bits(*lb as u64), f64::from_bits(*rb as u64)),
+        (Lat::Const(Const::Float { kind: FloatKind::F32, bits: lb }), Lat::Const(Const::Float { kind: FloatKind::F32, bits: rb })) => {
+            fold_fcmp_bits(pred, f32::from_bits(*lb as u32) as f64, f32::from_bits(*rb as u32) as f64)
+        }
+        (Lat::Const(Const::Float { kind: FloatKind::F64, bits: lb }), Lat::Const(Const::Float { kind: FloatKind::F64, bits: rb })) => {
+            fold_fcmp_bits(pred, f64::from_bits(*lb as u64), f64::from_bits(*rb as u64))
+        }
         _ => return Lat::Over,
     };
     Lat::Const(Const::Int {
@@ -605,17 +551,10 @@ fn rewrite(func: &mut Function, lattice: &[Lat], executable: &[bool]) -> bool {
             // A switch on a resolved scrutinee falls straight to its
             // one reachable arm, which carries no arguments; an
             // overdefined scrutinee keeps the whole switch.
-            Terminator::Switch {
-                scrutinee,
-                cases,
-                default,
-            } => {
+            Terminator::Switch { scrutinee, cases, default } => {
                 if matches!(&lattice[scrutinee.index()], Lat::Const(_)) {
                     let dest = switch_take(&lattice[scrutinee.index()], &cases, default);
-                    func.blocks[block].term = Some(Terminator::Br {
-                        dest,
-                        args: Default::default(),
-                    });
+                    func.blocks[block].term = Some(Terminator::Br { dest, args: Default::default() });
                     changed = true;
                 }
             }
@@ -638,10 +577,7 @@ fn note_value(func: &mut Function, map: &mut HashMap<Value, Value>, lattice: &[L
         (Lat::Const(c), Def::Const(existing)) if c == existing => {}
         (Lat::Const(c), _) => {
             let ty = func.values[v].ty.clone();
-            let fresh = func.values.push(ValueData {
-                ty,
-                def: Def::Const(c.clone()),
-            });
+            let fresh = func.values.push(ValueData { ty, def: Def::Const(c.clone()) });
             map.insert(v, fresh);
         }
         (Lat::Unknown, _) => {
@@ -700,10 +636,7 @@ mod tests {
         let Some(Terminator::Return { val: Some(v) }) = func.blocks[merge].term.clone() else {
             panic!("merge still returns");
         };
-        assert_eq!(
-            func.const_value(v),
-            Some(&Const::Int { bits: 32, value: 42 })
-        );
+        assert_eq!(func.const_value(v), Some(&Const::Int { bits: 32, value: 42 }));
         assert!(!Sccp.run(&mut func), "second run is a no-op");
     }
 
@@ -739,10 +672,7 @@ mod tests {
 
         assert!(!Sccp.run(&mut func));
         assert!(verify_func(&func).is_empty());
-        assert!(matches!(
-            func.blocks[merge].term.clone().unwrap(),
-            Terminator::Return { .. }
-        ));
+        assert!(matches!(func.blocks[merge].term.clone().unwrap(), Terminator::Return { .. }));
     }
 
     #[test]
@@ -751,16 +681,7 @@ mod tests {
         let (mut func, entry) = Function::new("f", sig);
         let cond = param(&mut func, entry, Ty::Bool, 0);
         let c = func.push_const(Const::Int { bits: 32, value: 7 });
-        let sel = emit(
-            &mut func,
-            entry,
-            InstKind::Select {
-                cond,
-                then_val: c,
-                else_val: c,
-            },
-            Ty::int(32),
-        );
+        let sel = emit(&mut func, entry, InstKind::Select { cond, then_val: c, else_val: c }, Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(Sccp.run(&mut func));
         assert!(verify_func(&func).is_empty());
@@ -827,10 +748,7 @@ mod tests {
             func.blocks[entry].term,
             Some(Terminator::Br { dest, .. }) if dest == then_block
         ));
-        assert!(matches!(
-            func.blocks[else_block].term,
-            Some(Terminator::Unreachable)
-        ));
+        assert!(matches!(func.blocks[else_block].term, Some(Terminator::Unreachable)));
         // The reachable load stays overdefined (it still reads memory).
         assert!(func.const_value(load).is_none());
         assert!(func.blocks[then_block].insts.len() == 1);
@@ -867,10 +785,7 @@ mod tests {
             func.blocks[entry].term,
             Some(Terminator::Br { dest, .. }) if dest == then_block
         ));
-        assert!(matches!(
-            func.blocks[else_block].term,
-            Some(Terminator::Unreachable)
-        ));
+        assert!(matches!(func.blocks[else_block].term, Some(Terminator::Unreachable)));
     }
 
     /// A loop phi first joins a constant, then widens to overdefined when
@@ -977,10 +892,7 @@ mod tests {
         match &func.insts[func.blocks[entry].insts[2]].kind {
             InstKind::Add(a, rhs) => {
                 assert_eq!(*a, read);
-                assert_eq!(
-                    func.values[*rhs].def,
-                    Def::Const(Const::Int { bits: 32, value: 80 })
-                );
+                assert_eq!(func.values[*rhs].def, Def::Const(Const::Int { bits: 32, value: 80 }));
             }
             other => panic!("expected add over the load, got {other:?}"),
         }
@@ -1033,15 +945,9 @@ mod tests {
         // The dead arm is out of the CFG reachable set; the merge
         // param folds to the only arm the branch can take, and the
         // return reads that constant.
-        assert!(matches!(
-            func.blocks[then_block].term,
-            Some(Terminator::Unreachable)
-        ));
+        assert!(matches!(func.blocks[then_block].term, Some(Terminator::Unreachable)));
         let out = returned(&func);
-        assert_eq!(
-            func.const_value(out),
-            Some(&Const::Int { bits: 32, value: 7 })
-        );
+        assert_eq!(func.const_value(out), Some(&Const::Int { bits: 32, value: 7 }));
     }
 
     fn returned(func: &Function) -> Value {

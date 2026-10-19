@@ -19,11 +19,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Source location of a span, or `None` for synthesized nodes and
     /// spans without a file. Lines are 1-based; columns are converted
     /// from the lexer's 0-based offsets to DWARF's 1-based convention.
-    pub(crate) fn debug_location(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        span: fe::span::Span,
-    ) -> Option<mir::Location> {
+    pub(crate) fn debug_location(&self, module: &mut mir::ModuleBuilder, span: fe::span::Span) -> Option<mir::Location> {
         if span.is_dummy() || span.start_ln == 0 {
             return None;
         }
@@ -51,11 +47,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Both ends of a span as locations, for lexical block ranges.
-    pub(crate) fn debug_span_range(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        span: fe::span::Span,
-    ) -> Option<(mir::Location, mir::Location)> {
+    pub(crate) fn debug_span_range(&self, module: &mut mir::ModuleBuilder, span: fe::span::Span) -> Option<(mir::Location, mir::Location)> {
         let start = self.debug_location(module, span)?;
         if span.end_ln == 0 {
             return None;
@@ -72,11 +64,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// the module through `module.debug_types`. `None` for types with no
     /// useful description (`void`, incomplete structs without a
     /// definition, integer complex).
-    pub(crate) fn lower_debug_ty(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        ty: &fe::parse::Ty,
-    ) -> Option<mir::DebugTypeId> {
+    pub(crate) fn lower_debug_ty(&self, module: &mut mir::ModuleBuilder, ty: &fe::parse::Ty) -> Option<mir::DebugTypeId> {
         let mut cache = self.debug_ty_cache.borrow_mut();
         lower_ty_debug(&mut cache, module, self.sema, self.interner, ty)
     }
@@ -114,17 +102,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Debug record of a file-scope or block-scope object.
-    pub(crate) fn global_debug(
-        &self,
-        module: &mut mir::ModuleBuilder,
-        decl_id: fe::sema::DeclId,
-    ) -> mir::GlobalDebug {
+    pub(crate) fn global_debug(&self, module: &mut mir::ModuleBuilder, decl_id: fe::sema::DeclId) -> mir::GlobalDebug {
         let binding = &self.sema.decls[decl_id.0 as usize];
         mir::GlobalDebug {
-            name: binding
-                .name
-                .and_then(|s| self.interner.resolve(s))
-                .map(str::to_string),
+            name: binding.name.and_then(|s| self.interner.resolve(s)).map(str::to_string),
             decl: self.debug_location(module, binding.span),
             debug_ty: self.lower_debug_ty(module, &binding.ty),
         }
@@ -154,18 +135,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         } else {
             return None;
         };
-        let name = binding
-            .name
-            .and_then(|s| self.interner.resolve(s))
-            .map(str::to_string);
+        let name = binding.name.and_then(|s| self.interner.resolve(s)).map(str::to_string);
         let decl = self.debug_location(module, binding.span);
         let debug_ty = self.lower_debug_ty(module, &binding.ty);
-        Some(mir::VarDebug {
-            name,
-            decl,
-            debug_ty,
-            home,
-        })
+        Some(mir::VarDebug { name, decl, debug_ty, home })
     }
 
     /// Variables and ranged child scopes of one lexical scope. Scopes
@@ -179,11 +152,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
         scope: &ScopeBuild,
     ) -> (Vec<mir::VarDebug>, Vec<mir::ScopeDebug>) {
-        let mut vars: Vec<mir::VarDebug> = scope
-            .vars
-            .iter()
-            .filter_map(|id| self.var_debug(module, slots, globals, *id))
-            .collect();
+        let mut vars: Vec<mir::VarDebug> = scope.vars.iter().filter_map(|id| self.var_debug(module, slots, globals, *id)).collect();
         let mut children = Vec::new();
         for child in &scope.children {
             let (cvars, cchildren) = self.scope_debug(module, slots, globals, child);
@@ -252,9 +221,7 @@ fn collect_stmt(stmt: &fe::parse::Stmt, scope: &mut ScopeBuild) {
                 collect_stmt(els, scope);
             }
         }
-        fe::parse::Stmt::While { body, .. }
-        | fe::parse::Stmt::DoWhile { body, .. }
-        | fe::parse::Stmt::Switch { body, .. } => {
+        fe::parse::Stmt::While { body, .. } | fe::parse::Stmt::DoWhile { body, .. } | fe::parse::Stmt::Switch { body, .. } => {
             collect_stmt(body, scope);
         }
         fe::parse::Stmt::Label { stmt, .. } | fe::parse::Stmt::Case { stmt, .. } => {
@@ -268,8 +235,8 @@ fn collect_stmt(stmt: &fe::parse::Stmt, scope: &mut ScopeBuild) {
 /// target assumptions the rest of the backend shares (signed `char`,
 /// 8-byte pointers, 16-byte `long double` slot).
 fn scalar_info(ty: &fe::parse::Ty) -> Option<(&'static str, mir::BaseEncoding, u64)> {
-    use mir::BaseEncoding::*;
     use fe::parse::Ty;
+    use mir::BaseEncoding::*;
     Some(match ty {
         Ty::Bool => ("_Bool", Boolean, 1),
         Ty::Char => ("char", SignedChar, 1),
@@ -331,13 +298,7 @@ fn lower_ty_debug(
                 fe::parse::TypeQualifier::Volatile => mir::Qualifier::Volatile,
                 fe::parse::TypeQualifier::Restrict => mir::Qualifier::Restrict,
             };
-            id = push_type(
-                module,
-                mir::DebugType::Qualified {
-                    qualifier,
-                    inner: id,
-                },
-            );
+            id = push_type(module, mir::DebugType::Qualified { qualifier, inner: id });
         }
         cache.push((ty.clone(), id));
         return Some(id);
@@ -363,13 +324,7 @@ fn lower_ty_debug(
                     fe::parse::TypeQualifier::Volatile => mir::Qualifier::Volatile,
                     fe::parse::TypeQualifier::Restrict => mir::Qualifier::Restrict,
                 };
-                id = push_type(
-                    module,
-                    mir::DebugType::Qualified {
-                        qualifier,
-                        inner: id,
-                    },
-                );
+                id = push_type(module, mir::DebugType::Qualified { qualifier, inner: id });
             }
             cache.push((ty.clone(), id));
             Some(id)
@@ -399,15 +354,12 @@ fn lower_ty_debug(
             );
             cache.push((ty.clone(), id));
             let Some(layout) = sema.struct_layout(*sid, interner) else {
-                if let mir::DebugType::Struct { declaration, .. } =
-                    &mut module.module.debug_types[id as usize]
-                {
+                if let mir::DebugType::Struct { declaration, .. } = &mut module.module.debug_types[id as usize] {
                     *declaration = true;
                 }
                 return Some(id);
             };
-            if let mir::DebugType::Struct { size, .. } = &mut module.module.debug_types[id as usize]
-            {
+            if let mir::DebugType::Struct { size, .. } = &mut module.module.debug_types[id as usize] {
                 *size = layout.size;
             }
             // `members` parallels named definition members only, so
@@ -449,22 +401,13 @@ fn lower_ty_debug(
                         }
                     }
                     None => {
-                        let offset = by_name
-                            .get(&sym)
-                            .map(|m| m.offset)
-                            .unwrap_or(layout.member_offsets[i]);
+                        let offset = by_name.get(&sym).map(|m| m.offset).unwrap_or(layout.member_offsets[i]);
                         mir::MemberLocation::Byte(offset)
                     }
                 };
-                members.push(mir::Member {
-                    name,
-                    ty: member_ty,
-                    location,
-                });
+                members.push(mir::Member { name, ty: member_ty, location });
             }
-            if let mir::DebugType::Struct { members: slot, .. } =
-                &mut module.module.debug_types[id as usize]
-            {
+            if let mir::DebugType::Struct { members: slot, .. } = &mut module.module.debug_types[id as usize] {
                 *slot = members;
             }
             Some(id)
@@ -475,11 +418,7 @@ fn lower_ty_debug(
             let repr = lower_ty_debug(cache, module, sema, interner, &def.repr)?;
             let signed = !matches!(
                 def.repr.unqualified(),
-                Ty::UnsignedInt
-                    | Ty::UnsignedLong
-                    | Ty::UnsignedLongLong
-                    | Ty::UnsignedShort
-                    | Ty::UnsignedChar
+                Ty::UnsignedInt | Ty::UnsignedLong | Ty::UnsignedLongLong | Ty::UnsignedShort | Ty::UnsignedChar
             );
             let size = sema.type_size(&def.repr, interner).unwrap_or(4);
             let id = push_type(
@@ -513,14 +452,9 @@ fn lower_ty_debug(
                 let Some(name) = interner.resolve(e.name) else {
                     continue;
                 };
-                enumerators.push(mir::Enumerator {
-                    name: name.to_string(),
-                    value,
-                });
+                enumerators.push(mir::Enumerator { name: name.to_string(), value });
             }
-            if let mir::DebugType::Enum { enumerators: slot, .. } =
-                &mut module.module.debug_types[id as usize]
-            {
+            if let mir::DebugType::Enum { enumerators: slot, .. } = &mut module.module.debug_types[id as usize] {
                 *slot = enumerators;
             }
             Some(id)

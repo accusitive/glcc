@@ -780,7 +780,11 @@ fn lower_function<M: Module>(
             if let Some(cranelift_codegen::isa::unwind::UnwindInfo::WindowsX64(info)) = info {
                 let mut xdata = vec![0u8; info.emit_size()];
                 info.emit(&mut xdata);
-                unwind.push(WinUnwindEntry { func: clif_id, size: code.buffer.data().len() as u32, xdata });
+                unwind.push(WinUnwindEntry {
+                    func: clif_id,
+                    size: code.buffer.data().len() as u32,
+                    xdata,
+                });
             }
         }
     }
@@ -1002,11 +1006,7 @@ fn operand(body: &mut Body, builder: &mut FunctionBuilder, mir_value: mir::Value
 fn volatile_load(builder: &mut FunctionBuilder, ty: Type, addr: ClifValue) -> ClifValue {
     if let Some(int_ty) = atomic_ty(ty) {
         let raw = builder.ins().atomic_load(int_ty, MemFlagsData::new(), addr);
-        if int_ty == ty {
-            raw
-        } else {
-            builder.ins().bitcast(ty, MemFlagsData::new(), raw)
-        }
+        if int_ty == ty { raw } else { builder.ins().bitcast(ty, MemFlagsData::new(), raw) }
     } else {
         builder.ins().fence();
         let value = builder.ins().load(ty, MemFlagsData::new(), addr, Offset32::new(0));
@@ -1020,11 +1020,7 @@ fn volatile_load(builder: &mut FunctionBuilder, ty: Type, addr: ClifValue) -> Cl
 /// fenced plain store otherwise.
 fn volatile_store(builder: &mut FunctionBuilder, ty: Type, val: ClifValue, addr: ClifValue) {
     if let Some(int_ty) = atomic_ty(ty) {
-        let raw = if int_ty == ty {
-            val
-        } else {
-            builder.ins().bitcast(int_ty, MemFlagsData::new(), val)
-        };
+        let raw = if int_ty == ty { val } else { builder.ins().bitcast(int_ty, MemFlagsData::new(), val) };
         builder.ins().atomic_store(MemFlagsData::new(), raw, addr);
     } else {
         builder.ins().fence();
@@ -3272,10 +3268,13 @@ mod tests {
         );
         ret(&mut run, entry, None);
         module.push_func(run);
-        let (jit, ids) = jit_module_with(&module, &[
-            ("fabsl", fabsl as *const () as usize as *const u8),
-            ("__glccrt_f80_getret", getret_shim as *const () as usize as *const u8),
-        ]);
+        let (jit, ids) = jit_module_with(
+            &module,
+            &[
+                ("fabsl", fabsl as *const () as usize as *const u8),
+                ("__glccrt_f80_getret", getret_shim as *const () as usize as *const u8),
+            ],
+        );
         let addr = func_addr(&jit, &ids, 0);
         let mut buf = [0u8; 16];
         unsafe {
@@ -3477,12 +3476,15 @@ mod tests {
         ];
         for (op, helper, fa, fb, want) in cases {
             let module = qbinop_module(*op);
-            let (jit, ids) = jit_module_with(&module, &[
-                ("__glcc_addtf3", __addtf3 as *const () as usize as *const u8),
-                ("__glcc_subtf3", __subtf3 as *const () as usize as *const u8),
-                ("__glcc_multf3", __multf3 as *const () as usize as *const u8),
-                ("__glcc_divtf3", __divtf3 as *const () as usize as *const u8),
-            ]);
+            let (jit, ids) = jit_module_with(
+                &module,
+                &[
+                    ("__glcc_addtf3", __addtf3 as *const () as usize as *const u8),
+                    ("__glcc_subtf3", __subtf3 as *const () as usize as *const u8),
+                    ("__glcc_multf3", __multf3 as *const () as usize as *const u8),
+                    ("__glcc_divtf3", __divtf3 as *const () as usize as *const u8),
+                ],
+            );
             let (alo, ahi) = crate::quad::ref_f64_to_quad(fa.to_bits());
             let (blo, bhi) = crate::quad::ref_f64_to_quad(fb.to_bits());
             let abuf = qbytes(alo, ahi);
@@ -3616,10 +3618,13 @@ mod tests {
             );
             ret(&mut f, entry, None);
             module.push_func(f);
-            let (jit, ids) = jit_module_with(&module, &[
-                ("__glcc_trunctfxf2", __trunctfxf2 as *const () as usize as *const u8),
-                ("__glccrt_f80_getret", trunc_getret_shim as *const () as usize as *const u8),
-            ]);
+            let (jit, ids) = jit_module_with(
+                &module,
+                &[
+                    ("__glcc_trunctfxf2", __trunctfxf2 as *const () as usize as *const u8),
+                    ("__glccrt_f80_getret", trunc_getret_shim as *const () as usize as *const u8),
+                ],
+            );
             let inp = qbytes(*ilo, *ihi);
             let mut buf = [0u8; 16];
             unsafe {
@@ -3697,11 +3702,14 @@ mod tests {
             );
             ret(&mut f, entry, None);
             module.push_func(f);
-            let (jit, ids) = jit_module_with(&module, &[
-                ("__glcc_floattixf", __floattixf as *const () as usize as *const u8),
-                ("__glcc_floatuntixf", __floatuntixf as *const () as usize as *const u8),
-                ("__glccrt_f80_getret", from_getret_shim as *const () as usize as *const u8),
-            ]);
+            let (jit, ids) = jit_module_with(
+                &module,
+                &[
+                    ("__glcc_floattixf", __floattixf as *const () as usize as *const u8),
+                    ("__glcc_floatuntixf", __floatuntixf as *const () as usize as *const u8),
+                    ("__glccrt_f80_getret", from_getret_shim as *const () as usize as *const u8),
+                ],
+            );
             let mut buf = [0u8; 16];
             unsafe {
                 let func: extern "C" fn(*mut u8, u64, u64) = std::mem::transmute(func_addr(&jit, &ids, 0));
@@ -3765,10 +3773,13 @@ mod tests {
                 );
                 ret(&mut f, entry, None);
                 module.push_func(f);
-                let (jit, ids) = jit_module_with(&module, &[
-                    ("__glcc_fixxfti", __fixxfti as *const () as usize as *const u8),
-                    ("__glcc_fixunsxfti", __fixunsxfti as *const () as usize as *const u8),
-                ]);
+                let (jit, ids) = jit_module_with(
+                    &module,
+                    &[
+                        ("__glcc_fixxfti", __fixxfti as *const () as usize as *const u8),
+                        ("__glcc_fixunsxfti", __fixunsxfti as *const () as usize as *const u8),
+                    ],
+                );
                 let mut lo_b = [0u8; 8];
                 let mut hi_b = [0u8; 8];
                 lo_b.copy_from_slice(&bits.to_le_bytes()[..8]);
@@ -3816,10 +3827,13 @@ mod tests {
             );
             ret(&mut f, entry, None);
             module.push_func(f);
-            let (jit, ids) = jit_module_with(&module, &[
-                ("__glcc_fixxfti", __fixxfti as *const () as usize as *const u8),
-                ("__glcc_fixunsxfti", __fixunsxfti as *const () as usize as *const u8),
-            ]);
+            let (jit, ids) = jit_module_with(
+                &module,
+                &[
+                    ("__glcc_fixxfti", __fixxfti as *const () as usize as *const u8),
+                    ("__glcc_fixunsxfti", __fixunsxfti as *const () as usize as *const u8),
+                ],
+            );
             let inp = bits.to_le_bytes();
             let mut buf = [0u8; 16];
             unsafe {
@@ -4633,13 +4647,19 @@ mod tests {
         let w = emit(
             &mut caller,
             entry,
-            mir::InstKind::CallExtern { target: weak, args: Default::default() },
+            mir::InstKind::CallExtern {
+                target: weak,
+                args: Default::default(),
+            },
             mir::Ty::int(32),
         );
         let p = emit(
             &mut caller,
             entry,
-            mir::InstKind::CallExtern { target: plain, args: Default::default() },
+            mir::InstKind::CallExtern {
+                target: plain,
+                args: Default::default(),
+            },
             mir::Ty::int(32),
         );
         let sum = emit(&mut caller, entry, mir::InstKind::Add(w, p), mir::Ty::int(32));
@@ -4813,28 +4833,15 @@ mod tests {
             self.declarations.declare_function(name, linkage, signature).map(|(id, _)| id)
         }
 
-        fn declare_anonymous_function(
-            &mut self,
-            signature: &cranelift_codegen::ir::Signature,
-        ) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
+        fn declare_anonymous_function(&mut self, signature: &cranelift_codegen::ir::Signature) -> cranelift_module::ModuleResult<cranelift_module::FuncId> {
             self.declarations.declare_anonymous_function(signature)
         }
 
-        fn declare_data(
-            &mut self,
-            name: &str,
-            linkage: cranelift_module::Linkage,
-            writable: bool,
-            tls: bool,
-        ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        fn declare_data(&mut self, name: &str, linkage: cranelift_module::Linkage, writable: bool, tls: bool) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
             self.declarations.declare_data(name, linkage, writable, tls).map(|(id, _)| id)
         }
 
-        fn declare_anonymous_data(
-            &mut self,
-            writable: bool,
-            tls: bool,
-        ) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
+        fn declare_anonymous_data(&mut self, writable: bool, tls: bool) -> cranelift_module::ModuleResult<cranelift_module::DataId> {
             self.declarations.declare_anonymous_data(writable, tls)
         }
 

@@ -41,10 +41,7 @@ pub(crate) fn declare(module: &mut mir::Module) -> Runtime {
     let ptr = mir::Ty::ptr(mir::Ty::Void);
     Runtime {
         enter: module.push_extern("fern_enter", mir::Signature::new(vec![], word.clone())),
-        pin: module.push_extern(
-            "fern_pin",
-            mir::Signature::new(vec![word.clone(), word.clone(), ptr.clone()], mir::Ty::Void),
-        ),
+        pin: module.push_extern("fern_pin", mir::Signature::new(vec![word.clone(), word.clone(), ptr.clone()], mir::Ty::Void)),
         leave: module.push_extern("fern_leave", mir::Signature::new(vec![word], mir::Ty::Void)),
         alloc: module.push_extern("fern_alloc", mir::Signature::new(vec![mir::Ty::int(64)], ptr)),
     }
@@ -153,9 +150,6 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         if self.terminated {
             return Ok(());
         }
-        self.emit_void(mir::InstKind::CallExtern {
-            target,
-            args: args.into(),
-        })
+        self.emit_void(mir::InstKind::CallExtern { target, args: args.into() })
     }
 }

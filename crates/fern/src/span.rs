@@ -8,10 +8,7 @@ pub struct Span {
 
 impl Span {
     pub fn new(lo: usize, hi: usize) -> Span {
-        Span {
-            lo: lo as u32,
-            hi: hi as u32,
-        }
+        Span { lo: lo as u32, hi: hi as u32 }
     }
 
     /// Smallest span covering both.
@@ -37,10 +34,7 @@ pub struct Diag {
 
 impl Diag {
     pub fn new(msg: impl Into<String>, span: Span) -> Diag {
-        Diag {
-            msg: msg.into(),
-            span,
-        }
+        Diag { msg: msg.into(), span }
     }
 }
 
@@ -76,16 +70,8 @@ impl SourceMap {
     pub fn render(&self, src: &str, diag: &Diag) -> String {
         let (line, col) = self.line_col(diag.span.lo);
         let line_text = src.lines().nth(line - 1).unwrap_or("");
-        let width = (diag.span.hi.saturating_sub(diag.span.lo).max(1) as usize).min(
-            line_text
-                .len()
-                .saturating_sub(col.saturating_sub(1))
-                .max(1),
-        );
+        let width = (diag.span.hi.saturating_sub(diag.span.lo).max(1) as usize).min(line_text.len().saturating_sub(col.saturating_sub(1)).max(1));
         let caret = format!("{}{}", " ".repeat(col - 1), "^".repeat(width));
-        format!(
-            "error: {}\n --> {}:{}\n  |\n{} | {}\n  | {}",
-            diag.msg, line, col, line, line_text, caret
-        )
+        format!("error: {}\n --> {}:{}\n  |\n{} | {}\n  | {}", diag.msg, line, col, line, line_text, caret)
     }
 }

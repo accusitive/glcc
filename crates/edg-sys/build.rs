@@ -49,11 +49,7 @@ fn cmakedef_values(macro_root: &Path, tool: &str, target: &str) -> BTreeMap<Stri
         .arg("print-values")
         .output()
         .expect("failed to run edg-cmakedef");
-    assert!(
-        out.status.success(),
-        "edg-cmakedef failed for {target}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "edg-cmakedef failed for {target}: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8(out.stdout).expect("non-utf8 cmakedef output");
     let mut map = BTreeMap::new();
     for line in stdout.lines() {
@@ -99,10 +95,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", workspace_root.join("edg/util/mk_errinfo.c").display());
 
     // ---- 1. Macro defines -------------------------------------------------
-    let tool = workspace_root
-        .join("edg/dev_tools/bin/edg-cmakedef")
-        .to_string_lossy()
-        .into_owned();
+    let tool = workspace_root.join("edg/dev_tools/bin/edg-cmakedef").to_string_lossy().into_owned();
     let mut defs = BTreeMap::<String, Option<String>>::new();
     defs.extend(cmakedef_values(&macro_root, &tool, "linux-gcc/base.cmakedef"));
     defs.extend(cmakedef_values(&macro_root, &tool, "linux-gcc/cpfe.cmakedef"));
@@ -138,15 +131,14 @@ fn main() {
         workspace_root.join("edg/util/mk_errinfo.c"),
     ];
     let err_outputs = [out_dir.join("err_codes.h"), out_dir.join("err_data.h")];
-    let regen_needed = err_outputs.iter().any(|o| !o.exists())
-        || {
-            let newest_input = err_inputs.iter().filter_map(|p| mtime(p)).max();
-            let oldest_output = err_outputs.iter().filter_map(|p| mtime(p)).min();
-            match (newest_input, oldest_output) {
-                (Some(i), Some(o)) => i > o,
-                _ => true,
-            }
-        };
+    let regen_needed = err_outputs.iter().any(|o| !o.exists()) || {
+        let newest_input = err_inputs.iter().filter_map(|p| mtime(p)).max();
+        let oldest_output = err_outputs.iter().filter_map(|p| mtime(p)).min();
+        match (newest_input, oldest_output) {
+            (Some(i), Some(o)) => i > o,
+            _ => true,
+        }
+    };
     if regen_needed {
         let bin_dir = out_dir.join("bin");
         fs::create_dir_all(&bin_dir).unwrap();
@@ -173,26 +165,82 @@ fn main() {
 
     // ---- 3. Compile EDG front end into libedg.a ------------------------------
     let core: &[&str] = &[
-        "attribute.c", "c_gen_be.c", "cfe.c", "class_decl.c", "cmd_line.c",
-        "const_ints.c", "cp_gen_be.c", "debug.c", "decl_inits.c", "decl_spec.c",
-        "declarator.c", "decls.c", "def_arg.c", "disambig.c", "error.c",
-        "expr.c", "exprutil.c", "extasm.c", "fe_init.c", "fe_wrapup.c",
-        "fixed_pt.c", "float_pt.c", "floating.c", "folding.c", "func_def.c",
-        "host_envir.c", "ifc_modules.c", "il.c", "il_alloc.c", "il_display.c",
-        "il_read.c", "il_to_str.c", "il_walk.c", "il_write.c", "inline.c",
-        "interpret.c", "layout.c", "lexical.c", "literals.c", "lookup.c",
-        "lower_c99.c", "lower_eh.c", "lower_il.c", "lower_init.c",
-        "lower_name.c", "macro.c", "mem_manage.c", "modules.c", "ms_attrib.c",
-        "overload.c", "pch.c", "pragma.c", "preproc.c", "scope_stk.c",
-        "src_seq.c", "statements.c", "symbol_ref.c", "symbol_tbl.c",
-        "sys_predef.c", "target.c", "templates.c", "trans_copy.c",
-        "trans_corresp.c", "trans_unit.c", "types.c",
+        "attribute.c",
+        "c_gen_be.c",
+        "cfe.c",
+        "class_decl.c",
+        "cmd_line.c",
+        "const_ints.c",
+        "cp_gen_be.c",
+        "debug.c",
+        "decl_inits.c",
+        "decl_spec.c",
+        "declarator.c",
+        "decls.c",
+        "def_arg.c",
+        "disambig.c",
+        "error.c",
+        "expr.c",
+        "exprutil.c",
+        "extasm.c",
+        "fe_init.c",
+        "fe_wrapup.c",
+        "fixed_pt.c",
+        "float_pt.c",
+        "floating.c",
+        "folding.c",
+        "func_def.c",
+        "host_envir.c",
+        "ifc_modules.c",
+        "il.c",
+        "il_alloc.c",
+        "il_display.c",
+        "il_read.c",
+        "il_to_str.c",
+        "il_walk.c",
+        "il_write.c",
+        "inline.c",
+        "interpret.c",
+        "layout.c",
+        "lexical.c",
+        "literals.c",
+        "lookup.c",
+        "lower_c99.c",
+        "lower_eh.c",
+        "lower_il.c",
+        "lower_init.c",
+        "lower_name.c",
+        "macro.c",
+        "mem_manage.c",
+        "modules.c",
+        "ms_attrib.c",
+        "overload.c",
+        "pch.c",
+        "pragma.c",
+        "preproc.c",
+        "scope_stk.c",
+        "src_seq.c",
+        "statements.c",
+        "symbol_ref.c",
+        "symbol_tbl.c",
+        "sys_predef.c",
+        "target.c",
+        "templates.c",
+        "trans_copy.c",
+        "trans_corresp.c",
+        "trans_unit.c",
+        "types.c",
     ];
     let optional: &[&str] = &[
-        "cfe_daemon.c", "ifc_map_functions.c", "ifc_map_functions_acc.c",
-        "ifc_map_functions_dbg.c", "ifc_map_functions_mut.c",
-        "ifc_map_functions_val.c", "ifc_modules_read.c",
-        "ifc_modules_templ.c", "ifc_modules_write.c",
+        "cfe_daemon.c",
+        "ifc_map_functions.c",
+        "ifc_map_functions_acc.c",
+        "ifc_map_functions_dbg.c",
+        "ifc_map_functions_mut.c",
+        "ifc_map_functions_val.c",
+        "ifc_modules_read.c",
+        "ifc_modules_templ.c",
+        "ifc_modules_write.c",
         "unicode_name_fsm.c",
     ];
 

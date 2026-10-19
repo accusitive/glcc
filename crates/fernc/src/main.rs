@@ -130,27 +130,15 @@ fn parse_args(args: &[String]) -> Result<Option<Options>, String> {
     }
 
     let input = input.ok_or("no input file")?;
-    Ok(Some(Options {
-        input,
-        output,
-        emit,
-        opt,
-        debug,
-    }))
+    Ok(Some(Options { input, output, emit, opt, debug }))
 }
 
 fn run(opts: &Options) -> Result<(), String> {
-    let src = fs::read_to_string(&opts.input)
-        .map_err(|e| format!("cannot read `{}`: {e}", opts.input.display()))?;
-    let mut module = fern::compile(&src).map_err(|diag| {
-        format!("{}:{}", opts.input.display(), fern::render_diag(&src, &diag))
-    })?;
+    let src = fs::read_to_string(&opts.input).map_err(|e| format!("cannot read `{}`: {e}", opts.input.display()))?;
+    let mut module = fern::compile(&src).map_err(|diag| format!("{}:{}", opts.input.display(), fern::render_diag(&src, &diag)))?;
 
     if opts.debug {
-        eprintln!(
-            "--- mir (frontend output) ---\n{}",
-            glcc_mir::display::dump_module(&module)
-        );
+        eprintln!("--- mir (frontend output) ---\n{}", glcc_mir::display::dump_module(&module));
     }
     if opts.opt.optimize() {
         // Same pipeline the C driver runs: inline, promote slots, fold
@@ -170,10 +158,7 @@ fn run(opts: &Options) -> Result<(), String> {
         pm.run(&mut module);
     }
     if opts.debug {
-        eprintln!(
-            "--- mir (after passes) ---\n{}",
-            glcc_mir::display::dump_module(&module)
-        );
+        eprintln!("--- mir (after passes) ---\n{}", glcc_mir::display::dump_module(&module));
     }
 
     let errors = glcc_mir::verify::verify_module(&module);
@@ -191,8 +176,7 @@ fn run(opts: &Options) -> Result<(), String> {
         Emit::Object => {
             let bytes = emit_object(&module, opts.opt)?;
             let path = output_path(opts);
-            fs::write(&path, &bytes)
-                .map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
+            fs::write(&path, &bytes).map_err(|e| format!("cannot write `{}`: {e}", path.display()))?;
             Ok(())
         }
     }
@@ -201,8 +185,7 @@ fn run(opts: &Options) -> Result<(), String> {
 /// Write a MIR dump to `-o`, or to stdout when no output path was given.
 fn write_dump(opts: &Options, text: String) -> Result<(), String> {
     match &opts.output {
-        Some(path) => fs::write(path, text.as_bytes())
-            .map_err(|e| format!("cannot write `{}`: {e}", path.display())),
+        Some(path) => fs::write(path, text.as_bytes()).map_err(|e| format!("cannot write `{}`: {e}", path.display())),
         None => {
             print!("{text}");
             Ok(())
@@ -224,24 +207,12 @@ fn emit_object(module: &glcc_mir::ir::Module, opt: OptLevel) -> Result<Vec<u8>, 
     use cranelift_codegen::settings::Configurable;
 
     let mut flag_builder = cranelift_codegen::settings::builder();
-    flag_builder
-        .set("opt_level", opt.flag())
-        .map_err(|e| e.to_string())?;
+    flag_builder.set("opt_level", opt.flag()).map_err(|e| e.to_string())?;
     flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;
-    flag_builder
-        .set("preserve_frame_pointers", "true")
-        .map_err(|e| e.to_string())?;
+    flag_builder.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let flags = cranelift_codegen::settings::Flags::new(flag_builder);
-    let isa = cranelift_native::builder()
-        .map_err(|e| e.to_string())?
-        .finish(flags)
-        .map_err(|e| e.to_string())?;
-    let builder = cranelift_object::ObjectBuilder::new(
-        isa,
-        "fern",
-        cranelift_module::default_libcall_names(),
-    )
-    .map_err(|e| e.to_string())?;
+    let isa = cranelift_native::builder().map_err(|e| e.to_string())?.finish(flags).map_err(|e| e.to_string())?;
+    let builder = cranelift_object::ObjectBuilder::new(isa, "fern", cranelift_module::default_libcall_names()).map_err(|e| e.to_string())?;
     let mut object = cranelift_object::ObjectModule::new(builder);
     // The runtime comes first: the program's externs for `fern_enter`,
     // `fern_pin`, `fern_leave`, and `fern_alloc` then bind to the
@@ -250,10 +221,7 @@ fn emit_object(module: &glcc_mir::ir::Module, opt: OptLevel) -> Result<Vec<u8>, 
     let runtime = fern::runtime::module();
     glcc_lower_cl::lower_module(&runtime, &mut object, glcc_lower_cl::Target::native());
     glcc_lower_cl::lower_module(module, &mut object, glcc_lower_cl::Target::native());
-    object
-        .finish()
-        .emit()
-        .map_err(|e| format!("object emission failed: {e}"))
+    object.finish().emit().map_err(|e| format!("object emission failed: {e}"))
 }
 
 #[cfg(test)]
@@ -262,9 +230,7 @@ mod tests {
 
     fn parse(args: &[&str]) -> Options {
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
-        parse_args(&args)
-            .expect("parses")
-            .expect("not a help request")
+        parse_args(&args).expect("parses").expect("not a help request")
     }
 
     #[test]

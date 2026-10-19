@@ -6,7 +6,4 @@
 
 mod debug;
 
-pub use debug::{
-    emit_with_debug, FuncDebug, GlobalDebug, LoweredDebug, ScopeDebug, SrcLocRow, VarDebug,
-    VarLoc,
-};
+pub use debug::{FuncDebug, GlobalDebug, LoweredDebug, ScopeDebug, SrcLocRow, VarDebug, VarLoc, emit_with_debug};

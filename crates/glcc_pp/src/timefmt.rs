@@ -25,7 +25,10 @@ struct Parts {
 pub fn date_time(now: SystemTime) -> (String, String) {
     let secs = now.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let p = parts(secs);
-    (format!("{} {:2} {}", MONTHS[p.month as usize - 1], p.day, p.year), format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second))
+    (
+        format!("{} {:2} {}", MONTHS[p.month as usize - 1], p.day, p.year),
+        format!("{:02}:{:02}:{:02}", p.hour, p.minute, p.second),
+    )
 }
 
 /// `__TIMESTAMP__` of `path`: ctime-style local time
@@ -41,7 +44,13 @@ pub fn file_timestamp(path: &Path) -> String {
     let p = parts(secs);
     format!(
         "{} {} {:2} {:02}:{:02}:{:02} {}",
-        WEEKDAYS[p.weekday as usize], MONTHS[p.month as usize - 1], p.day, p.hour, p.minute, p.second, p.year
+        WEEKDAYS[p.weekday as usize],
+        MONTHS[p.month as usize - 1],
+        p.day,
+        p.hour,
+        p.minute,
+        p.second,
+        p.year
     )
 }
 

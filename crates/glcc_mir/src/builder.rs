@@ -1,6 +1,6 @@
 use smallvec::SmallVec;
 
-use crate::ir::{Block, Const, Func, Function, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, Def};
+use crate::ir::{Block, Const, Def, Func, Function, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData};
 use crate::ty::{Signature, Ty};
 
 /// Ergonomic builder over a function under construction.
@@ -96,7 +96,14 @@ impl<'f> FunctionBuilder<'f> {
     }
 
     pub fn store(&mut self, addr: Value, val: Value) {
-        let _ = self.emit(InstKind::Store { addr, val, flags: MemFlags::plain() }, None);
+        let _ = self.emit(
+            InstKind::Store {
+                addr,
+                val,
+                flags: MemFlags::plain(),
+            },
+            None,
+        );
     }
 
     pub fn ret(&mut self, val: Option<Value>) {
@@ -110,14 +117,7 @@ impl<'f> FunctionBuilder<'f> {
         });
     }
 
-    pub fn cond_br(
-        &mut self,
-        cond: Value,
-        then_block: Block,
-        else_block: Block,
-        then_args: Vec<Value>,
-        else_args: Vec<Value>,
-    ) {
+    pub fn cond_br(&mut self, cond: Value, then_block: Block, else_block: Block, then_args: Vec<Value>, else_args: Vec<Value>) {
         self.func.blocks[self.block].term = Some(Terminator::CondBr {
             cond,
             then_block,
@@ -140,9 +140,7 @@ pub struct ModuleBuilder {
 
 impl ModuleBuilder {
     pub fn new() -> Self {
-        ModuleBuilder {
-            module: Module::new(),
-        }
+        ModuleBuilder { module: Module::new() }
     }
 
     pub fn declare(&mut self, name: &str, sig: Signature) -> (Func, Block) {
@@ -161,9 +159,7 @@ impl ModuleBuilder {
         if let Some(index) = self.module.files.iter().position(|f| f.path == path) {
             return index as u32;
         }
-        self.module.files.push(crate::debug::File {
-            path: path.to_string(),
-        });
+        self.module.files.push(crate::debug::File { path: path.to_string() });
         (self.module.files.len() - 1) as u32
     }
 

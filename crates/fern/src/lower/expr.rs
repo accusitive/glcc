@@ -21,11 +21,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirExprKind::Call { callee, args } => self.call_indirect(callee, args, e),
             HirExprKind::Tuple(args) => self.tuple(e, args),
             HirExprKind::Let { binds, body } => self.let_expr(binds, body),
-            HirExprKind::If {
-                cond,
-                then_body,
-                else_body,
-            } => self.if_expr(cond, then_body, else_body, e),
+            HirExprKind::If { cond, then_body, else_body } => self.if_expr(cond, then_body, else_body, e),
             HirExprKind::Match { scrutinee, arms } => self.match_expr(e, scrutinee, arms),
             HirExprKind::Bin { op, lhs, rhs } => self.bin(*op, lhs, rhs, e),
             HirExprKind::Un { op, operand } => self.un(*op, operand, e),
@@ -70,13 +66,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         if matches!(target, FnRef::Value { .. }) {
             let (callee, _) = self.lw.resolve_callee(target, &sub, e.span)?;
             let ret = self.ty_of(&e.ty, e.span)?;
-            return self.emit(
-                mir::InstKind::Call {
-                    callee,
-                    args: Vec::new().into(),
-                },
-                ret,
-            );
+            return self.emit(mir::InstKind::Call { callee, args: Vec::new().into() }, ret);
         }
         let (callee, name) = self.lw.resolve_callee(target, &sub, e.span)?;
         let src = e.ty.substitute(&sub);
@@ -88,10 +78,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let ret_ty = self.lw.types.get(&ret, e.span)?;
         let thunk = self.lw.thunk(callee, &name, &param_tys, &ret_ty, e.span)?;
         let cell = self.alloc_cell(8)?;
-        let code = self.emit(
-            mir::InstKind::FuncAddr { func: thunk },
-            mir::Ty::ptr(mir::Ty::Void),
-        )?;
+        let code = self.emit(mir::InstKind::FuncAddr { func: thunk }, mir::Ty::ptr(mir::Ty::Void))?;
         self.store(cell, code)?;
         Ok(cell)
     }
@@ -101,18 +88,11 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     fn closure_value(&mut self, id: u32, captures: &[usize], span: Span) -> KResult<mir::Value> {
         let enclosing = self.name.clone();
         let sub = self.sub.clone();
-        let captures_tys: Vec<Ty> = self.lw.program.closures[id as usize]
-            .captures
-            .iter()
-            .map(|c| c.ty.substitute(&sub))
-            .collect();
+        let captures_tys: Vec<Ty> = self.lw.program.closures[id as usize].captures.iter().map(|c| c.ty.substitute(&sub)).collect();
         let env = self.lw.types.env_layout(&captures_tys, span)?;
         let func = self.lw.declare_closure(&enclosing, id, &sub, span)?;
         let cell = self.alloc_cell(env.size)?;
-        let code = self.emit(
-            mir::InstKind::FuncAddr { func },
-            mir::Ty::ptr(mir::Ty::Void),
-        )?;
+        let code = self.emit(mir::InstKind::FuncAddr { func }, mir::Ty::ptr(mir::Ty::Void))?;
         self.store(cell, code)?;
         for (i, &outer) in captures.iter().enumerate() {
             let src = self.read_local(outer)?;
@@ -140,13 +120,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             values.push(value);
         }
         let ret = self.ty_of(&e.ty, e.span)?;
-        let call = self.emit(
-            mir::InstKind::Call {
-                callee,
-                args: values.into(),
-            },
-            ret,
-        );
+        let call = self.emit(mir::InstKind::Call { callee, args: values.into() }, ret);
         self.release(mark)?;
         call
     }
@@ -189,10 +163,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         if args.is_empty() {
             return Ok(self.iconst(8, 0));
         }
-        let layout = self
-            .lw
-            .types
-            .tuple_layout(&e.ty.substitute(&self.sub), e.span)?;
+        let layout = self.lw.types.tuple_layout(&e.ty.substitute(&self.sub), e.span)?;
         let cell = self.alloc_cell(layout.cell_size)?;
         let mark = self.hold(cell.clone())?;
         for (i, a) in args.iter().enumerate() {
@@ -213,13 +184,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         self.expr(body)
     }
 
-    fn if_expr(
-        &mut self,
-        cond: &HirExpr,
-        then_body: &HirExpr,
-        else_body: &HirExpr,
-        e: &HirExpr,
-    ) -> KResult<mir::Value> {
+    fn if_expr(&mut self, cond: &HirExpr, then_body: &HirExpr, else_body: &HirExpr, e: &HirExpr) -> KResult<mir::Value> {
         let c = self.expr(cond)?;
         let ret = self.ty_of(&e.ty, e.span)?;
         let then_block = self.new_block(Vec::new());
@@ -309,10 +274,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 (kind, mir::Ty::Bool)
             }
             BinOp::And | BinOp::Or | BinOp::Cons => {
-                return Err(Diag::new(
-                    "unexpected operator reached lowering",
-                    e.span,
-                ));
+                return Err(Diag::new("unexpected operator reached lowering", e.span));
             }
         };
         self.emit(kind, result)
@@ -368,11 +330,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
 }
 
 fn arith_op(float: bool, f: mir::InstKind, i: mir::InstKind) -> mir::InstKind {
-    if float {
-        f
-    } else {
-        i
-    }
+    if float { f } else { i }
 }
 
 fn icmp_pred(op: BinOp) -> mir::IcmpPred {

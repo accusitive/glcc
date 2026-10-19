@@ -39,7 +39,7 @@ mod substitute;
 mod timefmt;
 mod tree;
 
-pub use glcc_toolchain::{find_clang, msvc_dirs, MsvcDirs};
+pub use glcc_toolchain::{MsvcDirs, find_clang, msvc_dirs};
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -213,10 +213,7 @@ fn parse_search_dirs(stderr: &str) -> Vec<PathBuf> {
             inside = true;
         } else if t == END {
             inside = false;
-        } else if inside
-            && (Path::new(t).is_absolute() || t.starts_with('/'))
-            && !t.ends_with("(framework directory)")
-        {
+        } else if inside && (Path::new(t).is_absolute() || t.starts_with('/')) && !t.ends_with("(framework directory)") {
             out.push(PathBuf::from(t));
         }
     }
@@ -355,20 +352,12 @@ pub fn fallback_predefines(triple: Option<&str>) -> Vec<(String, String)> {
     parse_d_m_defined(text)
 }
 
-
 /// `__has_feature` / `__has_extension` answers: a table probed from
 /// clang in default C mode (see `has_table`), with the C11 six gated by
 /// `-std` like the compiler itself (`tls` is always on). Unknown names
 /// are false; real misses surface in differentials.
 fn has_feature(which: &str, arg: &str, std: Option<&str>) -> bool {
-    const GATED: &[&str] = &[
-        "c_alignas",
-        "c_alignof",
-        "c_atomic",
-        "c_generic_selections",
-        "c_static_assert",
-        "c_thread_local",
-    ];
+    const GATED: &[&str] = &["c_alignas", "c_alignof", "c_atomic", "c_generic_selections", "c_static_assert", "c_thread_local"];
     if arg == "tls" {
         return true;
     }
@@ -670,7 +659,6 @@ fn has_table(which: &str, arg: &str) -> Option<bool> {
     })
 }
 
-
 /// Options for [`preprocess`]. Built from `-D`/`-U`/`-I` flags.
 #[derive(Debug, Clone, Default)]
 pub struct PpOptions {
@@ -743,14 +731,7 @@ impl Ctx {
     /// Search for a header: quoted tries the includer's directory first,
     /// then `-I` paths; bracketed tries `-I` paths only. With `after`,
     /// resume past the current file (`#include_next`).
-    pub fn resolve_header(
-        &self,
-        name: &str,
-        quoted: bool,
-        after: Option<FoundKind>,
-        dir: &Path,
-        loc: &str,
-    ) -> Result<(PathBuf, FoundKind), PpError> {
+    pub fn resolve_header(&self, name: &str, quoted: bool, after: Option<FoundKind>, dir: &Path, loc: &str) -> Result<(PathBuf, FoundKind), PpError> {
         let start = match after {
             None | Some(FoundKind::Start) | Some(FoundKind::QuoterDir) => None,
             Some(FoundKind::Index(i)) => Some(i + 1),
@@ -842,7 +823,11 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
     let mut macros: HashMap<SymbolU32, MacroDef> = HashMap::new();
     seed_macros(&opts.predefined, filename, &mut interner, &mut macros)?;
     seed_macros(
-        &opts.defines.iter().map(|(n, r)| (n.clone(), r.clone().unwrap_or_else(|| "1".to_string()))).collect::<Vec<_>>(),
+        &opts
+            .defines
+            .iter()
+            .map(|(n, r)| (n.clone(), r.clone().unwrap_or_else(|| "1".to_string())))
+            .collect::<Vec<_>>(),
         filename,
         &mut interner,
         &mut macros,
@@ -857,26 +842,46 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
     let main_display = interner.get_or_intern(filename.to_string());
     // `-include` files come first, as if included at line 1.
     for pre in opts.preincludes.clone() {
-        let (target, found) =
-            ctx.resolve_header(&pre, true, None, &main_dir, filename).map_err(|_| {
-                err(format!("{filename}: -include '{pre}' not found"))
-            })?;
+        let (target, found) = ctx
+            .resolve_header(&pre, true, None, &main_dir, filename)
+            .map_err(|_| err(format!("{filename}: -include '{pre}' not found")))?;
         let canon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
         if ctx.once.contains(&canon) {
             continue;
         }
-        let text = std::fs::read_to_string(&target)
-            .map_err(|_| err(format!("{filename}: cannot read '{}'", target.display())))?;
+        let text = std::fs::read_to_string(&target).map_err(|_| err(format!("{filename}: cannot read '{}'", target.display())))?;
         // An `-include` file reports include level 1 (as if included).
         ctx.depth = 1;
-        let r = run_source(&text, &target, interner.get_or_intern(target.display().to_string()), main_display, found, true, &mut interner, &mut macros, &mut ctx, opts);
+        let r = run_source(
+            &text,
+            &target,
+            interner.get_or_intern(target.display().to_string()),
+            main_display,
+            found,
+            true,
+            &mut interner,
+            &mut macros,
+            &mut ctx,
+            opts,
+        );
         ctx.depth = 0;
         r?;
     }
     if opts.linemarkers {
         ctx.out.push_str(&marker(1, filename));
     }
-    run_source(source, &main_path, main_display, main_display, FoundKind::Start, false, &mut interner, &mut macros, &mut ctx, opts)?;
+    run_source(
+        source,
+        &main_path,
+        main_display,
+        main_display,
+        FoundKind::Start,
+        false,
+        &mut interner,
+        &mut macros,
+        &mut ctx,
+        opts,
+    )?;
     if opts.linemarkers {
         // clang terminates the final line unconditionally (a marker-only
         // tail therefore grows a blank line).
@@ -890,12 +895,7 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
 /// Seed the macro table from `(name, replacement)` pairs (predefined
 /// builtins and `-D`): each is lexed and parsed exactly like a
 /// `#define` tail, so function-like builtins (`__INTMAX_C(c)`) work.
-fn seed_macros(
-    pairs: &[(String, String)],
-    filename: &str,
-    interner: &mut Interner,
-    macros: &mut HashMap<SymbolU32, MacroDef>,
-) -> Result<(), PpError> {
+fn seed_macros(pairs: &[(String, String)], filename: &str, interner: &mut Interner, macros: &mut HashMap<SymbolU32, MacroDef>) -> Result<(), PpError> {
     use tree::parse_control_line;
     for (name, rep) in pairs {
         let text = if rep.is_empty() { format!("define {name}") } else { format!("define {name} {rep}") };
@@ -909,11 +909,23 @@ fn seed_macros(
                 let sym = interner.get_or_intern(macro_name);
                 macros.insert(sym, MacroDef::Object(replacement));
             }
-            ControlLine::DefineFunction { macro_name, parameters, replacement } => {
+            ControlLine::DefineFunction {
+                macro_name,
+                parameters,
+                replacement,
+            } => {
                 let loc = format!("{filename}: -D{name}");
                 let parsed = macros::parse_parameters(&parameters, &loc, interner)?;
                 let sym = interner.get_or_intern(macro_name);
-                macros.insert(sym, MacroDef::Func { params: parsed.parameters, variadic: parsed.variadic, named_variadic: parsed.named_variadic, body: replacement });
+                macros.insert(
+                    sym,
+                    MacroDef::Func {
+                        params: parsed.parameters,
+                        variadic: parsed.variadic,
+                        named_variadic: parsed.named_variadic,
+                        body: replacement,
+                    },
+                );
             }
             _ => return Err(err(format!("{filename}: invalid macro definition '{name}'"))),
         }
@@ -939,11 +951,7 @@ fn run_source(
     opts: &PpOptions,
 ) -> Result<(), PpError> {
     let mut lexer = Lexer::new(source, interner);
-    let toks: Vec<Tok> = lexer
-        .lex_pp_all()
-        .into_iter()
-        .map(|t| Tok::from_pp(&t, display, false, false))
-        .collect();
+    let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
     if std::env::var_os("GLCC_PP_DEBUG").is_some() {
         let nl = toks.iter().filter(|t| matches!(t.tok, PpToken::Ws(PpWs::Newline))).count();
         let mx = toks.iter().map(|t| t.line).max().unwrap_or(0);
@@ -1017,11 +1025,7 @@ mod tests {
         let mut interner = Interner::new();
         let mut lexer = Lexer::new(src, &mut interner);
         let toks = lexer.lex_pp_all();
-        let nls: Vec<u64> = toks
-            .iter()
-            .filter(|t| matches!(t.tok, PpToken::Ws(PpWs::Newline)))
-            .map(|t| t.line)
-            .collect();
+        let nls: Vec<u64> = toks.iter().filter(|t| matches!(t.tok, PpToken::Ws(PpWs::Newline))).map(|t| t.line).collect();
         // 7 physical lines: newlines after lines 1,2 (comment), 3 (comment
         // close), 4 (define), 5 (comment), 6 (code).
         assert_eq!(nls.len(), 6, "newlines: {nls:?}");
@@ -1184,7 +1188,10 @@ mod tests {
         write_file(&dir.join("sys.h"), "int sys = 2;\n");
         let main = dir.join("main.c");
         write_file(&main, "#include \"sub.h\"\n#include <sys.h>\nint m = sub + sys;\n");
-        let o = PpOptions { include_paths: vec![dir.clone()], ..opts() };
+        let o = PpOptions {
+            include_paths: vec![dir.clone()],
+            ..opts()
+        };
         let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &o).unwrap();
         assert_eq!(got, "int sub = 1;\n\nint sys = 2;\n\nint m = sub + sys;\n");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1281,7 +1288,16 @@ mod tests {
 
     #[test]
     fn cli_flag_parsing_keeps_d_u_i() {
-        let cpp = vec![OsString::from("-DFOO=1"), OsString::from("-U"), OsString::from("BAR"), OsString::from("-Iinc"), OsString::from("-std=c11"), OsString::from("-isystem"), OsString::from("sys"), OsString::from("-includepre.h")];
+        let cpp = vec![
+            OsString::from("-DFOO=1"),
+            OsString::from("-U"),
+            OsString::from("BAR"),
+            OsString::from("-Iinc"),
+            OsString::from("-std=c11"),
+            OsString::from("-isystem"),
+            OsString::from("sys"),
+            OsString::from("-includepre.h"),
+        ];
         let o = cpp_flags_to_opts(&cpp, "t.c");
         assert_eq!(o.defines, vec![("FOO".to_string(), Some("1".to_string()))]);
         assert_eq!(o.undefs, vec!["BAR".to_string()]);
@@ -1316,10 +1332,7 @@ mod tests {
     #[test]
     fn stringify_and_glue() {
         let src = "#define S(x) #x\n#define CAT(a, b) a ## b\nconst char *s = S(hello  world);\nint xy = CAT(x, y);\n";
-        assert_eq!(
-            pp(src).unwrap(),
-            "\n\nconst char *s = \"hello world\";\nint xy = xy;\n"
-        );
+        assert_eq!(pp(src).unwrap(), "\n\nconst char *s = \"hello world\";\nint xy = xy;\n");
     }
 
     #[test]
@@ -1366,10 +1379,7 @@ mod tests {
     #[test]
     fn line_and_file_expand_at_use_site() {
         let src = "int a = __LINE__;\n#define L __LINE__\nint b = L;\nconst char *f = __FILE__;\n";
-        assert_eq!(
-            pp(src).unwrap(),
-            "int a = 1;\n\nint b = 3;\nconst char *f = \"t.c\";\n"
-        );
+        assert_eq!(pp(src).unwrap(), "int a = 1;\n\nint b = 3;\nconst char *f = \"t.c\";\n");
     }
 
     #[test]
@@ -1406,19 +1416,13 @@ mod tests {
     fn gnu_linemarker_remaps_line_and_file() {
         // GNU's preprocessed format: `# <line> "file" [flags]`.
         let src = "int a = __LINE__;\n# 7 \"hello.c\"\nint b = __LINE__;\nconst char *f = __FILE__;\n";
-        assert_eq!(
-            pp(src).unwrap(),
-            "int a = 1;\n\nint b = 7;\nconst char *f = \"hello.c\";\n"
-        );
+        assert_eq!(pp(src).unwrap(), "int a = 1;\n\nint b = 7;\nconst char *f = \"hello.c\";\n");
     }
 
     #[test]
     fn gnu_linemarker_bare_form_keeps_file() {
         let src = "int a = __LINE__;\n# 1\nint b = __LINE__;\nconst char *f = __FILE__;\n";
-        assert_eq!(
-            pp(src).unwrap(),
-            "int a = 1;\n\nint b = 1;\nconst char *f = \"t.c\";\n"
-        );
+        assert_eq!(pp(src).unwrap(), "int a = 1;\n\nint b = 1;\nconst char *f = \"t.c\";\n");
     }
 
     #[test]

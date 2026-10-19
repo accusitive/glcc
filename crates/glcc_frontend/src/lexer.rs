@@ -257,7 +257,11 @@ impl<'a> Lexer<'a> {
                     let start_col = col;
                     let mut spaces = 0u32;
                     let mut tabs = 0u32;
-                    if c == ' ' { spaces += 1; } else { tabs += 1; }
+                    if c == ' ' {
+                        spaces += 1;
+                    } else {
+                        tabs += 1;
+                    }
                     col += 1;
                     while let Some((nc, _, _)) = self.chars.peek().copied() {
                         if nc == ' ' {

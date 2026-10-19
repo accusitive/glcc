@@ -1047,7 +1047,11 @@ fn eval_unary(op: UnaryOp, operand: &CheckedExpr, sema: &Sema, interner: &Intern
                 return None;
             };
             let ty = promoted(&operand.ty);
-            if crate::check::is_integer(&ty) { wrap(!i, &ty, sema.target).map(Value::Int) } else { None }
+            if crate::check::is_integer(&ty) {
+                wrap(!i, &ty, sema.target).map(Value::Int)
+            } else {
+                None
+            }
         }
         // A non-null address operand is known truthy where initializers
         // allow address constants, so `!&obj` folds to 0.
@@ -1088,9 +1092,7 @@ fn address_of_nonzero(operand: &CheckedExpr, sema: &Sema) -> bool {
             !binding.weak && !binding.tls && matches!(binding.kind, BindingKind::Var | BindingKind::Func)
         }
         CheckedExprKind::Member { base, .. } => address_of_nonzero(base, sema),
-        CheckedExprKind::Subscript { base, .. } => {
-            matches!(base.ty.unqualified(), Ty::Array { .. }) && address_of_nonzero(base, sema)
-        }
+        CheckedExprKind::Subscript { base, .. } => matches!(base.ty.unqualified(), Ty::Array { .. }) && address_of_nonzero(base, sema),
         _ => false,
     }
 }
@@ -1114,7 +1116,10 @@ fn eval_cast(ty: &Ty, operand: &CheckedExpr, sema: &Sema, interner: &Interner, a
     if let Ty::Complex(inner) = t {
         let zero = complex_zero(inner, sema.target.long_double)?;
         return match v {
-            Value::Complex(re, im) => Some(Value::Complex(Box::new(cast_scalar(inner, *re, sema.target)?), Box::new(cast_scalar(inner, *im, sema.target)?))),
+            Value::Complex(re, im) => Some(Value::Complex(
+                Box::new(cast_scalar(inner, *re, sema.target)?),
+                Box::new(cast_scalar(inner, *im, sema.target)?),
+            )),
             scalar => Some(Value::Complex(Box::new(cast_scalar(inner, scalar, sema.target)?), Box::new(zero))),
         };
     }
@@ -1248,29 +1253,29 @@ fn eval_binary(op: BinaryOp, lhs: &CheckedExpr, rhs: &CheckedExpr, sema: &Sema, 
                 return eval_complex_op(op, &l, &r, &common, sema.target);
             }
             match (l, r) {
-            (Value::Int(a), Value::Int(b)) => {
-                if !crate::check::is_integer(&common) {
-                    return None;
+                (Value::Int(a), Value::Int(b)) => {
+                    if !crate::check::is_integer(&common) {
+                        return None;
+                    }
+                    eval_int_op(op, a, b, &common, sema.target)
                 }
-                eval_int_op(op, a, b, &common, sema.target)
-            }
-            // Floats (and int/float mixes) compute in the common
-            // precision, per the usual arithmetic conversions.
-            (Value::Float(a), Value::Float(b)) => {
-                let kind = float_kind(&common, ld)?;
-                eval_float_op(op, a.convert_to(kind), b.convert_to(kind))
-            }
-            (Value::Int(a), Value::Float(b)) => {
-                let kind = float_kind(&common, ld)?;
-                eval_float_op(op, FloatValue::from_int(a, kind), b.convert_to(kind))
-            }
-            (Value::Float(a), Value::Int(b)) => {
-                let kind = float_kind(&common, ld)?;
-                eval_float_op(op, a.convert_to(kind), FloatValue::from_int(b, kind))
-            }
-            // Complex values take the `eval_complex_op` path above
-            // (their common type is complex).
-            (Value::Complex(..), _) | (_, Value::Complex(..)) => return None,
+                // Floats (and int/float mixes) compute in the common
+                // precision, per the usual arithmetic conversions.
+                (Value::Float(a), Value::Float(b)) => {
+                    let kind = float_kind(&common, ld)?;
+                    eval_float_op(op, a.convert_to(kind), b.convert_to(kind))
+                }
+                (Value::Int(a), Value::Float(b)) => {
+                    let kind = float_kind(&common, ld)?;
+                    eval_float_op(op, FloatValue::from_int(a, kind), b.convert_to(kind))
+                }
+                (Value::Float(a), Value::Int(b)) => {
+                    let kind = float_kind(&common, ld)?;
+                    eval_float_op(op, a.convert_to(kind), FloatValue::from_int(b, kind))
+                }
+                // Complex values take the `eval_complex_op` path above
+                // (their common type is complex).
+                (Value::Complex(..), _) | (_, Value::Complex(..)) => return None,
             }
         }
     }

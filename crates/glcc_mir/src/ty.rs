@@ -23,7 +23,9 @@ pub enum FloatKind {
 pub enum Ty {
     Void,
     Bool,
-    Int { bits: u32 },
+    Int {
+        bits: u32,
+    },
     Float(FloatKind),
     /// Code or data address. `pointee` is structural, not a runtime check.
     Ptr(Box<Ty>),
@@ -34,7 +36,10 @@ pub enum Ty {
         size: u64,
         align: u64,
     },
-    Array { elem: Box<Ty>, len: u64 },
+    Array {
+        elem: Box<Ty>,
+        len: u64,
+    },
     Struct {
         fields: Vec<Ty>,
         offsets: Vec<u64>,
@@ -95,11 +100,7 @@ pub struct Signature {
 
 impl Signature {
     pub fn new(params: Vec<Ty>, ret: Ty) -> Self {
-        Signature {
-            params,
-            ret,
-            variadic: false,
-        }
+        Signature { params, ret, variadic: false }
     }
 
     /// One step of a GEP through this type: field selection into structs,
@@ -109,15 +110,9 @@ impl Signature {
     pub fn gep_step(ty: &Ty, index: &GepIndex) -> Option<Ty> {
         match (ty, index) {
             (Ty::Struct { fields, .. }, GepIndex::Field(i)) => fields.get(*i as usize).cloned(),
-            (Ty::Array { elem, .. }, GepIndex::Index(_) | GepIndex::ConstIndex(_)) => {
-                Some(elem.as_ref().clone())
-            }
-            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::ConstIndex(_)) => {
-                Some(ty.clone())
-            }
-            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::Index(_)) => {
-                Some(ty.clone())
-            }
+            (Ty::Array { elem, .. }, GepIndex::Index(_) | GepIndex::ConstIndex(_)) => Some(elem.as_ref().clone()),
+            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::ConstIndex(_)) => Some(ty.clone()),
+            (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr(_), GepIndex::Index(_)) => Some(ty.clone()),
             _ => None,
         }
     }

@@ -20,9 +20,9 @@ use string_interner::symbol::SymbolU32;
 
 use crate::macros::parse_parameters;
 use crate::prepend::PrependingPeekableIterator;
-use crate::substitute::{render_raw, ArgMap, ArgumentSubstitution, MacroArgument};
+use crate::substitute::{ArgMap, ArgumentSubstitution, MacroArgument, render_raw};
 use crate::tree::{ControlLine, TokenTree};
-use crate::{err, PpError};
+use crate::{PpError, err};
 
 /// One working token: a preprocessing token plus the source line
 /// (restamped to the use site through expansions), the definition-site
@@ -79,7 +79,12 @@ impl Tok {
 #[derive(Debug, Clone)]
 pub enum MacroDef {
     Object(Vec<Tok>),
-    Func { params: Vec<String>, variadic: bool, named_variadic: bool, body: Vec<Tok> },
+    Func {
+        params: Vec<String>,
+        variadic: bool,
+        named_variadic: bool,
+        body: Vec<Tok>,
+    },
 }
 
 pub fn tok_is_ws(t: &Tok) -> bool {
@@ -91,12 +96,50 @@ pub fn tok_is_ws(t: &Tok) -> bool {
 fn is_keyword(word: &str) -> bool {
     matches!(
         word,
-        "auto" | "break" | "case" | "char" | "const" | "continue" | "default" | "do" | "double"
-            | "else" | "enum" | "extern" | "float" | "for" | "goto" | "if" | "inline" | "int"
-            | "long" | "register" | "restrict" | "return" | "short" | "signed" | "sizeof"
-            | "static" | "struct" | "switch" | "typedef" | "union" | "unsigned" | "void"
-            | "volatile" | "while" | "_Alignas" | "_Alignof" | "_Atomic" | "_Bool" | "_Complex"
-            | "_Generic" | "_Imaginary" | "_Noreturn" | "_Static_assert" | "_Thread_local"
+        "auto"
+            | "break"
+            | "case"
+            | "char"
+            | "const"
+            | "continue"
+            | "default"
+            | "do"
+            | "double"
+            | "else"
+            | "enum"
+            | "extern"
+            | "float"
+            | "for"
+            | "goto"
+            | "if"
+            | "inline"
+            | "int"
+            | "long"
+            | "register"
+            | "restrict"
+            | "return"
+            | "short"
+            | "signed"
+            | "sizeof"
+            | "static"
+            | "struct"
+            | "switch"
+            | "typedef"
+            | "union"
+            | "unsigned"
+            | "void"
+            | "volatile"
+            | "while"
+            | "_Alignas"
+            | "_Alignof"
+            | "_Atomic"
+            | "_Bool"
+            | "_Complex"
+            | "_Generic"
+            | "_Imaginary"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
     )
 }
 
@@ -189,25 +232,11 @@ fn concat_kind(t: &Tok) -> ConcatKind {
 fn concat_info(kind: ConcatKind) -> u32 {
     match kind {
         ConcatKind::Ident => ACI_CUSTOM,
-        ConcatKind::Number
-        | ConcatKind::Period
-        | ConcatKind::Colon
-        | ConcatKind::Hash
-        | ConcatKind::Arrow => ACI_CUSTOM_FIRSTCHAR,
-        ConcatKind::Amp
-        | ConcatKind::Plus
-        | ConcatKind::Minus
-        | ConcatKind::Slash
-        | ConcatKind::Less
-        | ConcatKind::Greater
-        | ConcatKind::Pipe
-        | ConcatKind::Percent => ACI_CUSTOM_FIRSTCHAR | ACI_AVOID_EQUAL,
-        ConcatKind::Star
-        | ConcatKind::Exclaim
-        | ConcatKind::Caret
-        | ConcatKind::Equal
-        | ConcatKind::LessLess
-        | ConcatKind::GreaterGreater => ACI_AVOID_EQUAL,
+        ConcatKind::Number | ConcatKind::Period | ConcatKind::Colon | ConcatKind::Hash | ConcatKind::Arrow => ACI_CUSTOM_FIRSTCHAR,
+        ConcatKind::Amp | ConcatKind::Plus | ConcatKind::Minus | ConcatKind::Slash | ConcatKind::Less | ConcatKind::Greater | ConcatKind::Pipe | ConcatKind::Percent => {
+            ACI_CUSTOM_FIRSTCHAR | ACI_AVOID_EQUAL
+        }
+        ConcatKind::Star | ConcatKind::Exclaim | ConcatKind::Caret | ConcatKind::Equal | ConcatKind::LessLess | ConcatKind::GreaterGreater => ACI_AVOID_EQUAL,
         ConcatKind::Other => 0,
     }
 }
@@ -215,9 +244,7 @@ fn concat_info(kind: ConcatKind) -> u32 {
 /// Human rendering of one token for diagnostics.
 fn show_tok(t: &Tok, interner: &Interner) -> String {
     match t.tok {
-        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => {
-            interner.resolve(sym).unwrap_or("?").to_string()
-        }
+        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => interner.resolve(sym).unwrap_or("?").to_string(),
         PpToken::Punct(p) => p.as_str().to_string(),
         PpToken::Ws(_) => " ".to_string(),
         PpToken::Directive => "#".to_string(),
@@ -408,9 +435,7 @@ impl<'a, 'b> Expander<'a, 'b> {
 
     fn handle_ws_before(&mut self, t: &Tok, require_space: bool, require_same_line: bool) {
         // EmittedDirectiveOnThisLine takes priority over RequireSameLine.
-        if (!require_same_line || self.r_directive_on_line)
-            && self.move_to_line_tok(t, self.r_directive_on_line)
-        {
+        if (!require_same_line || self.r_directive_on_line) && self.move_to_line_tok(t, self.r_directive_on_line) {
             // Indent the first token on a line to its source column, with
             // clang's empty-macro-argument and `#`-at-column-1 quirks.
             let mut col = t.col;
@@ -424,11 +449,7 @@ impl<'a, 'b> Expander<'a, 'b> {
                 self.files.out.push(' ');
                 col -= 1;
             }
-        } else if require_space
-            || t.space
-            || ((self.r_tokens_on_line || self.r_directive_on_line)
-                && self.avoid_concat(self.r_prevprev.as_ref(), self.r_prev.as_ref(), t))
-        {
+        } else if require_space || t.space || ((self.r_tokens_on_line || self.r_directive_on_line) && self.avoid_concat(self.r_prevprev.as_ref(), self.r_prev.as_ref(), t)) {
             self.files.out.push(' ');
         }
     }
@@ -542,15 +563,8 @@ impl<'a, 'b> Expander<'a, 'b> {
                 // `L`, `u`, `U` followed by a string/char literal paste.
                 matches!(render_tok_text(prev, self.interner).as_str(), "L" | "u" | "U")
             }
-            ConcatKind::Number => {
-                first.map_or(false, |c| {
-                    c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '+' || c == '-' || c == '$'
-                })
-            }
-            ConcatKind::Period => {
-                (first_is('.') && prevprev.map_or(false, |p| concat_kind(p) == ConcatKind::Period))
-                    || first.map_or(false, |c| c.is_ascii_digit())
-            }
+            ConcatKind::Number => first.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '+' || c == '-' || c == '$'),
+            ConcatKind::Period => (first_is('.') && prevprev.map_or(false, |p| concat_kind(p) == ConcatKind::Period)) || first.map_or(false, |c| c.is_ascii_digit()),
             ConcatKind::Amp => first_is('&'),
             ConcatKind::Plus => first_is('+'),
             ConcatKind::Minus => first_is('-') || first_is('>'),
@@ -689,9 +703,12 @@ impl<'a, 'b> Expander<'a, 'b> {
         match self.macros.get(&sym).cloned() {
             None => Ok(vec![t]),
             Some(MacroDef::Object(body)) => self.splice(sym, &body, &t),
-            Some(MacroDef::Func { params, variadic, named_variadic, body }) => {
-                self.expand_call(&t, &name, &params, variadic, named_variadic, &body)
-            }
+            Some(MacroDef::Func {
+                params,
+                variadic,
+                named_variadic,
+                body,
+            }) => self.expand_call(&t, &name, &params, variadic, named_variadic, &body),
         }
     }
 
@@ -818,13 +835,7 @@ impl<'a, 'b> Expander<'a, 'b> {
     /// re-enable the macro afterwards. An expansion that produces no
     /// output (or ends with an unconsumed pending space) propagates the
     /// macro's eof-token flags to the next token of this stream.
-    fn drain_expansion(
-        &mut self,
-        trees: Vec<TokenTree>,
-        name: &Tok,
-        sym: Option<SymbolU32>,
-        pending: bool,
-    ) -> Result<Vec<Tok>, PpError> {
+    fn drain_expansion(&mut self, trees: Vec<TokenTree>, name: &Tok, sym: Option<SymbolU32>, pending: bool) -> Result<Vec<Tok>, PpError> {
         let mut out = Vec::new();
         if !trees.is_empty() {
             let stop_at = self.trees.remaining();
@@ -838,10 +849,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         // (the macro name's, unless a token already consumed it) and
         // `LeadingSpace = HasLeadingSpace || NextTokGetsSpace`; a nested
         // empty expansion's propagation composes first.
-        let (csol, cspace) = self
-            .carry
-            .take()
-            .unwrap_or(if out.is_empty() { (name.sol, name.space) } else { (false, false) });
+        let (csol, cspace) = self.carry.take().unwrap_or(if out.is_empty() { (name.sol, name.space) } else { (false, false) });
         if csol || cspace || pending {
             self.carry = Some((csol, cspace || pending));
         }
@@ -984,9 +992,7 @@ impl<'a, 'b> Expander<'a, 'b> {
 
     fn is_defined_name(&mut self, name: &str) -> bool {
         let sym = self.interner.get_or_intern(name.to_string());
-        self.macros.contains_key(&sym)
-            || is_has_builtin_name(name)
-            || (is_location_name(name) && !self.undef_builtins.contains(name))
+        self.macros.contains_key(&sym) || is_has_builtin_name(name) || (is_location_name(name) && !self.undef_builtins.contains(name))
     }
 
     /// Clang `__has_*` inside conditions: `__has_include[_next]` consults
@@ -1096,15 +1102,7 @@ impl<'a, 'b> Expander<'a, 'b> {
 
     /// Expand one function-like call: collect balanced args, prescan,
     /// substitute, rescan.
-    fn expand_call(
-        &mut self,
-        t: &Tok,
-        name: &str,
-        params: &[String],
-        variadic: bool,
-        named_variadic: bool,
-        body: &[Tok],
-    ) -> Result<Vec<Tok>, PpError> {
+    fn expand_call(&mut self, t: &Tok, name: &str, params: &[String], variadic: bool, named_variadic: bool, body: &[Tok]) -> Result<Vec<Tok>, PpError> {
         // The `(` may follow on later lines; skip whitespace (never a
         // directive: that aborts the call and leaves it literal).
         let mut depth = 0u32;
@@ -1208,12 +1206,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let actuals = if empty_list { 0 } else { pieces.len() };
         if !variadic {
             if pieces.len() != params.len() {
-                return Err(err(format!(
-                    "{}: macro '{name}' needs {} arguments, got {}",
-                    self.loc(t.line),
-                    params.len(),
-                    pieces.len()
-                )));
+                return Err(err(format!("{}: macro '{name}' needs {} arguments, got {}", self.loc(t.line), params.len(), pieces.len())));
             }
         } else if actuals < fixed && !(empty_list && fixed <= 1) {
             // clang allows a missing variadic pack, not missing named
@@ -1235,13 +1228,22 @@ impl<'a, 'b> Expander<'a, 'b> {
         for (i, p) in params.iter().enumerate().take(fixed) {
             let raw: Vec<Tok> = trim_tokens(pieces[i]).into_iter().cloned().collect();
             let cooked = self.expand_arg(raw.clone())?;
-            map.insert(p.clone(), MacroArgument { unexpanded: raw, expanded: cooked });
+            map.insert(
+                p.clone(),
+                MacroArgument {
+                    unexpanded: raw,
+                    expanded: cooked,
+                },
+            );
         }
         let mut extras = Vec::new();
         for piece in pieces.iter().skip(fixed) {
             let raw: Vec<Tok> = trim_tokens(piece).into_iter().cloned().collect();
             let cooked = self.expand_arg(raw.clone())?;
-            extras.push(MacroArgument { unexpanded: raw, expanded: cooked });
+            extras.push(MacroArgument {
+                unexpanded: raw,
+                expanded: cooked,
+            });
         }
         if named_variadic && !params.is_empty() {
             // GNU `name...`: the pack substitutes as the comma-joined
@@ -1269,7 +1271,13 @@ impl<'a, 'b> Expander<'a, 'b> {
                 raw.extend(extra.unexpanded.iter().cloned());
                 cooked.extend(extra.expanded.iter().cloned());
             }
-            map.insert(params[fixed].clone(), MacroArgument { unexpanded: raw, expanded: cooked });
+            map.insert(
+                params[fixed].clone(),
+                MacroArgument {
+                    unexpanded: raw,
+                    expanded: cooked,
+                },
+            );
         }
         let PpToken::Ident(sym) = t.tok else {
             return Err(err(format!("{}: internal error: call site is not an identifier", self.loc(t.line))));
@@ -1388,9 +1396,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         }
         let mut sub = Expander {
             interner: &mut *self.interner,
-            trees: PrependingPeekableIterator::new(
-                condition.iter().cloned().map(TokenTree::Token).collect::<Vec<_>>().into_iter(),
-            ),
+            trees: PrependingPeekableIterator::new(condition.iter().cloned().map(TokenTree::Token).collect::<Vec<_>>().into_iter()),
             output: Vec::new(),
             macros: Rc::clone(&self.macros),
             expanding: HashSet::new(),
@@ -1475,7 +1481,11 @@ impl<'a, 'b> Expander<'a, 'b> {
                 let sym = self.interner.get_or_intern(macro_name);
                 Rc::make_mut(&mut self.macros).insert(sym, MacroDef::Object(replacement));
             }
-            ControlLine::DefineFunction { macro_name, parameters, replacement } => {
+            ControlLine::DefineFunction {
+                macro_name,
+                parameters,
+                replacement,
+            } => {
                 let loc = self.loc(parameters.first().map(|t| t.line).unwrap_or(0));
                 let parsed = parse_parameters(&parameters, &loc, &mut *self.interner)?;
                 let sym = self.interner.get_or_intern(macro_name);
@@ -1785,9 +1795,7 @@ impl<'a, 'b> Expander<'a, 'b> {
     /// Column just past the last token of a directive: where the lexer
     /// puts the end-of-directive token.
     fn pragma_eod_col(&self, toks: &[Tok]) -> u64 {
-        toks.last()
-            .map(|t| t.col + render_tok_text(t, self.interner).chars().count() as u64)
-            .unwrap_or(0)
+        toks.last().map(|t| t.col + render_tok_text(t, self.interner).chars().count() as u64).unwrap_or(0)
     }
 
     /// Decoded body of a string-literal token. Only the `\"`/`\\` escapes
@@ -2017,8 +2025,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         if self.files.once.contains(&canon) {
             return Ok(false);
         }
-        let text = std::fs::read_to_string(path)
-            .map_err(|_| err(format!("{}: cannot read '{}'", self.display(), path.display())))?;
+        let text = std::fs::read_to_string(path).map_err(|_| err(format!("{}: cannot read '{}'", self.display(), path.display())))?;
         let display = self.interner.get_or_intern(path.display().to_string());
         if self.files.opts.linemarkers {
             // clang `FileChanged(EnterFile)`: skip ahead to the `#include`
@@ -2054,11 +2061,7 @@ impl<'a, 'b> Expander<'a, 'b> {
     fn run_tokens(&mut self, text: &str, display: SymbolU32) -> Result<(), PpError> {
         use glcc_frontend::lexer::Lexer;
         let mut lexer = Lexer::new(text, self.interner);
-        let toks: Vec<Tok> = lexer
-            .lex_pp_all()
-            .into_iter()
-            .map(|t| Tok::from_pp(&t, display, false, false))
-            .collect();
+        let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
         let disp = self.display();
         let trees = crate::tree::collect_trees(toks, &disp, &mut *self.interner)?;
         let stop_at = self.trees.remaining();
@@ -2134,9 +2137,7 @@ fn unescape_string_body(raw: &str) -> String {
 
 fn render_tok_text(t: &Tok, interner: &Interner) -> String {
     match t.tok {
-        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => {
-            interner.resolve(sym).unwrap_or("").to_string()
-        }
+        PpToken::Ident(sym) | PpToken::PpNumber(sym) | PpToken::Str(sym) | PpToken::Char(sym) => interner.resolve(sym).unwrap_or("").to_string(),
         PpToken::Punct(p) => p.as_str().to_string(),
         PpToken::Ws(PpWs::Space) => " ".to_string(),
         PpToken::Ws(PpWs::Tab) => "\t".to_string(),

@@ -36,10 +36,7 @@ pub fn compile(src: &str) -> KResult<MirModule> {
     // The prelude's `Eof` is not the program's `Eof`.
     tokens.pop();
     for token in &mut tokens {
-        token.span = Span::new(
-            (token.span.lo + PRELUDE_TAG) as usize,
-            (token.span.hi + PRELUDE_TAG) as usize,
-        );
+        token.span = Span::new((token.span.lo + PRELUDE_TAG) as usize, (token.span.hi + PRELUDE_TAG) as usize);
     }
     tokens.extend(lexer::lex(src)?);
     let program = parser::parse(tokens)?;
@@ -55,9 +52,7 @@ pub fn render_diag(src: &str, diag: &Diag) -> String {
         let lo = (diag.span.lo - PRELUDE_TAG) as usize;
         let hi = diag.span.hi.saturating_sub(PRELUDE_TAG) as usize;
         let shifted = Diag::new(diag.msg.clone(), Span::new(lo, hi));
-        return SourceMap::new(prelude::SOURCE)
-            .render(prelude::SOURCE, &shifted)
-            .replacen(" --> ", " --> prelude:", 1);
+        return SourceMap::new(prelude::SOURCE).render(prelude::SOURCE, &shifted).replacen(" --> ", " --> prelude:", 1);
     }
     SourceMap::new(src).render(src, diag)
 }

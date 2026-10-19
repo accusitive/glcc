@@ -112,10 +112,7 @@ impl TyExpr {
         match &self.kind {
             TyExprKind::Name(n) => n.clone(),
             TyExprKind::Paren(t) => format!("({})", t.display()),
-            TyExprKind::Tuple(items) => format!(
-                "({})",
-                items.iter().map(|t| t.display()).collect::<Vec<_>>().join(", ")
-            ),
+            TyExprKind::Tuple(items) => format!("({})", items.iter().map(|t| t.display()).collect::<Vec<_>>().join(", ")),
             TyExprKind::App(f, a) => format!("{} {}", f.display(), a.display()),
             TyExprKind::Arrow(a, b) => format!("{} -> {}", a.display(), b.display()),
         }
@@ -182,7 +179,10 @@ pub enum Pat {
     Bind(String),
     /// Grouping; transparent.
     Paren(Box<Pat>),
-    Ctor { name: String, fields: Vec<Pat> },
+    Ctor {
+        name: String,
+        fields: Vec<Pat>,
+    },
     Tuple(Vec<Pat>),
     /// `[a, b, c]`: sugar, desugared by the checker.
     List(Vec<Pat>),
@@ -249,21 +249,39 @@ pub enum ExprKind {
     BoolConst(bool),
     Unit,
     /// `Just(x)`: constructor call.
-    CtorCall { name: String, args: Vec<Expr> },
+    CtorCall {
+        name: String,
+        args: Vec<Expr>,
+    },
     /// `Nothing`: bare constructor application, zero args.
-    Ctor { name: String },
+    Ctor {
+        name: String,
+    },
     /// A value reference (function name or local binding)
     Var(String),
     /// `f(x, y)`
     Call(Box<Expr>, Vec<Expr>),
     /// `Eq::eq(x, y)` — a class-method call.
-    ClassSel { class: String, method: String, args: Vec<Expr> },
+    ClassSel {
+        class: String,
+        method: String,
+        args: Vec<Expr>,
+    },
     /// `(x, y) -> body`
-    Lambda { params: Vec<Pat>, body: Box<Expr> },
+    Lambda {
+        params: Vec<Pat>,
+        body: Box<Expr>,
+    },
     /// `let x : T = e in body`
-    Let { binds: Vec<(Pat, Expr)>, body: Box<Expr> },
+    Let {
+        binds: Vec<(Pat, Expr)>,
+        body: Box<Expr>,
+    },
     /// `match e { case pat => e; ... }`
-    Match { scrutinee: Box<Expr>, arms: Vec<MatchArm> },
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
     Tuple(Vec<Expr>),
     /// `[a, b, c]`: marble-toned sugar; the checker desugars.
     List(Vec<Expr>),

@@ -106,9 +106,15 @@ pub enum HirExprKind {
     Fn(FnRef),
     /// A closure value: the listed locals of the enclosing body are
     /// copied into the environment, in the closure's capture order.
-    Closure { id: u32, captures: Vec<usize> },
+    Closure {
+        id: u32,
+        captures: Vec<usize>,
+    },
     /// A fully applied call of a known target.
-    CallDirect { target: FnRef, args: Vec<HirExpr> },
+    CallDirect {
+        target: FnRef,
+        args: Vec<HirExpr>,
+    },
     /// A fully applied call through a closure value.
     Call {
         callee: Box<HirExpr>,
@@ -159,11 +165,7 @@ pub enum HirPatKind {
     Bind(usize),
     Int(i64),
     Bool(bool),
-    Ctor {
-        data_id: DataId,
-        ctor: usize,
-        fields: Vec<HirPat>,
-    },
+    Ctor { data_id: DataId, ctor: usize, fields: Vec<HirPat> },
     Tuple(Vec<HirPat>),
 }
 
@@ -175,20 +177,12 @@ pub enum FnRef {
     Value { id: ValueId, args: Vec<Ty> },
     /// An instance method; `args` instantiate the instance's generics
     /// followed by the method signature's own parameters.
-    Instance {
-        instance: usize,
-        method: usize,
-        args: Vec<Ty>,
-    },
+    Instance { instance: usize, method: usize, args: Vec<Ty> },
     /// A class method whose dispatch is still open; lowering resolves it
     /// through the solver once the class arguments are concrete. `args`
     /// holds the class arguments first, then the method's own
     /// instantiation (the same tail [`FnRef::Instance`] carries).
-    Class {
-        class_id: ClassId,
-        method: usize,
-        args: Vec<Ty>,
-    },
+    Class { class_id: ClassId, method: usize, args: Vec<Ty> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

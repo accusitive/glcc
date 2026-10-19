@@ -14,11 +14,7 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn have_cc() -> bool {
-    Command::new("cc")
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    Command::new("cc").arg("--version").output().map(|out| out.status.success()).unwrap_or(false)
 }
 
 fn run_fernc(source: &str, name: &str, extra: &[&str]) -> (PathBuf, PathBuf) {
@@ -52,11 +48,7 @@ fn run_fernc_stdout(source: &str, name: &str, extra: &[&str]) -> String {
         command.arg(arg);
     }
     let out = command.output().expect("run fernc");
-    assert!(
-        out.status.success(),
-        "fernc failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -69,23 +61,10 @@ fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
     )
     .expect("write c harness");
     let exe = dir.join("program");
-    let out = Command::new("cc")
-        .arg(&c_path)
-        .arg(object)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("run cc");
-    assert!(
-        out.status.success(),
-        "link failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = Command::new("cc").arg(&c_path).arg(object).arg("-o").arg(&exe).output().expect("run cc");
+    assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let out = Command::new(&exe).output().expect("run program");
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        out.status.code().unwrap_or(-1),
-    )
+    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code().unwrap_or(-1))
 }
 
 const PROGRAM: &str = r#"
@@ -147,10 +126,7 @@ fn emit_full_mir_keeps_every_compact_dump_line() {
     // full dump is currently identical; when locations land, every
     // compact line must survive with a `; file:line:column` suffix.
     for line in plain.lines() {
-        assert!(
-            full.contains(line),
-            "compact line missing from full dump:\n{line}"
-        );
+        assert!(full.contains(line), "compact line missing from full dump:\n{line}");
     }
 }
 
@@ -167,11 +143,7 @@ fn emit_full_mir_honors_the_output_path() {
         .arg(&dump_path)
         .output()
         .expect("run fernc");
-    assert!(
-        out.status.success(),
-        "fernc failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     assert!(out.stdout.is_empty(), "dump leaked to stdout");
     let text = fs::read_to_string(&dump_path).expect("read dump");
     assert!(text.contains("func @fib:"), "no fib in dump:\n{text}");
@@ -182,11 +154,7 @@ fn emit_check_stops_before_object_emission() {
     let dir = temp_dir("check");
     let fern_path = dir.join("main.fern");
     fs::write(&fern_path, "fun main() = 1\n").expect("write source");
-    let out = Command::new(FERNC)
-        .arg(&fern_path)
-        .arg("--emit=check")
-        .output()
-        .expect("run fernc");
+    let out = Command::new(FERNC).arg(&fern_path).arg("--emit=check").output().expect("run fernc");
     assert!(out.status.success());
     assert!(!dir.join("main.o").exists());
 }
@@ -196,12 +164,7 @@ fn type_errors_are_reported_with_a_location() {
     let dir = temp_dir("error");
     let fern_path = dir.join("main.fern");
     fs::write(&fern_path, "fun main() = 1 + true\n").expect("write source");
-    let out = Command::new(FERNC)
-        .arg(&fern_path)
-        .arg("-o")
-        .arg(dir.join("main.o"))
-        .output()
-        .expect("run fernc");
+    let out = Command::new(FERNC).arg(&fern_path).arg("-o").arg(dir.join("main.o")).output().expect("run fernc");
     assert!(!out.status.success(), "expected a compile error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("error:"), "no error message:\n{stderr}");
@@ -215,21 +178,10 @@ fn brainfuck_example_links_and_runs() {
         return;
     }
     let dir = temp_dir("brainfuck");
-    let example =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/brainfuck/brainfuck.fern");
+    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/brainfuck/brainfuck.fern");
     let object = dir.join("brainfuck.o");
-    let out = Command::new(FERNC)
-        .arg(&example)
-        .arg("-O1")
-        .arg("-o")
-        .arg(&object)
-        .output()
-        .expect("run fernc");
-    assert!(
-        out.status.success(),
-        "fernc failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = Command::new(FERNC).arg(&example).arg("-O1").arg("-o").arg(&object).output().expect("run fernc");
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
     // "Hello World!\n", '*', '@', a NUL byte, and "He", folded into a

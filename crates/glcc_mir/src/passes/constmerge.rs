@@ -8,8 +8,8 @@
 //! above all — cannot see that the expressions are identical until
 //! the duplicates share one value.
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 use crate::ir::{Const, Def, Function, Value};
 use crate::pass::FunctionPass;

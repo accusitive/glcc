@@ -54,10 +54,7 @@ impl InferCtx {
     }
 
     pub fn fresh(&mut self) -> Ty {
-        self.vars.push(VarState {
-            link: None,
-            level: self.level,
-        });
+        self.vars.push(VarState { link: None, level: self.level });
         Ty::Var((self.vars.len() - 1) as u32)
     }
 
@@ -167,9 +164,7 @@ impl InferCtx {
     fn min_level(&self, ty: &Ty) -> usize {
         match self.shallow(ty) {
             Ty::Var(w) => self.vars[w as usize].level,
-            Ty::Named { args, .. } | Ty::Tuple(args) => {
-                args.iter().map(|a| self.min_level(a)).min().unwrap_or(usize::MAX)
-            }
+            Ty::Named { args, .. } | Ty::Tuple(args) => args.iter().map(|a| self.min_level(a)).min().unwrap_or(usize::MAX),
             Ty::App(h, a) | Ty::Arrow(h, a) => self.min_level(&h).min(self.min_level(&a)),
             Ty::Param(_) => usize::MAX,
         }
@@ -198,9 +193,7 @@ impl InferCtx {
     fn occurs(&self, v: u32, ty: &Ty) -> bool {
         match self.shallow(ty) {
             Ty::Var(w) => w == v,
-            Ty::Named { args, .. } | Ty::Tuple(args) => {
-                args.iter().any(|a| self.occurs(v, a))
-            }
+            Ty::Named { args, .. } | Ty::Tuple(args) => args.iter().any(|a| self.occurs(v, a)),
             Ty::App(h, a) | Ty::Arrow(h, a) => self.occurs(v, &h) || self.occurs(v, &a),
             Ty::Param(_) => false,
         }
@@ -215,10 +208,7 @@ impl InferCtx {
                 args.push(self.resolve(&a));
                 (head, args)
             }
-            Ty::Named { name, args } if !args.is_empty() => (
-                Ty::named0(&name),
-                args.iter().map(|a| self.resolve(a)).collect(),
-            ),
+            Ty::Named { name, args } if !args.is_empty() => (Ty::named0(&name), args.iter().map(|a| self.resolve(a)).collect()),
             other => (other, Vec::new()),
         }
     }
@@ -253,14 +243,7 @@ impl InferCtx {
     /// Unifies two application spines from the right, so a shorter
     /// application can match a longer one through its (variable) head:
     /// `f a` against `Free g a` peels `a` and binds `f := Free g`.
-    fn unify_spines(
-        &mut self,
-        h1: Ty,
-        mut args1: Vec<Ty>,
-        h2: Ty,
-        mut args2: Vec<Ty>,
-        span: Span,
-    ) -> KResult<()> {
+    fn unify_spines(&mut self, h1: Ty, mut args1: Vec<Ty>, h2: Ty, mut args2: Vec<Ty>, span: Span) -> KResult<()> {
         while let (Some(x), Some(y)) = (args1.last(), args2.last()) {
             let (x, y) = (x.clone(), y.clone());
             self.unify(&x, &y, span)?;
@@ -329,28 +312,16 @@ impl InferCtx {
     /// parameters named `t$<varid>`, which no source identifier can
     /// collide with.
     pub fn generalize(&self, ty: &Ty) -> Scheme {
-        let vars: Vec<u32> = self
-            .unbound_vars(ty)
-            .into_iter()
-            .filter(|v| self.vars[*v as usize].level >= self.level)
-            .collect();
+        let vars: Vec<u32> = self.unbound_vars(ty).into_iter().filter(|v| self.vars[*v as usize].level >= self.level).collect();
         Scheme {
             ty: self.rigidify(ty, &vars),
-            vars: vars
-                .iter()
-                .map(|v| (format!("t${v}"), Kind::star()))
-                .collect(),
+            vars: vars.iter().map(|v| (format!("t${v}"), Kind::star())).collect(),
         }
     }
 
     /// Every currently unbound variable, in creation order.
     pub fn unbound_ids(&self) -> Vec<u32> {
-        self.vars
-            .iter()
-            .enumerate()
-            .filter(|(_, state)| state.link.is_none())
-            .map(|(i, _)| i as u32)
-            .collect()
+        self.vars.iter().enumerate().filter(|(_, state)| state.link.is_none()).map(|(i, _)| i as u32).collect()
     }
 
     /// Substitutes the unbound variables `ids` by the rigid parameters
@@ -397,8 +368,5 @@ fn subst_vars(ty: &Ty, map: &HashMap<u32, Ty>) -> Ty {
 }
 
 fn mismatch(a: &Ty, b: &Ty, span: Span) -> Diag {
-    Diag::new(
-        format!("mismatched types: expected `{a}`, found `{b}`"),
-        span,
-    )
+    Diag::new(format!("mismatched types: expected `{a}`, found `{b}`"), span)
 }

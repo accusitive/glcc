@@ -53,10 +53,7 @@ pub struct Scheme {
 
 impl Scheme {
     pub fn monomorphic(ty: Ty) -> Scheme {
-        Scheme {
-            vars: Vec::new(),
-            ty,
-        }
+        Scheme { vars: Vec::new(), ty }
     }
 }
 
@@ -102,10 +99,7 @@ impl ClassDef {
     }
 
     pub fn param_kind(&self, name: &str) -> Option<&Kind> {
-        self.params
-            .iter()
-            .find(|(p, _)| p == name)
-            .map(|(_, k)| k)
+        self.params.iter().find(|(p, _)| p == name).map(|(_, k)| k)
     }
 }
 
@@ -288,10 +282,7 @@ impl Kinds {
             Some(existing) => self.unify(&existing, k, span),
             None => {
                 if self.occurs(v, k) {
-                    return Err(Diag::new(
-                        format!("the kind `{}` would contain itself", k.display()),
-                        span,
-                    ));
+                    return Err(Diag::new(format!("the kind `{}` would contain itself", k.display()), span));
                 }
                 self.nodes[v as usize] = Some(k.clone());
                 Ok(())
@@ -311,10 +302,7 @@ impl Kinds {
                 self.unify(b1, b2, span)
             }
             (RawKind::Star, RawKind::Star) => Ok(()),
-            _ => Err(Diag::new(
-                format!("kinds do not match: `{}` vs `{}`", a.display(), b.display()),
-                span,
-            )),
+            _ => Err(Diag::new(format!("kinds do not match: `{}` vs `{}`", a.display(), b.display()), span)),
         }
     }
 
@@ -329,20 +317,12 @@ impl Kinds {
             RawKind::Var(v) => {
                 let dom = self.var();
                 let rest = self.var();
-                self.link(
-                    v,
-                    &RawKind::Arrow(Box::new(dom.clone()), Box::new(rest.clone())),
-                    span,
-                )?;
+                self.link(v, &RawKind::Arrow(Box::new(dom.clone()), Box::new(rest.clone())), span)?;
                 self.unify(&dom, &arg, span)?;
                 Ok(rest)
             }
             other => Err(Diag::new(
-                format!(
-                    "cannot apply an argument of kind `{}` to a type of kind `{}`",
-                    arg.display(),
-                    other.display()
-                ),
+                format!("cannot apply an argument of kind `{}` to a type of kind `{}`", arg.display(), other.display()),
                 span,
             )),
         }
@@ -387,10 +367,7 @@ struct ResolveCtx {
 
 impl ResolveCtx {
     fn kind_of_name(&self, name: &str, span: Span) -> KResult<RawKind> {
-        self.kinds_of
-            .get(name)
-            .cloned()
-            .ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))
+        self.kinds_of.get(name).cloned().ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))
     }
 
     fn kind_of_ty(&mut self, ty: &Ty, span: Span) -> KResult<RawKind> {
@@ -416,19 +393,16 @@ impl ResolveCtx {
                 }
                 Ok(self.scope[p].clone())
             }
-            Ty::Var(_) => Err(Diag::new(
-                "internal: inference variable in a type signature",
-                span,
-            )),
+            Ty::Var(_) => Err(Diag::new("internal: inference variable in a type signature", span)),
         }
     }
 
     /// The kind of the `i`th parameter of the registered head `name`.
     fn peel_param(&self, name: &str, i: usize, span: Span) -> KResult<RawKind> {
         let head = self.kind_of_name(name, span)?;
-        self.kinds.nth_domain(&head, i).ok_or_else(|| {
-            Diag::new(format!("internal: `{name}` has no parameter {i}"), span)
-        })
+        self.kinds
+            .nth_domain(&head, i)
+            .ok_or_else(|| Diag::new(format!("internal: `{name}` has no parameter {i}"), span))
     }
 
     fn star_check(&mut self, ty: &Ty, span: Span) -> KResult<()> {
@@ -480,9 +454,7 @@ impl ResolveCtx {
         let arg_kind = self.kind_of_ty(arg, span)?;
         self.kinds.apply(&head_kind, &arg_kind, span)?;
         match head {
-            Ty::Named { name, args }
-                if self.arity.get(name).is_some_and(|n| args.len() < *n) =>
-            {
+            Ty::Named { name, args } if self.arity.get(name).is_some_and(|n| args.len() < *n) => {
                 let mut args = args.clone();
                 args.push(arg.clone());
                 Ok(Ty::named(name, args))
@@ -511,10 +483,7 @@ fn parse_bound(ctx: &mut ResolveCtx, defs: &Defs, node: &ast::TyExpr) -> KResult
         _ => return Err(Diag::new("expected a class name in this bound", head.span)),
     };
     let Some(class_id) = defs.class_by_name(&name) else {
-        return Err(Diag::new(
-            format!("`{name}` is not a class (used as an instance bound)"),
-            head.span,
-        ));
+        return Err(Diag::new(format!("`{name}` is not a class (used as an instance bound)"), head.span));
     };
     let expected = defs.classes[class_id.index()].params.len();
     if args.len() != expected {
@@ -542,12 +511,7 @@ fn parse_bound(ctx: &mut ResolveCtx, defs: &Defs, node: &ast::TyExpr) -> KResult
 /// The class-argument list of an instance head. Unary classes take the
 /// whole written type; n-ary classes take an application chain of n
 /// arguments.
-fn instance_args(
-    ctx: &mut ResolveCtx,
-    defs: &Defs,
-    class_id: ClassId,
-    node: &ast::TyExpr,
-) -> KResult<Vec<Ty>> {
+fn instance_args(ctx: &mut ResolveCtx, defs: &Defs, class_id: ClassId, node: &ast::TyExpr) -> KResult<Vec<Ty>> {
     let class = &defs.classes[class_id.index()];
     let expected = class.params.len();
     if expected == 1 {
@@ -556,11 +520,7 @@ fn instance_args(
     let (head, args) = split_chain(node);
     if args.len() + 1 != expected {
         return Err(Diag::new(
-            format!(
-                "class `{}` takes {expected} type arguments, but this instance head has {}",
-                class.name,
-                args.len() + 1
-            ),
+            format!("class `{}` takes {expected} type arguments, but this instance head has {}", class.name, args.len() + 1),
             node.span,
         ));
     }
@@ -573,10 +533,7 @@ fn instance_args(
 }
 
 fn free_type_vars(node: &ast::TyExpr, kinds_of: &HashMap<String, RawKind>) -> Vec<String> {
-    node.free_tyvars()
-        .into_iter()
-        .filter(|name| !kinds_of.contains_key(name))
-        .collect()
+    node.free_tyvars().into_iter().filter(|name| !kinds_of.contains_key(name)).collect()
 }
 
 fn fresh_head(kinds: &mut Kinds, params: usize) -> RawKind {
@@ -599,10 +556,7 @@ fn fresh_head(kinds: &mut Kinds, params: usize) -> RawKind {
 /// capitalized.
 fn check_reserved(name: &str, span: Span) -> KResult<()> {
     if name.starts_with("fern_") {
-        return Err(Diag::new(
-            format!("`{name}` is reserved: `fern_` names belong to the runtime"),
-            span,
-        ));
+        return Err(Diag::new(format!("`{name}` is reserved: `fern_` names belong to the runtime"), span));
     }
     Ok(())
 }
@@ -638,24 +592,15 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         match &item.kind {
             ast::ItemKind::Data(d) => {
                 if Ty::intros().contains(&d.name.as_str()) {
-                    return Err(Diag::new(
-                        format!("`{}` is a built-in type", d.name),
-                        d.span,
-                    ));
+                    return Err(Diag::new(format!("`{}` is a built-in type", d.name), d.span));
                 }
                 if kinds_of.contains_key(&d.name) {
-                    return Err(Diag::new(
-                        format!("duplicate type name `{}`", d.name),
-                        d.span,
-                    ));
+                    return Err(Diag::new(format!("duplicate type name `{}`", d.name), d.span));
                 }
                 let id = DataId(defs.data.len() as u32);
                 for (tag, ctor) in d.ctors.iter().enumerate() {
                     if defs.ctor_ids.contains_key(&ctor.name) {
-                        return Err(Diag::new(
-                            format!("duplicate constructor `{}`", ctor.name),
-                            d.span,
-                        ));
+                        return Err(Diag::new(format!("duplicate constructor `{}`", ctor.name), d.span));
                     }
                     defs.ctor_ids.insert(ctor.name.clone(), (id, tag as u32));
                 }
@@ -672,22 +617,13 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             }
             ast::ItemKind::Class(c) => {
                 if Ty::intros().contains(&c.name.as_str()) {
-                    return Err(Diag::new(
-                        format!("`{}` is a built-in type", c.name),
-                        c.span,
-                    ));
+                    return Err(Diag::new(format!("`{}` is a built-in type", c.name), c.span));
                 }
                 if kinds_of.contains_key(&c.name) {
-                    return Err(Diag::new(
-                        format!("duplicate type name `{}`", c.name),
-                        c.span,
-                    ));
+                    return Err(Diag::new(format!("duplicate type name `{}`", c.name), c.span));
                 }
                 if c.params.is_empty() {
-                    return Err(Diag::new(
-                        format!("class `{}` needs at least one type parameter", c.name),
-                        c.span,
-                    ));
+                    return Err(Diag::new(format!("class `{}` needs at least one type parameter", c.name), c.span));
                 }
                 let id = ClassId(defs.classes.len() as u32);
                 defs.classes.push(ClassDef {
@@ -714,10 +650,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             ast::ItemKind::Fun(f) => {
                 check_reserved(&f.name, f.span)?;
                 if defs.fn_ids.contains_key(&f.name) || defs.value_ids.contains_key(&f.name) {
-                    return Err(Diag::new(
-                        format!("`{}` is already defined", f.name),
-                        f.span,
-                    ));
+                    return Err(Diag::new(format!("`{}` is already defined", f.name), f.span));
                 }
                 let id = FnId(defs.fns.len() as u32);
                 defs.fns.push(FnDef {
@@ -733,10 +666,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             ast::ItemKind::Let(v) => {
                 check_reserved(&v.name, v.span)?;
                 if defs.fn_ids.contains_key(&v.name) || defs.value_ids.contains_key(&v.name) {
-                    return Err(Diag::new(
-                        format!("`{}` is already defined", v.name),
-                        v.span,
-                    ));
+                    return Err(Diag::new(format!("`{}` is already defined", v.name), v.span));
                 }
                 let id = ValueId(defs.values.len() as u32);
                 defs.values.push(ValueDef {
@@ -820,10 +750,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             continue;
         };
         let Some(class_id) = defs.class_by_name(&inst.class) else {
-            return Err(Diag::new(
-                format!("cannot find class `{}`", inst.class),
-                inst.span,
-            ));
+            return Err(Diag::new(format!("cannot find class `{}`", inst.class), inst.span));
         };
 
         let mut free_names: Vec<String> = Vec::new();
@@ -855,20 +782,9 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 ));
             }
         }
-        if defs
-            .instances
-            .iter()
-            .any(|prev| prev.class_id == class_id && prev.args == parts)
-        {
-            let display = parts
-                .iter()
-                .map(|p| p.to_string())
-                .collect::<Vec<_>>()
-                .join(" ");
-            return Err(Diag::new(
-                format!("duplicate instance for `{} {display}`", inst.class),
-                inst.span,
-            ));
+        if defs.instances.iter().any(|prev| prev.class_id == class_id && prev.args == parts) {
+            let display = parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
+            return Err(Diag::new(format!("duplicate instance for `{} {display}`", inst.class), inst.span));
         }
         let mut cur = ctx.kind_of_name(&inst.class, inst.span)?;
         for part in &parts {
@@ -909,18 +825,10 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         instance_generics_raw.push(generics);
     }
 
-    let ResolveCtx {
-        kinds,
-        kinds_of,
-        arity,
-        ..
-    } = ctx;
+    let ResolveCtx { kinds, kinds_of, arity, .. } = ctx;
     defs.arity = arity;
 
-    defs.kinds_of = kinds_of
-        .iter()
-        .map(|(name, raw)| (name.clone(), kinds.to_kind(raw)))
-        .collect();
+    defs.kinds_of = kinds_of.iter().map(|(name, raw)| (name.clone(), kinds.to_kind(raw))).collect();
 
     for d in &mut defs.data {
         if let Some(head) = kinds_of.get(&d.name) {
@@ -942,19 +850,13 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         if let Some(vars_per_method) = method_var_kinds.get(&ClassId(cidx as u32)) {
             for (m, method) in c.methods.iter_mut().enumerate() {
                 if let Some(vars) = vars_per_method.get(m) {
-                    method.vars = vars
-                        .iter()
-                        .map(|(name, raw)| (name.clone(), kinds.to_kind(raw)))
-                        .collect();
+                    method.vars = vars.iter().map(|(name, raw)| (name.clone(), kinds.to_kind(raw))).collect();
                 }
             }
         }
     }
     for (inst, generics) in defs.instances.iter_mut().zip(&instance_generics_raw) {
-        inst.generics = generics
-            .iter()
-            .map(|(name, raw)| (name.clone(), kinds.to_kind(raw)))
-            .collect();
+        inst.generics = generics.iter().map(|(name, raw)| (name.clone(), kinds.to_kind(raw))).collect();
     }
 
     Ok(defs)

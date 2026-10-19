@@ -28,10 +28,7 @@ fn check_err(src: &str) -> String {
 }
 
 fn body<'a>(hir: &'a HirProgram, name: &str) -> &'a HirFn {
-    hir.bodies
-        .iter()
-        .find(|b| b.name == name)
-        .unwrap_or_else(|| panic!("no body named `{name}`"))
+    hir.bodies.iter().find(|b| b.name == name).unwrap_or_else(|| panic!("no body named `{name}`"))
 }
 
 fn is_generic_name(name: &str) -> bool {
@@ -65,11 +62,7 @@ fn refs(e: &HirExpr, out: &mut Vec<FnRef>) {
             }
             refs(body, out);
         }
-        HirExprKind::If {
-            cond,
-            then_body,
-            else_body,
-        } => {
+        HirExprKind::If { cond, then_body, else_body } => {
             refs(cond, out);
             refs(then_body, out);
             refs(else_body, out);
@@ -105,10 +98,7 @@ instance Functor List {
 #[test]
 fn identity_is_generalized() {
     let (defs, _) = check_ok("fun id(x) = x");
-    let scheme = defs
-        .fn_by_name("id")
-        .and_then(|id| defs.fns[id.index()].scheme.as_ref())
-        .expect("id has a scheme");
+    let scheme = defs.fn_by_name("id").and_then(|id| defs.fns[id.index()].scheme.as_ref()).expect("id has a scheme");
     assert_eq!(scheme.vars.len(), 1);
     assert!(is_generic_name(&scheme.vars[0].0));
 }
@@ -138,9 +128,7 @@ fn higher_kinded_dispatch_resolves_on_a_concrete_type() {
     let mut found = Vec::new();
     refs(&one.body, &mut found);
     assert!(
-        found
-            .iter()
-            .any(|r| matches!(r, FnRef::Instance { instance: 0, method: 0, .. })),
+        found.iter().any(|r| matches!(r, FnRef::Instance { instance: 0, method: 0, .. })),
         "the List instance is chosen: {found:?}"
     );
 }
@@ -203,9 +191,7 @@ fn self_recursion_references_its_own_generics() {
     let mut found = Vec::new();
     refs(&dup_body.body, &mut found);
     assert!(
-        found
-            .iter()
-            .any(|r| matches!(r, FnRef::Fn { args, .. } if args.len() == 1)),
+        found.iter().any(|r| matches!(r, FnRef::Fn { args, .. } if args.len() == 1)),
         "the self call passes the body's own generics: {found:?}"
     );
 }
@@ -251,10 +237,12 @@ fn local_lets_are_monomorphic_and_ordered() {
 
 #[test]
 fn matcher_unifies_arm_types() {
-    check_ok("\
+    check_ok(
+        "\
 data Maybe a = Nothing | Just(a)
 fun or_zero(m) = match m { case Nothing => 0 case Just(x) => x }
-");
+",
+    );
 }
 
 #[test]
@@ -286,10 +274,7 @@ fn error_unknown_name() {
 #[test]
 fn error_arity_mismatch() {
     let msg = check_err("fun id(x) = x\nfun f() = id()");
-    assert!(
-        msg.contains("takes 1 parameter(s), but 0 argument(s)"),
-        "{msg}"
-    );
+    assert!(msg.contains("takes 1 parameter(s), but 0 argument(s)"), "{msg}");
 }
 
 #[test]
@@ -301,10 +286,7 @@ fn closure_returning_function_is_called_by_declared_arity() {
 #[test]
 fn error_partial_application() {
     let msg = check_err("fun add(x, y) = x + y\nfun f() = add(1)(2)");
-    assert!(
-        msg.contains("takes 2 parameter(s), but 1 argument(s)"),
-        "{msg}"
-    );
+    assert!(msg.contains("takes 2 parameter(s), but 1 argument(s)"), "{msg}");
 }
 
 #[test]
@@ -344,9 +326,7 @@ fun z(x) = shrunk(x)
 
 #[test]
 fn error_unusable_unknown() {
-    let msg = check_err(
-        "data List a = Nil | Cons(a, List a)\nfun f(n) = { let empty = Nil; n }",
-    );
+    let msg = check_err("data List a = Nil | Cons(a, List a)\nfun f(n) = { let empty = Nil; n }");
     assert!(msg.contains("cannot infer"), "{msg}");
 }
 
@@ -372,8 +352,5 @@ fun f(b) = addp(b, b)
     let f = body(&hir, "f");
     let mut found = Vec::new();
     refs(&f.body, &mut found);
-    assert!(
-        found.iter().any(|r| matches!(r, FnRef::Class { .. })),
-        "lowering must pick the instance: {found:?}"
-    );
+    assert!(found.iter().any(|r| matches!(r, FnRef::Class { .. })), "lowering must pick the instance: {found:?}");
 }

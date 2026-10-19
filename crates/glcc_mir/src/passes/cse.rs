@@ -299,11 +299,7 @@ fn bin(op: BinOp, a: Value, b: Value) -> ExprKey {
 
 /// Canonical operand order for commutative operations.
 fn sorted(a: Value, b: Value) -> (Value, Value) {
-    if a.index() <= b.index() {
-        (a, b)
-    } else {
-        (b, a)
-    }
+    if a.index() <= b.index() { (a, b) } else { (b, a) }
 }
 
 #[cfg(test)]

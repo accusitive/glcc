@@ -117,9 +117,7 @@ fn check_term(func: &Function, term: &Terminator, errors: &mut Vec<String>) {
             else_args,
             ..
         } => {
-            if then_args.len() != func.blocks[*then_block].params.len()
-                || else_args.len() != func.blocks[*else_block].params.len()
-            {
+            if then_args.len() != func.blocks[*then_block].params.len() || else_args.len() != func.blocks[*else_block].params.len() {
                 errors.push(format!("{}: condbr arity mismatch", func.name));
             }
         }

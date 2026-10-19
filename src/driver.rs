@@ -12,8 +12,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::winunwind;
 
@@ -30,11 +30,7 @@ use glcc_frontend::{
 /// Preprocessor binary (`clang` unless `GLCC_PP` overrides); only used
 /// when the native preprocessor is not in effect.
 fn preprocessor() -> OsString {
-    std::env::var_os("GLCC_PP").unwrap_or_else(|| {
-        glcc_pp::find_clang()
-            .map(PathBuf::into_os_string)
-            .unwrap_or_else(|| OsString::from("clang"))
-    })
+    std::env::var_os("GLCC_PP").unwrap_or_else(|| glcc_pp::find_clang().map(PathBuf::into_os_string).unwrap_or_else(|| OsString::from("clang")))
 }
 
 /// Whether the native `glcc_pp` preprocessor is in effect for `job`:
@@ -75,9 +71,7 @@ fn link_driver() -> OsString {
 /// on a Windows host, unless `GLCC_CC` names a gcc-shaped driver.
 /// Object inputs are COFF either way.
 fn msvc_link(job: &Job) -> bool {
-    cfg!(windows)
-        && matches!(job.target.os, glcc_frontend::target::Os::Windows)
-        && std::env::var_os("GLCC_CC").is_none()
+    cfg!(windows) && matches!(job.target.os, glcc_frontend::target::Os::Windows) && std::env::var_os("GLCC_CC").is_none()
 }
 
 /// MSVC linker binary; `GLCC_LD` overrides (e.g. `lld-link`), the same
@@ -109,12 +103,7 @@ fn msvc_tool(name: &str) -> OsString {
 /// codegen may still need helpers the CRT does not provide (builtin
 /// setjmp/longjmp, inline quad arithmetic), which the staged Win64
 /// runtime library supplies, appended last.
-fn msvc_link_command(
-    job: &Job,
-    objects: &dyn Fn(usize) -> OsString,
-    out: &OsStr,
-    asm_objects: &[PathBuf],
-) -> (OsString, Vec<OsString>) {
+fn msvc_link_command(job: &Job, objects: &dyn Fn(usize) -> OsString, out: &OsStr, asm_objects: &[PathBuf]) -> (OsString, Vec<OsString>) {
     // Library search paths: `LIB` when a Developer Command Prompt set
     // it, else the discovered MSVC + Windows SDK layout.
     let libpaths = if std::env::var_os("LIB").is_some() {
@@ -128,9 +117,7 @@ fn msvc_link_command(
     if wants_glcc_runtime(job) {
         match find_glcc_runtime("glccrt-win64.lib") {
             Some(rt) => args.push(rt.into_os_string()),
-            None => eprintln!(
-                "glcc: warning: no glccrt-win64.lib (run `cargo build` to stage it, or set GLCC_RT); builtin setjmp/longjmp and quad arithmetic will not link"
-            ),
+            None => eprintln!("glcc: warning: no glccrt-win64.lib (run `cargo build` to stage it, or set GLCC_RT); builtin setjmp/longjmp and quad arithmetic will not link"),
         }
     }
     (linker, args)
@@ -149,11 +136,7 @@ fn msvc_link_command_with(
         args.push(OsString::from("/dll"));
     }
     args.push(OsString::from(format!("/out:{}", Path::new(out).display())));
-    args.push(OsString::from(if job.shared {
-        "/subsystem:windows"
-    } else {
-        "/subsystem:console"
-    }));
+    args.push(OsString::from(if job.shared { "/subsystem:windows" } else { "/subsystem:console" }));
     let mut items = job.order.iter();
     while let Some(item) = items.next() {
         match item {
@@ -189,9 +172,26 @@ fn msvc_link_command_with(
 /// only exist on ELF drop out; anything else passes through verbatim.
 fn push_msvc_link_arg(args: &mut Vec<OsString>, a: &OsStr) {
     const GCC_ONLY: [&str; 21] = [
-        "-static", "-static-pie", "-pie", "-no-pie", "-nopie", "-pthread", "-pthreads", "-s",
-        "-shared", "-nostdlib", "-nostartfiles", "-nodefaultlibs", "-static-libgcc",
-        "-shared-libgcc", "-static-libstdc++", "-lm", "-lpthread", "-lrt", "-ldl", "-lc",
+        "-static",
+        "-static-pie",
+        "-pie",
+        "-no-pie",
+        "-nopie",
+        "-pthread",
+        "-pthreads",
+        "-s",
+        "-shared",
+        "-nostdlib",
+        "-nostartfiles",
+        "-nodefaultlibs",
+        "-static-libgcc",
+        "-shared-libgcc",
+        "-static-libstdc++",
+        "-lm",
+        "-lpthread",
+        "-lrt",
+        "-ldl",
+        "-lc",
         "-lgcc_s",
     ];
     let s = a.to_string_lossy();
@@ -495,12 +495,7 @@ impl Default for Job {
 fn default_link_libs(flavor: Flavor) -> Vec<OsString> {
     match flavor {
         Flavor::C => Vec::new(),
-        Flavor::Cpp => vec![
-            OsString::from("-lstdc++"),
-            OsString::from("-lm"),
-            OsString::from("-lgcc_s"),
-            OsString::from("-lpthread"),
-        ],
+        Flavor::Cpp => vec![OsString::from("-lstdc++"), OsString::from("-lm"), OsString::from("-lgcc_s"), OsString::from("-lpthread")],
     }
 }
 
@@ -621,10 +616,7 @@ fn handle_valued(job: &mut Job, lang: &mut Option<Lang>, flag: &str, val: OsStri
             // front end is invoked with a scratch cwd so the `.ti`
             // it writes to cwd stays out of the user's directory.
             let val = if flag == "-I" {
-                Path::new(&val)
-                    .canonicalize()
-                    .map(|p| p.as_os_str().to_os_string())
-                    .unwrap_or(val)
+                Path::new(&val).canonicalize().map(|p| p.as_os_str().to_os_string()).unwrap_or(val)
             } else {
                 val
             };
@@ -729,10 +721,7 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
     // like `-x`'s running state): pre-scan so a `.c` before the flag
     // classifies the same as one after it. Stops at `--`, where
     // everything after is a filename.
-    job.force_edg_c = args
-        .iter()
-        .take_while(|a| a.as_os_str() != "--")
-        .any(|a| a.as_os_str() == "--edg-c");
+    job.force_edg_c = args.iter().take_while(|a| a.as_os_str() != "--").any(|a| a.as_os_str() == "--edg-c");
     if job.force_edg_c && flavor == Flavor::C {
         return Err("--edg-c requires glcpp (EDG is not linked into glcc)".into());
     }
@@ -1204,8 +1193,7 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
     // frontend output as-is for best debug fidelity.
     if opt_level != OptLevel::None {
         use glcc_mir::pass::PassManager;
-        let pm = PassManager::new()
-            .add_module_pass(glcc_mir::passes::Inline::small());
+        let pm = PassManager::new().add_module_pass(glcc_mir::passes::Inline::small());
         let mut pm = pm
             .add_func_pass(glcc_mir::passes::Mem2Reg)
             .add_func_pass(glcc_mir::passes::ConstFold)
@@ -1251,9 +1239,7 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         let mut flag_builder = cranelift_codegen::settings::builder();
         flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
         flag_builder.set("is_pic", "true").expect("pic");
-        flag_builder
-            .set("preserve_frame_pointers", "true")
-            .expect("frame pointers");
+        flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
         // TLS access (`tls_value` for the x86-64 foreign-variadic
         // trampoline) has no lowering unless a model is selected;
         // `elf_gd` lowers on all supported ISAs, like the legacy
@@ -1264,27 +1250,18 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         // runtime is compiled with the same setting, so internal
         // `__glcc_*` calls agree by construction.
         if matches!(target.os, glcc_frontend::target::Os::Windows) {
-            flag_builder
-                .set("enable_llvm_abi_extensions", "true")
-                .expect("llvm abi extensions");
+            flag_builder.set("enable_llvm_abi_extensions", "true").expect("llvm abi extensions");
         }
         let flags = cranelift_codegen::settings::Flags::new(flag_builder);
         let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() {
             cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
         } else {
-            cranelift_codegen::isa::lookup(
-                target.triple().parse().expect("known target triple"),
-            )
-            .expect("known isa")
-            .finish(flags)
-            .expect("isa flags")
+            cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
+                .expect("known isa")
+                .finish(flags)
+                .expect("isa flags")
         };
-        let mut builder = cranelift_object::ObjectBuilder::new(
-            isa,
-            "glcc",
-            cranelift_module::default_libcall_names(),
-        )
-        .expect("object builder");
+        let mut builder = cranelift_object::ObjectBuilder::new(isa, "glcc", cranelift_module::default_libcall_names()).expect("object builder");
         // Always emit `.eh_frame` so backtraces work with or without
         // `-g`: the DWARF variable locations are CFA-relative, so gdb
         // needs the CFI to resolve them too.
@@ -1292,29 +1269,14 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         let mut obj = cranelift_object::ObjectModule::new(builder);
         let mut unwind = Vec::new();
         if debug {
-            let (_, lowered) = glcc_lower_cl::lower_module_with_debug(
-                &mir_module,
-                &mut obj,
-                cl_target,
-                &mut asm_text,
-                &mut unwind,
-            );
+            let (_, lowered) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
             let mut product = obj.finish();
             if let Err(e) = winunwind::emit(&mut product, &unwind) {
                 eprintln!("glcc: warning: {e}");
             }
-            (
-                glcc_dwarf::emit_with_debug(product, &lowered, &mir_module),
-                asm_text,
-            )
+            (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
         } else {
-            glcc_lower_cl::lower_module_collecting(
-                &mir_module,
-                &mut obj,
-                cl_target,
-                &mut asm_text,
-                &mut unwind,
-            );
+            glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
             let mut product = obj.finish();
             if let Err(e) = winunwind::emit(&mut product, &unwind) {
                 eprintln!("glcc: warning: {e}");
@@ -1769,7 +1731,11 @@ fn do_deps(ctx: &Ctx, job: &Job) -> Outcome<()> {
         .iter()
         .filter_map(|item| match item {
             OrderItem::Input(i) => {
-                if matches!(job.inputs[*i].lang, Lang::Cpp | Lang::EdgC) { None } else { Some(job.inputs[*i].path.clone()) }
+                if matches!(job.inputs[*i].lang, Lang::Cpp | Lang::EdgC) {
+                    None
+                } else {
+                    Some(job.inputs[*i].path.clone())
+                }
             }
             OrderItem::LinkArg(_) => None,
         })
@@ -1973,11 +1939,7 @@ fn edg_scrape(root: &Path) -> Option<EdpScrape> {
                     .arg("includes")
                     .output()
                     .ok()?;
-                if out.status.success() {
-                    String::from_utf8(out.stdout).ok()
-                } else {
-                    None
-                }
+                if out.status.success() { String::from_utf8(out.stdout).ok() } else { None }
             }
             let cxx = run(root, "c++")?;
             let c = run(root, "c")?;
@@ -2569,11 +2531,7 @@ Examples:
 }
 
 fn print_version(flavor: Flavor) {
-    println!(
-        "{} {} (Cranelift backend; GCC-compatible command driver)",
-        driver_name(flavor),
-        env!("CARGO_PKG_VERSION")
-    );
+    println!("{} {} (Cranelift backend; GCC-compatible command driver)", driver_name(flavor), env!("CARGO_PKG_VERSION"));
 }
 
 /// Run `cc <flag>` and print its stdout (for -print-search-dirs and
@@ -3013,9 +2971,7 @@ mod tests {
         };
         for (i, (_, func_name)) in funcs.iter().enumerate() {
             let row = i as u64 * 12;
-            let at = |field: u64| -> &object::Relocation {
-                &relocs.iter().find(|(o, _)| *o == row + field).unwrap_or_else(|| panic!("reloc at row {i} + {field}")).1
-            };
+            let at = |field: u64| -> &object::Relocation { &relocs.iter().find(|(o, _)| *o == row + field).unwrap_or_else(|| panic!("reloc at row {i} + {field}")).1 };
             for field in [0, 4, 8] {
                 match at(field).flags() {
                     object::RelocationFlags::Coff { typ } => assert_eq!(typ, object::pe::IMAGE_REL_AMD64_ADDR32NB),
@@ -3077,17 +3033,15 @@ mod tests {
         let abbrev = load(".debug_abbrev");
         let line = load(".debug_line");
         let endian = gimli::RunTimeEndian::Little;
-        let dwarf = gimli::read::Dwarf::load(
-            |id: gimli::SectionId| -> Result<EndianSlice<'_, gimli::RunTimeEndian>, gimli::Error> {
-                let data: &[u8] = match id {
-                    gimli::SectionId::DebugInfo => &info,
-                    gimli::SectionId::DebugAbbrev => &abbrev,
-                    gimli::SectionId::DebugLine => &line,
-                    _ => &[],
-                };
-                Ok(EndianSlice::new(data, endian))
-            },
-        )
+        let dwarf = gimli::read::Dwarf::load(|id: gimli::SectionId| -> Result<EndianSlice<'_, gimli::RunTimeEndian>, gimli::Error> {
+            let data: &[u8] = match id {
+                gimli::SectionId::DebugInfo => &info,
+                gimli::SectionId::DebugAbbrev => &abbrev,
+                gimli::SectionId::DebugLine => &line,
+                _ => &[],
+            };
+            Ok(EndianSlice::new(data, endian))
+        })
         .expect("DWARF parses");
         let mut out = Vec::new();
         let mut rows = Vec::new();
@@ -3106,11 +3060,7 @@ mod tests {
             }
             let mut tree = unit.entries_tree(None).expect("tree");
             let root = tree.root().expect("root");
-            fn walk<R: gimli::read::Reader>(
-                node: gimli::read::EntriesTreeNode<'_, '_, R>,
-                depth: u32,
-                out: &mut Vec<DieSummary>,
-            ) -> Result<(), gimli::Error> {
+            fn walk<R: gimli::read::Reader>(node: gimli::read::EntriesTreeNode<'_, '_, R>, depth: u32, out: &mut Vec<DieSummary>) -> Result<(), gimli::Error> {
                 let entry = node.entry();
                 let mut udata_attrs = Vec::new();
                 let mut sdata_attrs = Vec::new();
@@ -3123,23 +3073,15 @@ mod tests {
                         _ => {}
                     }
                 }
-                let name = entry
-                    .attr_value(gimli::constants::DW_AT_name)
-                    .and_then(|v| match v {
-                        gimli::read::AttributeValue::String(s) => {
-                            s.to_string_lossy().ok().map(|s| s.into_owned())
-                        }
-                        _ => None,
-                    });
-                let decl_line = entry
-                    .attr_value(gimli::constants::DW_AT_decl_line)
-                    .and_then(|v| match v {
-                        gimli::read::AttributeValue::Udata(n) => Some(n),
-                        _ => None,
-                    });
-                let has_location = entry
-                    .attr_value(gimli::constants::DW_AT_location)
-                    .is_some();
+                let name = entry.attr_value(gimli::constants::DW_AT_name).and_then(|v| match v {
+                    gimli::read::AttributeValue::String(s) => s.to_string_lossy().ok().map(|s| s.into_owned()),
+                    _ => None,
+                });
+                let decl_line = entry.attr_value(gimli::constants::DW_AT_decl_line).and_then(|v| match v {
+                    gimli::read::AttributeValue::Udata(n) => Some(n),
+                    _ => None,
+                });
+                let has_location = entry.attr_value(gimli::constants::DW_AT_location).is_some();
                 out.push(DieSummary {
                     depth,
                     tag: entry.tag(),
@@ -3183,18 +3125,8 @@ mod tests {
             .iter()
             .find(|(name, _)| *name == AT)
             .map(|(_, n)| *n as i64)
-            .or_else(|| {
-                die.sdata_attrs
-                    .iter()
-                    .find(|(name, _)| *name == AT)
-                    .map(|(_, n)| *n)
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing DW_AT_const_value on {}",
-                    die.name.as_deref().unwrap_or("?")
-                )
-            })
+            .or_else(|| die.sdata_attrs.iter().find(|(name, _)| *name == AT).map(|(_, n)| *n))
+            .unwrap_or_else(|| panic!("missing DW_AT_const_value on {}", die.name.as_deref().unwrap_or("?")))
     }
 
     #[test]
@@ -3237,10 +3169,7 @@ mod tests {
         assert_eq!(global.decl_line, Some(103));
         // Struct members keep byte offsets; bit-fields carry widths and
         // struct-relative bit offsets.
-        let members: Vec<_> = dies
-            .iter()
-            .filter(|d| d.tag == DW_TAG_member && d.depth == 2)
-            .collect();
+        let members: Vec<_> = dies.iter().filter(|d| d.tag == DW_TAG_member && d.depth == 2).collect();
         let px = members.iter().find(|d| d.name.as_deref() == Some("x")).expect("Point.x");
         let py = members.iter().find(|d| d.name.as_deref() == Some("y")).expect("Point.y");
         assert_eq!(udata(px, DW_AT_data_member_location), 0);
@@ -3248,10 +3177,7 @@ mod tests {
         let bit = |name: &str| {
             members
                 .iter()
-                .find(|d| {
-                    d.name.as_deref() == Some(name)
-                        && d.udata_attrs.iter().any(|(at, _)| *at == DW_AT_bit_size)
-                })
+                .find(|d| d.name.as_deref() == Some(name) && d.udata_attrs.iter().any(|(at, _)| *at == DW_AT_bit_size))
                 .unwrap_or_else(|| panic!("Bits.{name}"))
         };
         assert_eq!(udata(bit("a"), DW_AT_bit_size), 3);
@@ -3265,10 +3191,7 @@ mod tests {
         assert_eq!(const_value(enumerator("GREEN")), 5);
         assert_eq!(const_value(enumerator("BLUE")), 6);
         // Line rows carry the same original lines as the DIEs.
-        assert!(
-            rows.contains(&104) && rows.contains(&105) && rows.contains(&112),
-            "missing original lines in {rows:?}"
-        );
+        assert!(rows.contains(&104) && rows.contains(&105) && rows.contains(&112), "missing original lines in {rows:?}");
     }
 
     #[test]
@@ -3446,7 +3369,8 @@ mod tests {
     }
 
     #[test]
-    fn link_mode_flags() {        let job = parse(&["-shared", "-fPIC", "a.c", "-o", "lib.so"]);
+    fn link_mode_flags() {
+        let job = parse(&["-shared", "-fPIC", "a.c", "-o", "lib.so"]);
         assert!(job.shared);
         assert_eq!(order_kind(&job), ["flag:-shared", "in:a.c"]);
         let job = parse(&["a.c", "-static", "-pthread", "-s"]);

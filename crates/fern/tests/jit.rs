@@ -34,11 +34,7 @@ fn build(src: &str) -> Jit {
     let module = fern::compile(src).unwrap_or_else(|d| panic!("compile failed: {}\nin {src}", d.msg));
     let errors = glcc_mir::verify::verify_module(&module);
     assert!(errors.is_empty(), "mir errors in {src}: {errors:?}");
-    let mut builder = JITBuilder::with_flags(
-        &[("preserve_frame_pointers", "true")],
-        cranelift_module::default_libcall_names(),
-    )
-    .expect("jit builder");
+    let mut builder = JITBuilder::with_flags(&[("preserve_frame_pointers", "true")], cranelift_module::default_libcall_names()).expect("jit builder");
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
     builder.symbol("write", write as *const u8);
@@ -138,14 +134,8 @@ fn arithmetic() {
 
 #[test]
 fn conditionals() {
-    assert_eq!(
-        run_i64("fun abs(x) = if x < 0 then -x else x\nfun main() = abs(-9)"),
-        9
-    );
-    assert_eq!(
-        run_i64("fun max(x, y) = if x > y then x else y\nfun main() = max(3, 8)"),
-        8
-    );
+    assert_eq!(run_i64("fun abs(x) = if x < 0 then -x else x\nfun main() = abs(-9)"), 9);
+    assert_eq!(run_i64("fun max(x, y) = if x > y then x else y\nfun main() = max(3, 8)"), 8);
     assert_eq!(run_i64("fun main() = if true then 1 else 2"), 1);
 }
 
@@ -159,16 +149,8 @@ fn short_circuit() {
 
 #[test]
 fn recursion() {
-    assert_eq!(
-        run_i64("fun fac(n) = if n == 0 then 1 else n * fac(n - 1)\nfun main() = fac(6)"),
-        720
-    );
-    assert_eq!(
-        run_i64(
-            "fun fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfun main() = fib(12)"
-        ),
-        144
-    );
+    assert_eq!(run_i64("fun fac(n) = if n == 0 then 1 else n * fac(n - 1)\nfun main() = fac(6)"), 720);
+    assert_eq!(run_i64("fun fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfun main() = fib(12)"), 144);
 }
 
 #[test]
@@ -207,10 +189,7 @@ fn heap_keeps_up_with_allocations() {
 
 #[test]
 fn tuples_and_patterns() {
-    assert_eq!(
-        run_i64("fun fst(p) = match p { case (a, _) => a }\nfun main() = fst((7, 9))"),
-        7
-    );
+    assert_eq!(run_i64("fun fst(p) = match p { case (a, _) => a }\nfun main() = fst((7, 9))"), 7);
     assert_eq!(
         run_i64(
             "fun fst(p) = match p { case (a, _) => a }\n\
@@ -219,19 +198,13 @@ fn tuples_and_patterns() {
         ),
         2
     );
-    assert_eq!(
-        run_i64("fun main() = { let (a, b) = (3, 4); a * b }"),
-        12
-    );
+    assert_eq!(run_i64("fun main() = { let (a, b) = (3, 4); a * b }"), 12);
     assert_eq!(run_i64("fun main() = { let u = {}; 1 }"), 1);
 }
 
 #[test]
 fn parameter_patterns() {
-    assert_eq!(
-        run_i64("fun uncurry((a, b)) = a * b\nfun main() = uncurry((6, 7))"),
-        42
-    );
+    assert_eq!(run_i64("fun uncurry((a, b)) = a * b\nfun main() = uncurry((6, 7))"), 42);
     assert_eq!(
         run_i64(
             "fun swap((a, b)) = (b, a)\n\
@@ -277,30 +250,18 @@ fn self_reference_as_a_value() {
 }
 
 #[test]
-fn literal_patterns_and_guards() {    let sign = "fun sign(x) = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n";
+fn literal_patterns_and_guards() {
+    let sign = "fun sign(x) = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n";
     assert_eq!(run_i64(&format!("{sign}fun main() = sign(-4)")), -1);
     assert_eq!(run_i64(&format!("{sign}fun main() = sign(0)")), 0);
     assert_eq!(run_i64(&format!("{sign}fun main() = sign(9)")), 1);
-    assert_eq!(
-        run_i64("fun f(b) = match b { case true => 1 case false => 0 }\nfun main() = f(false)"),
-        0
-    );
+    assert_eq!(run_i64("fun f(b) = match b { case true => 1 case false => 0 }\nfun main() = f(false)"), 0);
 }
 
 #[test]
 fn higher_order_functions() {
-    assert_eq!(
-        run_i64(
-            "fun apply(f, x) = f(x)\nfun adder(n) = y -> y + n\nfun main() = apply(adder(3), 4)"
-        ),
-        7
-    );
-    assert_eq!(
-        run_i64(
-            "fun twice(f, x) = f(f(x))\nfun inc(x) = x + 1\nfun main() = twice(inc, 10)"
-        ),
-        12
-    );
+    assert_eq!(run_i64("fun apply(f, x) = f(x)\nfun adder(n) = y -> y + n\nfun main() = apply(adder(3), 4)"), 7);
+    assert_eq!(run_i64("fun twice(f, x) = f(f(x))\nfun inc(x) = x + 1\nfun main() = twice(inc, 10)"), 12);
     assert_eq!(
         run_i64(
             "fun compose(f, g) = x -> f(g(x))\n\
@@ -402,8 +363,7 @@ fn stats(jit: &Jit) -> (i64, i64, i64) {
     unsafe {
         let live: extern "C" fn() -> i64 = std::mem::transmute(jit.rt("fern_stats_live"));
         let used: extern "C" fn() -> i64 = std::mem::transmute(jit.rt("fern_stats_used"));
-        let collections: extern "C" fn() -> i64 =
-            std::mem::transmute(jit.rt("fern_stats_collections"));
+        let collections: extern "C" fn() -> i64 = std::mem::transmute(jit.rt("fern_stats_collections"));
         (live(), used(), collections())
     }
 }

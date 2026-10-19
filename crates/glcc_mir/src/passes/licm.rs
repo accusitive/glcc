@@ -102,16 +102,8 @@ fn natural_loops(func: &Function, dom: &DomInfo) -> Vec<(Block, HashSet<Block>)>
 /// The loop's preheader: the unique out-of-loop predecessor of the
 /// header. The CFG makes that block dominate the header, and this
 /// rechecks it against a pred-bug paranoia before using it.
-fn preheader_of(
-    func: &Function,
-    dom: &DomInfo,
-    header: Block,
-    loop_blocks: &HashSet<Block>,
-) -> Option<Block> {
-    let mut outside: Vec<Block> = loop_blocks
-        .iter()
-        .flat_map(|b| dom.preds[b.index()].iter().copied())
-        .collect();
+fn preheader_of(func: &Function, dom: &DomInfo, header: Block, loop_blocks: &HashSet<Block>) -> Option<Block> {
+    let mut outside: Vec<Block> = loop_blocks.iter().flat_map(|b| dom.preds[b.index()].iter().copied()).collect();
     outside.retain(|p| !loop_blocks.contains(p));
     outside.sort_by_key(|b| b.index());
     outside.dedup();
@@ -131,12 +123,7 @@ fn preheader_of(
 /// Hoist one loop's invariants. Candidates repeat: an instruction
 /// hoisted earlier in this sweep leaves the loop blocks behind, so its
 /// own users become invariant until the sweep stops moving.
-fn hoist_loop(
-    func: &mut Function,
-    preheader: Block,
-    loop_blocks: &HashSet<Block>,
-    uses: &HashMap<Value, usize>,
-) -> bool {
+fn hoist_loop(func: &mut Function, preheader: Block, loop_blocks: &HashSet<Block>, uses: &HashMap<Value, usize>) -> bool {
     let mut changed = false;
     let mut order: Vec<Block> = loop_blocks.iter().copied().collect();
     order.sort_by_key(|b| b.index());
@@ -165,12 +152,7 @@ fn hoist_loop(
     }
 }
 
-fn should_hoist(
-    func: &Function,
-    inst: Inst,
-    loop_blocks: &HashSet<Block>,
-    uses: &HashMap<Value, usize>,
-) -> bool {
+fn should_hoist(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, uses: &HashMap<Value, usize>) -> bool {
     let Some(result) = func.insts[inst].result else {
         return false;
     };
@@ -250,11 +232,7 @@ mod tests {
     }
 
     fn kinds_in(func: &Function, block: Block) -> Vec<InstKind> {
-        func.blocks[block]
-            .insts
-            .iter()
-            .map(|i| func.insts[*i].kind.clone())
-            .collect()
+        func.blocks[block].insts.iter().map(|i| func.insts[*i].kind.clone()).collect()
     }
 
     /// `while (b) { tripled := x*3; bumped := tripled+1; use_cmp(read,
@@ -323,14 +301,8 @@ mod tests {
         assert!(Licm.run(&mut func));
         assert!(verify_func(&func).is_empty());
         let entry_kinds = kinds_in(&func, entry);
-        assert!(
-            entry_kinds.iter().any(|k| matches!(k, InstKind::Mul(..))),
-            "mul hoisted: {entry_kinds:?}"
-        );
-        assert!(
-            entry_kinds.iter().any(|k| matches!(k, InstKind::Add(..))),
-            "add hoisted: {entry_kinds:?}"
-        );
+        assert!(entry_kinds.iter().any(|k| matches!(k, InstKind::Mul(..))), "mul hoisted: {entry_kinds:?}");
+        assert!(entry_kinds.iter().any(|k| matches!(k, InstKind::Add(..))), "add hoisted: {entry_kinds:?}");
         let latch_kinds = kinds_in(&func, latch);
         assert!(matches!(latch_kinds[0], InstKind::Load { .. }), "{latch_kinds:?}");
         assert!(matches!(latch_kinds[1], InstKind::Icmp { .. }), "{latch_kinds:?}");

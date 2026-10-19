@@ -111,9 +111,7 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
         // minimum signed value, whose `-1` cases are the dangerous
         // ones).
         InstKind::Udiv(a, b) | InstKind::Sdiv(a, b) if is_int_one(func, *b) => Some(Plan::Value(*a)),
-        InstKind::Urem(_, b) | InstKind::Srem(_, b) if is_int_one(func, *b) => {
-            Some(Plan::Const(zero_const(result_ty)?))
-        }
+        InstKind::Urem(_, b) | InstKind::Srem(_, b) if is_int_one(func, *b) => Some(Plan::Const(zero_const(result_ty)?)),
         InstKind::And(a, b) => {
             if is_int_zero(func, *a) || is_int_zero(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
