@@ -3014,6 +3014,39 @@ mod tests {
     }
 
     #[test]
+    fn non_variadic_extern_calls_are_direct() {
+        use cranelift_codegen::ir::Opcode;
+
+        let mut module = mir::Module::new();
+        let ext = module.push_extern("ext", mir::Signature::new(vec![mir::Ty::int(32)], mir::Ty::int(32)));
+        let (mut f, entry) = mir::Function::new("f", i32_sig(1));
+        let arg = param(&mut f, entry, mir::Ty::int(32), 0);
+        let value = emit(
+            &mut f,
+            entry,
+            mir::InstKind::CallExtern {
+                target: ext,
+                args: [arg].into_iter().collect(),
+            },
+            mir::Ty::int(32),
+        );
+        ret(&mut f, entry, Some(value));
+        module.push_func(f);
+
+        let mut sink = RecordingModule::new();
+        lower_module(&module, &mut sink, crate::abi::Target::native());
+        let func = &sink.funcs[0];
+        let opcodes: Vec<_> = func
+            .layout
+            .blocks()
+            .flat_map(|block| func.layout.block_insts(block))
+            .map(|inst| func.dfg.insts[inst].opcode())
+            .collect();
+        assert!(opcodes.contains(&Opcode::Call), "{opcodes:?}");
+        assert!(!opcodes.contains(&Opcode::FuncAddr), "{opcodes:?}");
+    }
+
+    #[test]
     fn dense_switches_lower_to_a_jump_table() {
         use cranelift_codegen::ir::Opcode;
 
@@ -5155,18 +5188,18 @@ fn emit_call<M: Module>(
         }
         _ => {}
     }
-    // Direct calls only when signatures match by construction
-    // (non-variadic internal); everything else goes indirect with a
-    // per-call signature.
-    let indirect = variadic || foreign;
+    // Direct calls when the declared signature matches the call-site
+    // signature: non-variadic internal functions and non-variadic
+    // externs (whose declarations use the same layout). Variadic calls
+    // and foreign `long double` returns build a per-call signature and
+    // go indirect.
+    let indirect = variadic || foreign_f80_ret || matches!(target, CallTarget::Indirect { .. });
     if !indirect {
-        let callee = match target {
-            CallTarget::Internal(f) => f,
-            CallTarget::External(_) | CallTarget::Indirect { .. } => {
-                panic!("foreign call marked direct")
-            }
+        let clif_id = match target {
+            CallTarget::Internal(f) => func_ids[&f],
+            CallTarget::External(e) => extern_ids[&e],
+            CallTarget::Indirect { .. } => panic!("indirect call marked direct"),
         };
-        let clif_id = func_ids[&callee];
         let funcref: FuncRef = clif.declare_func_in_func(clif_id, builder.func);
         let inst = builder.ins().call(funcref, &clif_args);
         return map_call_results(body, builder, inst, &callee_layout.ret, sret_temp, result_val);
