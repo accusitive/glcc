@@ -195,7 +195,7 @@ Godbolt-like inspector: C source in, MIR and assembly out.
   -fglcc-async      enable the async extension: `__attribute__((async))`,
                     `_Future(T)`, `__builtin_await` (off by default)
   --target=T        x86_64, aarch64, riscv64, or x86_64-windows (default native)
-  --serve [--port N]  serve the browser page on 127.0.0.1:N (default 7666)
+  --serve [--port N]  serve the browser page on 0.0.0.0:N (default 7666)
   --wasm FILE       wasm compiler module to serve (default: {WASM_NAME} next
                     to the crate or in target/wasm32-unknown-unknown/wasm)
 "
@@ -203,7 +203,7 @@ Godbolt-like inspector: C source in, MIR and assembly out.
 }
 
 fn serve(port: u16, wasm: Option<PathBuf>) {
-    let addr = format!("127.0.0.1:{port}");
+    let addr = format!("0.0.0.0:{port}");
     let listener = match TcpListener::bind(&addr) {
         Ok(l) => l,
         Err(e) => {
@@ -211,7 +211,7 @@ fn serve(port: u16, wasm: Option<PathBuf>) {
             std::process::exit(1);
         }
     };
-    eprintln!("glcc-explorer: serving at http://{addr}/");
+    eprintln!("glcc-explorer: serving on 0.0.0.0:{port} (e.g. http://localhost:{port}/)");
     let wasm = resolve_wasm(wasm);
     match &wasm {
         Some(p) => eprintln!("glcc-explorer: wasm module {}", p.display()),
