@@ -69,9 +69,6 @@ struct State {
     lattice: Vec<Lat>,
     /// Blocks with at least one proven-executable incoming edge.
     executable: Vec<bool>,
-    /// Edges already processed; the same edge is marked many times but
-    /// joins its arguments into the target's params only once.
-    seen_edges: HashSet<(Block, Block)>,
     edge_todo: VecDeque<(Block, Block)>,
     bb_todo: VecDeque<Block>,
     /// Blocks already in `bb_todo`, so a hot param is not enqueued once
@@ -122,7 +119,6 @@ impl State {
         State {
             lattice,
             executable: vec![false; func.blocks.len()],
-            seen_edges: HashSet::new(),
             edge_todo: VecDeque::new(),
             bb_todo: VecDeque::new(),
             queued_bbs: vec![false; func.blocks.len()],
@@ -148,9 +144,12 @@ impl State {
     }
 
     fn mark_edge(&mut self, from: Block, to: Block) {
-        if self.seen_edges.insert((from, to)) {
-            self.edge_todo.push_back((from, to));
-        }
+        // No dedup: an edge must re-join its arguments into the target's
+        // params every time the source is re-visited, because an
+        // argument that widened after the first join would otherwise be
+        // stuck at its stale lattice. `join_param` only propagates real
+        // changes, so repeated joins still reach a fixpoint.
+        self.edge_todo.push_back((from, to));
     }
 
     fn enqueue_bb(&mut self, block: Block) {
@@ -561,11 +560,11 @@ fn rewrite(func: &mut Function, lattice: &[Lat], executable: &[bool]) -> bool {
             }
         }
     }
-    if !map.is_empty() {
-        func.remap_operands(&map);
-        changed = true;
-    }
-
+    // Decide terminators while `lattice` still covers every operand:
+    // `remap_operands` below pushes fresh constants past the lattice's
+    // end, so indexing it with a remapped condition would go out of
+    // bounds. The arguments a fold picks are still the original values
+    // and get rewritten by the same sweep.
     for block_idx in 0..func.blocks.len() {
         let block = Block::from_usize(block_idx);
         if !executable[block_idx] {
@@ -622,6 +621,11 @@ fn rewrite(func: &mut Function, lattice: &[Lat], executable: &[bool]) -> bool {
             }
             _ => {}
         }
+    }
+
+    if !map.is_empty() {
+        func.remap_operands(&map);
+        changed = true;
     }
     changed
 }
@@ -830,6 +834,92 @@ mod tests {
         // The reachable load stays overdefined (it still reads memory).
         assert!(func.const_value(load).is_none());
         assert!(func.blocks[then_block].insts.len() == 1);
+    }
+
+    /// A computed condition folds to a constant, so the branch is
+    /// decided from a value that is itself rewritten to a fresh
+    /// constant by the same pass. Deciding the terminator must not
+    /// index the solve's lattice with that fresh value.
+    #[test]
+    fn folds_a_computed_condition_branch() {
+        let sig = Signature::new(vec![], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let cond = emit(&mut func, entry, InstKind::Add(zero, one), Ty::int(32));
+        let then_block = func.push_block(vec![]);
+        let else_block = func.push_block(vec![]);
+        let t = func.push_const(Const::Int { bits: 32, value: 10 });
+        let e = func.push_const(Const::Int { bits: 32, value: 20 });
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[then_block].term = Some(Terminator::Return { val: Some(t) });
+        func.blocks[else_block].term = Some(Terminator::Return { val: Some(e) });
+
+        assert!(Sccp.run(&mut func));
+        assert!(verify_func(&func).is_empty());
+        assert!(matches!(
+            func.blocks[entry].term,
+            Some(Terminator::Br { dest, .. }) if dest == then_block
+        ));
+        assert!(matches!(
+            func.blocks[else_block].term,
+            Some(Terminator::Unreachable)
+        ));
+    }
+
+    /// A loop phi first joins a constant, then widens to overdefined when
+    /// the back edge arrives. The widening has to flow back through that
+    /// already-joined edge: a stale `Const(1)` here used to replace the
+    /// loop counter's back-edge argument with a literal, so the loop
+    /// never advanced.
+    #[test]
+    fn rejoins_a_phi_whose_argument_widens() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let hdr = func.push_block(vec![Ty::int(32)]);
+        let body = func.push_block(vec![]);
+        let back = func.push_block(vec![Ty::int(32)]);
+        let out = func.push_block(vec![]);
+        let j = func.blocks[hdr].params[0];
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: hdr,
+            args: [zero].into_iter().collect(),
+        });
+        func.blocks[hdr].term = Some(Terminator::CondBr {
+            cond,
+            then_block: body,
+            else_block: out,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let next = emit(&mut func, body, InstKind::Add(j, one), Ty::int(32));
+        func.blocks[body].term = Some(Terminator::Br {
+            dest: back,
+            args: [next].into_iter().collect(),
+        });
+        let carried = func.blocks[back].params[0];
+        func.blocks[back].term = Some(Terminator::Br {
+            dest: hdr,
+            args: [carried].into_iter().collect(),
+        });
+        func.blocks[out].term = Some(Terminator::Return { val: Some(zero) });
+
+        assert!(!Sccp.run(&mut func), "the loop counter must stay dynamic");
+        assert!(verify_func(&func).is_empty());
+        let Some(Terminator::Br { dest, args }) = func.blocks[back].term.clone() else {
+            panic!("back edge vanished");
+        };
+        assert_eq!(dest, hdr);
+        assert_eq!(args[0], carried, "stale constant joined as the loop argument");
     }
 
     #[test]

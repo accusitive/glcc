@@ -7,3 +7,4 @@
 /perf.data
 /perf.data.old
 /crates/glcc_explorer/glcc-explorer.wasm
+/tests/sqlite/sqlite-amalgamation-3540100 
