@@ -112,6 +112,89 @@ let last = null;
 
 const schedule = () => { clearTimeout(timer); timer = setTimeout(go, 600); };
 
+const MARKER_OWNER = 'glcc';
+
+// Diagnostics carry 1-based line/column pairs into the compiler's source
+// buffer. Clamp them to the model so a stale or out-of-range position
+// cannot make `setModelMarkers` throw.
+function clampedPosition(model, line, column) {
+  const lineNumber = Math.min(Math.max(1, line || 1), model.getLineCount());
+  const maxColumn = model.getLineMaxColumn(lineNumber);
+  return { lineNumber, column: Math.min(Math.max(1, column || 1), maxColumn) };
+}
+
+function diagnosticMarker(model, d) {
+  const p = d.primary || {};
+  if (p.line == null || p.column == null) return null;
+  const start = clampedPosition(model, p.line, p.column);
+  const end = clampedPosition(model,
+    p.endLine == null ? start.lineNumber : p.endLine,
+    p.endColumn == null ? start.column : p.endColumn);
+  if (end.lineNumber < start.lineNumber || (end.lineNumber === start.lineNumber && end.column < start.column)) {
+    return null;
+  }
+  // A point span has no width; give the squiggle one character to sit on.
+  if (end.lineNumber === start.lineNumber && end.column === start.column) {
+    end.column = Math.min(start.column + 1, model.getLineMaxColumn(start.lineNumber));
+  }
+  const notes = (d.notes || []).map((n) => 'note: ' + n);
+  const detail = p.message ? [p.message, ...notes] : notes;
+  return {
+    severity: d.severity === 'warning' ? monaco.MarkerSeverity.Warning : monaco.MarkerSeverity.Error,
+    message: [d.message, ...detail].join('\n'),
+    startLineNumber: start.lineNumber,
+    startColumn: start.column,
+    endLineNumber: end.lineNumber,
+    endColumn: end.column,
+    source: 'glcc',
+    relatedInformation: (d.labels || [])
+      .filter((l) => l.line != null && l.column != null)
+      .map((l) => {
+        const pos = clampedPosition(model, l.line, l.column);
+        return {
+          resource: model.uri,
+          message: l.message || d.message,
+          startLineNumber: pos.lineNumber,
+          startColumn: pos.column,
+          endLineNumber: pos.lineNumber,
+          endColumn: pos.column,
+        };
+      }),
+  };
+}
+
+// Diagnostics index the preprocessed translation unit, which only equals
+// the edited text when no `#` directive made the compiler preprocess it.
+// In that case leave the text panel as the diagnostic surface.
+function showMarkers(json, source) {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (!model) return;
+  const preprocessed = /^[^\S\n]*#/m.test(source);
+  const diagnostics = (json.diagnostics && json.diagnostics.diagnostics) || [];
+  const markers = preprocessed
+    ? []
+    : diagnostics.map((d) => diagnosticMarker(model, d)).filter(Boolean);
+  monaco.editor.setModelMarkers(model, MARKER_OWNER, markers);
+  return diagnostics;
+}
+
+function clearMarkers() {
+  if (!editor) return;
+  const model = editor.getModel();
+  if (model) monaco.editor.setModelMarkers(model, MARKER_OWNER, []);
+}
+
+function warningLines(diagnostics) {
+  return diagnostics
+    .filter((d) => d.severity === 'warning')
+    .map((d) => {
+      const p = d.primary || {};
+      const at = p.line == null ? '' : p.line + ':' + p.column + ': ';
+      return at + 'warning: ' + d.message;
+    });
+}
+
 function showMir() {
   if (!last) return;
   const view = $('mirview').value;
@@ -166,11 +249,13 @@ async function fetchWithTimeout(url, ms, opts) {
 async function go() {
   if (!editor || !asmEditor) return; // Monaco still loading
   statusEl.textContent = 'compiling…';
+  clearMarkers();
+  const source = editor.getValue();
   const t0 = performance.now();
   let json, object;
   try {
     await ensureWasm();
-    const bytes = encoder.encode(editor.getValue());
+    const bytes = encoder.encode(source);
     const ptr = wasm.glcc_alloc(bytes.length);
     try {
       new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
@@ -188,7 +273,9 @@ async function go() {
     return;
   }
   last = json;
-  err.textContent = (json.errors || []).join('\n');
+  const diagnostics = showMarkers(json, source) || [];
+  const warnings = warningLines(diagnostics);
+  err.textContent = [(json.errors || []).join('\n'), warnings.join('\n')].filter(Boolean).join('\n');
   try {
     showMir();
   } catch (e) {

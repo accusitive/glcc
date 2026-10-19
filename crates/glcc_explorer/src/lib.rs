@@ -692,6 +692,16 @@ mod tests {
         assert!(json.contains("\"diagnostics\":{\"diagnostics\":["), "{json}");
     }
 
+    /// Warnings ride the same diagnostics object (so the editor can show
+    /// them as markers) without failing the compile.
+    #[test]
+    fn warnings_ride_the_diagnostics_object() {
+        let out = compile("int x = sizeof(void);", &opts());
+        assert!(out.success, "errors: {:?}", out.errors);
+        assert!(out.diagnostics.contains("\"severity\":\"warning\""), "diagnostics: {}", out.diagnostics);
+        assert!(output_json(&out).contains("\"severity\":\"warning\""), "json: {}", output_json(&out));
+    }
+
     /// The full MIR views carry `; path:line:column` annotation on the
     /// located instructions, like the driver's `--emit-full-mir`.
     #[test]
