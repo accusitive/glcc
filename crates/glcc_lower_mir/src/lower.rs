@@ -7557,7 +7557,21 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             (mir::Ty::Ptr(_), mir::Ty::Int { .. }) => mir::InstKind::PtrToInt(from),
             (mir::Ty::Ptr(_), mir::Ty::Ptr(_)) => mir::InstKind::Bitcast(from),
             (mir::Ty::Int { .. } | mir::Ty::Bool, mir::Ty::Ptr(_)) => {
-                mir::InstKind::IntToPtr(from)
+                // MIR integer types are signless, so the source's
+                // signedness applies here (C17 6.3.2.3p5-6): widen
+                // narrow sources to pointer width (LP64), sign- or
+                // zero-extending as the frontend type dictates.
+                let src = if int_bits(&from_mir) < 64 {
+                    let kind = if is_signed(from_ty, self.sema) {
+                        mir::InstKind::Sext(from)
+                    } else {
+                        mir::InstKind::Zext(from)
+                    };
+                    self.emit(func, frame, kind, mir::Ty::int(64))
+                } else {
+                    from
+                };
+                mir::InstKind::IntToPtr(src)
             }
             _ => todo!("conversion lowering"),
         };
@@ -11377,6 +11391,67 @@ mod tests {
         // when its low byte is zero; null is false.
         assert_eq!(run_main("int main(){int x = 1; int *p = &x; _Bool b = (_Bool)p; return b;}"), 1);
         assert_eq!(run_main("int main(){int *p = (int *)0; _Bool b = (_Bool)p; return b;}"), 0);
+    }
+
+    /// Integer-to-pointer casts extend by the source's signedness (C17
+    /// 6.3.2.3p5-6): MIR integer types are signless, so the conversion
+    /// has to sign-extend signed narrow sources to pointer width and
+    /// zero-extend unsigned ones. `(void *)-1` must be the all-ones
+    /// pattern, not `0xffffffff` (SQLite's `sqlite3Utf8CharLen(z, -1)`
+    /// sentinel leans on this).
+    #[test]
+    fn integer_to_pointer_casts_respect_signedness() {
+        assert_eq!(
+            run_main("int main(){const void *p = (const void*)-1; return (p == (const void*)-1) + ((long)p == -1);}"),
+            2
+        );
+        assert_eq!(
+            run_main("int main(){volatile int i = -1; volatile short s = -1; volatile char c = -1;\
+                return ((long)(void*)i == -1) + ((long)(void*)s == -1) * 2 + ((long)(void*)c == -1) * 4;}"),
+            7
+        );
+        // Unsigned narrow sources stay zero-extended, including the
+        // full-width unsigned value whose sign bit is set.
+        assert_eq!(
+            run_main("int main(){volatile unsigned u = 4294967295u; volatile unsigned short h = 65535;\
+                return ((unsigned long)(void*)u == 4294967295UL) + ((unsigned long)(void*)h == 65535UL) * 2;}"),
+            3
+        );
+        assert_eq!(run_main("int main(){volatile long l = -1; return (long)(void*)l == -1;}"), 1);
+    }
+
+    /// The conversion widens every `inttoptr` source to pointer width
+    /// before the cast, so the backend never re-decides the extension.
+    #[test]
+    fn integer_to_pointer_source_widens_to_pointer_width() {
+        let module = lower_module(
+            "void sink(const void *p); void f(volatile int i, volatile unsigned u, volatile short s, volatile char c) {\
+                sink((const void*)i); sink((const void*)u); sink((const void*)s); sink((const void*)c); }",
+        );
+        let mut seen = 0;
+        for func in module.funcs.iter().filter(|f| f.name == "f") {
+            for inst in func.insts.iter() {
+                if let mir::InstKind::IntToPtr(src) = &inst.kind {
+                    assert_eq!(func.values[*src].ty, mir::Ty::int(64));
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 4, "casts lowered through inttoptr");
+    }
+
+    /// The optimized pipeline keeps the conversion values intact with a
+    /// load in the way (nothing to constant-fold).
+    #[test]
+    fn optimized_pipeline_preserves_pointer_cast_signedness() {
+        let src = "int main(){volatile int i = -1; volatile unsigned u = 4294967295u; volatile unsigned short h = 65535;\
+                   return ((long)(void*)i != -1)\
+                        + ((unsigned long)(void*)u != 4294967295UL) * 2\
+                        + ((long)(void*)h != 65535) * 4;}";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        assert_eq!(jit_run_main(module), 0, "casts changed values:\n{dump}");
     }
 
     #[test]
