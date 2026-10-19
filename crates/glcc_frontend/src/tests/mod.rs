@@ -1523,6 +1523,15 @@ fn no_ms_extensions_filter_declspec() {
 }
 
 #[test]
+fn forceinline_requires_ms_extensions() {
+    let mut sema = gated_sema(LangOpts { ms: false, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("__forceinline int f(void) { return 1; }", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
+}
+
+#[test]
 fn c89_static_assert_keyword() {
     let mut sema = gated_sema(LangOpts {
         std: Std::C89,
@@ -2510,6 +2519,7 @@ fn inline_specifier_lands_on_binding() {
         "extern inline int f(void) { return 1; }",
         "static __inline__ int f(void) { return 1; }",
         "__inline int f(void) { return 1; }",
+        "__forceinline int f(void) { return 1; }",
     ] {
         let mut sema = Sema::new();
         let mut interner = Interner::new();

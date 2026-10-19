@@ -200,7 +200,7 @@ pub struct Binding {
     /// definition that omits the attribute (cross-TU headers).
     pub is_async: bool,
     /// C `inline` function specifier (`inline`, `__inline__`,
-    /// `__inline`): an optimization hint requesting call-site
+    /// `__inline`, `__forceinline`): an optimization hint requesting call-site
     /// inlining. Recorded on function bindings only (the parser
     /// rejects it elsewhere); merged with OR like `weak`, so an
     /// `inline` prototype marks the definition too. The MIR

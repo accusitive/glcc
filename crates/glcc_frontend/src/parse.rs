@@ -2683,9 +2683,9 @@ impl<'a> Parser<'a> {
                 | Keyword::_Noreturn,
             )) => true,
             // A typedef name may open a declaration (`Arg a;`), as may
-            // the GNU `inline` spellings (`__inline__ int f();`,
-            // pervasive in system headers and EDG C output) and the
-            // GNU qualifier spellings (`__const char *`).
+            // the alternate `inline` spellings (`__inline__ int f();`
+            // and `__forceinline int f();`) and the GNU qualifier
+            // spellings (`__const char *`).
             Some(Token::Identifier(sym)) => {
                 // `t :` in a block is a label named like a typedef
                 // (C17 §6.8.1): the colon of a member bit-field only
@@ -2696,7 +2696,7 @@ impl<'a> Parser<'a> {
                 }
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
-                    || self.peek_gnu_inline()
+                    || self.peek_alternate_inline()
                     || self.peek_gnu_qualifier().is_some()
                     // MSVC declaration prefixes (`__declspec(noreturn)
                     // void f(...);`, `__cdecl int f(void);`).
@@ -2755,10 +2755,11 @@ impl<'a> Parser<'a> {
             _ => None,
         }
     }
-    /// A GNU alternate `inline` spelling (`__inline__`, `__inline`),
-    /// used for `static __inline` definitions in system headers.
-    fn peek_gnu_inline(&self) -> bool {
-        self.peek_is_gnu("__inline__") || self.peek_is_gnu("__inline")
+    /// An alternate `inline` spelling: the GNU ones (`__inline__`,
+    /// `__inline`, used for `static __inline` definitions in system
+    /// headers) and MSVC's `__forceinline`.
+    fn peek_alternate_inline(&self) -> bool {
+        self.peek_is_gnu("__inline__") || self.peek_is_gnu("__inline") || self.peek_is_gnu("__forceinline")
     }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
@@ -4393,7 +4394,7 @@ impl<'a> Parser<'a> {
                 self.tokens.advance();
                 continue;
             }
-            if self.peek_gnu_inline() {
+            if self.peek_alternate_inline() {
                 ds.function_specifier += 1;
                 self.tokens.advance();
                 continue;
@@ -6922,8 +6923,8 @@ impl DeclarationSpecifiers {
         self.class.contains(&StorageClass::Typedef)
     }
     /// Whether an `inline` function specifier was present (`inline`,
-    /// `__inline__`, `__inline` all count; duplicates stack in
-    /// `function_specifier`).
+    /// `__inline__`, `__inline`, `__forceinline` all count; duplicates
+    /// stack in `function_specifier`).
     pub fn is_inline(&self) -> bool {
         self.function_specifier > 0
     }
