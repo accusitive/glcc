@@ -1071,11 +1071,14 @@ fn operand(body: &mut Body, builder: &mut FunctionBuilder, mir_value: mir::Value
 /// `__ptr32`). Ordinary addresses pass through untouched.
 fn addr_operand(body: &mut Body, builder: &mut FunctionBuilder, v: mir::Value) -> ClifValue {
     let val = operand(body, builder, v);
-    let ty = body.func.values[v].ty.clone();
-    match clif_ty(&ty) {
-        Some(t) if t == types::I32 => builder.ins().sextend(types::I64, val),
-        _ => val,
-    }
+    // Only a 32-bit address widens; other address operands (a SysV
+    // `va_list` tag) have no scalar Clif type and pass through.
+    let narrow = match &body.func.values[v].ty {
+        mir::Ty::Ptr { bits, .. } => *bits <= 32,
+        mir::Ty::Int { bits } => (17..=32).contains(bits),
+        _ => false,
+    };
+    if narrow { builder.ins().sextend(types::I64, val) } else { val }
 }
 
 /// One volatile scalar load. C requires every volatile access to touch
