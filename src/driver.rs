@@ -363,6 +363,11 @@ pub struct Job {
     /// Optimization level, default `-O0` (Cranelift `none`): any `-O*`
     /// selects codegen, last wins like gcc.
     pub opt_level: OptLevel,
+    /// Cranelift `is_pic`: on by default so objects can go into the
+    /// PIE/shared links the system driver produces. `-fno-pic` and
+    /// `-fno-pie` select direct addressing; the PIC/PIE spelling
+    /// variants share one switch, last wins.
+    pub pic: bool,
     /// Keep intermediate files (`-save-temps[=cwd|=obj]`): `<stem>.i`
     /// preprocessed C for every C input, plus `<stem>.int.c` raw
     /// EDG-lowered C for C++ inputs.
@@ -502,6 +507,7 @@ impl Default for Job {
             relocatable: false,
             debug: true,
             opt_level: OptLevel::None,
+            pic: true,
             save_temps: SaveTemps::Off,
             target: Target::native(),
             lang_std: None,
@@ -954,9 +960,19 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                     job.ext_clang = Some(true);
                 } else if s == "-fno-clang-extensions" {
                     job.ext_clang = Some(false);
+                } else if matches!(s.as_ref(), "-fpic" | "-fPIC" | "-fpie" | "-fPIE") {
+                    // Cranelift has one PIC mode: PIE is PIC without
+                    // symbol preemption, which this backend does not
+                    // model separately.
+                    job.pic = true;
+                    // Also lets clang -E define __PIC__/__PIE__ to match.
+                    job.cpp.push(arg.clone());
+                } else if matches!(s.as_ref(), "-fno-pic" | "-fno-PIC" | "-fno-pie" | "-fno-PIE") {
+                    job.pic = false;
+                    job.cpp.push(arg.clone());
                 } else if s.starts_with("-f") {
-                    // PIC, spelling, and machine-independent codegen
-                    // flags: nothing to configure.
+                    // Spelling and machine-independent codegen flags:
+                    // nothing to configure.
                 } else if s == "-m32" || s == "-mx32" {
                     return Err("32-bit targets are not supported; glcc always builds LP64".into());
                 } else if s.starts_with("-m") {
@@ -1154,7 +1170,11 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         // native preprocessor with exactly what `clang -E` predefines.
         if !job.cpp.iter().any(|a| a == "-undef") {
             let std = pp_std_flag(job);
-            opts.predefined = glcc_pp::native_predefines(Some(job.target.triple()), std.as_deref());
+            let mut predefined = glcc_pp::native_predefines(Some(job.target.triple()), std.as_deref());
+            if !job.pic {
+                predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
+            }
+            opts.predefined = predefined;
             opts.std = std;
         }
         // The default system search (resource headers, libc) comes from
@@ -1272,7 +1292,7 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
 /// diagnostics are reported by `lower_source_to_mir`; any panic here
 /// (codegen or MIR verification) is `Quiet`: the panic hook or the
 /// rendered diagnostic already spoke.
-fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(Vec<u8>, String), ()> {
+fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, pic: bool, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (mir_module, mut asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
         let cl_target = match target.arch {
@@ -1288,7 +1308,7 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, opt_le
         use cranelift_codegen::settings::Configurable;
         let mut flag_builder = cranelift_codegen::settings::builder();
         flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
-        flag_builder.set("is_pic", "true").expect("pic");
+        flag_builder.set("is_pic", if pic { "true" } else { "false" }).expect("pic");
         flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
         // TLS access (`tls_value` for the x86-64 foreign-variadic
         // trampoline) has no lowering unless a model is selected;
@@ -1979,7 +1999,7 @@ fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path
         }
         save_temp_file(&dir, &format!("{stem}.i"), &bytes);
     }
-    let (bytes, asm_text) = compile_source(&c, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
+    let (bytes, asm_text) = compile_source(&c, job.flavor, job.target, job.debug, job.pic, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
         take_diagnostic_emitted();
         Fail::Quiet
     })?;
@@ -2131,7 +2151,7 @@ fn compile_input_to_bytes(ctx: &Ctx, job: &Job, input: &Input, obj_out: Option<&
         Lang::Assembler => unreachable!("assembler inputs are assembled, not compiled"),
         Lang::Cpp | Lang::EdgC => unreachable!("EDG inputs are handled by compile_edg_input"),
     };
-    compile_source(&text, job.flavor, job.target, job.debug, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
+    compile_source(&text, job.flavor, job.target, job.debug, job.pic, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
         // Drain the flag so a caught diagnostic never silences a
         // later, unrelated panic in the hook.
         take_diagnostic_emitted();
@@ -2569,6 +2589,9 @@ Codegen (last -O* wins, like gcc; default -O0):
   -O0                no optimization, best debug fidelity
   -O1/-O2/-O3/-Og/-Ofast/bare -O  optimized (Cranelift `speed`)
   -Os/-Oz            optimize for size (Cranelift `speed_and_size`)
+  -fno-pic/-fno-pie  direct addressing instead of PIC (default); useful for
+                     freestanding or fixed-address images. -fpic/-fPIC and
+                     -fpie/-fPIE re-enable PIC; last flag wins.
 Extensions (glcc-specific):
   -fglcc-async       stackless coroutines: `__attribute__((async))` functions
                      return a `_Future(T)` handle, `__builtin_await` suspends
@@ -2924,7 +2947,7 @@ mod tests {
         let job = parse(&["-march=native", "-O2", "-Wall", "-fPIC", "-m64", "a.c"]);
         assert_eq!(job.inputs.len(), 1);
         assert!(job.warnings.is_empty());
-        assert!(job.cpp.is_empty());
+        assert_eq!(job.cpp, ["-fPIC"]);
         let job = parse(&["-Zunknown-flag", "a.c"]);
         assert_eq!(job.inputs.len(), 1);
         assert_eq!(job.warnings, ["unrecognized option '-Zunknown-flag'; ignoring"]);
@@ -2955,7 +2978,7 @@ mod tests {
     fn debug_flag_controls_debug_sections() {
         let src = "int add(int a, int b) { return a + b; }\nint main() { return add(2, 3); }\n";
         let compile = |debug| {
-            compile_source(src, Flavor::C, Target::LP64, debug, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+            compile_source(src, Flavor::C, Target::LP64, debug, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
                 .expect("compiles")
                 .0
         };
@@ -2973,7 +2996,7 @@ mod tests {
         assert!(has_section(&without, b".eh_frame"), "missing .eh_frame with -g0");
         // Optimized builds still carry debug info through the MIR
         // passes (locations ride on instructions).
-        let optimized = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
+        let optimized = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&optimized, b".debug_info"), "missing .debug_info at -O2 -g");
@@ -2985,7 +3008,7 @@ mod tests {
         // A function with no statements still gets a subprogram and an
         // (empty) line sequence rather than failing emission.
         let src = "void e() {}\nint main() { e(); return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b".debug_info"));
@@ -2999,7 +3022,7 @@ mod tests {
     #[test]
     fn debug_extern_declaration_has_no_location() {
         let src = "extern int x;\nint main() { return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let (dies, _) = read_dies(&bytes);
@@ -3031,7 +3054,7 @@ mod tests {
     fn ptr32_global_initializer_emits_a_32_bit_relocation() {
         let src = "int x;\nint *__ptr32 g = &x;\nint main(void) { return 0; }\n";
         let lang = LangOpts { ms: true, ..LangOpts::default() };
-        let bytes = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, lang, ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, lang, ErrorFormat::Human)
             .expect("compiles")
             .0;
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -3065,7 +3088,7 @@ mod tests {
                        return t * 2;\n\
                    }\n\
                    int main(void) { return f(3); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let (dies, _) = read_dies(&bytes);
@@ -3090,7 +3113,7 @@ mod tests {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
         let src = "int f(int x) { return x + 1; }\nint g(void) { return f(2); }\nint main(void) { return g(); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::WINDOWS_X86_64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::WINDOWS_X86_64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -3152,7 +3175,7 @@ mod tests {
         }
 
         // Other targets must not grow the sections.
-        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -3305,7 +3328,7 @@ mod tests {
                  return total + p.x + bs.a + col + g;\n\
              }\n\
              int main() { g = 1; return add(2, 3); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"orig.c"), "line program lost the original file name");
@@ -3368,6 +3391,39 @@ mod tests {
         assert_eq!(parse(&["-O2", "-O0", "a.c"]).opt_level, OptLevel::None);
         assert_eq!(parse(&["-O0", "-O2", "a.c"]).opt_level, OptLevel::Speed);
         assert_eq!(parse(&["-O2", "-Os", "a.c"]).opt_level, OptLevel::Size);
+    }
+
+    #[test]
+    fn pic_flags_last_wins() {
+        // PIC is the default for PIE/shared links.
+        assert!(parse(&["a.c"]).pic);
+        for flag in ["-fpic", "-fPIC", "-fpie", "-fPIE"] {
+            assert!(parse(&[flag, "a.c"]).pic, "{flag}");
+        }
+        for flag in ["-fno-pic", "-fno-PIC", "-fno-pie", "-fno-PIE"] {
+            assert!(!parse(&[flag, "a.c"]).pic, "{flag}");
+        }
+        assert!(!parse(&["-fPIC", "-fno-pic", "a.c"]).pic);
+        assert!(parse(&["-fno-pic", "-fPIE", "a.c"]).pic);
+    }
+
+    #[test]
+    fn non_pic_globals_avoid_the_got() {
+        let reloc_kinds = |pic| {
+            use object::{Object as _, ObjectSection as _};
+            let src = "int x; int get(void) { return x; }";
+            let bytes = compile_source(src, Flavor::C, Target::LP64, false, pic, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+                .expect("compiles")
+                .0;
+            let obj = object::File::parse(&bytes[..]).expect("object parses");
+            obj.section_by_name(".text")
+                .expect(".text")
+                .relocations()
+                .map(|(_, reloc)| reloc.kind())
+                .collect::<Vec<_>>()
+        };
+        assert!(reloc_kinds(true).contains(&object::RelocationKind::GotRelative));
+        assert!(!reloc_kinds(false).contains(&object::RelocationKind::GotRelative));
     }
 
     #[test]
@@ -3487,7 +3543,7 @@ mod tests {
     #[test]
     fn file_scope_asm_becomes_assembler_text() {
         let src = "asm(\".globl x\\nx:\\n  ret\\n\");\nint f(void){return 0;}\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert_eq!(asm_text, ".globl x\nx:\n  ret\n\n");
     }
@@ -3496,7 +3552,7 @@ mod tests {
     fn inline_asm_wrappers_become_assembler_text() {
         let src = "int f(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n\
                    int g(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("addl $1, %eax"), "{asm_text}");
         // Identical blocks share one content-addressed wrapper.
@@ -3506,7 +3562,7 @@ mod tests {
     #[test]
     fn asm_goto_wrapper_returns_a_selector() {
         let src = "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("jnz .Lasm"), "{asm_text}");
         assert!(asm_text.contains("movq $1,"), "{asm_text}");
@@ -3733,7 +3789,7 @@ mod tests {
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { add1(1); return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"add1$resume"), "resume symbol");
@@ -3748,7 +3804,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -3764,7 +3820,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::Speed, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, true, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -3778,7 +3834,7 @@ int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { return add1(1); }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
             .expect("compiles")
             .0;
         assert!(!has_section(&bytes, b"$resume"), "no split without the flag");

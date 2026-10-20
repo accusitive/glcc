@@ -24,7 +24,7 @@ USER_BIN := $(BUILD)/user.bin
 USER_IMG_SRC := $(BUILD)/user_image.S
 USER_IMG := $(BUILD)/user.img.o
 
-TARGET_FLAGS := --target=riscv64 -ffreestanding
+TARGET_FLAGS := --target=riscv64 -ffreestanding -fno-pic
 LINK_FLAGS := --target=riscv64 -nostdlib -nostartfiles -static
 
 all: kernel.elf
