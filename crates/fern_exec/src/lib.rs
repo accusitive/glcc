@@ -19,8 +19,18 @@ use glcc_mir::ir as mir;
 unsafe extern "C" {
     fn memcpy(dst: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
     fn memset(dst: *mut core::ffi::c_void, c: i32, n: usize) -> *mut core::ffi::c_void;
-    fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
     fn abort();
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    #[link_name = "_write"]
+    fn write(fd: i32, buf: *const core::ffi::c_void, n: u32) -> i32;
 }
 
 /// A value returned by a JITed fern function, rendered by the REPL.
@@ -177,7 +187,10 @@ fn build_jit() -> JITModule {
     .expect("jit builder");
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
+    #[cfg(unix)]
     builder.symbol("write", write as *const u8);
+    #[cfg(windows)]
+    builder.symbol("_write", write as *const u8);
     builder.symbol("abort", abort as *const u8);
     JITModule::new(builder)
 }
