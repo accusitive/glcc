@@ -2,11 +2,12 @@
 --
 -- It supports the subset that drives the examples: comments, variables
 -- (`=`, `:=`, `?=`), ordinary rules, tab-indented recipes, `.PHONY`,
--- prerequisite ordering, and the `$@`, `$<`, and `$^` automatic
+-- prerequisite ordering, line continuations, nested `$(...)`, the
+-- common path/shell functions, and the `$@`, `$<`, and `$^` automatic
 -- variables. Recipes run through `sh -c`, so shell syntax works.
 --
--- Build with `make`, then try `./build/fernmake demo.mk` or
--- `./build/fernmake demo.mk run`.
+-- Build with `make`, or run `./bootstrap.sh` when GNU make is absent.
+-- Then try `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
 
 data Rule = Rule(List String, List String, List String)
 data Parsed = Parsed(List (String, String), List Rule, List String)
@@ -74,6 +75,29 @@ fun words_at(s : String, i : Int, n : Int, current : String, out : List String) 
 
 fun words(s : String) : List String = words_at(s, 0, str_len(s), "", Nil)
 
+-- Join backslash-newline continuations before classifying lines. The
+-- continuation's leading whitespace (including a recipe tab) is dropped.
+fun logical_lines(lines : List String, acc : List String) : List String = match lines {
+    case Nil => reverse(acc)
+    case Cons(line, rest) =>
+        if ends_with("\\", line) then match rest {
+            case Nil => reverse(Cons(line, acc))
+            case Cons(next, more) =>
+                logical_lines(Cons(concat(trim_right(drop_last(line)), concat(" ", trim_left(next))), more), acc)
+        }
+        else logical_lines(rest, Cons(line, acc))
+}
+
+fun last_slash_at(s : String, i : Int, found : Int) : Int =
+    if i >= str_len(s) then found
+    else if str_slice(s, i, 1) == "/" then last_slash_at(s, i + 1, i)
+    else last_slash_at(s, i + 1, found)
+
+fun dir_name(s : String) : String = {
+    let at = last_slash_at(s, 0, -1);
+    if at < 0 then "./" else str_slice(s, 0, at + 1)
+}
+
 fun strip_comment(s : String) : String = {
     let at = str_find("#", s);
     if at < 0 then s else str_slice(s, 0, at)
@@ -119,7 +143,56 @@ fun var_value(name : String, vars : List (String, String)) : String =
         case Just(value) => value
     }
 
--- Expand `$(NAME)` recursively, with `depth` guarding self-reference.
+-- Index of the `)` matching an already-consumed `(`. Function calls
+-- nest, so a plain `str_find(")")` is not enough.
+fun matching_close(s : String, i : Int, depth : Int) : Int =
+    if i >= str_len(s) then -1
+    else {
+        let c = str_slice(s, i, 1);
+        if c == "(" then matching_close(s, i + 1, depth + 1)
+        else if c == ")" then
+            if depth == 0 then i else matching_close(s, i + 1, depth - 1)
+        else matching_close(s, i + 1, depth)
+    }
+
+fun shell_value(command : String) : String = trim(spawn_capture("sh", ["-c", command]))
+
+fun wildcard(pattern : String) : String = {
+    let script = concat("for f in ", concat(pattern, "; do [ -e \"$f\" ] && printf '%s\\n' \"$f\"; done"));
+    str_join(" ", compact(str_split("\n", shell_value(script))))
+}
+
+fun first_word(s : String) : String = match first(words(s)) {
+    case Nothing => ""
+    case Just(word) => word
+}
+
+-- `realpath` and `abspath` are enough for the examples and avoid
+-- depending on a POSIX path library. Both expect the path to exist.
+fun real_path(path : String) : String = {
+    let resolved = shell_value(concat("realpath ", path));
+    if str_len(resolved) == 0 then path else resolved
+}
+
+fun abs_path(path : String) : String = real_path(path)
+
+fun eval_expr(expr : String, vars : List (String, String), depth : Int) : String =
+    if starts_with("firstword ", expr) then
+        first_word(trim(str_slice(expr, 10, str_len(expr) - 10)))
+    else if starts_with("wildcard ", expr) then
+        wildcard(trim(str_slice(expr, 9, str_len(expr) - 9)))
+    else if starts_with("dir ", expr) then
+        dir_name(trim(str_slice(expr, 4, str_len(expr) - 4)))
+    else if starts_with("shell ", expr) then
+        shell_value(trim(str_slice(expr, 6, str_len(expr) - 6)))
+    else if starts_with("realpath ", expr) then
+        real_path(trim(str_slice(expr, 9, str_len(expr) - 9)))
+    else if starts_with("abspath ", expr) then
+        abs_path(trim(str_slice(expr, 8, str_len(expr) - 8)))
+    else expand_depth(var_value(trim(expr), vars), vars, depth - 1)
+
+-- Expand `$(NAME)` and the function subset recursively. `depth` guards
+-- self-reference and mutual recursion.
 fun expand_depth(s : String, vars : List (String, String), depth : Int) : String =
     if depth == 0 then s
     else {
@@ -127,11 +200,12 @@ fun expand_depth(s : String, vars : List (String, String), depth : Int) : String
         if at < 0 then s
         else {
             let after = str_slice(s, at + 2, str_len(s) - at - 2);
-            let close = str_find(")", after);
+            let close = matching_close(after, 0, 0);
             if close < 0 then s
             else {
-                let name = str_slice(after, 0, close);
-                let value = expand_depth(var_value(name, vars), vars, depth - 1);
+                let expr = str_slice(after, 0, close);
+                let resolved = expand_depth(expr, vars, depth - 1);
+                let value = eval_expr(resolved, vars, depth - 1);
                 let rest = str_slice(after, close + 1, str_len(after) - close - 1);
                 concat(str_slice(s, 0, at), concat(value, expand_depth(rest, vars, depth)))
             }
@@ -154,11 +228,8 @@ fun compact(xs : List String) : List String = match xs {
 
 fun is_recipe(line : String) : Bool = starts_with("\t", line)
 
-fun recipe_command(line : String) : String = {
-    let command = str_slice(line, 1, str_len(line) - 1);
-    if starts_with("@", command) then str_slice(command, 1, str_len(command) - 1)
-    else command
-}
+fun recipe_command(line : String) : String =
+    str_slice(line, 1, str_len(line) - 1)
 
 fun is_name(s : String) : Bool =
     str_len(s) > 0 && not(str_contains(" ", s)) && not(str_contains("\t", s)) && not(str_contains(":", s))
@@ -217,7 +288,7 @@ fun add_phony(names : List String, phony : List String) : List String = match na
 fun set_assignment(state : Parsed, name : String, value : String, conditional : Bool) : Parsed =
     match state {
         case Parsed(vars, rules, phony) =>
-            if conditional && has_var(name, vars) then state
+            if conditional && (has_var(name, vars) || str_len(getenv(name)) > 0) then state
             else Parsed(set_var(name, value, vars), rules, phony)
     }
 
@@ -269,8 +340,19 @@ fun resolve_parsed(parsed : Parsed) : Parsed = match parsed {
         Parsed(vars, resolve_rules(rules, vars), compact(expand_names(phony, vars)))
 }
 
-fun parse_makefile(source : String) : Parsed =
-    resolve_parsed(parse_lines(str_lines(source), Parsed(Nil, Nil, Nil)))
+fun default_var(name : String, fallback : String) : String = {
+    let value = getenv(name);
+    if str_len(value) == 0 then fallback else value
+}
+
+fun parse_makefile(source : String, path : String) : Parsed = {
+    let builtins = Cons(
+        ("CC", default_var("CC", "cc")),
+        Cons(("MAKEFILE_LIST", path), Nil)
+    );
+    let initial = Parsed(builtins, Nil, Nil);
+    resolve_parsed(parse_lines(logical_lines(str_lines(source), Nil), initial))
+}
 
 -- ------------------------------------------------------------- building --
 
@@ -322,8 +404,17 @@ fun automatic_variables(s : String, target : String, prereqs : List String) : St
     replace_all("$^", str_join(" ", prereqs), expanded)
 }
 
-fun recipe_line(raw : String, target : String, prereqs : List String, vars : List (String, String)) : String =
-    automatic_variables(expand(raw, vars), target, prereqs)
+fun recipe_line(raw : String, target : String, prereqs : List String, vars : List (String, String)) : String = {
+    let with_auto = automatic_variables(raw, target, prereqs);
+    automatic_variables(expand(with_auto, vars), target, prereqs)
+}
+
+fun run_shell(silent : Bool, command : String) : Int =
+    if silent then spawn_status("sh", ["-c", command])
+    else {
+        println(command);
+        spawn_status("sh", ["-c", command])
+    }
 
 fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : Bool =
     match recipe {
@@ -332,8 +423,9 @@ fun run_recipe(recipe : List String, target : String, prereqs : List String, var
             let command = recipe_line(raw, target, prereqs, vars);
             if str_len(trim(command)) == 0 then run_recipe(rest, target, prereqs, vars)
             else {
-                println(command);
-                let status = spawn_status("sh", ["-c", command]);
+                let silent = starts_with("@", command);
+                let command = if silent then str_slice(command, 1, str_len(command) - 1) else command;
+                let status = run_shell(silent, command);
                 if status == 0 then run_recipe(rest, target, prereqs, vars)
                 else {
                     println(concat("fernmake: *** [", concat(target, concat("] Error ", str_of_int(status)))));
@@ -380,7 +472,7 @@ fun run_makefile(path : String, requested : String) : Int = {
     if str_len(source) == 0 then {
         println(concat("fernmake: cannot read ", path));
         1
-    } else match parse_makefile(source) {
+    } else match parse_makefile(source, path) {
         case Parsed(vars, rules, phony) => {
             let requested = trim(requested);
             let goal = if str_len(requested) > 0 then requested

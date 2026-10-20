@@ -15,7 +15,8 @@ and linked against a small C driver:
   returns 42.
 - `make/` — a small Makefile runner written in fern. It parses
   variables, rules, recipes, and `.PHONY`, then builds prerequisites and
-  runs shell commands. `make run` invokes it on `demo.mk`.
+  runs shell commands. `make run` invokes it on `demo.mk`; once
+  bootstrapped, it can drive every example Makefile without GNU make.
 
 `make && make run` in any directory. `fernc` is looked up in the
 repo's build tree first (`cargo build -p fernc`), then on `PATH`. The

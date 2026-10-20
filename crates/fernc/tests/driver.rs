@@ -311,6 +311,55 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
     let (stdout, ok) = run("clean");
     assert!(ok, "clean failed:\n{stdout}");
     assert!(!dir.join("out.txt").exists(), "clean left the output");
+
+    fs::write(
+        dir.join("features.mk"),
+        concat!(
+            "SHELL_WORD := $(shell printf 'from shell\\n')\n",
+            "PICK = $(firstword $(wildcard source.txt) fallback)\n",
+            "MISSING = $(firstword $(wildcard absent.txt) fallback)\n",
+            "OVERRIDE ?= default\n",
+            "LINE = one \\\n",
+            "       two\n",
+            "WHERE = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))\n",
+            "HERE = $(abspath $(WHERE).)\n",
+            "\n",
+            "all: build/features.txt\n",
+            "\n",
+            "build/features.txt: source.txt features.mk\n",
+            "\tmkdir -p $(dir $@)\n",
+            "\t@printf '%s\\n' '$(SHELL_WORD)' '$(PICK)' '$(MISSING)' '$(LINE)' '$(WHERE)' '$(HERE)' '$(OVERRIDE)' > $@\n",
+        ),
+    )
+    .expect("write feature makefile");
+
+    let out = Command::new(&exe)
+        .current_dir(&dir)
+        .arg("features.mk")
+        .env("OVERRIDE", "from-env")
+        .output()
+        .expect("run feature makefile");
+    assert!(
+        out.status.success(),
+        "feature build failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("printf"), "`@` recipe was echoed:\n{stdout}");
+
+    let expected_dir = fs::canonicalize(&dir).expect("canonical temp dir");
+    let expected_where = format!("{}/", expected_dir.display());
+    let expected_here = expected_dir.to_str().expect("utf8 temp dir");
+    let features = fs::read_to_string(dir.join("build/features.txt")).expect("read features");
+    let mut lines = features.lines();
+    assert_eq!(lines.next(), Some("from shell"));
+    assert_eq!(lines.next(), Some("source.txt"));
+    assert_eq!(lines.next(), Some("fallback"));
+    assert_eq!(lines.next(), Some("one two"));
+    assert_eq!(lines.next(), Some(expected_where.as_str()));
+    assert_eq!(lines.next(), Some(expected_here));
+    assert_eq!(lines.next(), Some("from-env"));
 }
 
 #[test]
