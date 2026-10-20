@@ -1,0 +1,3 @@
+import math
+
+fun answer() : Int = math.double(20) + math.size(math.tree())
