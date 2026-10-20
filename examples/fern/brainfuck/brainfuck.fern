@@ -12,6 +12,8 @@
 --
 -- Build and run: make && make run (driver.c prints `answer()`).
 
+import std::foldable
+
 data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
 
 -- ------------------------------------------------------------- the tape --
@@ -41,25 +43,6 @@ fun drop(n : Int) : Int = if n == 0 then 255 else n - 1
 
 fun peek(stream : List Int) : Maybe Int = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
 fun tail(stream : List Int) : List Int = match stream { case Nil => Nil case Cons(_, more) => more }
-
--- -------------------------------------------------------------- folding --
-class Foldable t {
-    fold : (b -> a -> b) -> b -> t a -> b
-}
-
-instance Foldable List {
-    fold(f, z, xs) = match xs {
-        case Nil => z
-        case Cons(x, xs) => fold(f, f(z, x), xs)
-    }
-}
-
-instance Foldable Maybe {
-    fold(f, z, m) = match m {
-        case Nothing => z
-        case Just(x) => f(z, x)
-    }
-}
 
 -- "Maybe a byte" from the input stream becomes a byte: `Just(b)` keeps
 -- `b`, and `Nothing` at EOF reads as 0.

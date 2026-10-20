@@ -279,3 +279,10 @@ fn reload_picks_up_changed_module_bodies() {
     assert_eq!(repl.eval_expr("math.double(14)").expect("runs"), "42");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn the_repl_can_import_the_bundled_std() {
+    let mut repl = Repl::new();
+    repl.define("import std::foldable").expect("import std");
+    assert_eq!(repl.eval_expr("fold((h, b) -> h + b, 0, [1, 2, 3])").expect("runs"), "6");
+}

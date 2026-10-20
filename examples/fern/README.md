@@ -6,7 +6,8 @@ and linked against a small C driver that calls `answer()`:
 - `showcase/` — sum types, type classes, higher-order functions;
   `answer()` returns 137.
 - `brainfuck/` — a Brainfuck interpreter built from immutable lists;
-  `answer()` returns a rolling checksum of everything it emitted.
+  it imports `std::foldable`, and `answer()` returns a rolling checksum of
+  everything it emitted.
 - `modules/` — a two-file program: `main.fern` imports `math.fern`,
   uses a qualified generic function and constructor, and `answer()`
   returns 42.

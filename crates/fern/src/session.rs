@@ -150,6 +150,8 @@ pub struct LowerStats {
 pub struct Session {
     files: Vec<SourceFile>,
     module_root: PathBuf,
+    module_paths: Vec<PathBuf>,
+    std_paths: Vec<PathBuf>,
     modules: HashMap<Vec<String>, FileId>,
     module_files: Vec<FileId>,
     loaded_files: HashMap<PathBuf, FileId>,
@@ -179,6 +181,8 @@ impl Session {
                 revision: 0,
             }],
             module_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            module_paths: env_search_paths(),
+            std_paths: default_std_paths(),
             modules: HashMap::new(),
             module_files: Vec::new(),
             loaded_files: HashMap::new(),
@@ -284,6 +288,25 @@ impl Session {
         self.module_root = root.into();
     }
 
+    /// Add one directory to the ordinary module search path. It is tried
+    /// after the entry directory and before any standard-library root.
+    pub fn add_module_search_path(&mut self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        if !self.module_paths.contains(&path) {
+            self.module_paths.push(path);
+        }
+    }
+
+    /// Add a directory that contains the contents of `std` directly, so
+    /// `import std::foldable` looks for `<path>/foldable.fern`. This is
+    /// tried after the entry directory and `FERN_PATH`.
+    pub fn add_std_search_path(&mut self, path: impl Into<PathBuf>) {
+        let path = path.into();
+        if !self.std_paths.contains(&path) {
+            self.std_paths.push(path);
+        }
+    }
+
     /// Load an entry file and every module it imports, returning the files
     /// in prelude-independent order: the entry first, then imports.
     pub fn load_entry(&mut self, entry: &Path) -> Result<Vec<FileId>, Vec<Diag>> {
@@ -345,19 +368,33 @@ impl Session {
     }
 
     fn find_module(&self, path: &[String], span: Span) -> KResult<PathBuf> {
-        let joined = path.join("/");
-        let leaf = self.module_root.join(format!("{joined}.fern"));
-        let package = self.module_root.join(&joined).join(format!("{}.fern", path.last().expect("non-empty module path")));
-        if leaf.is_file() {
-            Ok(leaf)
-        } else if package.is_file() {
-            Ok(package)
-        } else {
-            Err(Diag::new(
-                format!("cannot find module `{}` (tried `{}` and `{}`)", path.join("::"), leaf.display(), package.display()),
-                span,
-            ))
+        let mut tried = Vec::new();
+        if let Some(found) = find_in_root(&self.module_root, path, &mut tried) {
+            return Ok(found);
         }
+        for root in &self.module_paths {
+            if let Some(found) = find_in_root(root, path, &mut tried) {
+                return Ok(found);
+            }
+        }
+
+        if path.first().is_some_and(|segment| segment == "std") && path.len() > 1 {
+            for root in &self.std_paths {
+                if let Some(found) = find_in_root(root, &path[1..], &mut tried) {
+                    return Ok(found);
+                }
+            }
+        }
+
+        let tried = tried
+            .iter()
+            .map(|candidate| format!("`{}`", candidate.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(Diag::new(
+            format!("cannot find module `{}` (tried {tried})", path.join("::")),
+            span,
+        ))
     }
 
     pub fn set_text(&mut self, file: FileId, text: impl Into<String>) {
@@ -841,6 +878,56 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
         }
     }
     hash
+}
+
+fn env_search_paths() -> Vec<PathBuf> {
+    std::env::var_os("FERN_PATH")
+        .map(|value| {
+            std::env::split_paths(&value)
+                .filter(|path| !path.as_os_str().is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn default_std_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(path) = std::env::var_os("FERN_STD") {
+        paths.push(PathBuf::from(path));
+    }
+
+    let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../stdlib/std");
+    paths.push(development);
+
+    #[cfg(unix)]
+    paths.push(PathBuf::from("/usr/share/fern/std"));
+
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    if let Some(home) = home {
+        paths.push(PathBuf::from(home).join(".local/share/fern/std"));
+    }
+    paths
+}
+
+fn find_in_root(root: &Path, path: &[String], tried: &mut Vec<PathBuf>) -> Option<PathBuf> {
+    if path.is_empty() {
+        return None;
+    }
+    let joined = path.join("/");
+    let leaf = root.join(format!("{joined}.fern"));
+    if leaf.is_file() {
+        return Some(leaf);
+    }
+    tried.push(leaf);
+
+    let package = root
+        .join(&joined)
+        .join(format!("{}.fern", path.last().expect("non-empty module path")));
+    if package.is_file() {
+        return Some(package);
+    }
+    tried.push(package);
+    None
 }
 
 fn tarjan(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {

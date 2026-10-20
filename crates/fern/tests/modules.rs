@@ -269,3 +269,54 @@ fn module_ids_reach_the_program() {
     assert_eq!(x.module, ModuleId(2));
     let _ = FileId::PRELUDE;
 }
+
+#[test]
+fn the_bundled_std_provides_foldable() {
+    let mut session = fern::Session::new();
+    let foldable = session
+        .load_import(vec!["std".into(), "foldable".into()])
+        .unwrap_or_else(|diags| panic!("std load failed: {}", diags[0].msg));
+    assert!(std::path::Path::new(session.path(foldable)).ends_with("stdlib/std/foldable.fern"));
+
+    let main = session.add_file(
+        "<main>",
+        "import std::foldable\nfun main() : Int = fold((h, b) -> h + b, 0, [1, 2, 3])",
+    );
+    let module = session
+        .compile(&[session.prelude(), main, foldable])
+        .unwrap_or_else(|diags| panic!("compile failed: {}", diags[0].msg));
+    assert!(module.funcs.iter().any(|f| f.name == "main"));
+}
+
+#[test]
+fn module_search_paths_are_searched_before_the_stdlib() {
+    let dir = std::env::temp_dir().join(format!("fern-modules-search-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("std")).expect("mkdir");
+    std::fs::write(dir.join("std/foldable.fern"), "fun marker() : Int = 7").expect("write");
+
+    let mut session = fern::Session::new();
+    session.add_module_search_path(&dir);
+    let foldable = session
+        .load_import(vec!["std".into(), "foldable".into()])
+        .unwrap_or_else(|diags| panic!("load failed: {}", diags[0].msg));
+    assert!(session.text(foldable).contains("marker"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn std_roots_map_the_std_prefix_to_their_contents() {
+    let dir = std::env::temp_dir().join(format!("fern-std-root-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    std::fs::write(dir.join("only_in_test.fern"), "fun marker() : Int = 9").expect("write");
+
+    let mut session = fern::Session::new();
+    session.add_std_search_path(&dir);
+    let module = session
+        .load_import(vec!["std".into(), "only_in_test".into()])
+        .unwrap_or_else(|diags| panic!("load failed: {}", diags[0].msg));
+    assert!(std::path::Path::new(session.path(module)).ends_with("only_in_test.fern"));
+    assert!(session.text(module).contains("marker"));
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,0 +1,17 @@
+class Foldable t {
+    fold : (b -> a -> b) -> b -> t a -> b
+}
+
+instance Foldable List {
+    fold(f, z, xs) = match xs {
+        case Nil => z
+        case Cons(x, xs) => fold(f, f(z, x), xs)
+    }
+}
+
+instance Foldable Maybe {
+    fold(f, z, m) = match m {
+        case Nothing => z
+        case Just(x) => f(z, x)
+    }
+}
