@@ -4,8 +4,10 @@
  * the load address, not the ELF entry point, so `_start` must be first:
  * it lives in `.text.boot`, placed ahead of everything else.
  *
- * `.eh_frame` is claimed explicitly: lld would otherwise place the
- * synthesized `.eh_frame_hdr` orphan ahead of `.text`.
+ * The flat user image (build/user.bin) is embedded in `.user` at
+ * 0x80400000; the kernel page tables mark that region U=1. `.eh_frame`
+ * is claimed explicitly: lld would otherwise place the synthesized
+ * `.eh_frame_hdr` orphan ahead of `.text`.
  */
 ENTRY(_start)
 SECTIONS
@@ -15,4 +17,7 @@ SECTIONS
     .rodata : { *(.rodata*) *(.eh_frame*) }
     .data : { *(.data*) }
     .bss : { *(.bss*) *(COMMON) }
+
+    . = 0x80400000;
+    .user : { *(.user) }
 }
