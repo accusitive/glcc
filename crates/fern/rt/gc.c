@@ -558,6 +558,60 @@ static char **fern_argv_array(char *name, fargv *args) {
 }
 
 #ifdef _WIN32
+/* _spawnvp joins argv with spaces without quoting, so a recipe reaches
+   the shell as separate words. Quote each argument for CreateProcess's
+   command-line parser before handing it to _spawnvp. */
+static char *fern_win_quote(const char *arg) {
+	u64 n = fern_strlen(arg);
+	char *out = (char *)fern_alloc(2 * n + 3);
+	u64 i = 0;
+	int quote = n == 0;
+	for (u64 j = 0; j < n; j++) {
+		if (arg[j] == ' ' || arg[j] == '\t' || arg[j] == '"') quote = 1;
+	}
+	if (!quote) {
+		for (u64 j = 0; j < n; j++) out[i++] = arg[j];
+		out[i] = 0;
+		return out;
+	}
+	out[i++] = '"';
+	u64 j = 0;
+	while (j < n) {
+		u64 backslashes = 0;
+		while (j < n && arg[j] == '\\') {
+			backslashes++;
+			j++;
+		}
+		if (j == n) {
+			for (u64 k = 0; k < backslashes * 2; k++) out[i++] = '\\';
+		} else if (arg[j] == '"') {
+			for (u64 k = 0; k < backslashes * 2 + 1; k++) out[i++] = '\\';
+			out[i++] = '"';
+			j++;
+		} else {
+			for (u64 k = 0; k < backslashes; k++) out[i++] = '\\';
+			out[i++] = arg[j++];
+		}
+	}
+	out[i++] = '"';
+	out[i] = 0;
+	return out;
+}
+
+static char **fern_win_argv_array(char *name, fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)fern_alloc((n + 2) * sizeof(char *));
+	u64 i = 0;
+	out[0] = name;
+	while (args != 0) {
+		i++;
+		out[i] = fern_win_quote(args->s);
+		args = args->next;
+	}
+	out[n + 1] = 0;
+	return out;
+}
+
 /* Pipeline stages become one shell command line. Quote only arguments
    that need it: cmd.exe treats an all-quoted line as a single token. */
 static int fern_arg_is_simple(const char *s) {
@@ -596,7 +650,7 @@ static void fern_append_argv(char *out, u64 *len, u64 cap, char *name, fargv *ar
 }
 
 i64 fern_spawn_status(char *name, fargv *args) {
-	return (i64)_spawnvp(0, name, fern_argv_array(name, args));
+	return (i64)_spawnvp(0, name, fern_win_argv_array(name, args));
 }
 
 /* A regular file's contents, truncated at 64 KiB. A missing file reads
@@ -640,7 +694,7 @@ char *fern_spawn_capture(char *name, fargv *args) {
 		free(tmp);
 		return out;
 	}
-	_spawnvp(0, name, fern_argv_array(name, args));
+	_spawnvp(0, name, fern_win_argv_array(name, args));
 	_dup2(saved, 1);
 	_close(saved);
 	_lseeki64(fd, 0, 0);
