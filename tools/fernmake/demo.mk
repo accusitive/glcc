@@ -1,4 +1,4 @@
-GLCC ?= $(firstword $(wildcard ../../../target/debug/glcc ../../../target/debug/glcc.exe) glcc)
+GLCC ?= $(firstword $(wildcard ../../target/debug/glcc ../../target/debug/glcc.exe) glcc)
 OUT = build/demo
 SRC = demo.c
 

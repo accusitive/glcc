@@ -1,0 +1,28 @@
+# Windows build for fernmake. Run `fernmake Makefile.win` (or `run`,
+# `clean`); the demo makefile uses PowerShell recipes too.
+PROGRAM = fernmake
+SOURCE = make.fern
+OPT = -O1
+RUN_ARGS = demo.win.mk run
+SHELL = powershell
+.SHELLFLAGS = -NoProfile -Command
+FERNC ?= ../../target/debug/fernc.exe
+GLCC ?= ../../target/debug/glcc.exe
+MKDIR = New-Item -ItemType Directory -Force -Path
+
+all: build/$(PROGRAM).exe
+
+build/$(PROGRAM).exe: build/$(PROGRAM).obj driver.c
+	$(GLCC) driver.c build/$(PROGRAM).obj -o $@
+
+build/$(PROGRAM).obj: $(SOURCE)
+	$(MKDIR) build
+	$(FERNC) $(OPT) $< -o $@
+
+run: build/$(PROGRAM).exe
+	& ./build/$(PROGRAM).exe $(RUN_ARGS)
+
+clean:
+	if (Test-Path build) { Remove-Item -Recurse -Force build }
+
+.PHONY: all run clean

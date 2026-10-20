@@ -292,8 +292,8 @@ suite is excluded (it fails here; see audit). Nothing extra to install.
 # 4. add C:\Program Files\Git\bin and ...\usr\bin to PATH
 # 5. cargo build -p glcc -p fernc --locked
 # 6. cargo test --workspace --locked
-# 7. build fernmake with fernc + glcc, then run Makefile.win in
-#    examples/fern/{make,brainfuck,modules,showcase}
+# 7. build fernmake with fernc + glcc, run tools/fernmake/Makefile.win,
+#    then run Makefile.win in examples/fern/{brainfuck,modules,showcase}
 ```
 
 What Windows needs and does not need, verified against the code:
@@ -302,7 +302,7 @@ What Windows needs and does not need, verified against the code:
   driver tests use `glcc` (the sibling binary built in step 5) for the
   C harness and link step.
 - Git Bash supplies `sh`, `test`, `cp`, `printf`, `rm`, `mkdir`, and
-  `realpath` for `fernmake`'s POSIX feature tests. The Windows example
+  `realpath` for `fernmake`'s POSIX feature tests. The Windows example and tool
   makefiles use PowerShell recipes instead and avoid those utilities.
 - `link.exe`/`lib.exe` come from `ilammy/msvc-dev-cmd`; `glcc` uses
   them to link the fern objects and C harnesses.
@@ -400,7 +400,7 @@ What **not** to cache:
 | `tests/llvm-test-suite` + `tools/torture.bash` | 2+ GB submodule; long bash-driven run; not needed to keep the C compiler honest day-to-day |
 | `tests/c-testsuite` + `tools/ctestsuite.bash` | submodule + bash + zig/qemu cross targets; good as a *later* nightly, not a per-PR job |
 | `abi_probe` full matrix | needs zig + `qemu-aarch64`/`qemu-riscv64` |
-| other `examples/*` | C/C++ demos with their own `make`; the C++/SDL triangle example would drag in C++ toolchains. Only `examples/fern` runs in CI |
+| other `examples/*` | C/C++ demos with their own `make`; the C++/SDL triangle example would drag in C++ toolchains. Only `examples/fern` and `tools/fernmake` run in CI |
 | wasm build, `cargo install`, docs publish | not part of the test contract for this plan |
 | macOS, riscv64 | not requested; no free riscv64 hosted runner |
 | `cargo fmt`/`clippy` as *gating* | owner didn't ask; repo may not be clean today. Optional separate job, non-blocking at first |

@@ -332,10 +332,10 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
     }
     let dir = temp_dir("make-runner");
     let _ = fs::remove_file(dir.join("out.txt"));
-    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/make");
+    let tool_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tools/fernmake");
     let object = object_path(&dir);
     let out = Command::new(FERNC)
-        .arg(example_dir.join("make.fern"))
+        .arg(tool_dir.join("make.fern"))
         .arg("-O1")
         .arg("-o")
         .arg(&object)
@@ -344,7 +344,7 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
     assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
     let exe = exe_path(&dir, "fernmake");
-    let out = link_with_c(&example_dir.join("driver.c"), &object, &exe);
+    let out = link_with_c(&tool_dir.join("driver.c"), &object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
     fs::write(dir.join("source.txt"), "payload\n").expect("write source");
