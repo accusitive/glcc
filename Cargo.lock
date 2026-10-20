@@ -312,6 +312,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fern_repl"
+version = "0.1.0"
+dependencies = [
+ "cranelift-jit",
+ "cranelift-module",
+ "fern",
+ "glcc_lower_cl",
+ "glcc_mir",
+]
+
+[[package]]
 name = "fernc"
 version = "0.1.0"
 dependencies = [
