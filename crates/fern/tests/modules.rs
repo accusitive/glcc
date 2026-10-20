@@ -72,6 +72,29 @@ fn qualified_constructors_work_in_patterns() {
 }
 
 #[test]
+fn nested_module_records_resolve_in_expressions() {
+    let module = compile(
+        "import geo::point\n\
+         use geo::point::Leaf\n\
+         fun nested() : geo.point.Tree Int = geo.point.Leaf(4)\n\
+         fun main() : Int = {\n\
+             let p = geo.point.origin();\n\
+             let t = geo.point.leaf();\n\
+             let u = nested();\n\
+             p.x + p.y + match t { case Leaf(x) => x } + match u { case Leaf(x) => x }\n\
+         }",
+        &[(
+            &["geo", "point"],
+            "data Point = Point { x : Int, y : Int }\n\
+             data Tree a = Leaf(a)\n\
+             fun origin() : Point = Point { x = 1, y = 2 }\n\
+             fun leaf() : Tree Int = Leaf(3)",
+        )],
+    );
+    assert!(module.funcs.iter().any(|f| f.name == "main"));
+}
+
+#[test]
 fn used_types_and_constructors_lose_their_prefix() {
     let module = compile(
         "import math\nuse math::Tree\nuse math::Leaf\nuse math::size\n\

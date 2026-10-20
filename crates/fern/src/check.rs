@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, UnOp};
 use crate::defs::{Bound, Defs, FnId, Scheme, ValueId};
-use crate::hir::{BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn, HirLocal, HirPat, HirPatKind, HirProgram};
+use crate::hir::{BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn, HirLocal, HirPat, HirPatKind, HirProgram, TryResidual};
 use crate::infer::InferCtx;
 use crate::solve::{Obligation, Solution, Solver};
 use crate::span::{Diag, KResult, Span};
@@ -139,6 +139,8 @@ struct Check<'d> {
     bodies: Vec<BodyState>,
     /// The bounds in scope for the current body.
     env: Vec<Bound>,
+    /// Return types of the enclosing bodies, innermost last.
+    returns: Vec<Ty>,
     /// The name and in-progress type of the item being checked, when it
     /// may refer to itself.
     self_ref: Option<SelfRef>,
@@ -147,6 +149,19 @@ struct Check<'d> {
 enum SelfRef {
     Fn(FnId, String, Ty),
     Value(ValueId, String, Ty),
+}
+
+fn ctor_short(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+struct TryInfo {
+    name: String,
+    success: Ty,
+    error: Option<Ty>,
+    ok_ctor: usize,
+    err_ctor: usize,
+    is_maybe: bool,
 }
 
 struct BodyState {
@@ -198,6 +213,7 @@ impl<'d> Check<'d> {
             value_schemes: Vec::new(),
             bodies: Vec::new(),
             env: Vec::new(),
+            returns: Vec::new(),
             self_ref: None,
         }
     }
@@ -307,8 +323,10 @@ impl<'d> Check<'d> {
                     params.push(this.check_pat(&param.pat, ty, span)?);
                 }
                 this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
-                let body = this.check_expr(&f.body, &ret)?;
-                Ok((params, ret.clone(), body, fn_ty.clone()))
+                this.returns.push(ret.clone());
+                let body = this.check_expr(&f.body, &ret);
+                this.returns.pop();
+                Ok((params, ret.clone(), body?, fn_ty.clone()))
             },
         )?;
         self.fn_schemes[id.index()] = Some(declared);
@@ -331,8 +349,10 @@ impl<'d> Check<'d> {
                 Some(declared.clone()),
                 &mut |this| {
                     this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-                    let body = this.check_expr(&v.body, &ty)?;
-                    Ok((Vec::new(), ty.clone(), body, ty.clone()))
+                    this.returns.push(ty.clone());
+                    let body = this.check_expr(&v.body, &ty);
+                    this.returns.pop();
+                    Ok((Vec::new(), ty.clone(), body?, ty.clone()))
                 },
             )?;
             self.value_schemes[id.index()] = Some(declared);
@@ -351,8 +371,10 @@ impl<'d> Check<'d> {
             &mut |this| {
                 let ty = this.infer.fresh();
                 this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-                let body = this.check_expr(&v.body, &ty)?;
-                Ok((Vec::new(), ty.clone(), body, ty))
+                this.returns.push(ty.clone());
+                let body = this.check_expr(&v.body, &ty);
+                this.returns.pop();
+                Ok((Vec::new(), ty.clone(), body?, ty))
             },
         )?;
         self.value_schemes[id.index()] = Some(scheme);
@@ -439,8 +461,10 @@ impl<'d> Check<'d> {
                 for (p, want) in impl_m.params.iter().zip(param_tys.iter()) {
                     params.push(this.check_pat(p, want, span)?);
                 }
-                let body = this.check_expr(&impl_m.body, &ret)?;
-                Ok((params, ret, body, sig.clone()))
+                this.returns.push(ret.clone());
+                let body = this.check_expr(&impl_m.body, &ret);
+                this.returns.pop();
+                Ok((params, ret, body?, sig.clone()))
             },
         )?;
         self.hir.bodies.push(hir_fn);
@@ -556,6 +580,9 @@ impl<'d> Check<'d> {
             ast::ExprKind::Ctor { name } => self.synthesize_ctor(name, &[], span),
             ast::ExprKind::Var(name) => self.synthesize_var(name, span),
             ast::ExprKind::Call(callee, args) => self.synthesize_call(callee, args, span),
+            ast::ExprKind::Record { ctor, fields } => self.synthesize_record(ctor, fields, span),
+            ast::ExprKind::Field { base, field } => self.synthesize_field(base, field, span),
+            ast::ExprKind::Try(inner) => self.synthesize_try(inner, span),
             ast::ExprKind::ClassSel { class, method, args } => self.synthesize_class_sel(class, method, args, span),
             ast::ExprKind::Lambda { params, body } => self.synthesize_lambda(params, body, span),
             ast::ExprKind::Let { binds, body } => self.synthesize_let(binds, body, span),
@@ -855,6 +882,86 @@ impl<'d> Check<'d> {
         })
     }
 
+    fn synthesize_record(&mut self, name: &str, fields: &[(String, ast::Expr)], span: Span) -> KResult<HirExpr> {
+        let (data_id, tag) = self.defs.ctor_by_name(name).ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
+        let data = self.defs.data[data_id.index()].clone();
+        let ctor = data.ctors[tag as usize].clone();
+        let Some(field_names) = &ctor.field_names else {
+            return Err(Diag::new(format!("constructor `{name}` does not have named fields"), span));
+        };
+        let mut values: Vec<Option<&ast::Expr>> = vec![None; field_names.len()];
+        for (field, value) in fields {
+            let Some(index) = field_names.iter().position(|name| name == field) else {
+                return Err(Diag::new(format!("`{name}` has no field `{field}`"), value.span));
+            };
+            if values[index].replace(value).is_some() {
+                return Err(Diag::new(format!("field `{field}` is given twice"), value.span));
+            }
+        }
+        let mut map = HashMap::new();
+        let mut fresh = Vec::new();
+        for (pname, _) in &data.params {
+            let v = self.infer.fresh();
+            fresh.push(v.clone());
+            map.insert(pname.clone(), v);
+        }
+        let mut hir_args = Vec::with_capacity(values.len());
+        for (index, value) in values.into_iter().enumerate() {
+            let Some(value) = value else {
+                return Err(Diag::new(
+                    format!("record constructor `{name}` is missing field `{}`", field_names[index]),
+                    span,
+                ));
+            };
+            let want = ctor.args[index].substitute(&map);
+            hir_args.push(self.check_expr(value, &want)?);
+        }
+        Ok(HirExpr {
+            kind: HirExprKind::Ctor {
+                data_id,
+                ctor: tag as usize,
+                args: hir_args,
+            },
+            ty: Ty::Named {
+                name: data.name.clone(),
+                args: fresh,
+            },
+            span,
+        })
+    }
+
+    fn synthesize_field(&mut self, base: &ast::Expr, field: &str, span: Span) -> KResult<HirExpr> {
+        let base = self.synth(base)?;
+        let ty = self.infer.resolve(&base.ty);
+        let Ty::Named { name, args } = &ty else {
+            return Err(Diag::new(format!("field access requires a record, found `{ty}`"), span));
+        };
+        let data_id = self.defs.data_by_name(name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
+        let data = self.defs.data[data_id.index()].clone();
+        let ctor = data.ctors.first().filter(|_| data.ctors.len() == 1).ok_or_else(|| {
+            Diag::new(format!("`{name}` is not a record type"), span)
+        })?;
+        let field_names = ctor.field_names.as_ref().ok_or_else(|| {
+            Diag::new(format!("`{name}` is not a record type"), span)
+        })?;
+        let Some(index) = field_names.iter().position(|name| name == field) else {
+            return Err(Diag::new(format!("`{name}` has no field `{field}`"), span));
+        };
+        if data.params.len() != args.len() {
+            return Err(Diag::new(format!("`{name}` is not fully applied"), span));
+        }
+        let subst: HashMap<String, Ty> = data.params.iter().map(|(n, _)| n.clone()).zip(args.iter().cloned()).collect();
+        let ty = ctor.args[index].substitute(&subst);
+        Ok(HirExpr {
+            kind: HirExprKind::Field {
+                base: Box::new(base),
+                index,
+            },
+            ty,
+            span,
+        })
+    }
+
     fn synthesize_call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> KResult<HirExpr> {
         let callee_hir = self.synth(callee)?;
         let callee_ty = callee_hir.ty.clone();
@@ -979,6 +1086,82 @@ impl<'d> Check<'d> {
         Ok(HirExpr { kind, ty: ret, span })
     }
 
+    fn try_info(&self, ty: &Ty, span: Span) -> KResult<TryInfo> {
+        let ty = self.infer.resolve(ty);
+        let Ty::Named { name, args } = ty else {
+            return Err(Diag::new(format!("`?` requires a `Maybe` or `Result`, found `{ty}`"), span));
+        };
+        let is_maybe = match name.as_str() {
+            "Maybe" => true,
+            "std::result::Result" => false,
+            _ => return Err(Diag::new(format!("`?` requires a `Maybe` or `Result`, found `{name}`"), span)),
+        };
+        let arity = if is_maybe { 1 } else { 2 };
+        if args.len() != arity {
+            return Err(Diag::new(format!("`{name}` is not fully applied in `?`"), span));
+        }
+        let data_id = self.defs.data_by_name(&name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
+        let data = &self.defs.data[data_id.index()];
+        let (ok_name, err_name) = if is_maybe { ("Just", "Nothing") } else { ("Ok", "Err") };
+        let ok_ctor = data.ctors.iter().position(|c| ctor_short(&c.name) == ok_name);
+        let err_ctor = data.ctors.iter().position(|c| ctor_short(&c.name) == err_name);
+        let (Some(ok_ctor), Some(err_ctor)) = (ok_ctor, err_ctor) else {
+            return Err(Diag::new(format!("`{name}` does not have the expected constructors"), span));
+        };
+        Ok(TryInfo {
+            name,
+            success: args[0].clone(),
+            error: if is_maybe { None } else { Some(args[1].clone()) },
+            ok_ctor,
+            err_ctor,
+            is_maybe,
+        })
+    }
+
+    fn synthesize_try(&mut self, inner: &ast::Expr, span: Span) -> KResult<HirExpr> {
+        let value = self.synth(inner)?;
+        let input = self.try_info(&value.ty, inner.span)?;
+        let ret = self.returns.last().cloned().ok_or_else(|| {
+            Diag::new("`?` can only be used inside a function body", span)
+        })?;
+        let mut ret = self.infer.shallow(&ret);
+        if matches!(ret, Ty::Var(_)) {
+            let fresh = self.infer.fresh();
+            let wrapper = if input.is_maybe {
+                Ty::named(&input.name, vec![fresh])
+            } else {
+                Ty::named(&input.name, vec![fresh, input.error.clone().unwrap()])
+            };
+            self.infer.unify(&ret, &wrapper, span)?;
+            ret = wrapper;
+        }
+        let want = if input.is_maybe { "Maybe" } else { "Result" };
+        let out = self.try_info(&ret, span).map_err(|_| {
+            Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span)
+        })?;
+        if input.is_maybe != out.is_maybe {
+            return Err(Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span));
+        }
+        let residual = if input.is_maybe {
+            TryResidual::Reuse
+        } else {
+            self.infer.unify(input.error.as_ref().unwrap(), out.error.as_ref().unwrap(), span)?;
+            TryResidual::Rebuild {
+                err_ctor: input.err_ctor,
+                ret_err_ctor: out.err_ctor,
+            }
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Try {
+                value: Box::new(value),
+                ok_ctor: input.ok_ctor,
+                residual,
+            },
+            ty: input.success,
+            span,
+        })
+    }
+
     fn synthesize_lambda(&mut self, params: &[ast::Pat], body: &ast::Expr, span: Span) -> KResult<HirExpr> {
         check_param_names(params, span)?;
         self.bodies.push(BodyState::new());
@@ -988,7 +1171,9 @@ impl<'d> Check<'d> {
             param_pats.push(self.check_pat(p, &t, span)?);
         }
         let ret = self.infer.fresh();
+        self.returns.push(ret.clone());
         let built = self.check_expr(body, &ret);
+        self.returns.pop();
         let body_hir = match built {
             Ok(body_hir) => body_hir,
             Err(diag) => {
@@ -1603,6 +1788,12 @@ fn finalize_expr(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, self_
             for a in args {
                 finalize_expr(infer, ids, allowed, self_ref, generics, a)?;
             }
+        }
+        HirExprKind::Field { base, .. } => {
+            finalize_expr(infer, ids, allowed, self_ref, generics, base)?;
+        }
+        HirExprKind::Try { value, .. } => {
+            finalize_expr(infer, ids, allowed, self_ref, generics, value)?;
         }
         HirExprKind::Let { binds, body } => {
             for (p, value) in binds {

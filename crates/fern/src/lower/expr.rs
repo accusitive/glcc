@@ -16,6 +16,8 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirExprKind::Const(c) => self.const_value(c),
             HirExprKind::Local(id) => self.read_local(*id),
             HirExprKind::Ctor { ctor, args, .. } => self.ctor(e, *ctor, args),
+            HirExprKind::Field { base, index } => self.field_expr(e, base, *index),
+            HirExprKind::Try { value, ok_ctor, residual } => self.try_expr(e, value, *ok_ctor, *residual),
             HirExprKind::Fn(target) => self.fn_value(target, e),
             HirExprKind::Closure { id, captures } => self.closure_value(*id, captures, e.span),
             HirExprKind::CallDirect { target, args } => self.call_direct(target, args, e),
@@ -82,6 +84,77 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         }
         self.release(mark)?;
         Ok(cell)
+    }
+
+    /// Read a named record field from its constructor payload.
+    fn field_expr(&mut self, e: &HirExpr, base: &HirExpr, index: usize) -> KResult<mir::Value> {
+        let cell = self.expr(base)?;
+        let mark = self.hold(cell.clone())?;
+        let ty = base.ty.substitute(&self.sub);
+        let layout = self.lw.types.data_layout(&ty, base.span)?;
+        let payload = self.offset_addr(cell, layout.payload_offsets[0])?;
+        let addr = self.offset_addr(payload, layout.field_offsets[0][index])?;
+        let ty = self.ty_of(&e.ty, e.span)?;
+        let value = self.load(addr, &ty)?;
+        self.release(mark)?;
+        Ok(value)
+    }
+
+    /// Lower `expr?`. The success path loads the payload from the
+    /// constructor's cell; the failure path builds the enclosing
+    /// function's residual and branches to its shared return block.
+    fn try_expr(&mut self, e: &HirExpr, value: &HirExpr, ok_ctor: usize, residual: TryResidual) -> KResult<mir::Value> {
+        let cell = self.expr(value)?;
+        let mark = self.hold(cell.clone())?;
+        let src = value.ty.substitute(&self.sub);
+        let layout = self.lw.types.data_layout(&src, value.span)?;
+        let tag = self.load(cell.clone(), &mir::Ty::int(32))?;
+        let want = self.iconst(32, ok_ctor as i128);
+        let ok = self.emit(
+            mir::InstKind::Icmp {
+                pred: mir::IcmpPred::Eq,
+                lhs: tag,
+                rhs: want,
+            },
+            mir::Ty::Bool,
+        )?;
+        let success = self.new_block(Vec::new());
+        let failure = self.new_block(Vec::new());
+        self.terminate(mir::Terminator::CondBr {
+            cond: ok,
+            then_block: success,
+            else_block: failure,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+
+        self.goto(failure);
+        let residual = match residual {
+            TryResidual::Reuse => cell.clone(),
+            TryResidual::Rebuild { err_ctor, ret_err_ctor } => {
+                let src_err = layout.payload_offsets[err_ctor] + layout.field_offsets[err_ctor][0];
+                let src_addr = self.offset_addr(cell.clone(), src_err)?;
+                let err_ty = layout.field_tys[err_ctor][0].clone();
+                let ret_ty = self.return_ty.substitute(&self.sub);
+                let ret_layout = self.lw.types.data_layout(&ret_ty, e.span)?;
+                let out = self.alloc_cell(ret_layout.cell_size)?;
+                let ret_tag = self.iconst(32, ret_err_ctor as i128);
+                self.store(out.clone(), ret_tag)?;
+                let err = self.load(src_addr, &err_ty)?;
+                let dst = ret_layout.payload_offsets[ret_err_ctor] + ret_layout.field_offsets[ret_err_ctor][0];
+                let dst = self.offset_addr(out.clone(), dst)?;
+                self.store(dst, err)?;
+                out
+            }
+        };
+        self.branch(self.return_block, vec![residual]);
+
+        self.goto(success);
+        let payload = self.offset_addr(cell, layout.payload_offsets[ok_ctor])?;
+        let ty = self.ty_of(&e.ty, e.span)?;
+        let value = self.load(payload, &ty)?;
+        self.release(mark)?;
+        Ok(value)
     }
 
     /// A named function as a value: allocate a cell holding a thunk's

@@ -11,6 +11,7 @@
 
 import std::list
 import std::path
+import std::result
 import std::string
 use std::list::contains
 use std::list::filter
@@ -27,8 +28,27 @@ use std::string::trim_left
 use std::string::trim_right
 use std::string::words
 
-data Rule = Rule(List String, List String, List String)
-data Parsed = Parsed(List (String, String), List Rule, List String)
+data Rule = Rule {
+    targets : List String,
+    prereqs : List String,
+    recipe : List String
+}
+
+data Parsed = Parsed {
+    vars : List (String, String),
+    rules : List Rule,
+    phony : List String
+}
+
+data BuildError = BuildError(String)
+
+data BuildState = BuildState {
+    rules : List Rule,
+    vars : List (String, String),
+    phony : List String,
+    done : List String,
+    visiting : List String
+}
 
 -- Join backslash-newline continuations before classifying lines. The
 -- continuation's leading whitespace (including a recipe tab) is dropped.
@@ -201,18 +221,26 @@ fun parse_rule(line : String) : Maybe (List String, List String) = {
     }
 }
 
-fun add_recipe(state : Parsed, command : String) : Parsed = match state {
-    case Parsed(vars, rules, phony) => match rules {
-        case Nil => state
-        case Cons(Rule(targets, prereqs, recipe), rest) =>
-            if str_len(trim(command)) == 0 then state
-            else Parsed(vars, Cons(Rule(targets, prereqs, Cons(command, recipe)), rest), phony)
-    }
+fun add_recipe(state : Parsed, command : String) : Parsed = match state.rules {
+    case Nil => state
+    case Cons(rule, rest) =>
+        if str_len(trim(command)) == 0 then state
+        else Parsed {
+            vars = state.vars,
+            rules = Cons(Rule {
+                targets = rule.targets,
+                prereqs = rule.prereqs,
+                recipe = Cons(command, rule.recipe)
+            }, rest),
+            phony = state.phony
+        }
 }
 
 fun add_rule(state : Parsed, targets : List String, prereqs : List String) : Parsed =
-    match state {
-        case Parsed(vars, rules, phony) => Parsed(vars, Cons(Rule(targets, prereqs, Nil), rules), phony)
+    Parsed {
+        vars = state.vars,
+        rules = Cons(Rule { targets = targets, prereqs = prereqs, recipe = Nil }, state.rules),
+        phony = state.phony
     }
 
 fun add_phony(names : List String, phony : List String) : List String = match names {
@@ -221,21 +249,29 @@ fun add_phony(names : List String, phony : List String) : List String = match na
 }
 
 fun set_assignment(state : Parsed, name : String, value : String, conditional : Bool) : Parsed =
-    match state {
-        case Parsed(vars, rules, phony) =>
-            if conditional && (has_var(name, vars) || str_len(getenv(name)) > 0) then state
-            else Parsed(set_var(name, value, vars), rules, phony)
+    if conditional && (has_var(name, state.vars) || str_len(getenv(name)) > 0) then state
+    else Parsed {
+        vars = set_var(name, value, state.vars),
+        rules = state.rules,
+        phony = state.phony
     }
 
 fun reverse_recipes(rules : List Rule) : List Rule = match rules {
     case Nil => Nil
-    case Cons(Rule(targets, prereqs, recipe), rest) =>
-        Cons(Rule(targets, prereqs, reverse(recipe)), reverse_recipes(rest))
+    case Cons(rule, rest) =>
+        Cons(Rule {
+            targets = rule.targets,
+            prereqs = rule.prereqs,
+            recipe = reverse(rule.recipe)
+        }, reverse_recipes(rest))
 }
 
-fun finish_parsing(state : Parsed) : Parsed = match state {
-    case Parsed(vars, rules, phony) => Parsed(vars, reverse(reverse_recipes(rules)), reverse(phony))
-}
+fun finish_parsing(state : Parsed) : Parsed =
+    Parsed {
+        vars = state.vars,
+        rules = reverse(reverse_recipes(state.rules)),
+        phony = reverse(state.phony)
+    }
 
 fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
     case Nil => finish_parsing(state)
@@ -245,8 +281,10 @@ fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
             let code = trim(strip_comment(line));
             if str_len(code) == 0 then parse_lines(rest, state)
             else match parse_phony(code) {
-                case Just(names) => parse_lines(rest, match state {
-                    case Parsed(vars, rules, phony) => Parsed(vars, rules, add_phony(names, phony))
+                case Just(names) => parse_lines(rest, Parsed {
+                    vars = state.vars,
+                    rules = state.rules,
+                    phony = add_phony(names, state.phony)
                 })
                 case Nothing => match parse_assignment(code) {
                     case Just((name, value, conditional)) =>
@@ -260,20 +298,24 @@ fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
         }
 }
 
-fun resolve_rule(rule : Rule, vars : List (String, String)) : Rule = match rule {
-    case Rule(targets, prereqs, recipe) =>
-        Rule(compact(expand_names(targets, vars)), compact(expand_names(prereqs, vars)), recipe)
-}
+fun resolve_rule(rule : Rule, vars : List (String, String)) : Rule =
+    Rule {
+        targets = compact(expand_names(rule.targets, vars)),
+        prereqs = compact(expand_names(rule.prereqs, vars)),
+        recipe = rule.recipe
+    }
 
 fun resolve_rules(rules : List Rule, vars : List (String, String)) : List Rule = match rules {
     case Nil => Nil
     case Cons(rule, rest) => Cons(resolve_rule(rule, vars), resolve_rules(rest, vars))
 }
 
-fun resolve_parsed(parsed : Parsed) : Parsed = match parsed {
-    case Parsed(vars, rules, phony) =>
-        Parsed(vars, resolve_rules(rules, vars), compact(expand_names(phony, vars)))
-}
+fun resolve_parsed(parsed : Parsed) : Parsed =
+    Parsed {
+        vars = parsed.vars,
+        rules = resolve_rules(parsed.rules, parsed.vars),
+        phony = compact(expand_names(parsed.phony, parsed.vars))
+    }
 
 fun default_var(name : String, fallback : String) : String = {
     let value = getenv(name);
@@ -285,15 +327,13 @@ fun parse_makefile(source : String, path : String) : Parsed = {
         ("CC", default_var("CC", "cc")),
         Cons(("MAKEFILE_LIST", path), Nil)
     );
-    let initial = Parsed(builtins, Nil, Nil);
+    let initial = Parsed { vars = builtins, rules = Nil, phony = Nil };
     resolve_parsed(parse_lines(logical_lines(str_lines(source), Nil), initial))
 }
 
 -- ------------------------------------------------------------- building --
 
-fun rule_targets(rule : Rule) : List String = match rule {
-    case Rule(targets, _, _) => targets
-}
+fun rule_targets(rule : Rule) : List String = rule.targets
 
 fun lookup_rule(target : String, rules : List Rule) : Maybe Rule = match rules {
     case Nil => Nothing
@@ -351,9 +391,9 @@ fun run_shell(silent : Bool, command : String) : Int =
         spawn_status("sh", ["-c", command])
     }
 
-fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : Bool =
+fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : result.Result Unit BuildError =
     match recipe {
-        case Nil => true
+        case Nil => result.Ok(())
         case Cons(raw, rest) => {
             let command = recipe_line(raw, target, prereqs, vars);
             if str_len(trim(command)) == 0 then run_recipe(rest, target, prereqs, vars)
@@ -362,41 +402,47 @@ fun run_recipe(recipe : List String, target : String, prereqs : List String, var
                 let command = if silent then str_slice(command, 1, str_len(command) - 1) else command;
                 let status = run_shell(silent, command);
                 if status == 0 then run_recipe(rest, target, prereqs, vars)
-                else {
-                    println(concat("fernmake: *** [", concat(target, concat("] Error ", str_of_int(status)))));
-                    false
-                }
+                else result.Err(BuildError(concat("fernmake: *** [", concat(target, concat("] Error ", str_of_int(status))))))
             }
         }
     }
 
-fun build_all(prereqs : List String, rules : List Rule, vars : List (String, String), phony : List String, done : List String, visiting : List String) : (Bool, List String) = match prereqs {
-    case Nil => (true, done)
-    case Cons(prereq, rest) => {
-        let (ok, done) = build(prereq, rules, vars, phony, done, visiting);
-        if ok then build_all(rest, rules, vars, phony, done, visiting) else (false, done)
+fun build_all(prereqs : List String, state : BuildState) : result.Result (List String) BuildError =
+    match prereqs {
+        case Nil => result.Ok(state.done)
+        case Cons(prereq, rest) => {
+            let done = build(prereq, state)?;
+            build_all(rest, BuildState {
+                rules = state.rules,
+                vars = state.vars,
+                phony = state.phony,
+                done = done,
+                visiting = state.visiting
+            })
+        }
     }
-}
 
-fun build(target : String, rules : List Rule, vars : List (String, String), phony : List String, done : List String, visiting : List String) : (Bool, List String) =
-    if contains(target, done) then (true, done)
-    else if contains(target, visiting) then {
-        println(concat("fernmake: circular dependency: ", target));
-        (false, done)
-    } else match lookup_rule(target, rules) {
+fun build(target : String, state : BuildState) : result.Result (List String) BuildError =
+    if contains(target, state.done) then result.Ok(state.done)
+    else if contains(target, state.visiting) then
+        result.Err(BuildError(concat("fernmake: circular dependency: ", target)))
+    else match lookup_rule(target, state.rules) {
         case Nothing =>
-            if file_exists(target) then (true, Cons(target, done))
-            else {
-                println(concat("fernmake: no rule to make `", concat(target, "`")));
-                (false, done)
-            }
-        case Just(Rule(_, prereqs, recipe)) => {
-            let (ok, done) = build_all(prereqs, rules, vars, phony, done, Cons(target, visiting));
-            if not(ok) then (false, done)
-            else if needs_build(target, prereqs, phony) then {
-                if run_recipe(recipe, target, prereqs, vars) then (true, Cons(target, done))
-                else (false, done)
-            } else (true, Cons(target, done))
+            if file_exists(target) then result.Ok(Cons(target, state.done))
+            else result.Err(BuildError(concat("fernmake: no rule to make `", concat(target, "`"))))
+        case Just(rule) => {
+            let visiting = Cons(target, state.visiting);
+            let done = build_all(rule.prereqs, BuildState {
+                rules = state.rules,
+                vars = state.vars,
+                phony = state.phony,
+                done = state.done,
+                visiting = visiting
+            })?;
+            if needs_build(target, rule.prereqs, state.phony) then {
+                run_recipe(rule.recipe, target, rule.prereqs, state.vars)?;
+                result.Ok(Cons(target, done))
+            } else result.Ok(Cons(target, done))
         }
     }
 
@@ -407,20 +453,28 @@ fun run_makefile(path : String, requested : String) : Int = {
     if str_len(source) == 0 then {
         println(concat("fernmake: cannot read ", path));
         1
-    } else match parse_makefile(source, path) {
-        case Parsed(vars, rules, phony) => {
-            let requested = trim(requested);
-            let goal = if str_len(requested) > 0 then requested
-                       else match default_target(rules) {
-                           case Nothing => ""
-                           case Just(target) => target
-                       };
-            if str_len(goal) == 0 then {
-                println("fernmake: no targets");
+    } else {
+        let parsed = parse_makefile(source, path);
+        let requested = trim(requested);
+        let goal = if str_len(requested) > 0 then requested
+                   else match default_target(parsed.rules) {
+                       case Nothing => ""
+                       case Just(target) => target
+                   };
+        if str_len(goal) == 0 then {
+            println("fernmake: no targets");
+            1
+        } else match build(goal, BuildState {
+            rules = parsed.rules,
+            vars = parsed.vars,
+            phony = parsed.phony,
+            done = Nil,
+            visiting = Nil
+        }) {
+            case result.Ok(_) => 0
+            case result.Err(BuildError(message)) => {
+                println(message);
                 1
-            } else {
-                let (ok, _) = build(goal, rules, vars, phony, Nil, Nil);
-                if ok then 0 else 1
             }
         }
     }

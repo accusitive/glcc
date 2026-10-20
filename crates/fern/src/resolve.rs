@@ -533,6 +533,15 @@ impl Qualifier {
                     self.expr(module, arg, scopes)?;
                 }
             }
+            ExprKind::Record { ctor, fields } => {
+                let span = expr.span;
+                *ctor = self.ctor_name(module, ctor, span)?;
+                for (_, value) in fields {
+                    self.expr(module, value, scopes)?;
+                }
+            }
+            ExprKind::Field { .. } => self.resolve_field(module, expr, scopes)?,
+            ExprKind::Try(inner) => self.expr(module, inner, scopes)?,
             ExprKind::ClassSel { class, args, .. } => {
                 let span = expr.span;
                 *class = self.class_name(module, class, span)?;
@@ -597,6 +606,40 @@ impl Qualifier {
         Ok(())
     }
 
+    fn resolve_field(&self, module: ModuleId, expr: &mut Expr, scopes: &mut Scopes) -> KResult<()> {
+        let span = expr.span;
+        if let Some(path) = field_path(expr) {
+            let first = &path[0];
+            let imports = &self.modules[module.index()].imports;
+            let module_path = !scopes.contains(first)
+                && (1..path.len()).any(|n| imports.contains_key(&path[..n].join(".")));
+            if module_path {
+                let member = path.last().expect("field paths are non-empty");
+                let expect = if member.as_bytes()[0].is_ascii_uppercase() {
+                    Expect::Ctor
+                } else {
+                    Expect::Value
+                };
+                let name = self.resolve_member(module, &path.join("."), expect, span)?;
+                *expr = match expect {
+                    Expect::Ctor => Expr {
+                        kind: ExprKind::Ctor { name },
+                        span,
+                    },
+                    _ => Expr {
+                        kind: ExprKind::Var(name),
+                        span,
+                    },
+                };
+                return Ok(());
+            }
+        }
+        if let ExprKind::Field { base, .. } = &mut expr.kind {
+            self.expr(module, base, scopes)?;
+        }
+        Ok(())
+    }
+
     fn pat(&self, module: ModuleId, pat: &mut Pat) -> KResult<()> {
         match pat {
             Pat::Wild | Pat::Bind(_) | Pat::Int(_) | Pat::Bool(_) => {}
@@ -634,6 +677,18 @@ impl Qualifier {
             }
         }
         Ok(())
+    }
+}
+
+fn field_path(expr: &Expr) -> Option<Vec<String>> {
+    match &expr.kind {
+        ExprKind::Var(name) => Some(vec![name.clone()]),
+        ExprKind::Field { base, field } => {
+            let mut path = field_path(base)?;
+            path.push(field.clone());
+            Some(path)
+        }
+        _ => None,
     }
 }
 

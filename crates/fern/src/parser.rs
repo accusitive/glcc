@@ -256,6 +256,7 @@ impl Parser {
             }
             ctor_names.push(name.clone());
             let mut fields = Vec::new();
+            let mut field_names = None;
             if self.is(&Tok::LParen) {
                 self.bump();
                 if !self.is(&Tok::RParen) {
@@ -268,8 +269,29 @@ impl Parser {
                     }
                 }
                 self.expect(&Tok::RParen, "`)` after the constructor fields")?;
+            } else if self.is(&Tok::LBrace) {
+                self.bump();
+                let mut names = Vec::new();
+                if !self.is(&Tok::RBrace) {
+                    loop {
+                        let field_span = self.span();
+                        let field = self.lower("a record field name")?;
+                        if names.contains(&field) {
+                            return Err(Diag::new(format!("duplicate record field `{field}`"), field_span));
+                        }
+                        names.push(field);
+                        self.expect(&Tok::Colon, "`:` after the record field name")?;
+                        fields.push(self.ty_expr()?);
+                        if self.eat(&Tok::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBrace, "`}` after the record fields")?;
+                field_names = Some(names);
             }
-            ctors.push(CtorDecl { name, fields });
+            ctors.push(CtorDecl { name, fields, field_names });
             if self.eat(&Tok::Pipe) {
                 continue;
             }
@@ -916,6 +938,49 @@ impl Parser {
     fn postfix(&mut self) -> KResult<Expr> {
         let mut atom = self.atom()?;
         loop {
+            if self.eat(&Tok::Question) {
+                let span = atom.span.to(self.prev_span());
+                atom = Expr {
+                    kind: ExprKind::Try(Box::new(atom)),
+                    span,
+                };
+                continue;
+            }
+            if self.is(&Tok::LBrace) {
+                let ExprKind::Ctor { name } = &atom.kind else {
+                    break;
+                };
+                let opens_record = matches!(
+                    (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
+                    (Some(Token { tok: Tok::RBrace, .. }), _)
+                        | (Some(Token { tok: Tok::Lower(_), .. }), Some(Token { tok: Tok::Eq, .. }))
+                );
+                if !opens_record {
+                    break;
+                }
+                let name = name.clone();
+                let open_span = atom.span;
+                self.bump();
+                let mut fields = Vec::new();
+                if !self.is(&Tok::RBrace) {
+                    loop {
+                        let field = self.lower("a record field name")?;
+                        self.expect(&Tok::Eq, "`=` after the record field name")?;
+                        let value = self.expr()?;
+                        fields.push((field, value));
+                        if self.eat(&Tok::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBrace, "`}` after the record fields")?;
+                atom = Expr {
+                    kind: ExprKind::Record { ctor: name, fields },
+                    span: open_span.to(self.prev_span()),
+                };
+                continue;
+            }
             if self.eat(&Tok::Dot) {
                 let member = match self.bump() {
                     Token {
@@ -924,29 +989,28 @@ impl Parser {
                     } => name,
                     other => {
                         return Err(Diag::new(
-                            format!("expected a module member, found {}", other.tok.describe()),
+                            format!("expected a member name, found {}", other.tok.describe()),
                             other.span,
                         ));
                     }
                 };
-                let path = match atom.kind {
-                    ExprKind::Var(path) => path,
-                    _ => {
-                        return Err(Diag::new(
-                            "member access is only supported on module names",
-                            atom.span,
-                        ));
+                let upper = member.as_bytes()[0].is_ascii_uppercase();
+                let span = atom.span.to(self.prev_span());
+                if upper {
+                    if let Some(path) = expr_path(&atom) {
+                        atom = Expr {
+                            kind: ExprKind::Ctor { name: format!("{path}.{member}") },
+                            span,
+                        };
+                        continue;
                     }
-                };
-                let path = format!("{path}.{member}");
-                let kind = if member.as_bytes()[0].is_ascii_uppercase() {
-                    ExprKind::Ctor { name: path }
-                } else {
-                    ExprKind::Var(path)
-                };
+                }
                 atom = Expr {
-                    kind,
-                    span: atom.span.to(self.prev_span()),
+                    kind: ExprKind::Field {
+                        base: Box::new(atom),
+                        field: member,
+                    },
+                    span,
                 };
                 continue;
             }
@@ -1234,6 +1298,14 @@ impl Parser {
             kind: ExprKind::List(items),
             span: open.to(self.prev_span()),
         })
+    }
+}
+
+fn expr_path(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Var(name) => Some(name.clone()),
+        ExprKind::Field { base, field } => Some(format!("{}.{}", expr_path(base)?, field)),
+        _ => None,
     }
 }
 

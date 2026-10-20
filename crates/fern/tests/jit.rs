@@ -240,6 +240,40 @@ fn user_data_types() {
 }
 
 #[test]
+fn record_fields_and_reordering() {
+    let src = "\
+        data Point = Point { x : Int, y : Int }\n\
+        data Pair a = Pair { first : a, second : a }\n\
+        fun sum(p : Point) : Int = p.x + p.y\n\
+        fun swap(p : Pair a) : Pair a = Pair { first = p.second, second = p.first }\n\
+        fun main() : Int = sum(Point { y = 4, x = 1 }) + swap(Pair { first = 2, second = 3 }).first";
+    assert_eq!(run_i64(src), 8);
+}
+
+#[test]
+fn try_maybe_returns_the_residual() {
+    let src = "\
+        fun bump(m : Maybe Int) : Maybe Int = { let x = m?; Just(x + 1) }\n\
+        fun label(m : Maybe Int) : Maybe String = { let _ = m?; Just(\"ok\") }\n\
+        fun unwrap(m : Maybe Int, fallback : Int) : Int = match m { case Nothing => fallback case Just(x) => x }\n\
+        fun main() : Int = unwrap(bump(Just(4)), 0) * 10\n\
+            + unwrap(bump(Nothing), 7) + match label(Nothing) { case Nothing => 1 case Just(_) => 0 }";
+    assert_eq!(run_i64(src), 58);
+}
+
+#[test]
+fn try_returns_from_the_innermost_lambda() {
+    let src = "\
+        fun outer(m : Maybe Int) : Maybe Int = {\n\
+            let f = unused -> { let x = m?; Just(x + 10) };\n\
+            match f(0) { case Nothing => Just(99) case Just(x) => Just(x) }\n\
+        }\n\
+        fun unwrap(m : Maybe Int, fallback : Int) : Int = match m { case Nothing => fallback case Just(x) => x }\n\
+        fun main() : Int = unwrap(outer(Just(1)), 0) * 10 + unwrap(outer(Nothing), 0)";
+    assert_eq!(run_i64(src), 209);
+}
+
+#[test]
 fn boolean_not() {
     assert!(run_bool("fun main() : Bool = not(false)"));
     assert!(!run_bool("fun main() : Bool = not(1 < 2)"));

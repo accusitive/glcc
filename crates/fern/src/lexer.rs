@@ -67,6 +67,7 @@ pub enum Tok {
     PipePipe,
     PipeGt, // |> value pipe
     Pipe,   // | (data decl separator)
+    Question,
     Underscore,
     Eof,
 }
@@ -135,6 +136,7 @@ impl Tok {
             Tok::PipePipe => "||",
             Tok::PipeGt => "|>",
             Tok::Pipe => "|",
+            Tok::Question => "?",
             Tok::Underscore => "_",
             Tok::Str(_) => "string",
             Tok::Shell { .. } => "shell",
@@ -570,6 +572,13 @@ impl<'s> Lexer<'s> {
             b'.' => {
                 tokens.push(Token {
                     tok: Tok::Dot,
+                    span: self.span(lo, start + 1),
+                });
+                Ok(())
+            }
+            b'?' => {
+                tokens.push(Token {
+                    tok: Tok::Question,
                     span: self.span(lo, start + 1),
                 });
                 Ok(())

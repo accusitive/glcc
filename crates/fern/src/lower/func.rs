@@ -37,6 +37,11 @@ pub(super) struct FnCtx<'l, 'd> {
     pub(super) local_roots: u32,
     /// Temporaries currently held in root slots.
     pub(super) temps: u32,
+    /// Shared exit block; it takes the function's return value and closes
+    /// the GC frame before returning.
+    pub(super) return_block: mir::Block,
+    /// The enclosing body's return type, for `?` residual construction.
+    pub(super) return_ty: Ty,
 }
 
 /// Entry-block parameters for a body: one MIR parameter per HIR
@@ -69,8 +74,11 @@ fn entry_params<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, params: &[Hi
 
 pub(super) fn lower_fn<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, hir: &'d HirFn, subst: &HashMap<String, Ty>, span: Span, name: String) -> KResult<()> {
     let params = entry_params(lw, func, &hir.params, subst, false)?;
-    let _ = lw.types.get(&hir.ret.substitute(subst), span)?;
+    let ret_ty = lw.types.get(&hir.ret.substitute(subst), span)?;
+    let return_block = func.push_block(vec![ret_ty]);
     let mut cx = FnCtx::new(lw, func, name, subst);
+    cx.return_block = return_block;
+    cx.return_ty = hir.ret.clone();
     cx.open_frame()?;
     for local in &hir.locals {
         let ty = cx.ty_of(&local.ty, local.span)?;
@@ -82,17 +90,23 @@ pub(super) fn lower_fn<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, hir: 
     }
     let value = cx.expr(&hir.body)?;
     if !cx.terminated {
-        cx.close_frame()?;
-        cx.terminate(mir::Terminator::Return { val: Some(value) });
+        cx.branch(cx.return_block, vec![value]);
     }
+    cx.goto(cx.return_block);
+    cx.close_frame()?;
+    let ret = cx.func.blocks[cx.return_block].params[0];
+    cx.terminate(mir::Terminator::Return { val: Some(ret) });
     Ok(())
 }
 
 pub(super) fn lower_closure<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, closure: &'d HirClosure, subst: &HashMap<String, Ty>, span: Span, name: String) -> KResult<()> {
     let params = entry_params(lw, func, &closure.params, subst, true)?;
-    let _ = lw.types.get(&closure.ret.substitute(subst), span)?;
+    let ret_ty = lw.types.get(&closure.ret.substitute(subst), span)?;
+    let return_block = func.push_block(vec![ret_ty]);
     let env = func.blocks[func.entry].params[0];
     let mut cx = FnCtx::new(lw, func, name, subst);
+    cx.return_block = return_block;
+    cx.return_ty = closure.ret.clone();
     cx.open_frame()?;
     for local in &closure.locals {
         let ty = cx.ty_of(&local.ty, local.span)?;
@@ -112,9 +126,12 @@ pub(super) fn lower_closure<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, 
     }
     let value = cx.expr(&closure.body)?;
     if !cx.terminated {
-        cx.close_frame()?;
-        cx.terminate(mir::Terminator::Return { val: Some(value) });
+        cx.branch(cx.return_block, vec![value]);
     }
+    cx.goto(cx.return_block);
+    cx.close_frame()?;
+    let ret = cx.func.blocks[cx.return_block].params[0];
+    cx.terminate(mir::Terminator::Return { val: Some(ret) });
     Ok(())
 }
 
@@ -134,6 +151,8 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             local_slots: Vec::new(),
             local_roots: 0,
             temps: 0,
+            return_block: mir::Block::from_usize_unchecked(0),
+            return_ty: Ty::unit_ty(),
         }
     }
 

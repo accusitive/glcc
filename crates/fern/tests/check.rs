@@ -56,6 +56,8 @@ fn refs(e: &HirExpr, out: &mut Vec<FnRef>) {
                 refs(a, out);
             }
         }
+        HirExprKind::Field { base, .. } => refs(base, out),
+        HirExprKind::Try { value, .. } => refs(value, out),
         HirExprKind::Let { binds, body } => {
             for (_, value) in binds {
                 refs(value, out);
@@ -356,6 +358,35 @@ fun z(x : a) : a = shrunk(x)
 fn error_unusable_unknown() {
     let msg = check_err("data List a = Nil | Cons(a, List a)\nfun f(n : Int) : Int = { let empty = Nil; n }");
     assert!(msg.contains("cannot infer"), "{msg}");
+}
+
+#[test]
+fn try_requires_a_matching_return_type() {
+    let msg = check_err(
+        "data Maybe a = Nothing | Just(a)\n\
+         fun f(m : Maybe Int) : Int = { let x = m?; x }",
+    );
+    assert!(msg.contains("requires the enclosing function to return `Maybe`"), "{msg}");
+
+    let msg = check_err(
+        "data Maybe a = Nothing | Just(a)\n\
+         fun f(x : Int) : Int = { let y = x?; y }",
+    );
+    assert!(msg.contains("`?` requires a `Maybe` or `Result`"), "{msg}");
+}
+
+#[test]
+fn record_fields_are_checked_by_name() {
+    check_ok("data P = P { x : Int, y : Int }\nfun f(p : P) : Int = p.x + p.y");
+
+    let msg = check_err("data P = P { x : Int }\nfun f() : P = P { }");
+    assert!(msg.contains("missing field `x`"), "{msg}");
+
+    let msg = check_err("data P = P { x : Int }\nfun f() : P = P { y = 1 }");
+    assert!(msg.contains("has no field `y`"), "{msg}");
+
+    let msg = check_err("data P = P { x : Int }\nfun f() : P = P { x = 1, x = 2 }");
+    assert!(msg.contains("given twice"), "{msg}");
 }
 
 #[test]

@@ -91,6 +91,8 @@ pub struct DataDecl {
 pub struct CtorDecl {
     pub name: String,
     pub fields: Vec<TyExpr>,
+    /// `Rule { name : T, ... }`; `None` for positional constructors.
+    pub field_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -326,6 +328,18 @@ pub enum ExprKind {
     Var(String),
     /// `f(x, y)`
     Call(Box<Expr>, Vec<Expr>),
+    /// `Rule { targets = ..., recipe = ... }`: a record constructor.
+    Record {
+        ctor: String,
+        fields: Vec<(String, Expr)>,
+    },
+    /// `state.rules`: a record field, or a module member before resolution.
+    Field {
+        base: Box<Expr>,
+        field: String,
+    },
+    /// `expr?`: unwrap a `Result`/`Maybe`, early-returning the residual.
+    Try(Box<Expr>),
     /// `Eq::eq(x, y)` — a class-method call.
     ClassSel {
         class: String,

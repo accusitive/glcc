@@ -101,6 +101,18 @@ pub enum HirExprKind {
         ctor: usize,
         args: Vec<HirExpr>,
     },
+    /// A record field access; `index` is the field's position in the
+    /// constructor.
+    Field {
+        base: Box<HirExpr>,
+        index: usize,
+    },
+    /// `expr?` on `Maybe` or `std::result::Result`.
+    Try {
+        value: Box<HirExpr>,
+        ok_ctor: usize,
+        residual: TryResidual,
+    },
     /// A globally named function or value used as a value. Lowering
     /// wraps it in a parameterless closure thunk.
     Fn(FnRef),
@@ -142,6 +154,19 @@ pub enum HirExprKind {
     Un {
         op: UnOp,
         operand: Box<HirExpr>,
+    },
+}
+
+/// How the failure branch of `expr?` produces the enclosing function's
+/// residual value. `Maybe` can reuse the original cell (Nothing carries no
+/// payload); `Result` may need a new cell because changing the success
+/// type can move the error payload.
+#[derive(Debug, Clone, Copy)]
+pub enum TryResidual {
+    Reuse,
+    Rebuild {
+        err_ctor: usize,
+        ret_err_ctor: usize,
     },
 }
 

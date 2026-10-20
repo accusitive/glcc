@@ -160,6 +160,58 @@ fn emit_check_stops_before_object_emission() {
 }
 
 #[test]
+fn try_and_records_link_and_run() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("try-records");
+    let source = dir.join("main.fern");
+    fs::write(
+        &source,
+        "import std::result\n\
+         \n\
+         data Failure = Failure { message : String }\n\
+         data Box = Box { value : Int }\n\
+         \n\
+         fun parse(ok : Bool) : result.Result Int Failure =\n\
+             if ok then result.Ok(3) else result.Err(Failure { message = \"bad\" })\n\
+         fun label(ok : Bool) : result.Result String Failure = {\n\
+             let n = parse(ok)?;\n\
+             result.Ok(concat(\"n=\", str_of_int(n)))\n\
+         }\n\
+         fun nested(ok : Bool) : result.Result String Failure = {\n\
+             let s = label(ok)?;\n\
+             result.Ok(s)\n\
+         }\n\
+         fun answer() : Int = {\n\
+             let b = Box { value = 4 };\n\
+             (match nested(true) {\n\
+                 case result.Ok(s) => if s == \"n=3\" then b.value else 0\n\
+                 case result.Err(_) => 0\n\
+             }) + (match nested(false) {\n\
+                 case result.Ok(_) => 0\n\
+                 case result.Err(Failure(message)) => if message == \"bad\" then 2 else 0\n\
+                 case result.Err(_) => 0\n\
+             })\n\
+         }\n",
+    )
+    .expect("write try-records program");
+
+    let object = dir.join("main.o");
+    let out = Command::new(FERNC).arg(&source).arg("-O1").arg("-o").arg(&object).output().expect("run fernc");
+    assert!(
+        out.status.success(),
+        "fernc failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "6\n");
+}
+
+#[test]
 fn type_errors_are_reported_with_a_location() {
     let dir = temp_dir("error");
     let fern_path = dir.join("main.fern");

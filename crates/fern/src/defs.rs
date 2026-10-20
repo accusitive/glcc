@@ -63,6 +63,8 @@ pub struct CtorDef {
     pub span: Span,
     pub name: String,
     pub args: Vec<Ty>,
+    /// Field names for a record constructor, in `args` order.
+    pub field_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -774,6 +776,12 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 ctx.scope = scope;
                 let data_id = defs.data_ids[&d.name];
+                if d.ctors.iter().any(|c| c.field_names.is_some()) && d.ctors.len() != 1 {
+                    return Err(Diag::new(
+                        format!("record type `{}` must have exactly one constructor", d.name),
+                        d.span,
+                    ));
+                }
                 let mut ctors = Vec::with_capacity(d.ctors.len());
                 for ctor in &d.ctors {
                     let mut args = Vec::with_capacity(ctor.fields.len());
@@ -786,6 +794,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                         span: d.span,
                         name: ctor.name.clone(),
                         args,
+                        field_names: ctor.field_names.clone(),
                     });
                 }
                 defs.data[data_id.index()].ctors = ctors;
