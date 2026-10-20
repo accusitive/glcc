@@ -180,7 +180,7 @@ fn lower_module_impl<M: Module>(
         let sig = abi::clif_signature(&layout, target.call_conv());
         let clif_id = clif
             .declare_function(&ext.name, import_linkage(ext.weak), &sig)
-            .unwrap_or_else(|_| panic!("cannot declare extern {}", ext.name));
+            .unwrap_or_else(|e| panic!("cannot declare extern {}: {e}", ext.name));
         extern_ids.insert(id, clif_id);
         let call_variadic = ext.sig.variadic && target.arch == Arch::X86_64;
         extern_layouts.insert(id, abi::layout_sig(target, &ext.sig.params, &ext.sig.ret, call_variadic));

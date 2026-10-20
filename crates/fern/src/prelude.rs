@@ -51,6 +51,8 @@ extern \"fern_str_find\" find_raw : String -> String -> Int
 extern \"fern_str_slice\" slice_raw : String -> Int -> Int -> String
 extern \"fern_getenv\" getenv : String -> String
 extern \"fern_read_file\" read_file_raw : String -> String
+extern \"fern_path_exists\" path_exists_raw : String -> Bool
+extern \"fern_path_newer\" path_newer_raw : String -> String -> Bool
 extern \"fern_chdir\" chdir_raw : String -> Int
 extern \"fern_setenv\" setenv_raw : String -> String -> Int
 extern \"fern_exit\" exit : Int -> Int
@@ -67,6 +69,8 @@ fun print(s : String) : Unit = { let _ = print_raw(s); () }
 fun println(s : String) : Unit = { let _ = print_raw(concat(s, \"\\n\")); () }
 fun str_of_bool(b : Bool) : String = if b then \"true\" else \"false\"
 fun read_file(path : String) : String = read_file_raw(path)
+fun path_exists(path : String) : Bool = path_exists_raw(path)
+fun path_newer(target : String, prereq : String) : Bool = path_newer_raw(target, prereq)
 
 fun str_slice(s : String, start : Int, len : Int) : String = slice_raw(s, start, len)
 fun str_find(needle : String, s : String) : Int = find_raw(s, needle)

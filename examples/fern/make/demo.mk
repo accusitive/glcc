@@ -1,4 +1,4 @@
-CC ?= cc
+GLCC ?= $(firstword $(wildcard ../../../target/debug/glcc ../../../target/debug/glcc.exe) glcc)
 OUT = build/demo
 SRC = demo.c
 
@@ -6,7 +6,7 @@ all: $(OUT)
 
 $(OUT): $(SRC)
 	mkdir -p build
-	$(CC) $(SRC) -o $@
+	$(GLCC) $(SRC) -o $@
 
 run: $(OUT)
 	./$(OUT)

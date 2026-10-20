@@ -4,7 +4,9 @@
 -- (`=`, `:=`, `?=`), ordinary rules, tab-indented recipes, `.PHONY`,
 -- prerequisite ordering, line continuations, nested `$(...)`, the
 -- common path/shell functions, and the `$@`, `$<`, and `$^` automatic
--- variables. Recipes run through `sh -c`, so shell syntax works.
+-- variables. `include` splices another makefile relative to the including
+-- file. Recipes run through `$(SHELL)` with `.SHELLFLAGS` (default
+-- `sh -c`); `Makefile.win` selects PowerShell instead.
 --
 -- Build with `make`, or run `./bootstrap.sh` when GNU make is absent.
 -- Then try `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
@@ -13,6 +15,7 @@ import std::list
 import std::path
 import std::result
 import std::string
+use std::list::append
 use std::list::contains
 use std::list::filter
 use std::list::head
@@ -54,18 +57,53 @@ data BuildState = BuildState {
 -- continuation's leading whitespace (including a recipe tab) is dropped.
 fun logical_lines(lines : List String, acc : List String) : List String = match lines {
     case Nil => reverse(acc)
-    case Cons(line, rest) =>
+    case Cons(line, rest) => {
+        let line = if ends_with("\r", line) then take(line, str_len(line) - 1) else line;
         if ends_with("\\", line) then match rest {
             case Nil => reverse(Cons(line, acc))
             case Cons(next, more) =>
                 logical_lines(Cons(concat(trim_right(take(line, str_len(line) - 1)), concat(" ", trim_left(next))), more), acc)
         }
         else logical_lines(rest, Cons(line, acc))
+    }
 }
 
 fun dir_name(s : String) : String = {
     let dir = dirname(s);
     if ends_with("/", dir) then dir else concat(dir, "/")
+}
+
+fun normalize_path(s : String) : String =
+    if getenv("OS") == "Windows_NT" then replace("\\", "/", s) else s
+
+fun absolute_path(s : String) : Bool =
+    starts_with("/", s) || (str_len(s) > 1 && str_slice(s, 1, 1) == ":")
+
+fun include_files(names : List String, base : String) : List String = match names {
+    case Nil => Nil
+    case Cons(name, rest) => {
+        let name = normalize_path(name);
+        let path = if absolute_path(name) then name else concat(base, name);
+        if not(path_exists(path)) then {
+            println(concat("fernmake: cannot read ", path));
+            let _ = exit(1);
+            Nil
+        } else {
+            let source = read_file(path);
+            let lines = if str_len(source) == 0 then Nil else str_lines(source);
+            append(expand_includes(lines, dir_name(path)), include_files(rest, base))
+        }
+    }
+}
+
+fun expand_includes(lines : List String, base : String) : List String = match lines {
+    case Nil => Nil
+    case Cons(line, rest) => {
+        let code = trim(line);
+        if not(starts_with("\t", line)) && starts_with("include ", code) then
+            append(include_files(words(str_slice(code, 8, str_len(code) - 8)), base), expand_includes(rest, base))
+        else Cons(line, expand_includes(rest, base))
+    }
 }
 
 fun first_word(s : String) : String = match head(words(s)) {
@@ -323,12 +361,14 @@ fun default_var(name : String, fallback : String) : String = {
 }
 
 fun parse_makefile(source : String, path : String) : Parsed = {
+    let path = normalize_path(path);
     let builtins = Cons(
         ("CC", default_var("CC", "cc")),
         Cons(("MAKEFILE_LIST", path), Nil)
     );
     let initial = Parsed { vars = builtins, rules = Nil, phony = Nil };
-    resolve_parsed(parse_lines(logical_lines(str_lines(source), Nil), initial))
+    let lines = expand_includes(str_lines(source), dir_name(path));
+    resolve_parsed(parse_lines(logical_lines(lines, Nil), initial))
 }
 
 -- ------------------------------------------------------------- building --
@@ -349,10 +389,11 @@ fun default_target(rules : List Rule) : Maybe String = match rules {
     }
 }
 
-fun file_exists(path : String) : Bool = spawn_status("test", ["-e", path]) == 0
+fun file_exists(path : String) : Bool = path_exists(path)
 
 fun file_newer(target : String, prereq : String) : Bool =
-    spawn_status("test", [prereq, "-nt", target]) == 0
+    if getenv("OS") == "Windows_NT" then path_newer(target, prereq)
+    else spawn_status("test", [prereq, "-nt", target]) == 0
 
 fun any_newer(target : String, prereqs : List String) : Bool = match prereqs {
     case Nil => false
@@ -384,12 +425,37 @@ fun recipe_line(raw : String, target : String, prereqs : List String, vars : Lis
     automatic_variables(expand(with_auto, vars), target, prereqs)
 }
 
-fun run_shell(silent : Bool, command : String) : Int =
-    if silent then spawn_status("sh", ["-c", command])
+fun shell_program(vars : List (String, String)) : String = {
+    let value = var_value("SHELL", vars);
+    if str_len(value) == 0 then "sh" else value
+}
+
+fun shell_arguments(command : String, vars : List (String, String)) : List String = {
+    let flags = var_value(".SHELLFLAGS", vars);
+    let flags = if str_len(flags) == 0 then "-c" else flags;
+    append(words(flags), [command])
+}
+
+fun powershell_shell(vars : List (String, String)) : Bool = {
+    let shell = shell_program(vars);
+    str_contains("powershell", shell) || str_contains("pwsh", shell)
+}
+
+-- PowerShell does not turn a failed native command into a failed process
+-- on its own, so make the recipe's status explicit.
+fun shell_command(command : String, vars : List (String, String)) : String =
+    if powershell_shell(vars) then
+        concat(command, "; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 }")
+    else command
+
+fun run_shell(silent : Bool, command : String, vars : List (String, String)) : Int = {
+    let command = shell_command(command, vars);
+    if silent then spawn_status(shell_program(vars), shell_arguments(command, vars))
     else {
         println(command);
-        spawn_status("sh", ["-c", command])
+        spawn_status(shell_program(vars), shell_arguments(command, vars))
     }
+}
 
 fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : result.Result Unit BuildError =
     match recipe {
@@ -400,7 +466,7 @@ fun run_recipe(recipe : List String, target : String, prereqs : List String, var
             else {
                 let silent = starts_with("@", command);
                 let command = if silent then str_slice(command, 1, str_len(command) - 1) else command;
-                let status = run_shell(silent, command);
+                let status = run_shell(silent, command, vars);
                 if status == 0 then run_recipe(rest, target, prereqs, vars)
                 else result.Err(BuildError(concat("fernmake: *** [", concat(target, concat("] Error ", str_of_int(status))))))
             }

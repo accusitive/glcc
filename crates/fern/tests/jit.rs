@@ -4,10 +4,9 @@
 //! C runtime into the same JIT module, so the program's `fern_alloc` and
 //! frame calls bind to real code. Run with `cargo test -p fern`.
 
-// These execute generated code in-process, so they require a host whose C
-// ABI matches the SystemV convention the backend emits. Windows uses the
-// Win64 convention (not implemented yet), so skip there until the Windows
-// target lands.
+// These execute generated code in-process. The JIT harness binds POSIX
+// symbols and drives tests through Unix shell utilities, so it stays off
+// Windows even though the backend now lowers Win64.
 #![cfg(not(windows))]
 
 use std::collections::HashMap;

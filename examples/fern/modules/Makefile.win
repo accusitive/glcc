@@ -1,0 +1,16 @@
+# Windows build: run `fernmake Makefile.win` (or `... run`, `... clean`).
+PROGRAM = modules
+SOURCE = main.fern
+EXTRA_DEPS = math.fern
+OPT = -O1
+SHELL = powershell
+.SHELLFLAGS = -NoProfile -Command
+FERNC ?= ../../../target/debug/fernc.exe
+GLCC ?= ../../../target/debug/glcc.exe
+MKDIR = New-Item -ItemType Directory -Force -Path
+REMOVE = if (Test-Path build) { Remove-Item -Recurse -Force build }
+RUN = & ./
+EXE = .exe
+OBJ = .obj
+
+include ../common.mk

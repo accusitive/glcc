@@ -4,15 +4,15 @@
 #include <stdio.h>
 
 void demo(void);
-long run_file(const char *path);
-long answer(void);
+long long run_file(const char *path);
+long long answer(void);
 
 int main(int argc, char **argv) {
     if (argc > 1) {
         return run_file(argv[1]) == 0 ? 0 : 1;
     }
     demo();
-    long got = answer();
-    printf("checksum = %ld (expected 49729618)\n", got);
+    long long got = answer();
+    printf("checksum = %lld (expected 49729618)\n", got);
     return got == 49729618 ? 0 : 1;
 }

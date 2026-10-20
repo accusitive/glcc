@@ -4,6 +4,12 @@ Status: implemented. The v1 core lives in `.github/workflows/ci.yml`
 (three test jobs: Linux x86-64, Linux aarch64, Windows x86-64); this
 document is the rationale and reference for what is and is not in CI.
 
+Revision (2026-10-20): Windows now builds `glcc` and `fernc`, runs the
+full workspace suite including the experiments, and builds and runs the
+fern examples through their PowerShell `Makefile.win`. The Win64
+lowering and MSVCRT runtime paths are covered there; the Linux and
+aarch64 gates still exclude `fern`/`fernc`.
+
 Revision (2026-10-18, after the first public push): `fern` and `fernc`
 are experiments, not part of the compiler contract, so the CI test
 command excludes them. The first run showed why: `fern`'s JIT tests fail
@@ -42,9 +48,10 @@ Owner's goals, quoted:
 Goals
 
 - Keep `cargo test --workspace --exclude fern --exclude fernc --locked`
-  green on the three platforms. This covers the C frontend, MIR,
-  backend, driver, and preprocessor (965 tests). `fern`/`fernc` are
-  experiments and sit this one out — see "Deliberate exclusions".
+  green on Linux x86-64 and aarch64. Windows runs the full
+  `cargo test --workspace --locked`, including `fern` and `fernc`, plus
+  the example `Makefile.win` pass. This covers the C frontend, MIR,
+  backend, driver, preprocessor, and the Win64 fern path.
 - Cheap, boring, low-maintenance CI: three jobs, no submodules, no
   containers, no artifact uploads, cache only what pays for itself.
 - Make Windows behaviour observable early, because the owner cannot
@@ -64,8 +71,9 @@ Non-goals
 - **The full `abi_probe` matrix** (needs `zig` and `qemu-{aarch64,riscv64}`
   and a POSIX workdir; see the audit). One x86-64 case is cheap enough
   to run optionally — see below.
-- **Release packaging / `cargo install` / wasm builds / examples.**
-  `examples/*` are demos (`make`), not tests; the wasm module
+- **Release packaging / `cargo install` / wasm builds / most examples.**
+  `examples/*` are demos (`make`), not tests; only `examples/fern` is
+  built and run by the Windows job. The wasm module
   (`tools/build-wasm.sh`) is not part of the compiler contract.
 - No coverage, no benchmarks, no macOS, no riscv64 runner (no free
   hosted riscv64 runner exists).
@@ -87,13 +95,14 @@ tests exactly; doc-tests add nothing material). CI runs these minus
 | `glcc_explorer` | 16 | in-process compile; disassembly assertions are skipped when no `objdump`/`llvm-objdump` is on PATH (`crates/glcc_explorer/src/lib.rs:561-569`) |
 | `glcc_toolchain` | 1 | pure version-ordering test |
 | `glcc_dwarf`, `abi_probe`, `glcpp` | 0 | — |
-| `fern` | 94 | experiment, excluded from CI (JIT tests fail on aarch64; see audit) |
-| `fernc` | 10 | experiment, excluded from CI (Win64 lowering panics; see audit) |
+| `fern` | 94 | experiment; JIT suite excluded on Linux/aarch64, compiled out on Windows |
+| `fernc` | 14 | end-to-end driver tests; Windows gate, excluded on Linux/aarch64 |
 
 Host-runtime notes that matter for CI:
 
-- **No test invokes the `glcc` binary.** The only `CARGO_BIN_EXE_*` use
-  is `fernc` testing itself (excluded from CI). Driver tests call
+- **Only `fernc`'s driver tests invoke a sibling binary.** On Windows
+  they locate `glcc` next to `fernc` for the C harness and link step, so
+  the job builds `glcc` first. The rest of the driver tests call
   `compile_source` / `link_command` in-process.
 - **`build.rs` staging is a build side effect, not a test dependency.**
   On Linux it stages `~/.local/lib/glcc/glccrt.o` with `cc` (+`ld -r`
@@ -122,8 +131,9 @@ cancels superseded runs per ref, so force-pushing a PR costs nothing.
 
 ### Job matrix
 
-Test command in every row: `cargo test --workspace --exclude fern
---exclude fernc --locked` (the two experiments are excluded, see below).
+Test command: `cargo test --workspace --exclude fern --exclude fernc
+--locked` on Linux, and `cargo test --workspace --locked` on Windows
+(the experiments are part of the Windows gate; see below).
 
 | job | runner label | what runs | timeout | cache |
 |---|---|---|---|---|
@@ -150,6 +160,11 @@ reference and `actions/runner-images` README):
   same reason.
 
 ### YAML sketch
+
+The sketch below shows the original Linux-first shape. The checked-in
+workflow also builds `glcc`/`fernc` on Windows, adds Git Bash utilities
+to `PATH`, runs the full workspace suite, and builds every example with
+`Makefile.win`; use `.github/workflows/ci.yml` as the source of truth.
 
 ```yaml
 name: CI
@@ -227,8 +242,8 @@ Notes on specific choices:
   repeat work. `--locked` refuses lockfile churn (`Cargo.lock` is
   committed).
 - `--exclude fern --exclude fernc` keeps the experiments out of the
-  gate. It also drops their *compile* coverage in CI (nothing else
-  depends on them); a local `cargo test --workspace` still runs them.
+  Linux/aarch64 gates. Windows includes them; a local
+  `cargo test --workspace` runs them everywhere.
 - **Never** use `--all-features` here: it enables `cxx` and with it the
   EDG build. The plain workspace selection is the contract.
 - `ilammy/msvc-dev-cmd@v1` is defensive rather than strictly required:
@@ -274,18 +289,25 @@ suite is excluded (it fails here; see audit). Nothing extra to install.
 # 1. actions/checkout@v7 with submodules: false (default)
 # 2. dtolnay/rust-toolchain@stable
 # 3. ilammy/msvc-dev-cmd@v1
-cargo test --workspace --exclude fern --exclude fernc --locked
+# 4. add C:\Program Files\Git\bin and ...\usr\bin to PATH
+# 5. cargo build -p glcc -p fernc --locked
+# 6. cargo test --workspace --locked
+# 7. build fernmake with fernc + glcc, then run Makefile.win in
+#    examples/fern/{make,brainfuck,modules,showcase}
 ```
 
 What Windows needs and does not need, verified against the code:
 
-- `cc` does not exist on the image. Nothing left in the gate needs it:
-  the tests that used it (`fernc` link+run) are excluded.
+- `cc` does not exist on the image, and nothing needs it. `fernc`'s
+  driver tests use `glcc` (the sibling binary built in step 5) for the
+  C harness and link step.
+- Git Bash supplies `sh`, `test`, `cp`, `printf`, `rm`, `mkdir`, and
+  `realpath` for `fernmake`'s POSIX feature tests. The Windows example
+  makefiles use PowerShell recipes instead and avoid those utilities.
+- `link.exe`/`lib.exe` come from `ilammy/msvc-dev-cmd`; `glcc` uses
+  them to link the fern objects and C harnesses.
 - `clang` is not needed by tests. It *is* on the image (LLVM 20.1.8)
   for the future runtime-staging step.
-- `link.exe`/`lib.exe` are not needed by tests. They are needed to
-  link any produced `.exe`, and `build.rs` uses `lib.exe` to stage
-  `glccrt-win64.lib`.
 - Windows runtime staging is a two-pass affair on a clean checkout:
   the first build script run sees no `glcc.exe` yet and warns
   (`build.rs:100-103`). If the staged runtime is wanted, after the
@@ -297,7 +319,8 @@ What Windows needs and does not need, verified against the code:
   cargo build --workspace --locked   # now finds target\debug\glcc.exe
   ```
 
-  This is optional; `cargo test` does not depend on it.
+  This is optional; the fern tests and `Makefile.win` build their own
+  object/executable pairs with `fernc` + `glcc`.
 
 **`actions/checkout` and submodules**
 
@@ -328,8 +351,8 @@ Caveats, from the audit:
   decides at compile time). Good.
 - The `fernc` tests spawn the *host* `cc` and would fail to link
   AArch64 objects; masking `cc` with a wrapper pointing at
-  `aarch64-linux-gnu-gcc` fixes them — but `fernc` is excluded from CI
-  anyway, so the gate needs no wrapper.
+  `aarch64-linux-gnu-gcc` fixes them — but `fernc` is excluded from the
+  aarch64 gate anyway, so it needs no wrapper.
 - `build.rs` would stage a host-x86-64 `glccrt.o`; harmless for tests,
   wrong for e2e.
 - Emulation makes the suite slower and adds a class of flakes the native
@@ -372,12 +395,12 @@ What **not** to cache:
 
 | excluded | why |
 |---|---|
-| `fern`, `fernc` | experiments outside the compiler; their aarch64 JIT and Win64 lowering paths are unfinished (first-run findings in the audit). Local `cargo test --workspace` still runs them |
+| `fern`, `fernc` on Linux/aarch64 | experiments outside the compiler; their aarch64 JIT is unfinished. Windows includes them deliberately, because that is where the Win64 path needs coverage. Local `cargo test --workspace` still runs them everywhere |
 | `--features cxx`, EDG, `glcpp` binary | owner decision; plain workspace commands already skip them |
 | `tests/llvm-test-suite` + `tools/torture.bash` | 2+ GB submodule; long bash-driven run; not needed to keep the C compiler honest day-to-day |
 | `tests/c-testsuite` + `tools/ctestsuite.bash` | submodule + bash + zig/qemu cross targets; good as a *later* nightly, not a per-PR job |
 | `abi_probe` full matrix | needs zig + `qemu-aarch64`/`qemu-riscv64` |
-| `examples/*` | demos with their own `make`; the C++/SDL triangle example would drag in C++ toolchains |
+| other `examples/*` | C/C++ demos with their own `make`; the C++/SDL triangle example would drag in C++ toolchains. Only `examples/fern` runs in CI |
 | wasm build, `cargo install`, docs publish | not part of the test contract for this plan |
 | macOS, riscv64 | not requested; no free riscv64 hosted runner |
 | `cargo fmt`/`clippy` as *gating* | owner didn't ask; repo may not be clean today. Optional separate job, non-blocking at first |
@@ -386,17 +409,16 @@ What **not** to cache:
 
 ### Windows
 
-1. **Fern JIT tests are compiled out.** `crates/fern/tests/jit.rs:9` is
-   `#![cfg(not(windows))]` with the comment that Win64 convention is not
-   implemented for that path. Moot for CI: the crate is excluded as an
-   experiment. The `glcc_lower_cl`/`glcc_lower_mir` JIT tests
-   (Win64-aware, `crates/glcc_lower_mir/src/lower.rs:8943-8945`) still
-   run.
-2. **`fernc` cannot lower for Win64 at all** (observed on the first CI
-   run). `-p fernc --test driver`: 3 of 8 tests fail; `fernc` panics at
-   `crates/glcc_lower_cl/src/lower.rs:142` with `cannot declare extern
-   fern_enter`. Excluded from CI while it is an experiment — do not
-   mistake the exclusion for Win64 support.
+1. **Fern JIT tests stay compiled out.** `crates/fern/tests/jit.rs` is
+   `#![cfg(not(windows))]` because its harness binds POSIX symbols and
+   shell utilities, not because the backend cannot lower Win64. The
+   `glcc_lower_cl`/`glcc_lower_mir` JIT tests (Win64-aware,
+   `crates/glcc_lower_mir/src/lower.rs:8943-8945`) still run on Windows.
+2. **`fernc` Win64 lowering is covered now.** The old
+   `cannot declare extern fern_enter` panic came from an LLP64 `long`
+   mismatch in the runtime ABI; the runtime now uses explicit
+   `i64`/`u64`, and the Windows gate builds an object and links it
+   through `glcc` for every driver test.
 3. **Win64 runtime staging cannot complete on a clean first build.**
    `build.rs:91-111` warns and returns unless clang, `lib.exe`, and a
    previously built `glcc` exist; `find_glcc` (`build.rs:163-178`) only
@@ -422,10 +444,10 @@ What **not** to cache:
    otherwise `ar` is spawned. Windows CI never hits the non-MSVC branch
    (`GLCC_CC` unset), but a future Windows test with `GLCC_CC` set
    would need GNU `ar`.
-7. **No test links or runs a Windows `.exe` at all.** Everything the
-   driver does with `link.exe` is unit-tested as argument vectors
-   (`src/driver.rs:3547-3575`); the first real link will be the optional
-   smoke test.
+7. **Windows links and runs real `.exe`s.** The fern driver tests link
+   each object with `glcc`, and the example step builds and runs all
+   four `Makefile.win` targets. The optional C driver smoke remains
+   commented out, but it is no longer the first real link.
 
 Nothing found in the suite that hard-fails Windows on inspection:
 no `#[ignore]`, no `symlink`, no `Command::new("sh")`, no `/home`, no
@@ -460,7 +482,7 @@ unix-permission usage, `std::os::unix` appears once with a Windows twin
    `cranelift-jit 0.136.2` (`compiled_blob.rs:324`,
    `TryFromIntError(NegOverflow)`, while applying an AArch64 ADRP
    relocation). Upstream JIT issue, not a glcc codegen regression; the
-   crate is excluded from CI as an experiment.
+   crate is excluded from the aarch64 gate as an experiment.
 5. Bash tooling (`tools/*.bash`, `tests/*/run.sh`) is excluded anyway.
 6. **`target_flag` assumed aarch64 is a cross target** (second run,
    fixed). The test asserted `--target=aarch64` forwards
@@ -527,7 +549,7 @@ Implemented note: all three jobs landed together (the workflow above).
 First run (2026-10-18): `linux-x86_64` green; `linux-aarch64` and
 `windows-x86_64` failed in `fern`/`fernc` (see audit) before reaching
 the rest of the tree — cargo stops at the first failing test target.
-`fern`/`fernc` are now excluded. Second run: `linux-x86_64` green
+`fern`/`fernc` are now excluded from the Linux/aarch64 gates. Second run: `linux-x86_64` green
 (33 s), `windows-x86_64` fully green (2m12s), `linux-aarch64` red on a
 host-dependent driver test (audit aarch64-6). Third run: x86-64 and
 Windows green again; arm got through `glcc_frontend` and
@@ -552,9 +574,10 @@ How to validate Windows assumptions cheaply *before* merging:
 
 Unknowns / risks:
 
-- **Windows verified green** (second run, experiments excluded): the
-  whole workspace ran and passed on `windows-2025` in 2m12s. The smoke
-  test (link + run) is still off; see follow-ups.
+- **Windows verified green** (second run, experiments excluded). The
+  current gate also builds `glcc`/`fernc`, runs the full workspace
+  suite, and exercises the PowerShell example makefiles; see the
+  revision note at the top.
 - **aarch64 suite verified** (fourth run): every test target passed on
   arm; the only failure left was the driver smoke link, audit
   aarch64-9, fixed. The next run should close out the platform.
@@ -593,14 +616,14 @@ it to a few hundred MB per platform and it expires after 7 idle days.
 ## Follow-ups this plan creates (not done here)
 
 1. (done) `.github/workflows/ci.yml` exists, built from the sketch above.
-2. (done) `fern`/`fernc` are excluded from the CI test run: experiments
-   whose aarch64 JIT and Win64 lowering paths are unfinished (see
-   audit). Revisit only if they stop being experiments; a local
-   `cargo test --workspace` still covers them on x86-64 Linux.
-3. If compile coverage for the experiments in CI is wanted without
-   running their tests, add a `cargo build -p fern -p fernc` step.
-4. If Windows link/run coverage is wanted, stage
-   `glccrt-win64.lib` in CI (two-pass recipe) and promote the smoke
-   test to gating.
+2. (done) Linux/aarch64 keep `fern`/`fernc` out of the gate because
+   `fern`'s aarch64 JIT is unfinished. Windows runs them, which is where
+   the Win64 AOT/runtime path gets its coverage.
+3. (done) Windows compile/link/run coverage: the gate builds
+   `glcc`/`fernc`, runs the full workspace tests, and builds the fern
+   examples through `Makefile.win`.
+4. (optional) Stage `glccrt-win64.lib` in CI (two-pass recipe) and
+   promote the C driver smoke test to gating; fern link/run coverage
+   itself is already in place.
 5. Optional: pin `rust-toolchain.toml`; add a fmt/clippy job once the
    tree is clean under the pinned toolchain.

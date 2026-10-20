@@ -1,8 +1,8 @@
 #include <stdio.h>
 
-long answer(void);
+long long answer(void);
 
 int main(void) {
-    printf("%ld\n", answer());
+    printf("%lld\n", answer());
     return 0;
 }

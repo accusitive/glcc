@@ -2,7 +2,7 @@
    command line. The default Makefile is demo.mk in the current dir. */
 #include <stdio.h>
 
-long run_makefile(const char *path, const char *target);
+long long run_makefile(const char *path, const char *target);
 
 int main(int argc, char **argv) {
     const char *path = argc > 1 ? argv[1] : "demo.mk";

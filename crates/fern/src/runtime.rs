@@ -41,6 +41,11 @@ fn compile() -> mir::Module {
     // suppressed because nothing maps runtime positions back to source.
     let mut opts = glcc_pp::cpp_flags_to_opts(&[], NAME);
     opts.linemarkers = false;
+    opts.target = Some(Target::native());
+    // The runtime selects its OS layer with `_WIN32`, but the embedded
+    // preprocessor is not seeded with the host's builtin macros here.
+    #[cfg(windows)]
+    opts.defines.push(("_WIN32".to_string(), Some("1".to_string())));
     let src = glcc_pp::preprocess(SOURCE, NAME, &opts).expect("fern runtime: preprocessing rt/gc.c failed");
     let mut interner = Interner::new();
     let mut sema = Sema::with_target(Target::native());

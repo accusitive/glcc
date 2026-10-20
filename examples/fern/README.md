@@ -1,7 +1,8 @@
 # fern examples
 
 Each example is a `.fern` program compiled with `fernc` into an object
-and linked against a small C driver:
+and linked against a small C driver by `glcc`, the repository's own C
+compiler:
 
 - `showcase/` — sum types, type classes, higher-order functions;
   `answer()` returns 137.
@@ -19,6 +20,18 @@ and linked against a small C driver:
   `make run` invokes it on `demo.mk`; once bootstrapped, it can drive
   every example Makefile without GNU make.
 
-`make && make run` in any directory. `fernc` is looked up in the
-repo's build tree first (`cargo build -p fernc`), then on `PATH`. The
+On Linux and macOS, run `make && make run` in any example directory.
+On Windows, build the tools with `cargo build -p glcc -p fernc`, build
+`make/build/fernmake.exe` once (see `make/README.md`), then use the
+PowerShell recipes:
+
+```powershell
+..\make\build\fernmake.exe Makefile.win
+..\make\build\fernmake.exe Makefile.win run
+```
+
+The platform Makefiles share their rules through `common.mk`. The POSIX
+ones look for `fernc` and `glcc` in the repo's build tree first
+(`cargo build -p glcc -p fernc`), then on `PATH`; `Makefile.win`
+defaults to `target\debug` and accepts `FERNC`/`GLCC` overrides. The
 brainfuck driver also accepts a source file: `./build/brainfuck hello.bf`.

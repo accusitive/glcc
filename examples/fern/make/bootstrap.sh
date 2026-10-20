@@ -6,8 +6,8 @@ set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 fernc=${FERNC:-fernc}
-cc=${CC:-cc}
+glcc=${GLCC:-glcc}
 
 mkdir -p "$here/build"
 "$fernc" -O1 "$here/make.fern" -o "$here/build/make.o"
-"$cc" "$here/driver.c" "$here/build/make.o" -o "$here/build/fernmake"
+"$glcc" "$here/driver.c" "$here/build/make.o" -o "$here/build/fernmake"

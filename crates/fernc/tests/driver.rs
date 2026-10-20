@@ -3,7 +3,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
 
 const FERNC: &str = env!("CARGO_BIN_EXE_fernc");
 
@@ -13,15 +13,58 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// glcc, this repository's own C compiler, is the link driver for the
+/// harnesses. Integration tests of a workspace member do not get
+/// `CARGO_BIN_EXE_glcc`, so find the sibling of `fernc` in the target
+/// directory. `cargo test --workspace` builds both.
+fn glcc_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("CARGO_BIN_EXE_glcc") {
+        return PathBuf::from(path);
+    }
+    let candidate =
+        Path::new(FERNC).parent().expect("fernc has a parent").join(format!("glcc{}", std::env::consts::EXE_SUFFIX));
+    assert!(
+        candidate.is_file(),
+        "glcc not found at {}; build it with `cargo build -p glcc`",
+        candidate.display()
+    );
+    candidate
+}
+
 fn have_cc() -> bool {
-    Command::new("cc").arg("--version").output().map(|out| out.status.success()).unwrap_or(false)
+    Command::new(glcc_binary())
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+/// Keep the fern object distinct from the C harness's own output.
+fn object_path(dir: &Path) -> PathBuf {
+    dir.join(if cfg!(windows) { "fern.obj" } else { "fern.o" })
+}
+
+fn exe_path(dir: &Path, name: &str) -> PathBuf {
+    if cfg!(windows) { dir.join(format!("{name}.exe")) } else { dir.join(name) }
+}
+
+fn link_with_c(c_path: &Path, object: &Path, exe: &Path) -> Output {
+    Command::new(glcc_binary())
+        .arg(c_path)
+        .arg(object)
+        .arg("-o")
+        .arg(exe)
+        .output()
+        .expect("run glcc")
 }
 
 fn run_fernc(source: &str, name: &str, extra: &[&str]) -> (PathBuf, PathBuf) {
     let dir = temp_dir(name);
     let fern_path = dir.join("main.fern");
     fs::write(&fern_path, source).expect("write source");
-    let object_path = dir.join("main.o");
+    let object_path = object_path(&dir);
     let mut command = Command::new(FERNC);
     command.arg(&fern_path).arg("-o").arg(&object_path);
     for arg in extra {
@@ -54,14 +97,14 @@ fn run_fernc_stdout(source: &str, name: &str, extra: &[&str]) -> String {
 
 /// Link the object with a C harness that calls `answer()` and prints it.
 fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
-    let c_path = dir.join("main.c");
+    let c_path = dir.join("harness.c");
     fs::write(
         &c_path,
-        "#include <stdio.h>\nlong answer(void);\nint main(void) { printf(\"%ld\\n\", answer()); return 0; }\n",
+        "#include <stdio.h>\nlong long answer(void);\nint main(void) { printf(\"%lld\\n\", answer()); return 0; }\n",
     )
     .expect("write c harness");
-    let exe = dir.join("program");
-    let out = Command::new("cc").arg(&c_path).arg(object).arg("-o").arg(&exe).output().expect("run cc");
+    let exe = exe_path(dir, "program");
+    let out = link_with_c(&c_path, object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let out = Command::new(&exe).output().expect("run program");
     (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code().unwrap_or(-1))
@@ -197,7 +240,7 @@ fn try_and_records_link_and_run() {
     )
     .expect("write try-records program");
 
-    let object = dir.join("main.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC).arg(&source).arg("-O1").arg("-o").arg(&object).output().expect("run fernc");
     assert!(
         out.status.success(),
@@ -216,7 +259,7 @@ fn type_errors_are_reported_with_a_location() {
     let dir = temp_dir("error");
     let fern_path = dir.join("main.fern");
     fs::write(&fern_path, "fun main() : Int = 1 + true\n").expect("write source");
-    let out = Command::new(FERNC).arg(&fern_path).arg("-o").arg(dir.join("main.o")).output().expect("run fernc");
+    let out = Command::new(FERNC).arg(&fern_path).arg("-o").arg(object_path(&dir)).output().expect("run fernc");
     assert!(!out.status.success(), "expected a compile error");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("error:"), "no error message:\n{stderr}");
@@ -231,7 +274,7 @@ fn brainfuck_example_links_and_runs() {
     }
     let dir = temp_dir("brainfuck");
     let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/brainfuck/brainfuck.fern");
-    let object = dir.join("brainfuck.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC).arg(&example).arg("-O1").arg("-o").arg(&object).output().expect("run fernc");
     assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (stdout, code) = link_and_run(&dir, &object);
@@ -248,7 +291,7 @@ fn brainfuck_demo_prints_and_runs_files() {
     }
     let dir = temp_dir("brainfuck-demo");
     let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/brainfuck");
-    let object = dir.join("brainfuck.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC)
         .arg(example_dir.join("brainfuck.fern"))
         .arg("-O1")
@@ -258,14 +301,8 @@ fn brainfuck_demo_prints_and_runs_files() {
         .expect("run fernc");
     assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
-    let exe = dir.join("brainfuck");
-    let out = Command::new("cc")
-        .arg(example_dir.join("driver.c"))
-        .arg(&object)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("run cc");
+    let exe = exe_path(&dir, "brainfuck");
+    let out = link_with_c(&example_dir.join("driver.c"), &object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
     let out = Command::new(&exe).output().expect("run demo");
@@ -295,7 +332,7 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
     let dir = temp_dir("make-runner");
     let _ = fs::remove_file(dir.join("out.txt"));
     let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/make");
-    let object = dir.join("make.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC)
         .arg(example_dir.join("make.fern"))
         .arg("-O1")
@@ -305,21 +342,17 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
         .expect("run fernc");
     assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
-    let exe = dir.join("fernmake");
-    let out = Command::new("cc")
-        .arg(example_dir.join("driver.c"))
-        .arg(&object)
-        .arg("-o")
-        .arg(&exe)
-        .output()
-        .expect("run cc");
+    let exe = exe_path(&dir, "fernmake");
+    let out = link_with_c(&example_dir.join("driver.c"), &object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
 
     fs::write(dir.join("source.txt"), "payload\n").expect("write source");
+    fs::write(dir.join("common.mk"), "COPY ?= cp\nOUT = out.txt\n").expect("write included makefile");
     fs::write(
         dir.join("rules.mk"),
-        "COPY ?= cp\n\
-         OUT = out.txt\n\
+        "include common.mk\n\
+         SHELL = sh\n\
+         .SHELLFLAGS = -c\n\
          all: $(OUT)\n\
          \n\
          $(OUT): source.txt\n\
@@ -400,17 +433,29 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(!stdout.contains("printf"), "`@` recipe was echoed:\n{stdout}");
 
-    let expected_dir = fs::canonicalize(&dir).expect("canonical temp dir");
-    let expected_where = format!("{}/", expected_dir.display());
-    let expected_here = expected_dir.to_str().expect("utf8 temp dir");
     let features = fs::read_to_string(dir.join("build/features.txt")).expect("read features");
     let mut lines = features.lines();
     assert_eq!(lines.next(), Some("from shell"));
     assert_eq!(lines.next(), Some("source.txt"));
     assert_eq!(lines.next(), Some("fallback"));
     assert_eq!(lines.next(), Some("one two"));
-    assert_eq!(lines.next(), Some(expected_where.as_str()));
-    assert_eq!(lines.next(), Some(expected_here));
+    let where_line = lines.next();
+    let here_line = lines.next();
+    // Git Bash's `realpath` and Rust's `canonicalize` spell Windows paths
+    // differently; Makefile.win does not use the shell path helpers.
+    #[cfg(not(windows))]
+    {
+        let expected_dir = fs::canonicalize(&dir).expect("canonical temp dir");
+        let expected_where = format!("{}/", expected_dir.display());
+        let expected_here = expected_dir.to_str().expect("utf8 temp dir");
+        assert_eq!(where_line, Some(expected_where.as_str()));
+        assert_eq!(here_line, Some(expected_here));
+    }
+    #[cfg(windows)]
+    {
+        assert!(where_line.is_some(), "realpath produced no line");
+        assert!(here_line.is_some(), "abspath produced no line");
+    }
     assert_eq!(lines.next(), Some("from-env"));
 }
 
@@ -453,7 +498,7 @@ fn stdlib_modules_link_and_run() {
     )
     .expect("write stdlib program");
 
-    let object = dir.join("main.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC)
         .arg(&source)
         .arg("-o")
@@ -489,7 +534,7 @@ fn module_imports_link_and_run() {
         "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 20\n",
     )
     .expect("write math");
-    let object = dir.join("main.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC)
         .arg(&main_path)
         .arg("-o")
@@ -527,7 +572,7 @@ fn same_named_modules_link_and_run() {
     .expect("write main");
     fs::write(dir.join("a.fern"), source(20)).expect("write a");
     fs::write(dir.join("b.fern"), source(22)).expect("write b");
-    let object = dir.join("main.o");
+    let object = object_path(&dir);
     let out = Command::new(FERNC)
         .arg(&main_path)
         .arg("-o")
