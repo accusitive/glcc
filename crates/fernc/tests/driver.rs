@@ -236,6 +236,84 @@ fn brainfuck_demo_prints_and_runs_files() {
 }
 
 #[test]
+fn makefile_runner_builds_and_skips_up_to_date_targets() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("make-runner");
+    let _ = fs::remove_file(dir.join("out.txt"));
+    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/make");
+    let object = dir.join("make.o");
+    let out = Command::new(FERNC)
+        .arg(example_dir.join("make.fern"))
+        .arg("-O1")
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run fernc");
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let exe = dir.join("fernmake");
+    let out = Command::new("cc")
+        .arg(example_dir.join("driver.c"))
+        .arg(&object)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run cc");
+    assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    fs::write(dir.join("source.txt"), "payload\n").expect("write source");
+    fs::write(
+        dir.join("rules.mk"),
+        "COPY ?= cp\n\
+         OUT = out.txt\n\
+         all: $(OUT)\n\
+         \n\
+         $(OUT): source.txt\n\
+         \t$(COPY) $< $@\n\
+         \tprintf \"built %s from %s\\n\" $@ $^\n\
+         \n\
+         report: $(OUT)\n\
+         \tprintf \"report\\n\"\n\
+         \n\
+         .PHONY: all report clean\n\
+         clean:\n\
+         \trm -f $(OUT)\n",
+    )
+    .expect("write makefile");
+
+    let run = |target: &str| {
+        let mut command = Command::new(&exe);
+        command.current_dir(&dir).arg("rules.mk");
+        if !target.is_empty() {
+            command.arg(target);
+        }
+        let out = command.output().expect("run fernmake");
+        (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+    };
+
+    let (stdout, ok) = run("");
+    assert!(ok, "first build failed:\n{stdout}");
+    assert!(stdout.contains("cp source.txt out.txt"), "missing copy:\n{stdout}");
+    assert!(stdout.contains("built out.txt from source.txt"), "missing automatic vars:\n{stdout}");
+    assert_eq!(fs::read_to_string(dir.join("out.txt")).expect("read output"), "payload\n");
+
+    let (stdout, ok) = run("");
+    assert!(ok, "second build failed:\n{stdout}");
+    assert!(!stdout.contains("cp "), "rebuilt an up-to-date target:\n{stdout}");
+
+    let (stdout, ok) = run("report");
+    assert!(ok, "report failed:\n{stdout}");
+    assert!(stdout.contains("report"), "missing report target:\n{stdout}");
+    assert!(!stdout.contains("cp "), "report rebuilt its prerequisite:\n{stdout}");
+
+    let (stdout, ok) = run("clean");
+    assert!(ok, "clean failed:\n{stdout}");
+    assert!(!dir.join("out.txt").exists(), "clean left the output");
+}
+
+#[test]
 fn module_imports_link_and_run() {
     if !have_cc() {
         return;

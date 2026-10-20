@@ -1,0 +1,400 @@
+-- fernmake — a small Makefile runner written in fern.
+--
+-- It supports the subset that drives the examples: comments, variables
+-- (`=`, `:=`, `?=`), ordinary rules, tab-indented recipes, `.PHONY`,
+-- prerequisite ordering, and the `$@`, `$<`, and `$^` automatic
+-- variables. Recipes run through `sh -c`, so shell syntax works.
+--
+-- Build with `make`, then try `./build/fernmake demo.mk` or
+-- `./build/fernmake demo.mk run`.
+
+data Rule = Rule(List String, List String, List String)
+data Parsed = Parsed(List (String, String), List Rule, List String)
+
+-- ------------------------------------------------------------- strings --
+
+fun rev(xs : List a, acc : List a) : List a = match xs {
+    case Nil => acc
+    case Cons(x, rest) => rev(rest, Cons(x, acc))
+}
+
+fun reverse(xs : List a) : List a = rev(xs, Nil)
+
+fun member(x : String, xs : List String) : Bool = match xs {
+    case Nil => false
+    case Cons(y, rest) => if x == y then true else member(x, rest)
+}
+
+fun first(xs : List String) : Maybe String = match xs {
+    case Nil => Nothing
+    case Cons(x, _) => Just(x)
+}
+
+fun is_empty(xs : List a) : Bool = match xs {
+    case Nil => true
+    case Cons(_, _) => false
+}
+
+fun is_space(c : String) : Bool =
+    c == " " || c == "\t" || c == "\r" || c == "\n"
+
+fun starts_with(prefix : String, s : String) : Bool =
+    if str_len(prefix) > str_len(s) then false
+    else str_slice(s, 0, str_len(prefix)) == prefix
+
+fun ends_with(suffix : String, s : String) : Bool = {
+    let n = str_len(suffix);
+    let m = str_len(s);
+    if n > m then false else str_slice(s, m - n, n) == suffix
+}
+
+fun drop_last(s : String) : String = str_slice(s, 0, str_len(s) - 1)
+
+fun trim_left(s : String) : String =
+    if str_len(s) == 0 then s
+    else if is_space(str_slice(s, 0, 1)) then trim_left(str_slice(s, 1, str_len(s) - 1))
+    else s
+
+fun trim_right(s : String) : String =
+    if str_len(s) == 0 then s
+    else if is_space(str_slice(s, str_len(s) - 1, 1)) then trim_right(str_slice(s, 0, str_len(s) - 1))
+    else s
+
+fun trim(s : String) : String = trim_right(trim_left(s))
+
+fun words_at(s : String, i : Int, n : Int, current : String, out : List String) : List String =
+    if i >= n then
+        reverse(if str_len(current) == 0 then out else Cons(current, out))
+    else {
+        let c = str_slice(s, i, 1);
+        if is_space(c) then
+            words_at(s, i + 1, n, "", if str_len(current) == 0 then out else Cons(current, out))
+        else words_at(s, i + 1, n, concat(current, c), out)
+    }
+
+fun words(s : String) : List String = words_at(s, 0, str_len(s), "", Nil)
+
+fun strip_comment(s : String) : String = {
+    let at = str_find("#", s);
+    if at < 0 then s else str_slice(s, 0, at)
+}
+
+fun replace_all(needle : String, replacement : String, s : String) : String =
+    if str_len(needle) == 0 then s
+    else {
+        let at = str_find(needle, s);
+        if at < 0 then s
+        else {
+            let n = str_len(needle);
+            let rest = str_slice(s, at + n, str_len(s) - at - n);
+            concat(str_slice(s, 0, at), concat(replacement, replace_all(needle, replacement, rest)))
+        }
+    }
+
+-- ----------------------------------------------------------- variables --
+
+fun lookup_var(name : String, vars : List (String, String)) : Maybe String = match vars {
+    case Nil => Nothing
+    case Cons((key, value), rest) => if key == name then Just(value) else lookup_var(name, rest)
+}
+
+fun has_var(name : String, vars : List (String, String)) : Bool =
+    match lookup_var(name, vars) {
+        case Nothing => false
+        case Just(_) => true
+    }
+
+fun drop_var(name : String, vars : List (String, String)) : List (String, String) = match vars {
+    case Nil => Nil
+    case Cons((key, value), rest) =>
+        if key == name then drop_var(name, rest) else Cons((key, value), drop_var(name, rest))
+}
+
+fun set_var(name : String, value : String, vars : List (String, String)) : List (String, String) =
+    Cons((name, value), drop_var(name, vars))
+
+fun var_value(name : String, vars : List (String, String)) : String =
+    match lookup_var(name, vars) {
+        case Nothing => getenv(name)
+        case Just(value) => value
+    }
+
+-- Expand `$(NAME)` recursively, with `depth` guarding self-reference.
+fun expand_depth(s : String, vars : List (String, String), depth : Int) : String =
+    if depth == 0 then s
+    else {
+        let at = str_find("$(", s);
+        if at < 0 then s
+        else {
+            let after = str_slice(s, at + 2, str_len(s) - at - 2);
+            let close = str_find(")", after);
+            if close < 0 then s
+            else {
+                let name = str_slice(after, 0, close);
+                let value = expand_depth(var_value(name, vars), vars, depth - 1);
+                let rest = str_slice(after, close + 1, str_len(after) - close - 1);
+                concat(str_slice(s, 0, at), concat(value, expand_depth(rest, vars, depth)))
+            }
+        }
+    }
+
+fun expand(s : String, vars : List (String, String)) : String = expand_depth(s, vars, 32)
+
+fun expand_names(xs : List String, vars : List (String, String)) : List String = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => Cons(expand(x, vars), expand_names(rest, vars))
+}
+
+fun compact(xs : List String) : List String = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => if str_len(x) == 0 then compact(rest) else Cons(x, compact(rest))
+}
+
+-- ------------------------------------------------------------- parsing --
+
+fun is_recipe(line : String) : Bool = starts_with("\t", line)
+
+fun recipe_command(line : String) : String = {
+    let command = str_slice(line, 1, str_len(line) - 1);
+    if starts_with("@", command) then str_slice(command, 1, str_len(command) - 1)
+    else command
+}
+
+fun is_name(s : String) : Bool =
+    str_len(s) > 0 && not(str_contains(" ", s)) && not(str_contains("\t", s)) && not(str_contains(":", s))
+
+fun parse_assignment(line : String) : Maybe (String, String, Bool) = {
+    let eq = str_find("=", line);
+    if eq < 0 then Nothing
+    else {
+        let left = trim(str_slice(line, 0, eq));
+        let value = trim(str_slice(line, eq + 1, str_len(line) - eq - 1));
+        if str_len(left) == 0 then Nothing
+        else if ends_with(":", left) then Just((trim(drop_last(left)), value, false))
+        else if ends_with("?", left) then Just((trim(drop_last(left)), value, true))
+        else if is_name(left) then Just((left, value, false))
+        else Nothing
+    }
+}
+
+fun parse_phony(line : String) : Maybe (List String) = {
+    let at = str_find(":", line);
+    if at < 0 then Nothing
+    else if trim(str_slice(line, 0, at)) == ".PHONY" then
+        Just(words(trim(str_slice(line, at + 1, str_len(line) - at - 1))))
+    else Nothing
+}
+
+fun parse_rule(line : String) : Maybe (List String, List String) = {
+    let at = str_find(":", line);
+    if at < 0 then Nothing
+    else {
+        let targets = words(trim(str_slice(line, 0, at)));
+        let prereqs = words(trim(str_slice(line, at + 1, str_len(line) - at - 1)));
+        if is_empty(targets) then Nothing else Just((targets, prereqs))
+    }
+}
+
+fun add_recipe(state : Parsed, command : String) : Parsed = match state {
+    case Parsed(vars, rules, phony) => match rules {
+        case Nil => state
+        case Cons(Rule(targets, prereqs, recipe), rest) =>
+            if str_len(trim(command)) == 0 then state
+            else Parsed(vars, Cons(Rule(targets, prereqs, Cons(command, recipe)), rest), phony)
+    }
+}
+
+fun add_rule(state : Parsed, targets : List String, prereqs : List String) : Parsed =
+    match state {
+        case Parsed(vars, rules, phony) => Parsed(vars, Cons(Rule(targets, prereqs, Nil), rules), phony)
+    }
+
+fun add_phony(names : List String, phony : List String) : List String = match names {
+    case Nil => phony
+    case Cons(name, rest) => add_phony(rest, Cons(name, phony))
+}
+
+fun set_assignment(state : Parsed, name : String, value : String, conditional : Bool) : Parsed =
+    match state {
+        case Parsed(vars, rules, phony) =>
+            if conditional && has_var(name, vars) then state
+            else Parsed(set_var(name, value, vars), rules, phony)
+    }
+
+fun reverse_recipes(rules : List Rule) : List Rule = match rules {
+    case Nil => Nil
+    case Cons(Rule(targets, prereqs, recipe), rest) =>
+        Cons(Rule(targets, prereqs, reverse(recipe)), reverse_recipes(rest))
+}
+
+fun finish_parsing(state : Parsed) : Parsed = match state {
+    case Parsed(vars, rules, phony) => Parsed(vars, reverse(reverse_recipes(rules)), reverse(phony))
+}
+
+fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
+    case Nil => finish_parsing(state)
+    case Cons(line, rest) =>
+        if is_recipe(line) then parse_lines(rest, add_recipe(state, recipe_command(line)))
+        else {
+            let code = trim(strip_comment(line));
+            if str_len(code) == 0 then parse_lines(rest, state)
+            else match parse_phony(code) {
+                case Just(names) => parse_lines(rest, match state {
+                    case Parsed(vars, rules, phony) => Parsed(vars, rules, add_phony(names, phony))
+                })
+                case Nothing => match parse_assignment(code) {
+                    case Just((name, value, conditional)) =>
+                        parse_lines(rest, set_assignment(state, name, value, conditional))
+                    case Nothing => match parse_rule(code) {
+                        case Just((targets, prereqs)) => parse_lines(rest, add_rule(state, targets, prereqs))
+                        case Nothing => parse_lines(rest, state)
+                    }
+                }
+            }
+        }
+}
+
+fun resolve_rule(rule : Rule, vars : List (String, String)) : Rule = match rule {
+    case Rule(targets, prereqs, recipe) =>
+        Rule(compact(expand_names(targets, vars)), compact(expand_names(prereqs, vars)), recipe)
+}
+
+fun resolve_rules(rules : List Rule, vars : List (String, String)) : List Rule = match rules {
+    case Nil => Nil
+    case Cons(rule, rest) => Cons(resolve_rule(rule, vars), resolve_rules(rest, vars))
+}
+
+fun resolve_parsed(parsed : Parsed) : Parsed = match parsed {
+    case Parsed(vars, rules, phony) =>
+        Parsed(vars, resolve_rules(rules, vars), compact(expand_names(phony, vars)))
+}
+
+fun parse_makefile(source : String) : Parsed =
+    resolve_parsed(parse_lines(str_lines(source), Parsed(Nil, Nil, Nil)))
+
+-- ------------------------------------------------------------- building --
+
+fun rule_targets(rule : Rule) : List String = match rule {
+    case Rule(targets, _, _) => targets
+}
+
+fun lookup_rule(target : String, rules : List Rule) : Maybe Rule = match rules {
+    case Nil => Nothing
+    case Cons(rule, rest) =>
+        if member(target, rule_targets(rule)) then Just(rule) else lookup_rule(target, rest)
+}
+
+fun default_target(rules : List Rule) : Maybe String = match rules {
+    case Nil => Nothing
+    case Cons(rule, rest) => match first(rule_targets(rule)) {
+        case Nothing => default_target(rest)
+        case Just(target) => Just(target)
+    }
+}
+
+fun file_exists(path : String) : Bool = spawn_status("test", ["-e", path]) == 0
+
+fun file_newer(target : String, prereq : String) : Bool =
+    spawn_status("test", [prereq, "-nt", target]) == 0
+
+fun any_newer(target : String, prereqs : List String) : Bool = match prereqs {
+    case Nil => false
+    case Cons(prereq, rest) =>
+        if file_newer(target, prereq) then true else any_newer(target, rest)
+}
+
+fun any_phony(prereqs : List String, phony : List String) : Bool = match prereqs {
+    case Nil => false
+    case Cons(prereq, rest) =>
+        if member(prereq, phony) then true else any_phony(rest, phony)
+}
+
+fun needs_build(target : String, prereqs : List String, phony : List String) : Bool =
+    member(target, phony) || not(file_exists(target)) || any_phony(prereqs, phony) || any_newer(target, prereqs)
+
+fun automatic_variables(s : String, target : String, prereqs : List String) : String = {
+    let first_prereq = match first(prereqs) {
+        case Nothing => ""
+        case Just(prereq) => prereq
+    };
+    let expanded = replace_all("$@", target, s);
+    let expanded = replace_all("$<", first_prereq, expanded);
+    replace_all("$^", str_join(" ", prereqs), expanded)
+}
+
+fun recipe_line(raw : String, target : String, prereqs : List String, vars : List (String, String)) : String =
+    automatic_variables(expand(raw, vars), target, prereqs)
+
+fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : Bool =
+    match recipe {
+        case Nil => true
+        case Cons(raw, rest) => {
+            let command = recipe_line(raw, target, prereqs, vars);
+            if str_len(trim(command)) == 0 then run_recipe(rest, target, prereqs, vars)
+            else {
+                println(command);
+                let status = spawn_status("sh", ["-c", command]);
+                if status == 0 then run_recipe(rest, target, prereqs, vars)
+                else {
+                    println(concat("fernmake: *** [", concat(target, concat("] Error ", str_of_int(status)))));
+                    false
+                }
+            }
+        }
+    }
+
+fun build_all(prereqs : List String, rules : List Rule, vars : List (String, String), phony : List String, done : List String, visiting : List String) : (Bool, List String) = match prereqs {
+    case Nil => (true, done)
+    case Cons(prereq, rest) => {
+        let (ok, done) = build(prereq, rules, vars, phony, done, visiting);
+        if ok then build_all(rest, rules, vars, phony, done, visiting) else (false, done)
+    }
+}
+
+fun build(target : String, rules : List Rule, vars : List (String, String), phony : List String, done : List String, visiting : List String) : (Bool, List String) =
+    if member(target, done) then (true, done)
+    else if member(target, visiting) then {
+        println(concat("fernmake: circular dependency: ", target));
+        (false, done)
+    } else match lookup_rule(target, rules) {
+        case Nothing =>
+            if file_exists(target) then (true, Cons(target, done))
+            else {
+                println(concat("fernmake: no rule to make `", concat(target, "`")));
+                (false, done)
+            }
+        case Just(Rule(_, prereqs, recipe)) => {
+            let (ok, done) = build_all(prereqs, rules, vars, phony, done, Cons(target, visiting));
+            if not(ok) then (false, done)
+            else if needs_build(target, prereqs, phony) then {
+                if run_recipe(recipe, target, prereqs, vars) then (true, Cons(target, done))
+                else (false, done)
+            } else (true, Cons(target, done))
+        }
+    }
+
+-- --------------------------------------------------------------- entry --
+
+fun run_makefile(path : String, requested : String) : Int = {
+    let source = read_file(path);
+    if str_len(source) == 0 then {
+        println(concat("fernmake: cannot read ", path));
+        1
+    } else match parse_makefile(source) {
+        case Parsed(vars, rules, phony) => {
+            let requested = trim(requested);
+            let goal = if str_len(requested) > 0 then requested
+                       else match default_target(rules) {
+                           case Nothing => ""
+                           case Just(target) => target
+                       };
+            if str_len(goal) == 0 then {
+                println("fernmake: no targets");
+                1
+            } else {
+                let (ok, _) = build(goal, rules, vars, phony, Nil, Nil);
+                if ok then 0 else 1
+            }
+        }
+    }
+}
