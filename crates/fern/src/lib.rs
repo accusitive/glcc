@@ -29,7 +29,7 @@ pub mod solve;
 pub mod span;
 pub mod ty;
 
-pub use session::{Analysis, ParseResult, Session};
+pub use session::{Analysis, LowerStats, ParseResult, Session};
 pub use span::{Diag, FileId, KResult, SourceMap, Span};
 
 pub type MirModule = glcc_mir::ir::Module;

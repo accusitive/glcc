@@ -1,0 +1,15 @@
+[package]
+name = "fern_exec"
+version = "0.1.0"
+edition = "2024"
+
+# A persistent JIT image for fern's REPL and shell front-ends: the C
+# runtime and every definition compiled so far stay in one `JITModule`,
+# and each new input only lowers its new bodies.
+
+[dependencies]
+fern = { path = "../fern" }
+glcc_mir = { path = "../glcc_mir" }
+glcc_lower_cl = { path = "../glcc_lower_cl" }
+cranelift-jit = "0.136.0"
+cranelift-module = "0.136.0"

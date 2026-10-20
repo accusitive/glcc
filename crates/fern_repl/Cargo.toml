@@ -5,11 +5,7 @@ edition = "2024"
 
 # REPL/shell front-end. The core (`lib`) owns the session and the JIT so
 # it can be tested without stdin; the binary is a thin read/print loop.
-# `fern_exec` will absorb the JIT half when the shell layer lands.
 
 [dependencies]
 fern = { path = "../fern" }
-glcc_mir = { path = "../glcc_mir" }
-glcc_lower_cl = { path = "../glcc_lower_cl" }
-cranelift-jit = "0.136.0"
-cranelift-module = "0.136.0"
+fern_exec = { path = "../fern_exec" }

@@ -197,3 +197,39 @@ fn classifies_input_for_the_driver() {
     assert!(input_incomplete("fun f(x) = {"));
     assert!(!input_incomplete("fun f(x) = x"));
 }
+
+#[test]
+fn redefining_after_an_evaluation_uses_the_new_body() {
+    let mut repl = Repl::new();
+    repl.define("fun f(x) = x + 1").expect("defines");
+    assert_eq!(repl.eval_expr("f(1)").expect("runs"), "2");
+    repl.define("fun f(x) = x + 2").expect("redefines");
+    assert_eq!(repl.eval_expr("f(1)").expect("runs the new body"), "3");
+}
+
+#[test]
+fn new_monomorphizations_work_across_evaluations() {
+    let mut repl = Repl::new();
+    repl.define("fun id(x) = x").expect("defines");
+    assert_eq!(repl.eval_expr("id(1)").expect("runs"), "1");
+    assert_eq!(repl.eval_expr("id(true)").expect("runs"), "true");
+}
+
+#[test]
+fn a_heavy_library_is_checked_and_lowered_incrementally() {
+    let mut repl = Repl::new();
+    let mut library = String::new();
+    for i in 0..150 {
+        library.push_str(&format!("fun f{i}(x) = x + {i}\n"));
+    }
+    repl.define(&library).expect("defines a library");
+
+    // The first expression pays for the library once.
+    assert_eq!(repl.eval_expr("f149(1)").expect("runs"), "150");
+
+    // The next one must not: only its own wrapper is lowered.
+    assert_eq!(repl.eval_expr("f0(41)").expect("runs"), "41");
+    let stats = repl.lower_stats();
+    assert!(!stats.full, "the library lowering is reused");
+    assert_eq!(stats.bodies, 1, "only the new expression is emitted");
+}

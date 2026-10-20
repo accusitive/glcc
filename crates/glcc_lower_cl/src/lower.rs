@@ -58,7 +58,25 @@ pub enum NarrowTarget {
 /// stable symbol names either way.
 pub fn lower_module<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target) -> HashMap<mir::Func, FuncId> {
     let mut asm_text = String::new();
-    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None).0
+    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, &|_| true, &|_| true).0
+}
+
+/// [`lower_module`] for a module that shares a [`Module`] with code
+/// compiled by an earlier call.
+///
+/// Every symbol is declared, so calls into earlier code resolve, but a
+/// function or global is only *defined* when its predicate returns
+/// true. Callers pass false for symbols that are already finalized in
+/// `clif`; the declaration then reuses the existing id.
+pub fn lower_module_selected<M: Module>(
+    mir_module: &mir::Module,
+    clif: &mut M,
+    target: Target,
+    define_func: &dyn Fn(&str) -> bool,
+    define_data: &dyn Fn(&str) -> bool,
+) -> HashMap<mir::Func, FuncId> {
+    let mut asm_text = String::new();
+    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, define_func, define_data).0
 }
 
 /// [`lower_module`], also appending the generated inline-asm wrapper
@@ -72,7 +90,7 @@ pub fn lower_module_collecting<M: Module>(
     asm_text: &mut String,
     unwind: &mut Vec<WinUnwindEntry>,
 ) -> Vec<NarrowReloc> {
-    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind)).1
+    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), &|_| true, &|_| true).1
 }
 
 /// [`lower_module_collecting`], also collecting the debug records the
@@ -86,7 +104,7 @@ pub fn lower_module_with_debug<M: Module>(
     unwind: &mut Vec<WinUnwindEntry>,
 ) -> (HashMap<mir::Func, FuncId>, glcc_dwarf::LoweredDebug, Vec<NarrowReloc>) {
     let mut debug = glcc_dwarf::LoweredDebug::new();
-    let (ids, narrow) = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind));
+    let (ids, narrow) = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind), &|_| true, &|_| true);
     (ids, debug, narrow)
 }
 
@@ -97,6 +115,8 @@ fn lower_module_impl<M: Module>(
     asm_text: &mut String,
     mut debug: Option<&mut glcc_dwarf::LoweredDebug>,
     mut unwind: Option<&mut Vec<WinUnwindEntry>>,
+    define_func: &dyn Fn(&str) -> bool,
+    define_data: &dyn Fn(&str) -> bool,
 ) -> (HashMap<mir::Func, FuncId>, Vec<NarrowReloc>) {
     let mut wrappers = Wrappers::default();
     let mut layouts = HashMap::new();
@@ -185,7 +205,9 @@ fn lower_module_impl<M: Module>(
     let mut narrow = Vec::new();
     for (id, global) in mir_module.globals.iter_enumerated() {
         if let Some(&did) = data_ids.get(&id) {
-            define_global(global, did, &data_ids, &ids, &extern_ids, clif, &mut narrow);
+            if define_data(&global.name) {
+                define_global(global, did, &data_ids, &ids, &extern_ids, clif, &mut narrow);
+            }
         }
     }
     if let Some(debug) = debug.as_deref_mut() {
@@ -209,6 +231,9 @@ fn lower_module_impl<M: Module>(
         })
         .flatten();
     for (id, func) in mir_module.funcs.iter_enumerated() {
+        if !define_func(&func.name) {
+            continue;
+        }
         lower_function(
             id,
             func,

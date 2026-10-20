@@ -1,40 +1,28 @@
 //! fern REPL core.
 //!
 //! Definitions accumulate in one session file. Expressions are wrapped in
-//! a generated no-argument function, checked, JITed, and called. The core
-//! never touches stdin/stdout so it can be driven by tests and, later, by
-//! the shell front-end.
+//! a generated no-argument function, checked, lowered, and added to a
+//! persistent JIT image ([`fern_exec::ExecSession`]) that keeps the
+//! runtime and every earlier definition compiled. The core never touches
+//! stdin/stdout so it can be driven by tests and, later, by the shell
+//! front-end.
 //!
-//! This is a proof of concept: results print for `Int`, `Float`, `Bool`,
-//! `String`, and `Unit`; other values report their type. Definitions
-//! persist in one session, and failed input rolls back to the last good
-//! program.
+//! Results print for `Int`, `Float`, `Bool`, `String`, and `Unit`; other
+//! values report their type. Definitions persist in one session, and
+//! failed input rolls back to the last good program.
 
-use std::collections::HashMap;
-
-use cranelift_jit::{JITBuilder, JITModule};
 use fern::ast::ItemKind;
 use fern::hir::BodyKey;
 use fern::span::{FileId, Span};
 use fern::ty::Ty;
-use glcc_mir::ir::Module;
-
-unsafe extern "C" {
-    fn memcpy(
-        dst: *mut core::ffi::c_void,
-        src: *const core::ffi::c_void,
-        n: usize,
-    ) -> *mut core::ffi::c_void;
-    fn memset(dst: *mut core::ffi::c_void, c: i32, n: usize) -> *mut core::ffi::c_void;
-    fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
-    fn abort();
-}
+use fern_exec::ExecSession;
 
 pub struct Repl {
     session: fern::Session,
     file: FileId,
     source: String,
     next_expr: u32,
+    exec: ExecSession,
 }
 
 impl Default for Repl {
@@ -52,6 +40,7 @@ impl Repl {
             file,
             source: String::new(),
             next_expr: 0,
+            exec: ExecSession::new(),
         }
     }
 
@@ -65,9 +54,11 @@ impl Repl {
         }
 
         let current = parse_chunk(&self.source).0;
+        let mut redefined = false;
         for defined in &chunk_items {
             if let Some(item) = current.iter().find(|item| item.name == defined.name) {
                 blank_range(&mut self.source, item.span);
+                redefined = true;
             }
         }
         if !self.source.is_empty() && !self.source.ends_with('\n') {
@@ -81,10 +72,16 @@ impl Repl {
 
         let files = self.files();
         match self.session.analyze(&files) {
-            Ok(analysis) => Ok(chunk_items
-                .iter()
-                .filter_map(|defined| signature_line(&analysis, &defined.name))
-                .collect()),
+            Ok(analysis) => {
+                if redefined {
+                    self.exec.reset();
+                    self.session.reset_lowering();
+                }
+                Ok(chunk_items
+                    .iter()
+                    .filter_map(|defined| signature_line(&analysis, &defined.name))
+                    .collect())
+            }
             Err(diags) => {
                 self.source = previous;
                 self.sync();
@@ -124,7 +121,7 @@ impl Repl {
             )]);
         };
 
-        let module = match self.session.compile(&files) {
+        let module = match self.session.compile_shared(&files) {
             Ok(module) => module,
             Err(diags) => {
                 self.source = previous;
@@ -133,7 +130,8 @@ impl Repl {
             }
         };
 
-        let value = Jit::build(module).call(&name, &ret);
+        self.exec.load(&module);
+        let value = self.exec.call(&name, &ret).render();
         self.source = previous;
         self.sync();
         Ok(value)
@@ -142,6 +140,14 @@ impl Repl {
     pub fn clear(&mut self) {
         self.source.clear();
         self.sync();
+        self.exec.reset();
+        self.session.reset_lowering();
+    }
+
+    /// What the last `eval_expr`'s lowering did. Tests use it to prove
+    /// that a heavy library is not re-lowered on every input.
+    pub fn lower_stats(&self) -> fern::LowerStats {
+        self.session.lower_stats()
     }
 
     pub fn render(&self, diag: &fern::Diag) -> String {
@@ -155,79 +161,6 @@ impl Repl {
     fn files(&self) -> [FileId; 2] {
         [self.session.prelude(), self.file]
     }
-}
-
-struct Jit {
-    jit: JITModule,
-    ids: HashMap<glcc_mir::ir::Func, cranelift_module::FuncId>,
-    module: Module,
-}
-
-impl Jit {
-    fn build(module: Module) -> Jit {
-        let mut builder = JITBuilder::with_flags(
-            &[("preserve_frame_pointers", "true")],
-            cranelift_module::default_libcall_names(),
-        )
-        .expect("jit builder");
-        builder.symbol("memcpy", memcpy as *const u8);
-        builder.symbol("memset", memset as *const u8);
-        builder.symbol("write", write as *const u8);
-        builder.symbol("abort", abort as *const u8);
-
-        let mut jit = JITModule::new(builder);
-        let runtime = fern::runtime::module();
-        glcc_lower_cl::lower_module(&runtime, &mut jit, glcc_lower_cl::Target::native());
-        let ids = glcc_lower_cl::lower_module(&module, &mut jit, glcc_lower_cl::Target::native());
-        jit.finalize_definitions().expect("jit finalize");
-        Jit { jit, ids, module }
-    }
-
-    fn func(&self, name: &str) -> Option<cranelift_module::FuncId> {
-        self.ids
-            .iter()
-            .find(|(id, _)| self.module.funcs[**id].name == name)
-            .map(|(_, fid)| *fid)
-    }
-
-    fn call(&mut self, name: &str, ret: &Ty) -> String {
-        let Some(id) = self.func(name) else {
-            return format!("internal: no JIT function `{name}`");
-        };
-        let addr = self.jit.get_finalized_function(id);
-        unsafe {
-            if ret.is_unit() || is_named(ret, "Unit") {
-                let f: extern "C" fn() = std::mem::transmute(addr);
-                f();
-                "()".to_string()
-            } else if is_named(ret, "Int") {
-                let f: extern "C" fn() -> i64 = std::mem::transmute(addr);
-                f().to_string()
-            } else if is_named(ret, "Float") {
-                let f: extern "C" fn() -> f64 = std::mem::transmute(addr);
-                f().to_string()
-            } else if is_named(ret, "Bool") {
-                let f: extern "C" fn() -> bool = std::mem::transmute(addr);
-                f().to_string()
-            } else if is_named(ret, "String") {
-                let f: extern "C" fn() -> *const core::ffi::c_char = std::mem::transmute(addr);
-                let p = f();
-                if p.is_null() {
-                    "null".to_string()
-                } else {
-                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
-                }
-            } else {
-                let f: extern "C" fn() = std::mem::transmute(addr);
-                f();
-                format!("= <{ret}>")
-            }
-        }
-    }
-}
-
-fn is_named(ty: &Ty, want: &str) -> bool {
-    matches!(ty, Ty::Named { name, .. } if name == want)
 }
 
 #[derive(Clone)]

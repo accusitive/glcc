@@ -39,6 +39,31 @@ pub fn check(defs: &mut Defs, program: &ast::Program) -> KResult<HirProgram> {
     Ok(hir)
 }
 
+/// Check only the items from `first_item` on, reusing the schemes and
+/// HIR of everything before it.
+///
+/// `start_hir` must hold the bodies of the prefix items (and may hold
+/// unreachable bodies from earlier analyses; they are kept as-is).
+/// `defs.fns`/`defs.values` must already carry the schemes of the
+/// prefix, which [`Defs`] collection leaves as `None`.
+pub fn check_from(defs: &mut Defs, program: &ast::Program, first_item: usize, start_hir: HirProgram) -> KResult<HirProgram> {
+    let (hir, fn_schemes, value_schemes) = {
+        let mut state = Check::new(defs);
+        state.fn_schemes = defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        state.value_schemes = defs.values.iter().map(|v| v.scheme.clone()).collect();
+        state.hir = start_hir;
+        let hir = state.run_from(program, first_item)?;
+        (hir, state.fn_schemes, state.value_schemes)
+    };
+    for (def, scheme) in defs.fns.iter_mut().zip(fn_schemes) {
+        def.scheme = scheme;
+    }
+    for (def, scheme) in defs.values.iter_mut().zip(value_schemes) {
+        def.scheme = scheme;
+    }
+    Ok(hir)
+}
+
 struct Check<'d> {
     defs: &'d Defs,
     solver: Solver<'d>,
@@ -117,8 +142,20 @@ impl<'d> Check<'d> {
     fn run(&mut self, program: &ast::Program) -> KResult<HirProgram> {
         self.fn_schemes = vec![None; self.defs.fns.len()];
         self.value_schemes = vec![None; self.defs.values.len()];
+        self.run_from(program, 0)
+    }
+
+    fn run_from(&mut self, program: &ast::Program, first_item: usize) -> KResult<HirProgram> {
         let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
-        for item in &program.items {
+        for item in &program.items[..first_item] {
+            match &item.kind {
+                ast::ItemKind::Instance(_) => instance_index += 1,
+                ast::ItemKind::Fun(_) => fn_index += 1,
+                ast::ItemKind::Let(_) => value_index += 1,
+                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
+            }
+        }
+        for item in &program.items[first_item..] {
             match &item.kind {
                 ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
                 ast::ItemKind::Instance(_) => {

@@ -62,23 +62,85 @@ pub(crate) struct Lowerer<'d> {
     pub(crate) rt: gc::Runtime,
     /// Suffix for anonymous string globals.
     pub(crate) str_count: u32,
+    /// How many source-level externs are already in `module`.
+    declared_externs: usize,
+    /// Bodies fully lowered, for incremental-lowering statistics.
+    lowered: usize,
+}
+
+/// The lowering state a session keeps between inputs: the MIR module
+/// compiled so far plus the instance/thunk tables that keep a resumed
+/// lowering from emitting duplicate symbols.
+pub struct LowerCache {
+    module: mir::Module,
+    instances: HashMap<String, mir::Func>,
+    thunks: HashMap<String, mir::Func>,
+    externs: HashMap<ExternId, mir::Extern>,
+    rt: gc::Runtime,
+    str_count: u32,
+    declared_externs: usize,
+    lowered: usize,
+}
+
+impl LowerCache {
+    pub fn module(&self) -> &mir::Module {
+        &self.module
+    }
+
+    /// How many bodies this cache has lowered in total. A caller
+    /// comparing the count across a resume sees only the new work.
+    pub fn lowered(&self) -> usize {
+        self.lowered
+    }
 }
 
 /// Lower a checked program to MIR.
 pub fn lower(defs: &Defs, program: &HirProgram) -> KResult<mir::Module> {
+    Ok(lower_with_cache(defs, program)?.module)
+}
+
+/// Lower every root of `program` and hand back the state for later
+/// [`lower_more`] calls.
+pub fn lower_with_cache(defs: &Defs, program: &HirProgram) -> KResult<LowerCache> {
     let mut lw = Lowerer::new(defs, program)?;
     lw.run()?;
-    Ok(lw.module)
+    Ok(lw.into_cache())
+}
+
+/// Lower the roots in `roots` on top of a previous [`LowerCache`],
+/// leaving every already-lowered instance in place.
+pub fn lower_more(defs: &Defs, program: &HirProgram, cache: LowerCache, roots: &[BodyKey]) -> KResult<LowerCache> {
+    let mut lw = Lowerer::with_cache(defs, program, Some(cache))?;
+    lw.run_roots(roots)?;
+    Ok(lw.into_cache())
 }
 
 impl<'d> Lowerer<'d> {
     fn new(defs: &'d Defs, program: &'d HirProgram) -> KResult<Lowerer<'d>> {
+        Self::with_cache(defs, program, None)
+    }
+
+    fn with_cache(defs: &'d Defs, program: &'d HirProgram, cache: Option<LowerCache>) -> KResult<Lowerer<'d>> {
         let bodies = program.bodies.iter().map(|b| (b.key, b)).collect();
-        let mut module = mir::Module::new();
-        let rt = gc::declare(&mut module);
+        let (mut module, mut externs, instances, thunks, rt, str_count, declared_externs, lowered) = match cache {
+            Some(cache) => (
+                cache.module,
+                cache.externs,
+                cache.instances,
+                cache.thunks,
+                cache.rt,
+                cache.str_count,
+                cache.declared_externs,
+                cache.lowered,
+            ),
+            None => {
+                let mut module = mir::Module::new();
+                let rt = gc::declare(&mut module);
+                (module, HashMap::new(), HashMap::new(), HashMap::new(), rt, 0, 0, 0)
+            }
+        };
         let mut types = Types::new(defs);
-        let mut externs = HashMap::new();
-        for (index, def) in defs.externs.iter().enumerate() {
+        for (index, def) in defs.externs.iter().enumerate().skip(declared_externs) {
             let mut params = Vec::with_capacity(def.params.len());
             for param in &def.params {
                 params.push(types.get(param, def.span)?);
@@ -87,32 +149,58 @@ impl<'d> Lowerer<'d> {
             let target = module.push_extern(&def.symbol, mir::Signature::new(params, ret));
             externs.insert(ExternId(index as u32), target);
         }
+        let declared_externs = declared_externs.max(defs.externs.len());
         Ok(Lowerer {
             defs,
             program,
             types,
             module,
             bodies,
-            instances: HashMap::new(),
-            thunks: HashMap::new(),
+            instances,
+            thunks,
             externs,
             pending: Vec::new(),
             solver: Solver::new(defs),
             rt,
-            str_count: 0,
+            str_count,
+            declared_externs,
+            lowered,
         })
     }
 
     fn run(&mut self) -> KResult<()> {
-        for body in &self.program.bodies {
+        let roots: Vec<BodyKey> = self.program.bodies.iter().filter(|b| b.generics.is_empty()).map(|b| b.key).collect();
+        self.run_roots(&roots)
+    }
+
+    pub(crate) fn run_roots(&mut self, roots: &[BodyKey]) -> KResult<()> {
+        for &key in roots {
+            let body = self
+                .bodies
+                .get(&key)
+                .copied()
+                .ok_or_else(|| Diag::new("no checked body for this function", Span::new(0, 0)))?;
             if body.generics.is_empty() {
-                let _ = self.declare_body(body.key, HashMap::new())?;
+                let _ = self.declare_body(key, HashMap::new())?;
             }
         }
         while let Some(item) = self.pending.pop() {
             self.lower_one(&item)?;
         }
         Ok(())
+    }
+
+    fn into_cache(self) -> LowerCache {
+        LowerCache {
+            module: self.module,
+            instances: self.instances,
+            thunks: self.thunks,
+            externs: self.externs,
+            rt: self.rt,
+            str_count: self.str_count,
+            declared_externs: self.declared_externs,
+            lowered: self.lowered,
+        }
     }
 
     fn lower_one(&mut self, item: &Pending) -> KResult<()> {
@@ -129,6 +217,7 @@ impl<'d> Lowerer<'d> {
             PendingBody::Closure(id) => func::lower_closure(self, &mut func, &program.closures[id as usize], &item.subst, item.span, item.name.clone()),
         };
         self.module.funcs[item.func] = func;
+        self.lowered += 1;
         out
     }
 
