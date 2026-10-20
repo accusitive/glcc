@@ -17,7 +17,7 @@
 //! Prelude items carry spans in [`crate::FileId::PRELUDE`]; every later
 //! pass treats those as built-in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
 use crate::span::{Diag, FileId, KResult, Span};
@@ -40,6 +40,7 @@ id_type!(DataId);
 id_type!(ClassId);
 id_type!(FnId);
 id_type!(ValueId);
+id_type!(ExternId);
 
 /// A value scheme once the checker generalized it.
 #[derive(Debug, Clone)]
@@ -164,6 +165,20 @@ pub struct ValueDef {
     pub is_prelude: bool,
 }
 
+/// A foreign function: monomorphic, called with the C ABI. `symbol` is
+/// the linker name, which can differ from the fern name.
+#[derive(Debug, Clone)]
+pub struct ExternDef {
+    pub span: Span,
+    pub name: String,
+    pub symbol: String,
+    /// Domain types of the arity chain, outermost first.
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    /// The whole `params -> ret` type, as written.
+    pub ty: Ty,
+}
+
 pub struct Defs {
     pub data: Vec<DataDef>,
     pub data_ids: HashMap<String, DataId>,
@@ -174,6 +189,8 @@ pub struct Defs {
     pub fn_ids: HashMap<String, FnId>,
     pub values: Vec<ValueDef>,
     pub value_ids: HashMap<String, ValueId>,
+    pub externs: Vec<ExternDef>,
+    pub extern_ids: HashMap<String, ExternId>,
     /// Constructor name → (its data type, constructor index).
     pub ctor_ids: HashMap<String, (DataId, u32)>,
     /// Saturated argument counts for type constructors: data types, the
@@ -198,6 +215,10 @@ impl Defs {
 
     pub fn value_by_name(&self, name: &str) -> Option<ValueId> {
         self.value_ids.get(name).copied()
+    }
+
+    pub fn extern_by_name(&self, name: &str) -> Option<ExternId> {
+        self.extern_ids.get(name).copied()
     }
 
     pub fn ctor_by_name(&self, name: &str) -> Option<(DataId, u32)> {
@@ -415,6 +436,9 @@ impl ResolveCtx {
             ast::TyExprKind::Name(name) => {
                 if self.scope.contains_key(name) {
                     Ok(Ty::Param(name.clone()))
+                } else if name == "Unit" {
+                    // `Unit` and `()` are the same type.
+                    Ok(Ty::unit_ty())
                 } else if self.kinds_of.contains_key(name) {
                     Ok(Ty::named0(name))
                 } else {
@@ -561,6 +585,17 @@ fn check_reserved(name: &str, span: Span) -> KResult<()> {
     Ok(())
 }
 
+/// Split an arity chain into its domains and result.
+fn split_arrows(ty: &Ty) -> (Vec<Ty>, Ty) {
+    let mut params = Vec::new();
+    let mut cur = ty.clone();
+    while let Ty::Arrow(domain, rest) = cur {
+        params.push(*domain);
+        cur = *rest;
+    }
+    (params, cur)
+}
+
 pub fn collect(program: &ast::Program) -> KResult<Defs> {
     let mut defs = Defs {
         data: Vec::new(),
@@ -572,6 +607,8 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         fn_ids: HashMap::new(),
         values: Vec::new(),
         value_ids: HashMap::new(),
+        externs: Vec::new(),
+        extern_ids: HashMap::new(),
         ctor_ids: HashMap::new(),
         arity: HashMap::new(),
         kinds_of: HashMap::new(),
@@ -587,7 +624,9 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     }
 
     // Register every item name so forward references resolve later, and
-    // reject duplicates.
+    // reject duplicates. Functions, values, and externs share one value
+    // namespace.
+    let mut seen_names: HashSet<String> = HashSet::new();
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Data(d) => {
@@ -647,9 +686,25 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 arity.insert(c.name.clone(), c.params.len());
             }
             ast::ItemKind::Instance(..) => {}
+            ast::ItemKind::Extern(e) => {
+                check_reserved(&e.name, e.span)?;
+                if !seen_names.insert(e.name.clone()) {
+                    return Err(Diag::new(format!("`{}` is already defined", e.name), e.span));
+                }
+                let id = ExternId(defs.externs.len() as u32);
+                defs.externs.push(ExternDef {
+                    span: e.span,
+                    name: e.name.clone(),
+                    symbol: e.symbol.clone().unwrap_or_else(|| e.name.clone()),
+                    params: Vec::new(),
+                    ret: Ty::unit_ty(),
+                    ty: Ty::unit_ty(),
+                });
+                defs.extern_ids.insert(e.name.clone(), id);
+            }
             ast::ItemKind::Fun(f) => {
                 check_reserved(&f.name, f.span)?;
-                if defs.fn_ids.contains_key(&f.name) || defs.value_ids.contains_key(&f.name) {
+                if !seen_names.insert(f.name.clone()) {
                     return Err(Diag::new(format!("`{}` is already defined", f.name), f.span));
                 }
                 let id = FnId(defs.fns.len() as u32);
@@ -665,7 +720,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             }
             ast::ItemKind::Let(v) => {
                 check_reserved(&v.name, v.span)?;
-                if defs.fn_ids.contains_key(&v.name) || defs.value_ids.contains_key(&v.name) {
+                if !seen_names.insert(v.name.clone()) {
                     return Err(Diag::new(format!("`{}` is already defined", v.name), v.span));
                 }
                 let id = ValueId(defs.values.len() as u32);
@@ -740,8 +795,27 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 method_var_kinds.insert(class_id, vars_per_method);
             }
-            ast::ItemKind::Instance(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) => {}
+            ast::ItemKind::Instance(..) | ast::ItemKind::Extern(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) => {}
         }
+    }
+
+    // Extern signatures are monomorphic, so they resolve with no
+    // parameters in scope; a free type variable is rejected.
+    for item in &program.items {
+        let ast::ItemKind::Extern(e) = &item.kind else {
+            continue;
+        };
+        let id = defs.extern_ids[&e.name];
+        ctx.scope = HashMap::new();
+        let ty = ctx.resolve(&e.ty)?;
+        ctx.star_check(&ty, e.ty.span)?;
+        if !ty.is_concrete() {
+            return Err(Diag::new("extern signatures must be monomorphic", e.ty.span));
+        }
+        let (params, ret) = split_arrows(&ty);
+        defs.externs[id.index()].params = params;
+        defs.externs[id.index()].ret = ret;
+        defs.externs[id.index()].ty = ty;
     }
 
     let mut instance_generics_raw: Vec<Vec<(String, RawKind)>> = Vec::new();

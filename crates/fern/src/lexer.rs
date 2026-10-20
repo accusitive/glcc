@@ -12,6 +12,7 @@ pub enum Tok {
     Data,
     Class,
     Instance,
+    Extern,
     Fun,
     Let,
     If,
@@ -27,6 +28,7 @@ pub enum Tok {
     Upper(String),
     Int(i64),
     Float(f64),
+    Str(String),
     // punctuation
     LParen,
     RParen,
@@ -66,6 +68,7 @@ impl Tok {
             Tok::Upper(s) => format!("name `{s}`"),
             Tok::Int(v) => format!("integer `{v}`"),
             Tok::Float(v) => format!("float `{v}`"),
+            Tok::Str(_) => "a string literal".to_string(),
             Tok::Eof => "end of file".to_string(),
             other => format!("`{}`", other.spelling()),
         }
@@ -76,6 +79,7 @@ impl Tok {
             Tok::Data => "data",
             Tok::Class => "class",
             Tok::Instance => "instance",
+            Tok::Extern => "extern",
             Tok::Fun => "fun",
             Tok::Let => "let",
             Tok::If => "if",
@@ -113,6 +117,7 @@ impl Tok {
             Tok::PipePipe => "||",
             Tok::Pipe => "|",
             Tok::Underscore => "_",
+            Tok::Str(_) => "string",
             _ => "?",
         }
     }
@@ -243,6 +248,7 @@ impl<'s> Lexer<'s> {
             "data" => Tok::Data,
             "class" => Tok::Class,
             "instance" => Tok::Instance,
+            "extern" => Tok::Extern,
             "fun" => Tok::Fun,
             "let" => Tok::Let,
             "if" => Tok::If,
@@ -516,7 +522,47 @@ impl<'s> Lexer<'s> {
         if b.is_ascii_alphabetic() || b == b'_' {
             return self.ident(lo, tokens);
         }
+        if b == b'"' {
+            return self.string(lo, tokens);
+        }
         self.punct(lo, tokens)
+    }
+
+    /// A double-quoted literal. Newlines survive verbatim; the escapes
+    /// are the small portable set, with `\0` reserved for NUL.
+    fn string(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        self.pos += 1;
+        let mut out = String::new();
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err(Diag::incomplete("unterminated string literal", self.span(lo, self.pos)));
+            }
+            let c = self.src[self.pos..].chars().next().expect("char boundary");
+            self.pos += c.len_utf8();
+            match c {
+                '"' => {
+                    self.push(Tok::Str(out), lo, tokens);
+                    return Ok(());
+                }
+                '\\' => {
+                    if self.pos >= self.bytes.len() {
+                        return Err(Diag::incomplete("unterminated string literal", self.span(lo, self.pos)));
+                    }
+                    let escape = self.src[self.pos..].chars().next().expect("char boundary");
+                    self.pos += escape.len_utf8();
+                    match escape {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '0' => out.push('\0'),
+                        '\\' => out.push('\\'),
+                        '"' => out.push('"'),
+                        other => return Err(self.err(format!("unknown string escape `\\{other}`"), lo, self.pos)),
+                    }
+                }
+                other => out.push(other),
+            }
+        }
     }
 
     fn lex_all(mut self) -> KResult<Vec<Token>> {

@@ -83,6 +83,54 @@ fn clear_forgets_definitions() {
 }
 
 #[test]
+fn string_literals_evaluate() {
+    let mut repl = Repl::new();
+    assert_eq!(repl.eval_expr("\"hello\"").expect("runs"), "hello");
+    assert_eq!(repl.eval_expr("\"a\\nb\"").expect("runs"), "a\nb");
+    repl.define("fun greeting(name) = name").expect("defines");
+    assert_eq!(
+        repl.eval_expr("greeting(\"fern\")").expect("runs"),
+        "fern"
+    );
+}
+
+#[test]
+fn externs_and_shell_primitives() {
+    let mut repl = Repl::new();
+    assert_eq!(repl.eval_expr("\"a\" == \"a\"").expect("runs"), "true");
+    assert_eq!(
+        repl.eval_expr("spawn_status(\"true\", [])").expect("runs"),
+        "0"
+    );
+    assert_eq!(
+        repl.eval_expr("spawn_status(\"false\", [])").expect("runs"),
+        "1"
+    );
+    assert_eq!(
+        repl.eval_expr("spawn_capture(\"echo\", [\"hi\"])")
+            .expect("runs"),
+        "hi\n"
+    );
+    repl.define("extern \"strlen\" c_strlen : String -> Int")
+        .expect("declares an extern");
+    assert_eq!(repl.eval_expr("c_strlen(\"abcd\")").expect("runs"), "4");
+    assert_eq!(
+        repl.eval_expr("str_join(\"|\", str_split(\",\", \"a,b\"))")
+            .expect("runs"),
+        "a|b"
+    );
+    assert_eq!(
+        repl.eval_expr("set_env(\"FERN_PHASE_B\", \"yes\")")
+            .expect("runs"),
+        "true"
+    );
+    assert_eq!(
+        repl.eval_expr("getenv(\"FERN_PHASE_B\")").expect("runs"),
+        "yes"
+    );
+}
+
+#[test]
 fn classifies_input_for_the_driver() {
     assert!(is_definition("fun f(x) = x"));
     assert!(is_definition("let a = 1"));

@@ -58,6 +58,27 @@ fn incomplete_block_comment_is_flagged() {
 }
 
 #[test]
+fn unterminated_string_is_incomplete() {
+    let out = parse_src("fun main() = \"oops");
+    assert!(out.incomplete, "{:?}", out.diags);
+    assert!(!out.diags.is_empty(), "expected a diagnostic");
+}
+
+#[test]
+fn broken_extern_does_not_hide_the_next_item() {
+    let out = parse_src("extern broken\nfun ok() = 1\n");
+    assert!(!out.diags.is_empty(), "expected a diagnostic");
+    assert!(fun_names(&out.program).contains(&"ok"), "{:?}", out.program);
+}
+
+#[test]
+fn parses_extern_items() {
+    let out = parse_src("extern \"puts\" put : String -> Int\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    assert!(matches!(out.program.items[0].kind, ItemKind::Extern(_)));
+}
+
+#[test]
 fn fail_fast_parse_still_errors() {
     let tokens = lex("fun broken( = 1").expect("lexes");
     assert!(parse(tokens).is_err());

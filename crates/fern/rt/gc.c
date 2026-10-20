@@ -273,3 +273,219 @@ u64 fern_stats_roots(void) {
 u64 fern_stats_collections(void) {
 	return fern_collections;
 }
+
+/* ------------------------------------------------------------------ */
+/* strings                                                             */
+
+static u64 fern_strlen(const char *s) {
+	u64 n = 0;
+	while (s[n] != 0) n++;
+	return n;
+}
+
+long fern_print(const char *s) {
+	write(1, s, fern_strlen(s));
+	return 0;
+}
+
+char *fern_str_concat(const char *a, const char *b) {
+	u64 na = fern_strlen(a);
+	u64 nb = fern_strlen(b);
+	char *out = (char *)fern_alloc(na + nb + 1);
+	u64 i;
+	for (i = 0; i < na; i++) out[i] = a[i];
+	for (i = 0; i < nb; i++) out[na + i] = b[i];
+	out[na + nb] = 0;
+	return out;
+}
+
+char fern_str_eq(const char *a, const char *b) {
+	u64 i = 0;
+	while (a[i] != 0 && b[i] != 0) {
+		if (a[i] != b[i]) return 0;
+		i++;
+	}
+	return a[i] == b[i];
+}
+
+long fern_str_len(const char *s) {
+	return (long)fern_strlen(s);
+}
+
+/* Byte offset of `needle` in `s`, or -1. */
+long fern_str_find(const char *s, const char *needle) {
+	u64 n = fern_strlen(needle);
+	if (n == 0) return 0;
+	u64 i = 0;
+	while (s[i] != 0) {
+		u64 j = 0;
+		while (j < n && s[i + j] != 0 && s[i + j] == needle[j]) j++;
+		if (j == n) return (long)i;
+		i++;
+	}
+	return -1;
+}
+
+/* A fresh GC string holding up to `len` bytes from `start`. */
+char *fern_str_slice(const char *s, long start, long len) {
+	u64 n = fern_strlen(s);
+	u64 begin = start < 0 ? 0 : (u64)start;
+	u64 take = len < 0 ? 0 : (u64)len;
+	if (begin > n) begin = n;
+	if (take > n - begin) take = n - begin;
+	char *out = (char *)fern_alloc(take + 1);
+	u64 i;
+	for (i = 0; i < take; i++) out[i] = s[begin + i];
+	out[take] = 0;
+	return out;
+}
+
+/* Decimal rendering of a signed 64-bit value into a GC string. */
+char *fern_str_of_int(long v) {
+	char *out = (char *)fern_alloc(32);
+	char tmp[32];
+	int n = 0;
+	int neg = v < 0;
+	unsigned long u;
+	if (neg) u = (unsigned long)(-(v + 1)) + 1;
+	else u = (unsigned long)v;
+	if (u == 0) tmp[n++] = '0';
+	while (u != 0) {
+		tmp[n++] = (char)('0' + (int)(u % 10));
+		u = u / 10;
+	}
+	if (neg) tmp[n++] = '-';
+	int i = 0;
+	while (n > 0) out[i++] = tmp[--n];
+	out[i] = 0;
+	return out;
+}
+
+char *getenv(const char *name);
+
+char *fern_getenv(const char *name) {
+	char *v = getenv(name);
+	if (v == 0) return "";
+	return v;
+}
+
+int chdir(const char *path);
+int setenv(const char *name, const char *value, int overwrite);
+
+long fern_chdir(const char *path) {
+	return (long)chdir(path);
+}
+
+long fern_setenv(const char *name, const char *value) {
+	return (long)setenv(name, value, 1);
+}
+
+void _exit(int code);
+
+long fern_exit(long code) {
+	_exit((int)code);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* processes                                                           */
+
+int fork(void);
+int execvp(const char *file, char **argv);
+int waitpid(int pid, int *status, int options);
+int pipe(int *fds);
+int dup2(int oldfd, int newfd);
+int close(int fd);
+long read(int fd, void *buf, unsigned long count);
+
+/* A linked argv list built by the prelude from `List String`. */
+typedef struct fargv {
+	char *s;
+	struct fargv *next;
+} fargv;
+
+fargv *fern_argv_nil(long unused) {
+	(void)unused;
+	return 0;
+}
+
+fargv *fern_argv_cons(char *s, fargv *next) {
+	fargv *node = (fargv *)fern_alloc(sizeof(fargv));
+	node->s = s;
+	node->next = next;
+	return node;
+}
+
+static u64 fern_argv_count(fargv *a) {
+	u64 n = 0;
+	while (a != 0) {
+		n++;
+		a = a->next;
+	}
+	return n;
+}
+
+/* A NULL-terminated `char **` with the program name at index 0. */
+static char **fern_argv_array(char *name, fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)fern_alloc((n + 2) * sizeof(char *));
+	u64 i = 0;
+	out[0] = name;
+	while (args != 0) {
+		i++;
+		out[i] = args->s;
+		args = args->next;
+	}
+	out[n + 1] = 0;
+	return out;
+}
+
+/* Wait status as a shell would report it: exit code, or 128 + signal. */
+long fern_spawn_status(char *name, fargv *args) {
+	char **argv = fern_argv_array(name, args);
+	int pid = fork();
+	if (pid == 0) {
+		execvp(name, argv);
+		_exit(127);
+	}
+	if (pid < 0) return -1;
+	int status = 0;
+	if (waitpid(pid, &status, 0) < 0) return -1;
+	if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
+	return 128 + (status & 0x7f);
+}
+
+/* Captured stdout, truncated at 64 KiB. */
+char *fern_spawn_capture(char *name, fargv *args) {
+	char **argv = fern_argv_array(name, args);
+	int fds[2];
+	if (pipe(fds) != 0) return "";
+	int pid = fork();
+	if (pid == 0) {
+		close(fds[0]);
+		dup2(fds[1], 1);
+		close(fds[1]);
+		execvp(name, argv);
+		_exit(127);
+	}
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return "";
+	}
+	close(fds[1]);
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	for (;;) {
+		long got = read(fds[0], out + len, cap - 1 - len);
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	close(fds[0]);
+	out[len] = 0;
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return out;
+}

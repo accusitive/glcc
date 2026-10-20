@@ -81,6 +81,11 @@ impl<'d> Types<'d> {
             "Float" => return Ok(mir::Ty::Float(mir::FloatKind::F64)),
             "Bool" => return Ok(mir::Ty::Bool),
             "Unit" => return Ok(mir::Ty::int(8)),
+            // A NUL-terminated `char *`. Literals live in private
+            // globals; constructed strings are GC cells.
+            "String" => return Ok(mir::Ty::ptr(mir::Ty::int(8))),
+            // Opaque process argument list; only the prelude builds one.
+            "Argv" => return Ok(mir::Ty::ptr(mir::Ty::Void)),
             _ => {}
         }
         if self.defs.data_by_name(name).is_none() {

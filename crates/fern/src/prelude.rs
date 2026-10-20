@@ -39,4 +39,61 @@ instance Eq (Maybe a) when Eq a {
 }
 
 fun not(x) = if x then false else true
+
+extern \"fern_print\" print_raw : String -> Int
+extern \"fern_str_concat\" concat : String -> String -> String
+extern \"fern_str_of_int\" str_of_int : Int -> String
+extern \"fern_str_eq\" str_eq : String -> String -> Bool
+extern \"fern_str_len\" str_len : String -> Int
+extern \"fern_str_find\" find_raw : String -> String -> Int
+extern \"fern_str_slice\" slice_raw : String -> Int -> Int -> String
+extern \"fern_getenv\" getenv : String -> String
+extern \"fern_chdir\" chdir_raw : String -> Int
+extern \"fern_setenv\" setenv_raw : String -> String -> Int
+extern \"fern_exit\" exit : Int -> Int
+extern \"fern_argv_nil\" argv_nil : Int -> Argv
+extern \"fern_argv_cons\" argv_cons : String -> Argv -> Argv
+extern \"fern_spawn_status\" spawn_status_raw : String -> Argv -> Int
+extern \"fern_spawn_capture\" spawn_capture_raw : String -> Argv -> String
+
+fun print(s) = { let _ = print_raw(s); () }
+fun println(s) = { let _ = print_raw(concat(s, \"\\n\")); () }
+fun str_of_bool(b) = if b then \"true\" else \"false\"
+
+fun str_slice(s, start, len) = slice_raw(s, start, len)
+fun str_find(needle, s) = find_raw(s, needle)
+fun str_contains(needle, s) = find_raw(s, needle) >= 0
+fun str_split(sep, s) =
+    if str_len(sep) == 0 then [s]
+    else {
+        let at = find_raw(s, sep);
+        if at < 0 then [s]
+        else {
+            let n = str_len(sep);
+            Cons(slice_raw(s, 0, at), str_split(sep, slice_raw(s, at + n, str_len(s) - at - n)))
+        }
+    }
+fun str_lines(s) = str_split(\"\\n\", s)
+fun str_join(sep, xs) = match xs {
+    case Nil => \"\"
+    case Cons(x, rest) => match rest {
+        case Nil => x
+        case _ => concat(x, concat(sep, str_join(sep, rest)))
+    }
+}
+fun ok(status) = status == 0
+fun cd(path) = chdir_raw(path) == 0
+fun set_env(name, value) = setenv_raw(name, value) == 0
+
+fun argv(xs) = match xs {
+    case Nil => argv_nil(0)
+    case Cons(x, rest) => argv_cons(x, argv(rest))
+}
+fun spawn_status(name, args) = spawn_status_raw(name, argv(args))
+fun spawn_capture(name, args) = spawn_capture_raw(name, argv(args))
+fun spawn(name, args) = spawn_status(name, args) == 0
+
+instance Eq String {
+    eq(x, y) = str_eq(x, y)
+}
 ";

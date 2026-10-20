@@ -208,6 +208,14 @@ impl Jit {
             } else if is_named(ret, "Bool") {
                 let f: extern "C" fn() -> bool = std::mem::transmute(addr);
                 f().to_string()
+            } else if is_named(ret, "String") {
+                let f: extern "C" fn() -> *const core::ffi::c_char = std::mem::transmute(addr);
+                let p = f();
+                if p.is_null() {
+                    "null".to_string()
+                } else {
+                    std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+                }
             } else {
                 let f: extern "C" fn() = std::mem::transmute(addr);
                 f();
@@ -242,6 +250,7 @@ fn parse_chunk(src: &str) -> (Vec<NamedSpan>, Vec<fern::Diag>) {
             ItemKind::Let(value) => Some((value.name.clone(), item.span)),
             ItemKind::Data(data) => Some((data.name.clone(), item.span)),
             ItemKind::Class(class) => Some((class.name.clone(), item.span)),
+            ItemKind::Extern(extern_item) => Some((extern_item.name.clone(), item.span)),
             ItemKind::Instance(_) => None,
         })
         .map(|(name, span)| NamedSpan { name, span })
@@ -339,7 +348,7 @@ fn rename_vars(text: &str, names: &[(&str, String)]) -> String {
 
 pub fn is_definition(chunk: &str) -> bool {
     let trimmed = chunk.trim_start();
-    ["data ", "class ", "instance ", "fun ", "let "]
+    ["data ", "class ", "instance ", "extern ", "fun ", "let "]
         .iter()
         .any(|keyword| trimmed.starts_with(keyword))
 }

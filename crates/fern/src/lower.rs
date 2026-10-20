@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use glcc_mir as mir;
 
-use crate::defs::Defs;
+use crate::defs::{Defs, ExternId};
 use crate::hir::*;
 use crate::infer::InferCtx;
 use crate::solve::{Obligation, Solution, Solver};
@@ -55,35 +55,52 @@ pub(crate) struct Lowerer<'d> {
     bodies: HashMap<BodyKey, &'d HirFn>,
     instances: HashMap<String, mir::Func>,
     thunks: HashMap<String, mir::Func>,
+    /// The MIR import for each source-level extern.
+    externs: HashMap<ExternId, mir::Extern>,
     pending: Vec<Pending>,
     solver: Solver<'d>,
     pub(crate) rt: gc::Runtime,
+    /// Suffix for anonymous string globals.
+    pub(crate) str_count: u32,
 }
 
 /// Lower a checked program to MIR.
 pub fn lower(defs: &Defs, program: &HirProgram) -> KResult<mir::Module> {
-    let mut lw = Lowerer::new(defs, program);
+    let mut lw = Lowerer::new(defs, program)?;
     lw.run()?;
     Ok(lw.module)
 }
 
 impl<'d> Lowerer<'d> {
-    fn new(defs: &'d Defs, program: &'d HirProgram) -> Lowerer<'d> {
+    fn new(defs: &'d Defs, program: &'d HirProgram) -> KResult<Lowerer<'d>> {
         let bodies = program.bodies.iter().map(|b| (b.key, b)).collect();
         let mut module = mir::Module::new();
         let rt = gc::declare(&mut module);
-        Lowerer {
+        let mut types = Types::new(defs);
+        let mut externs = HashMap::new();
+        for (index, def) in defs.externs.iter().enumerate() {
+            let mut params = Vec::with_capacity(def.params.len());
+            for param in &def.params {
+                params.push(types.get(param, def.span)?);
+            }
+            let ret = types.get(&def.ret, def.span)?;
+            let target = module.push_extern(&def.symbol, mir::Signature::new(params, ret));
+            externs.insert(ExternId(index as u32), target);
+        }
+        Ok(Lowerer {
             defs,
             program,
-            types: Types::new(defs),
+            types,
             module,
             bodies,
             instances: HashMap::new(),
             thunks: HashMap::new(),
+            externs,
             pending: Vec::new(),
             solver: Solver::new(defs),
             rt,
-        }
+            str_count: 0,
+        })
     }
 
     fn run(&mut self) -> KResult<()> {
@@ -212,10 +229,80 @@ impl<'d> Lowerer<'d> {
         Ok(id)
     }
 
+    /// The closure thunk for an extern: same ABI as a real closure, but
+    /// the body is a direct foreign call and the environment is ignored.
+    pub(crate) fn thunk_extern(&mut self, target: mir::Extern, name: &str, params: &[mir::Ty], ret: &mir::Ty) -> KResult<mir::Func> {
+        let key = format!("{name}$$extern");
+        if let Some(&f) = self.thunks.get(&key) {
+            return Ok(f);
+        }
+        let mut sig_params = vec![mir::Ty::ptr(mir::Ty::Void)];
+        sig_params.extend(params.iter().cloned());
+        let sig = mir::Signature::new(sig_params, ret.clone());
+        let (mut func, entry) = mir::Function::new(&format!("{key}$$thunk"), sig);
+        let env = func.values.push(mir::ValueData {
+            ty: mir::Ty::ptr(mir::Ty::Void),
+            def: mir::Def::Param(entry, 0),
+        });
+        func.blocks[entry].params.push(env);
+        // Unlike a fern callee, the C callee cannot pin its parameters,
+        // so the thunk roots every pointer argument for the call.
+        let frame = push_inst(
+            &mut func,
+            entry,
+            mir::InstKind::CallExtern {
+                target: self.rt.enter,
+                args: Default::default(),
+            },
+            mir::Ty::int(64),
+        );
+        let mut args = Vec::with_capacity(params.len());
+        let mut slot = 0i128;
+        for (i, ty) in params.iter().enumerate() {
+            let value = func.values.push(mir::ValueData {
+                ty: ty.clone(),
+                def: mir::Def::Param(entry, (i + 1) as u32),
+            });
+            func.blocks[entry].params.push(value);
+            args.push(value);
+            if gc::is_ptr(ty) {
+                let slot_value = func.push_const(mir::Const::Int { bits: 64, value: slot });
+                push_void_inst(
+                    &mut func,
+                    entry,
+                    mir::InstKind::CallExtern {
+                        target: self.rt.pin,
+                        args: vec![frame, slot_value, value].into(),
+                    },
+                );
+                slot += 1;
+            }
+        }
+        let call = push_inst(
+            &mut func,
+            entry,
+            mir::InstKind::CallExtern { target, args: args.into() },
+            ret.clone(),
+        );
+        push_void_inst(
+            &mut func,
+            entry,
+            mir::InstKind::CallExtern {
+                target: self.rt.leave,
+                args: vec![frame].into(),
+            },
+        );
+        func.blocks[entry].term = Some(mir::Terminator::Return { val: Some(call) });
+        let id = self.module.push_func(func);
+        self.thunks.insert(key, id);
+        Ok(id)
+    }
+
     /// Resolve a call target to a concrete MIR function; the name is
     /// its mangled symbol (used to key thunks).
     pub(crate) fn resolve_callee(&mut self, target: &FnRef, subst: &HashMap<String, Ty>, span: Span) -> KResult<(mir::Func, String)> {
         let (key, concrete) = match target {
+            FnRef::Extern { .. } => return Err(Diag::new("internal: extern call reached body resolution", span)),
             FnRef::Fn { id, args } => (BodyKey::Fn(*id), self.concrete_args(args, subst, span)?),
             FnRef::Value { id, args } => (BodyKey::Value(*id), self.concrete_args(args, subst, span)?),
             FnRef::Instance { instance, method, args } => (
@@ -330,4 +417,14 @@ fn push_inst(func: &mut mir::Function, block: mir::Block, kind: mir::InstKind, t
     });
     func.blocks[block].insts.push(inst);
     result
+}
+
+fn push_void_inst(func: &mut mir::Function, block: mir::Block, kind: mir::InstKind) {
+    let inst = func.insts.push(mir::InstData {
+        block,
+        kind,
+        result: None,
+        loc: None,
+    });
+    func.blocks[block].insts.push(inst);
 }

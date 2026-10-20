@@ -19,8 +19,19 @@ pub enum ItemKind {
     Data(DataDecl),
     Class(ClassDecl),
     Instance(InstanceDecl),
+    Extern(ExternDecl),
     Fun(FnDecl),
     Let(ValueDecl),
+}
+
+/// `extern "symbol" name : ty`. The optional string renames the linked
+/// symbol; without it the symbol and the fern name are the same.
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub span: Span,
+    pub name: String,
+    pub symbol: Option<String>,
+    pub ty: TyExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -247,6 +258,7 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     BoolConst(bool),
+    Str(String),
     Unit,
     /// `Just(x)`: constructor call.
     CtorCall {

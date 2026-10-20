@@ -120,7 +120,7 @@ impl<'d> Check<'d> {
         let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
         for item in &program.items {
             match &item.kind {
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) => {}
+                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
                 ast::ItemKind::Instance(_) => {
                     self.check_instance(instance_index)?;
                     instance_index += 1;
@@ -357,6 +357,11 @@ impl<'d> Check<'d> {
                 ty: Ty::bool_ty(),
                 span,
             }),
+            ast::ExprKind::Str(v) => Ok(HirExpr {
+                kind: HirExprKind::Const(ConstValue::Str(v.clone())),
+                ty: Ty::named0("String"),
+                span,
+            }),
             ast::ExprKind::Unit => Ok(HirExpr {
                 kind: HirExprKind::Tuple(Vec::new()),
                 ty: Ty::unit_ty(),
@@ -458,6 +463,13 @@ impl<'d> Check<'d> {
             return Ok(HirExpr {
                 kind: HirExprKind::Fn(FnRef::Value { id, args }),
                 ty,
+                span,
+            });
+        }
+        if let Some(id) = self.defs.extern_by_name(name) {
+            return Ok(HirExpr {
+                kind: HirExprKind::Fn(FnRef::Extern { id }),
+                ty: self.defs.externs[id.index()].ty.clone(),
                 span,
             });
         }
@@ -1117,7 +1129,12 @@ impl<'d> Check<'d> {
     fn comparable(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool") => Ok(()),
+            Ty::Named { name, args }
+                if args.is_empty()
+                    && (name == "Int" || name == "Float" || name == "Bool" || name == "String") =>
+            {
+                Ok(())
+            }
             other => Err(Diag::new(format!("cannot compare values of type `{other}`"), span)),
         }
     }
@@ -1146,6 +1163,7 @@ impl<'d> Check<'d> {
             FnRef::Fn { id, .. } => Some(self.defs.fns[id.index()].params.len()),
             FnRef::Value { .. } => None,
             FnRef::Instance { instance, method, .. } => Some(self.defs.instances[*instance].methods[*method].params.len()),
+            FnRef::Extern { id } => Some(self.defs.externs[id.index()].params.len()),
             FnRef::Class { class_id, method, .. } => {
                 let sig = &self.defs.classes[class_id.index()].methods[*method].ty;
                 Some(split_arrows(sig).0.len())
@@ -1207,6 +1225,7 @@ fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResu
 fn finalize_ref(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, target: &mut FnRef, span: Span) -> KResult<()> {
     let args = match target {
         FnRef::Fn { args, .. } | FnRef::Value { args, .. } | FnRef::Instance { args, .. } | FnRef::Class { args, .. } => args,
+        FnRef::Extern { .. } => return Ok(()),
     };
     for a in args {
         finalize_ty(infer, ids, allowed, a, span)?;

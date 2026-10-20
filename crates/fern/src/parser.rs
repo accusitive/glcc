@@ -3,8 +3,9 @@
 //! fern is a small pure ML-family surface:
 //!
 //! ```text
-//! item     := data | class | instance | fun | let
+//! item     := data | class | instance | extern | fun | let
 //! data     := 'data' Upper lower* '=' ctor ('|' ctor)*
+//! extern   := 'extern' string? lower ':' ty
 //! ctor     := Upper ( '(' ty (',' ty)* ')' )?
 //! class    := 'class' Upper lower* '{' (lower ':' ty ';')* '}'
 //! instance := 'instance' Upper ty ('when' ty (',' ty)*)? '{' method* '}'
@@ -156,6 +157,8 @@ impl Parser {
     /// Skip to the next top-level item keyword, ignoring keywords nested
     /// inside braces, parentheses, or brackets. Always advances when the
     /// failing item consumed nothing, so the recovery loop terminates.
+    /// An item keyword already at the cursor belongs to the next item and
+    /// is left for the caller.
     fn synchronize(&mut self, item_start: usize) {
         let lo = item_start.min(self.tokens.len());
         let hi = self.pos.min(self.tokens.len());
@@ -186,7 +189,7 @@ impl Parser {
             }
             self.bump();
         }
-        if self.pos == start && !self.is(&Tok::Eof) {
+        if self.pos == start && !self.is(&Tok::Eof) && (self.pos == item_start || !is_item_start(self.peek())) {
             self.bump();
         }
     }
@@ -203,11 +206,12 @@ impl Parser {
             Tok::Data => ItemKind::Data(self.data_item()?),
             Tok::Class => ItemKind::Class(self.class_item()?),
             Tok::Instance => ItemKind::Instance(self.instance_item()?),
+            Tok::Extern => ItemKind::Extern(self.extern_item()?),
             Tok::Fun => ItemKind::Fun(self.fun_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
             other => {
                 return Err(self.complete_if_eof(Diag::new(
-                    format!("expected an item (`data`, `class`, `instance`, `fun`, or `let`), found {}", other.describe()),
+                    format!("expected an item (`data`, `class`, `instance`, `extern`, `fun`, or `let`), found {}", other.describe()),
                     self.span(),
                 )));
             }
@@ -360,6 +364,32 @@ impl Parser {
             ctx,
             self_ty,
             methods,
+        })
+    }
+
+    fn extern_item(&mut self) -> KResult<ExternDecl> {
+        let start = self.span();
+        self.bump();
+        let symbol = if matches!(self.peek(), Tok::Str(_)) {
+            let Token {
+                tok: Tok::Str(symbol),
+                ..
+            } = self.bump()
+            else {
+                unreachable!("checked above");
+            };
+            Some(symbol)
+        } else {
+            None
+        };
+        let name = self.lower("an extern name")?;
+        self.expect(&Tok::Colon, "`:` before the extern signature")?;
+        let ty = self.ty_expr()?;
+        Ok(ExternDecl {
+            span: start.to(self.prev_span()),
+            name,
+            symbol,
+            ty,
         })
     }
 
@@ -805,6 +835,10 @@ impl Parser {
                 let Token { tok: Tok::Float(v), span } = self.bump() else { unreachable!() };
                 Ok(Expr { kind: ExprKind::Float(v), span })
             }
+            Tok::Str(_) => {
+                let Token { tok: Tok::Str(s), span } = self.bump() else { unreachable!() };
+                Ok(Expr { kind: ExprKind::Str(s), span })
+            }
             Tok::True | Tok::False => {
                 let Token { tok, span } = self.bump();
                 Ok(Expr {
@@ -879,9 +913,28 @@ impl Parser {
 
     /// After an opening `(`: unit, grouping, tuple, or a paren-list lambda.
     fn paren_expr(&mut self, open: Span) -> KResult<Expr> {
-        // Lambda attempt: `() ->`, `(pat, pat, ...) ->`. Rewind on any
-        // failure and reparse as a plain expression; patterns are a small
-        // subset of the expression grammar, so nothing is lost.
+        // `()` is the unit value, unless an arrow makes it a zero-arg
+        // lambda head.
+        if self.is(&Tok::RParen) {
+            self.bump();
+            if self.eat(&Tok::Arrow) {
+                let body = self.expr()?;
+                return Ok(Expr {
+                    kind: ExprKind::Lambda {
+                        params: Vec::new(),
+                        body: Box::new(body),
+                    },
+                    span: open.to(self.prev_span()),
+                });
+            }
+            return Ok(Expr {
+                kind: ExprKind::Unit,
+                span: open.to(self.prev_span()),
+            });
+        }
+        // Lambda attempt: `(pat, pat, ...) ->`. Rewind on any failure and
+        // reparse as a plain expression; patterns are a small subset of
+        // the expression grammar, so nothing is lost.
         let mark = self.pos;
         match self.try_lambda_pats() {
             Ok(Some(params)) => {
@@ -918,10 +971,6 @@ impl Parser {
     /// when the shape is not a lambda. Errors are abortive (the caller
     /// rewinds either way).
     fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
-        if self.is(&Tok::RParen) {
-            self.bump();
-            return Ok(self.is(&Tok::Arrow)).map(|is_arrow| if is_arrow { Some(Vec::new()) } else { None });
-        }
         if !matches!(self.peek(), Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket) {
             return Ok(None);
         }
@@ -960,7 +1009,7 @@ impl Parser {
 fn is_item_start(tok: &Tok) -> bool {
     matches!(
         tok,
-        Tok::Data | Tok::Class | Tok::Instance | Tok::Fun | Tok::Let
+        Tok::Data | Tok::Class | Tok::Instance | Tok::Extern | Tok::Fun | Tok::Let
     )
 }
 

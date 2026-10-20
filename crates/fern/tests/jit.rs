@@ -109,6 +109,16 @@ impl Jit {
             }
         }
     }
+
+    fn string(&mut self, name: &str) -> String {
+        let addr = self.jit.get_finalized_function(self.func(name));
+        unsafe {
+            let f: extern "C" fn() -> *const core::ffi::c_char = std::mem::transmute(addr);
+            let p = f();
+            assert!(!p.is_null(), "`{name}` returned a null string");
+            std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+        }
+    }
 }
 
 fn run_i64(src: &str) -> i64 {
@@ -466,4 +476,68 @@ fn live_values_survive_collections() {
     collect_now(&jit);
     let (live, _, _) = stats(&jit);
     assert!(live <= 4096, "live bytes {live} after the program returned");
+}
+
+#[test]
+fn strings_concatenate_and_compare() {
+    assert_eq!(build("fun main() = \"hello\"").string("main"), "hello");
+    assert_eq!(
+        build("fun main() = concat(\"foo\", \"bar\")").string("main"),
+        "foobar"
+    );
+    assert_eq!(
+        build("fun main() = str_of_int(-1234)").string("main"),
+        "-1234"
+    );
+    assert!(build("fun main() = \"abc\" == \"abc\"").bool("main", &[]));
+    assert!(!build("fun main() = \"abc\" == \"abd\"").bool("main", &[]));
+    assert!(build("fun main() = \"abc\" != \"abd\"").bool("main", &[]));
+    assert!(build("fun main() = Eq::eq([\"a\", \"b\"], [\"a\", \"b\"])").bool("main", &[]));
+    assert!(!build("fun main() = Eq::eq([\"a\", \"b\"], [\"a\", \"c\"])").bool("main", &[]));
+}
+
+#[test]
+fn string_search_split_and_join() {
+    assert_eq!(
+        build("fun main() = str_slice(\"abcdef\", 1, 3)").string("main"),
+        "bcd"
+    );
+    assert_eq!(
+        build("fun main() = str_join(\"|\", str_split(\",\", \"a,b,c\"))").string("main"),
+        "a|b|c"
+    );
+    assert_eq!(
+        build("fun main() = str_join(\",\", str_lines(\"a\\nb\\nc\"))").string("main"),
+        "a,b,c"
+    );
+    assert!(build("fun main() = str_contains(\"bc\", \"abcd\")").bool("main", &[]));
+    assert!(!build("fun main() = str_contains(\"zz\", \"abcd\")").bool("main", &[]));
+    assert_eq!(
+        build("fun main() = str_of_int(str_find(\"bc\", \"abcd\"))").string("main"),
+        "1"
+    );
+    assert!(build("fun main() = ok(0)").bool("main", &[]));
+    assert!(!build("fun main() = ok(1)").bool("main", &[]));
+}
+
+#[test]
+fn externs_work_as_values() {
+    let src = "\
+        fun apply(f, x, y) = f(x, y)\n\
+        fun main() = if apply(str_eq, \"same\", \"same\") then 1 else 0";
+    assert_eq!(run_i64(src), 1);
+}
+
+#[test]
+fn spawn_status_and_capture() {
+    assert_eq!(run_i64("fun main() = spawn_status(\"true\", [])"), 0);
+    assert_eq!(run_i64("fun main() = spawn_status(\"false\", [])"), 1);
+    assert_eq!(
+        build("fun main() = spawn_capture(\"echo\", [\"hi\"])").string("main"),
+        "hi\n"
+    );
+    assert_eq!(
+        run_i64("fun main() = if spawn(\"true\", []) then 1 else 0"),
+        1
+    );
 }
