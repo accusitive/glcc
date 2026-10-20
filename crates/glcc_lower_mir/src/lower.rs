@@ -7420,6 +7420,7 @@ mod tests {
     fn run_opt_pipeline(module: &mut mir::Module) {
         let mut pm = mir::pass::PassManager::new()
             .add_module_pass(mir::passes::Inline::small())
+            .add_func_pass(mir::passes::Sroa)
             .add_func_pass(mir::passes::Mem2Reg)
             .add_func_pass(mir::passes::ConstFold)
             .add_func_pass(mir::passes::Sccp)
@@ -7479,6 +7480,56 @@ mod tests {
             .any(|inst| matches!(low.insts[*inst].kind, mir::InstKind::And(..)));
         assert!(!has_and, "mask survived in low:\n{dump}");
         assert_eq!(jit_run_main(module), 0xff);
+    }
+
+    /// SROA splits non-escaping struct and array locals into scalar
+    /// slots, and `Mem2Reg` then promotes them: none of the functions
+    /// keep stack traffic, including the one whose fields change in a
+    /// loop (which needs a phi per promoted field).
+    #[test]
+    fn optimized_pipeline_scalarizes_aggregate_locals() {
+        let src = "struct point { int x, y; };\n\
+                   int sum_points(int a, int b) {\n\
+                       struct point q;\n\
+                       q.x = a; q.y = b;\n\
+                       return q.x + q.y;\n\
+                   }\n\
+                   int sum_array(int a, int b, int c) {\n\
+                       int v[3];\n\
+                       v[0] = a; v[1] = b; v[2] = c;\n\
+                       return v[0] * 100 + v[1] * 10 + v[2];\n\
+                   }\n\
+                   int sum_loop(int n) {\n\
+                       struct point q;\n\
+                       q.x = 0; q.y = 0;\n\
+                       for (int i = 0; i < n; i++) {\n\
+                           q.x = q.x + i;\n\
+                           q.y = q.y + q.x;\n\
+                       }\n\
+                       return q.x * 100 + q.y;\n\
+                   }\n\
+                   int main() {\n\
+                       return sum_points(1, 2) + sum_array(1, 2, 3) + sum_loop(4);\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["sum_points", "sum_array", "sum_loop"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function is lowered");
+            let memory_ops = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .filter(|inst| {
+                    matches!(
+                        func.insts[**inst].kind,
+                        mir::InstKind::Alloca { .. } | mir::InstKind::Load { .. } | mir::InstKind::Store { .. }
+                    )
+                })
+                .count();
+            assert_eq!(memory_ops, 0, "stack traffic survived in {name}:\n{dump}");
+        }
+        assert_eq!(jit_run_main(module), 736);
     }
 
     /// Two identical additions collapse to one shared value; the
@@ -9671,6 +9722,7 @@ mod tests {
             for func in module.funcs.iter_mut() {
                 for _ in 0..16 {
                     let mut changed = false;
+                    changed |= mir::passes::Sroa.run(func);
                     changed |= mir::passes::Mem2Reg.run(func);
                     changed |= mir::passes::ConstFold.run(func);
                     changed |= mir::passes::InstCombine.run(func);

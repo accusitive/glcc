@@ -3,12 +3,14 @@ pub mod cse;
 pub mod instcombine;
 pub mod licm;
 pub mod sccp;
+pub mod sroa;
 
 pub use constmerge::ConstMerge;
 pub use cse::Cse;
 pub use instcombine::InstCombine;
 pub use licm::Licm;
 pub use sccp::Sccp;
+pub use sroa::Sroa;
 
 use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstKind, Module, Terminator, Value};
 use crate::pass::{FunctionPass, ModulePass};
@@ -454,15 +456,15 @@ struct MemoryRead {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MemoryObject {
+pub(crate) enum MemoryObject {
     Stack(Value),
     Global(Value),
 }
 
 #[derive(Clone, Copy)]
-struct AddressInfo {
-    object: MemoryObject,
-    offset: Option<u64>,
+pub(crate) struct AddressInfo {
+    pub(crate) object: MemoryObject,
+    pub(crate) offset: Option<u64>,
 }
 
 fn add_offset(offset: Option<u64>, delta: Option<(u32, i128)>) -> Option<u64> {
@@ -483,7 +485,7 @@ fn sub_offset(offset: Option<u64>, delta: Option<(u32, i128)>) -> Option<u64> {
 /// from, plus a constant byte offset when the arithmetic is known.
 /// `PtrToInt`/`IntToPtr` are address algebra here; escape analysis below
 /// is what decides whether the address actually leaves the function.
-fn address_info(func: &Function, value: Value) -> Option<AddressInfo> {
+pub(crate) fn address_info(func: &Function, value: Value) -> Option<AddressInfo> {
     let Def::Inst(inst) = func.values[value].def else {
         return None;
     };

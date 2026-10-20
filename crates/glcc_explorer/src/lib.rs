@@ -390,6 +390,7 @@ fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
     use glcc_mir::pass::PassManager;
     let pm = PassManager::new().add_module_pass(glcc_mir::passes::Inline::small());
     let mut pm = pm
+        .add_func_pass(glcc_mir::passes::Sroa)
         .add_func_pass(glcc_mir::passes::Mem2Reg)
         .add_func_pass(glcc_mir::passes::ConstFold)
         .add_func_pass(glcc_mir::passes::Sccp)
