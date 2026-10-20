@@ -14,13 +14,13 @@
 //!   the checker ([`crate::check`]), which generalizes them in one pass
 //!   over the items in declaration order.
 //!
-//! Prelude items carry `Span`s tagged with [`crate::PRELUDE_TAG`];
-//! every later pass treats those as built-in.
+//! Prelude items carry spans in [`crate::FileId::PRELUDE`]; every later
+//! pass treats those as built-in.
 
 use std::collections::HashMap;
 
 use crate::ast;
-use crate::span::{Diag, KResult, Span};
+use crate::span::{Diag, FileId, KResult, Span};
 use crate::ty::{Kind, Ty};
 
 macro_rules! id_type {
@@ -212,9 +212,9 @@ impl Defs {
         self.kinds_of.get(name)
     }
 
-    /// A prelude item's span is tagged beyond any source offset.
+    /// Whether a span belongs to the built-in prelude.
     pub fn is_prelude_span(&self, span: Span) -> bool {
-        span.lo >= crate::PRELUDE_TAG
+        span.file == FileId::PRELUDE
     }
 }
 
@@ -659,7 +659,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                     params: f.params.clone(),
                     body: f.body.clone(),
                     scheme: None,
-                    is_prelude: f.span.lo >= crate::PRELUDE_TAG,
+                    is_prelude: f.span.file == FileId::PRELUDE,
                 });
                 defs.fn_ids.insert(f.name.clone(), id);
             }
@@ -674,7 +674,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                     name: v.name.clone(),
                     body: v.body.clone(),
                     scheme: None,
-                    is_prelude: v.span.lo >= crate::PRELUDE_TAG,
+                    is_prelude: v.span.file == FileId::PRELUDE,
                 });
                 defs.value_ids.insert(v.name.clone(), id);
             }

@@ -24,9 +24,29 @@ use crate::ast::*;
 use crate::lexer::{Tok, Token};
 use crate::span::{Diag, KResult, Span};
 
-pub fn parse(tokens: Vec<Token>) -> KResult<Program> {
+#[derive(Debug, Clone)]
+pub struct ParseOutput {
+    pub program: Program,
+    pub diags: Vec<Diag>,
+    pub incomplete: bool,
+}
+
+/// Parse every item, reporting failures and resyncing at the next
+/// top-level item instead of stopping at the first error.
+pub fn parse_recovering(tokens: Vec<Token>) -> ParseOutput {
     let mut parser = Parser { tokens, pos: 0 };
-    parser.program()
+    parser.program_recovering()
+}
+
+/// Fail-fast wrapper over [`parse_recovering`]: returns the first
+/// diagnostic and discards the partially parsed program.
+pub fn parse(tokens: Vec<Token>) -> KResult<Program> {
+    let mut out = parse_recovering(tokens);
+    if out.diags.is_empty() {
+        Ok(out.program)
+    } else {
+        Err(out.diags.remove(0))
+    }
 }
 
 struct Parser {
@@ -62,11 +82,23 @@ impl Parser {
         self.peek() == want
     }
 
+    /// Mark an error as incomplete when the input ended while parsing.
+    fn complete_if_eof(&self, diag: Diag) -> Diag {
+        if self.is(&Tok::Eof) && !diag.incomplete {
+            Diag::incomplete(diag.msg, diag.span)
+        } else {
+            diag
+        }
+    }
+
     fn expect(&mut self, want: &Tok, what: &str) -> KResult<Token> {
         if self.is(want) {
             return Ok(self.bump());
         }
-        Err(Diag::new(format!("expected {what}, found {}", self.peek().describe()), self.span()))
+        Err(self.complete_if_eof(Diag::new(
+            format!("expected {what}, found {}", self.peek().describe()),
+            self.span(),
+        )))
     }
 
     fn eat(&mut self, want: &Tok) -> bool {
@@ -94,16 +126,69 @@ impl Parser {
 
     // ------------------------------------------------------------ items --
 
-    fn program(&mut self) -> KResult<Program> {
+    fn program_recovering(&mut self) -> ParseOutput {
         let mut items = Vec::new();
-        while !self.is(&Tok::Eof) {
+        let mut diags = Vec::new();
+        let mut incomplete = false;
+        loop {
             self.eat_seps();
             if self.is(&Tok::Eof) {
                 break;
             }
-            items.push(self.item()?);
+            let start = self.pos;
+            match self.item() {
+                Ok(item) => items.push(item),
+                Err(diag) => {
+                    let diag = self.complete_if_eof(diag);
+                    incomplete |= diag.incomplete;
+                    diags.push(diag);
+                    self.synchronize(start);
+                }
+            }
         }
-        Ok(Program { items })
+        ParseOutput {
+            program: Program { items },
+            diags,
+            incomplete,
+        }
+    }
+
+    /// Skip to the next top-level item keyword, ignoring keywords nested
+    /// inside braces, parentheses, or brackets. Always advances when the
+    /// failing item consumed nothing, so the recovery loop terminates.
+    fn synchronize(&mut self, item_start: usize) {
+        let lo = item_start.min(self.tokens.len());
+        let hi = self.pos.min(self.tokens.len());
+        let mut open = Vec::new();
+        // Only unmatched braces carry over from the failed item: a block
+        // or body can contain nested keywords, while an unclosed parameter
+        // list is abandoned at the next item keyword.
+        for token in &self.tokens[lo..hi] {
+            match token.tok {
+                Tok::LBrace => open.push(Delim::Brace),
+                Tok::RBrace => close_delim(&mut open, Delim::Brace),
+                _ => {}
+            }
+        }
+        let start = self.pos;
+        while !self.is(&Tok::Eof) {
+            if open.is_empty() && is_item_start(self.peek()) {
+                break;
+            }
+            match self.peek() {
+                Tok::LBrace => open.push(Delim::Brace),
+                Tok::LParen => open.push(Delim::Paren),
+                Tok::LBracket => open.push(Delim::Bracket),
+                Tok::RBrace => close_delim(&mut open, Delim::Brace),
+                Tok::RParen => close_delim(&mut open, Delim::Paren),
+                Tok::RBracket => close_delim(&mut open, Delim::Bracket),
+                _ => {}
+            }
+            self.bump();
+        }
+        if self.pos == start && !self.is(&Tok::Eof) {
+            self.bump();
+        }
     }
 
     fn eat_seps(&mut self) {
@@ -121,10 +206,10 @@ impl Parser {
             Tok::Fun => ItemKind::Fun(self.fun_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
             other => {
-                return Err(Diag::new(
+                return Err(self.complete_if_eof(Diag::new(
                     format!("expected an item (`data`, `class`, `instance`, `fun`, or `let`), found {}", other.describe()),
                     self.span(),
-                ));
+                )));
             }
         };
         Ok(Item {
@@ -869,6 +954,28 @@ impl Parser {
             kind: ExprKind::List(items),
             span: open.to(self.prev_span()),
         })
+    }
+}
+
+fn is_item_start(tok: &Tok) -> bool {
+    matches!(
+        tok,
+        Tok::Data | Tok::Class | Tok::Instance | Tok::Fun | Tok::Let
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delim {
+    Brace,
+    Paren,
+    Bracket,
+}
+
+/// Remove the nearest matching opening delimiter, discarding any
+/// unterminated delimiters nested inside it.
+fn close_delim(open: &mut Vec<Delim>, close: Delim) {
+    if let Some(index) = open.iter().rposition(|&delim| delim == close) {
+        open.truncate(index);
     }
 }
 

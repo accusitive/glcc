@@ -1,5 +1,5 @@
 //! The built-in prelude: a fixed source fragment compiled before user
-//! items, with spans tagged by [`crate::PRELUDE_TAG`].
+//! items, with spans in [`crate::FileId::PRELUDE`].
 //!
 //! Keeping the prelude in fern source means it is checked and lowered by
 //! the same pipeline as user code. It gives list syntax (`[...]`, `::`)
