@@ -346,6 +346,16 @@ char *fern_str_slice(const char *s, long start, long len) {
 	return out;
 }
 
+/* A fresh GC string holding one byte. Byte zero is the empty string
+   because fern strings are NUL-terminated; callers that need to display
+   a zero byte should render it separately. */
+char *fern_str_of_byte(long b) {
+	char *out = (char *)fern_alloc(2);
+	out[0] = (char)(b & 0xff);
+	out[1] = 0;
+	return out;
+}
+
 /* Decimal rendering of a signed 64-bit value into a GC string. */
 char *fern_str_of_int(long v) {
 	char *out = (char *)fern_alloc(32);
@@ -401,6 +411,7 @@ int execvp(const char *file, char **argv);
 int waitpid(int pid, int *status, int options);
 int pipe(int *fds);
 int dup2(int oldfd, int newfd);
+int open(const char *path, int flags);
 int close(int fd);
 long read(int fd, void *buf, unsigned long count);
 int kill(int pid, int sig);
@@ -466,6 +477,25 @@ long fern_spawn_status(char *name, fargv *args) {
 	int status = 0;
 	if (waitpid(pid, &status, 0) < 0) return -1;
 	return fern_status_of(status);
+}
+
+/* A regular file's contents, truncated at 64 KiB. A missing file reads
+   as the empty string. */
+char *fern_read_file(const char *path) {
+	int fd = open(path, 0);
+	if (fd < 0) return "";
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	for (;;) {
+		long got = read(fd, out + len, cap - 1 - len);
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	close(fd);
+	out[len] = 0;
+	return out;
 }
 
 /* Captured stdout, truncated at 64 KiB. */

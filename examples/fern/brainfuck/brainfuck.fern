@@ -6,11 +6,12 @@
 -- control flow is ordinary recursion. There is no mutable state, so no
 -- array or program counter even exists.
 --
--- `answer()` runs five programs — Hello World, 6 * 7, nested loops, a
--- walk off both ends of the tape, and a `cat` loop fed the input "He" —
--- and returns a rolling checksum of every byte they emitted.
+-- Programs are ordinary strings parsed into `Op`s, comments and
+-- whitespace included. `demo()` prints each program's output, and
+-- `run_file(path)` runs one loaded from disk.
 --
--- Build and run: make && make run (driver.c prints `answer()`).
+-- Build and run: make && make run (driver.c calls `demo()` and prints
+-- the checksum from `answer()`).
 
 import std::foldable
 
@@ -100,56 +101,93 @@ fun output(program : List Op, input : List Int) : List Int = {
 }
 
 -- ------------------------------------------------------------- programs --
--- The same five demos in Brainfuck text, for reference:
---
---   hello   ++++++++++[>+++++++>++++++++++>+++>+<<<<-]>++.>+.+++++++..+++.
---           >++.<<+++++++++++++++.>.+++.------.--------.>+.>.
---   forty   ++++++[>+++++++<-]>.
---   cubes   ++++[>++++[>++++<-]<-]>>.
---   wander  <<+>>.
---   cat     ,[.,]                    fed the input "He"
+-- Parse Brainfuck text: keep the eight commands and ignore everything
+-- else, so comments and layout are free.
+fun parse_op(c : String) : Maybe Op =
+    if c == ">" then Just(Right)
+    else if c == "<" then Just(Left)
+    else if c == "+" then Just(Inc)
+    else if c == "-" then Just(Dec)
+    else if c == "." then Just(Emit)
+    else if c == "," then Just(Read)
+    else if c == "[" then Just(Open)
+    else if c == "]" then Just(Close)
+    else Nothing
 
--- `asm` expands `(op, count)` chunks into program text, so each demo
--- below reads as run-length encoded source.
-fun rep(op : Op, n : Int) : List Op = if n == 0 then Nil else Cons(op, rep(op, n - 1))
-fun cats(xs : List a, ys : List a) : List a = match xs { case Nil => ys case Cons(x, xs) => Cons(x, cats(xs, ys)) }
+fun parse_from(source : String, i : Int, n : Int) : List Op =
+    if i >= n then Nil
+    else match parse_op(str_slice(source, i, 1)) {
+        case Nothing => parse_from(source, i + 1, n)
+        case Just(op) => Cons(op, parse_from(source, i + 1, n))
+    }
 
-fun asm(chunks : List (Op, Int)) : List Op = match chunks {
-    case Nil => Nil
-    case Cons((op, n), rest) => cats(rep(op, n), asm(rest))
+fun parse(source : String) : List Op = parse_from(source, 0, str_len(source))
+
+let hello_source = "
+    ++++++++++[>+++++++>++++++++++>+++>+<<<<-]
+    >++.>+.+++++++..+++.>++.<<+++++++++++++++.
+    >.+++.------.--------.>+.>.
+"
+let forty_source = "++++++[>+++++++<-]>."
+let cubes_source = "++++[>++++[>++++<-]<-]>>."
+let wander_source = "<<+>>."
+let cat_source = ",[.,]"
+
+let hello = parse(hello_source)
+let forty = parse(forty_source)
+let cubes = parse(cubes_source)
+let wander = parse(wander_source)
+let cat = parse(cat_source)
+
+-- --------------------------------------------------------------- output --
+-- Bytes become a printable string for the demo; control bytes use the
+-- same escapes the lexer accepts.
+fun render_byte(b : Int) : String =
+    if b == 0 then "\\0"
+    else if b == 10 then "\\n"
+    else if b == 9 then "\\t"
+    else if b == 13 then "\\r"
+    else str_of_byte(b)
+
+fun render(bytes : List Int) : String =
+    fold((text, b) -> concat(text, render_byte(b)), "", bytes)
+
+-- File output is raw text, so a trailing newline from the program stays
+-- a newline. A zero byte has no C-string representation and is dropped.
+fun decode(bytes : List Int) : String =
+    fold((text, b) -> if b == 0 then text else concat(text, str_of_byte(b)), "", bytes)
+
+fun run_source(source : String, input : List Int) : List Int =
+    output(parse(source), input)
+
+fun show(name : String, source : String, input : List Int) : Unit = {
+    let bytes = run_source(source, input);
+    println(concat(name, concat(" => ", render(bytes))));
+    ()
 }
 
-let hello = asm([
-    (Inc, 10), (Open, 1),
-    (Right, 1), (Inc, 7), (Right, 1), (Inc, 10), (Right, 1), (Inc, 3), (Right, 1), (Inc, 1),
-    (Left, 4), (Dec, 1), (Close, 1),
-    (Right, 1), (Inc, 2), (Emit, 1),
-    (Right, 1), (Inc, 1), (Emit, 1),
-    (Inc, 7), (Emit, 2), (Inc, 3), (Emit, 1),
-    (Right, 1), (Inc, 2), (Emit, 1),
-    (Left, 2), (Inc, 15), (Emit, 1),
-    (Right, 1), (Emit, 1),
-    (Inc, 3), (Emit, 1), (Dec, 6), (Emit, 1), (Dec, 8), (Emit, 1),
-    (Right, 1), (Inc, 1), (Emit, 1),
-    (Right, 1), (Emit, 1)
-])
+fun demo() : Unit = {
+    show("hello", hello_source, Nil);
+    show("forty", forty_source, Nil);
+    show("cubes", cubes_source, Nil);
+    show("wander", wander_source, Nil);
+    show("cat", cat_source, [72, 101]);
+    ()
+}
 
-let forty = asm([
-    (Inc, 6), (Open, 1), (Right, 1), (Inc, 7), (Left, 1), (Dec, 1), (Close, 1),
-    (Right, 1), (Emit, 1)
-])
+-- Run one program from a file with no input, writing its bytes as text.
+fun run_file(path : String) : Int = {
+    let source = read_file(path);
+    if str_len(source) == 0 then {
+        println(concat("cannot read ", path));
+        1
+    } else {
+        print(decode(run_source(source, Nil)));
+        0
+    }
+}
 
-let cubes = asm([
-    (Inc, 4), (Open, 1),
-    (Right, 1), (Inc, 4), (Open, 1),
-    (Right, 1), (Inc, 4), (Left, 1), (Dec, 1), (Close, 1),
-    (Left, 1), (Dec, 1), (Close, 1),
-    (Right, 2), (Emit, 1)
-])
-
-let wander = asm([(Left, 2), (Inc, 1), (Right, 2), (Emit, 1)])
-
-let cat = asm([(Read, 1), (Open, 1), (Emit, 1), (Read, 1), (Close, 1)])
+fun cats(xs : List a, ys : List a) : List a = match xs { case Nil => ys case Cons(x, xs) => Cons(x, cats(xs, ys)) }
 
 -- A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
 -- no `%`, so `reduce` spells the modulo by subtraction.

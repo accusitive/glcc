@@ -513,6 +513,16 @@ fn strings_concatenate_and_compare() {
 }
 
 #[test]
+fn byte_strings_and_file_loading() {
+    assert_eq!(build("fun main() : String = str_of_byte(65)").string("main"), "A");
+    let path = std::env::temp_dir().join(format!("fern-read-file-{}", std::process::id()));
+    std::fs::write(&path, "hello\n").expect("write file");
+    let src = format!("fun main() : String = read_file(\"{}\")", path.display());
+    assert_eq!(build(&src).string("main"), "hello\n");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn string_search_split_and_join() {
     assert_eq!(
         build("fun main() : String = str_slice(\"abcdef\", 1, 3)").string("main"),

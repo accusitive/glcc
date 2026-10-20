@@ -44,11 +44,13 @@ extern \"fern_print\" print_raw : String -> Int
 extern \"fern_str_concat\" concat : String -> String -> String
 extern \"fern_str_identity\" shell_arg : String -> String
 extern \"fern_str_of_int\" str_of_int : Int -> String
+extern \"fern_str_of_byte\" str_of_byte : Int -> String
 extern \"fern_str_eq\" str_eq : String -> String -> Bool
 extern \"fern_str_len\" str_len : String -> Int
 extern \"fern_str_find\" find_raw : String -> String -> Int
 extern \"fern_str_slice\" slice_raw : String -> Int -> Int -> String
 extern \"fern_getenv\" getenv : String -> String
+extern \"fern_read_file\" read_file_raw : String -> String
 extern \"fern_chdir\" chdir_raw : String -> Int
 extern \"fern_setenv\" setenv_raw : String -> String -> Int
 extern \"fern_exit\" exit : Int -> Int
@@ -64,6 +66,7 @@ extern \"fern_pipeline_capture\" pipeline_capture_raw : Pipe -> String
 fun print(s : String) : Unit = { let _ = print_raw(s); () }
 fun println(s : String) : Unit = { let _ = print_raw(concat(s, \"\\n\")); () }
 fun str_of_bool(b : Bool) : String = if b then \"true\" else \"false\"
+fun read_file(path : String) : String = read_file_raw(path)
 
 fun str_slice(s : String, start : Int, len : Int) : String = slice_raw(s, start, len)
 fun str_find(needle : String, s : String) : Int = find_raw(s, needle)

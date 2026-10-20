@@ -190,6 +190,52 @@ fn brainfuck_example_links_and_runs() {
 }
 
 #[test]
+fn brainfuck_demo_prints_and_runs_files() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("brainfuck-demo");
+    let example_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/fern/brainfuck");
+    let object = dir.join("brainfuck.o");
+    let out = Command::new(FERNC)
+        .arg(example_dir.join("brainfuck.fern"))
+        .arg("-O1")
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run fernc");
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let exe = dir.join("brainfuck");
+    let out = Command::new("cc")
+        .arg(example_dir.join("driver.c"))
+        .arg(&object)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("run cc");
+    assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
+
+    let out = Command::new(&exe).output().expect("run demo");
+    assert!(out.status.success(), "demo failed: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("hello => Hello World!\\n"), "missing hello:\n{stdout}");
+    assert!(stdout.contains("forty => *"), "missing forty:\n{stdout}");
+    assert!(stdout.contains("cat => He"), "missing cat:\n{stdout}");
+    assert!(stdout.contains("checksum = 49729618"), "bad checksum:\n{stdout}");
+
+    let program = dir.join("program.bf");
+    fs::write(&program, "++++++++[>++++++++<-]>+.").expect("write program");
+    let out = Command::new(&exe).arg(&program).output().expect("run file");
+    assert!(out.status.success(), "file mode failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "A");
+
+    let out = Command::new(&exe).arg(dir.join("missing.bf")).output().expect("run missing");
+    assert!(!out.status.success(), "missing file should fail");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("cannot read"));
+}
+
+#[test]
 fn module_imports_link_and_run() {
     if !have_cc() {
         return;
