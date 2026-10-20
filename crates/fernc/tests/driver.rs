@@ -107,7 +107,8 @@ fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
     let out = link_with_c(&c_path, object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let out = Command::new(&exe).output().expect("run program");
-    (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.code().unwrap_or(-1))
+    let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
+    (stdout, out.status.code().unwrap_or(-1))
 }
 
 const PROGRAM: &str = r#"
@@ -375,26 +376,28 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
             command.arg(target);
         }
         let out = command.output().expect("run fernmake");
-        (String::from_utf8_lossy(&out.stdout).into_owned(), out.status.success())
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        (stdout, stderr, out.status.success())
     };
 
-    let (stdout, ok) = run("");
-    assert!(ok, "first build failed:\n{stdout}");
-    assert!(stdout.contains("cp source.txt out.txt"), "missing copy:\n{stdout}");
-    assert!(stdout.contains("built out.txt from source.txt"), "missing automatic vars:\n{stdout}");
+    let (stdout, stderr, ok) = run("");
+    assert!(ok, "first build failed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("cp source.txt out.txt"), "missing copy:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("built out.txt from source.txt"), "missing automatic vars:\n{stdout}\n{stderr}");
     assert_eq!(fs::read_to_string(dir.join("out.txt")).expect("read output"), "payload\n");
 
-    let (stdout, ok) = run("");
-    assert!(ok, "second build failed:\n{stdout}");
-    assert!(!stdout.contains("cp "), "rebuilt an up-to-date target:\n{stdout}");
+    let (stdout, stderr, ok) = run("");
+    assert!(ok, "second build failed:\n{stdout}\n{stderr}");
+    assert!(!stdout.contains("cp "), "rebuilt an up-to-date target:\n{stdout}\n{stderr}");
 
-    let (stdout, ok) = run("report");
-    assert!(ok, "report failed:\n{stdout}");
-    assert!(stdout.contains("report"), "missing report target:\n{stdout}");
-    assert!(!stdout.contains("cp "), "report rebuilt its prerequisite:\n{stdout}");
+    let (stdout, stderr, ok) = run("report");
+    assert!(ok, "report failed:\n{stdout}\n{stderr}");
+    assert!(stdout.contains("report"), "missing report target:\n{stdout}\n{stderr}");
+    assert!(!stdout.contains("cp "), "report rebuilt its prerequisite:\n{stdout}\n{stderr}");
 
-    let (stdout, ok) = run("clean");
-    assert!(ok, "clean failed:\n{stdout}");
+    let (stdout, stderr, ok) = run("clean");
+    assert!(ok, "clean failed:\n{stdout}\n{stderr}");
     assert!(!dir.join("out.txt").exists(), "clean left the output");
 
     fs::write(
