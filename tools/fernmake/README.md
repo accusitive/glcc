@@ -10,7 +10,11 @@ With GNU make in the repo:
 cd tools/fernmake
 make
 make run                              # runs the demo
+make install                          # installs to /usr/local/bin
+make install PREFIX=$HOME/.local      # or under another prefix
 ```
+
+`DESTDIR` stages the install into a packaging root, as usual.
 
 Without GNU make, bootstrap it once with `fernc` and `glcc`, then use
 the resulting binary for every example Makefile:
@@ -23,6 +27,7 @@ GLCC=../../target/debug/glcc \
 
 ./build/fernmake demo.mk              # default target
 ./build/fernmake demo.mk clean        # named target
+PREFIX=$HOME/.local ./build/fernmake Makefile install
 (cd ../../examples/fern/showcase && ../../../tools/fernmake/build/fernmake Makefile)
 ```
 

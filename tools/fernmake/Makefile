@@ -5,6 +5,9 @@ OPT = -O1
 RUN_ARGS = demo.mk run
 FERNC ?= $(firstword $(wildcard ../../target/debug/fernc ../../target/debug/fernc.exe) fernc)
 GLCC ?= $(firstword $(wildcard ../../target/debug/glcc ../../target/debug/glcc.exe) glcc)
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+INSTALL ?= install
 
 all: build/$(PROGRAM)
 
@@ -18,7 +21,11 @@ build/$(PROGRAM).o: $(SOURCE)
 run: build/$(PROGRAM)
 	./build/$(PROGRAM) $(RUN_ARGS)
 
+install: build/$(PROGRAM)
+	$(INSTALL) -d $(DESTDIR)$(BINDIR)
+	$(INSTALL) -m 755 build/$(PROGRAM) $(DESTDIR)$(BINDIR)/$(PROGRAM)
+
 clean:
 	rm -rf build
 
-.PHONY: all run clean
+.PHONY: all run install clean
