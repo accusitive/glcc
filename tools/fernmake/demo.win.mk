@@ -2,7 +2,7 @@
 #   ./build/fernmake.exe demo.win.mk run
 SHELL = powershell
 .SHELLFLAGS = -NoProfile -Command
-GLCC ?= ../../../target/debug/glcc.exe
+GLCC ?= ../../target/debug/glcc.exe
 
 all: build/demo.exe
 
@@ -14,6 +14,6 @@ run: build/demo.exe
 	& ./build/demo.exe
 
 clean:
-	Remove-Item -Recurse -Force -ErrorAction SilentlyContinue build
+	if (Test-Path build) { Remove-Item -Recurse -Force build }
 
 .PHONY: all run clean

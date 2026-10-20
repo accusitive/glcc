@@ -72,11 +72,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          cargo run -q -p fernc --locked -- examples/fern/make/make.fern -O1 -o "$env:RUNNER_TEMP\fernmake.obj"
+          cargo run -q -p fernc --locked -- tools/fernmake/make.fern -O1 -o "$env:RUNNER_TEMP\fernmake.obj"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo run -q -p glcc --locked -- examples/fern/make/driver.c "$env:RUNNER_TEMP\fernmake.obj" -o "$env:RUNNER_TEMP\fernmake.exe"
+          cargo run -q -p glcc --locked -- tools/fernmake/driver.c "$env:RUNNER_TEMP\fernmake.obj" -o "$env:RUNNER_TEMP\fernmake.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          foreach ($dir in @("make", "brainfuck", "modules", "showcase")) {
+          Push-Location tools/fernmake
+          & "$env:RUNNER_TEMP\fernmake.exe" Makefile.win run
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          foreach ($dir in @("brainfuck", "modules", "showcase")) {
             Push-Location "examples/fern/$dir"
             & "$env:RUNNER_TEMP\fernmake.exe" Makefile.win
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

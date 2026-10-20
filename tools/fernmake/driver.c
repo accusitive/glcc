@@ -1,4 +1,4 @@
-/* C harness for make.fern: pass a Makefile and optional target on the
+/* C harness for fernmake: pass a Makefile and optional target on the
    command line. The default Makefile is demo.mk in the current dir. */
 #include <stdio.h>
 

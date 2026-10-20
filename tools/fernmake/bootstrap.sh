@@ -1,7 +1,7 @@
 #!/bin/sh
 # Build fernmake without assuming GNU make is installed. Once this script
 # has produced build/fernmake, that binary can rebuild itself from the
-# example Makefile.
+# tool's Makefile.
 set -eu
 
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
