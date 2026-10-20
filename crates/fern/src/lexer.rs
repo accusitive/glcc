@@ -15,6 +15,10 @@ pub enum Tok {
     Extern,
     Fun,
     Let,
+    Import,
+    Use,
+    As,
+    Priv,
     If,
     Then,
     Else,
@@ -45,6 +49,7 @@ pub enum Tok {
     Semi,
     Colon,
     ColonColon, // ::
+    Dot,        // .
     Arrow,      // ->
     FatArrow,   // =>
     Eq,         // =
@@ -90,6 +95,10 @@ impl Tok {
             Tok::Extern => "extern",
             Tok::Fun => "fun",
             Tok::Let => "let",
+            Tok::Import => "import",
+            Tok::Use => "use",
+            Tok::As => "as",
+            Tok::Priv => "priv",
             Tok::If => "if",
             Tok::Then => "then",
             Tok::Else => "else",
@@ -108,6 +117,7 @@ impl Tok {
             Tok::Semi => ";",
             Tok::Colon => ":",
             Tok::ColonColon => "::",
+            Tok::Dot => ".",
             Tok::Arrow => "->",
             Tok::FatArrow => "=>",
             Tok::Eq => "=",
@@ -275,6 +285,10 @@ impl<'s> Lexer<'s> {
             "extern" => Tok::Extern,
             "fun" => Tok::Fun,
             "let" => Tok::Let,
+            "import" => Tok::Import,
+            "use" => Tok::Use,
+            "as" => Tok::As,
+            "priv" => Tok::Priv,
             "if" => Tok::If,
             "then" => Tok::Then,
             "else" => Tok::Else,
@@ -551,6 +565,13 @@ impl<'s> Lexer<'s> {
                         span: self.span(lo, start + 1),
                     });
                 }
+                Ok(())
+            }
+            b'.' => {
+                tokens.push(Token {
+                    tok: Tok::Dot,
+                    span: self.span(lo, start + 1),
+                });
                 Ok(())
             }
             b':' => {

@@ -13,6 +13,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::ast::{self, Program};
@@ -20,7 +22,7 @@ use crate::defs::{Defs, FnId, ValueId};
 use crate::hir::{BodyKey, HirProgram};
 use crate::intern::Interner;
 use crate::span::{self, Diag, FileId, KResult, Span};
-use crate::{check, defs, lexer, lower, parser, prelude, MirModule};
+use crate::{check, defs, lexer, lower, parser, prelude, resolve, MirModule};
 
 #[derive(Debug, Clone)]
 pub struct ParseResult {
@@ -31,6 +33,7 @@ pub struct ParseResult {
 
 struct SourceFile {
     path: String,
+    module_path: Vec<String>,
     text: String,
     revision: u64,
 }
@@ -55,6 +58,8 @@ pub enum ItemKindKey {
     Extern,
     Fun,
     Let,
+    Import,
+    Use,
 }
 
 /// Identity of one top-level item: where it sits and a hash of its
@@ -113,6 +118,10 @@ pub struct LowerStats {
 
 pub struct Session {
     files: Vec<SourceFile>,
+    module_root: PathBuf,
+    modules: HashMap<Vec<String>, FileId>,
+    module_files: Vec<FileId>,
+    loaded_files: HashMap<PathBuf, FileId>,
     parse_cache: RefCell<HashMap<FileId, ParseCache>>,
     analysis_cache: RefCell<Option<AnalysisCache>>,
     unit_cache: RefCell<Option<UnitCache>>,
@@ -134,9 +143,14 @@ impl Session {
         Session {
             files: vec![SourceFile {
                 path: "<prelude>".to_string(),
+                module_path: Vec::new(),
                 text: prelude::SOURCE.to_string(),
                 revision: 0,
             }],
+            module_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            modules: HashMap::new(),
+            module_files: Vec::new(),
+            loaded_files: HashMap::new(),
             parse_cache: RefCell::new(HashMap::new()),
             analysis_cache: RefCell::new(None),
             unit_cache: RefCell::new(None),
@@ -151,10 +165,153 @@ impl Session {
         let file = FileId(self.files.len() as u32);
         self.files.push(SourceFile {
             path: path.into(),
+            module_path: Vec::new(),
             text: text.into(),
             revision: 0,
         });
         file
+    }
+
+    pub fn add_module_file(
+        &mut self,
+        path: impl Into<String>,
+        module_path: Vec<String>,
+        text: impl Into<String>,
+    ) -> FileId {
+        let file = FileId(self.files.len() as u32);
+        self.files.push(SourceFile {
+            path: path.into(),
+            module_path,
+            text: text.into(),
+            revision: 0,
+        });
+        file
+    }
+
+    pub fn module_path(&self, file: FileId) -> &[String] {
+        &self.files[file.index()].module_path
+    }
+
+    pub fn module_files(&self) -> &[FileId] {
+        &self.module_files
+    }
+
+    pub fn set_module_root(&mut self, root: impl Into<PathBuf>) {
+        self.module_root = root.into();
+    }
+
+    /// Load an entry file and every module it imports, returning the files
+    /// in prelude-independent order: the entry first, then imports.
+    pub fn load_entry(&mut self, entry: &Path) -> Result<Vec<FileId>, Vec<Diag>> {
+        let canonical = fs::canonicalize(entry).map_err(|error| {
+            vec![Diag::new(
+                format!("cannot read `{}`: {error}", entry.display()),
+                Span::new(0, 0),
+            )]
+        })?;
+        self.module_root = canonical
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let text = fs::read_to_string(&canonical).map_err(|error| {
+            vec![Diag::new(
+                format!("cannot read `{}`: {error}", canonical.display()),
+                Span::new(0, 0),
+            )]
+        })?;
+        let file = self.add_module_file(canonical.display().to_string(), Vec::new(), text);
+        if let Err(diag) = self.load_imports(file) {
+            return Err(vec![diag]);
+        }
+        let mut files = vec![FileId::PRELUDE, file];
+        files.extend(self.module_files.iter().copied());
+        Ok(files)
+    }
+
+    /// Load one module into the session. REPL imports use this with the
+    /// session's module root; the compiler driver uses [`Session::load_entry`].
+    pub fn load_import(&mut self, path: Vec<String>) -> Result<FileId, Vec<Diag>> {
+        self.load_module(path, Span::new(0, 0))
+            .map_err(|diag| vec![diag])
+    }
+
+    fn load_imports(&mut self, file: FileId) -> KResult<()> {
+        let parsed = self.parse(file);
+        let imports: Vec<(Vec<String>, Span)> = parsed
+            .program
+            .items
+            .iter()
+            .filter_map(|item| match &item.kind {
+                ast::ItemKind::Import(import) => Some((import.path.clone(), import.span)),
+                _ => None,
+            })
+            .collect();
+        for (path, span) in imports {
+            self.load_module(path, span)?;
+        }
+        Ok(())
+    }
+
+    fn load_module(&mut self, path: Vec<String>, span: Span) -> KResult<FileId> {
+        if let Some(file) = self.modules.get(&path) {
+            return Ok(*file);
+        }
+        if path.is_empty() {
+            return Err(Diag::new("an import needs a module path", span));
+        }
+        let source = self.find_module(&path, span)?;
+        let canonical = fs::canonicalize(&source).map_err(|error| {
+            Diag::new(
+                format!("cannot read `{}`: {error}", source.display()),
+                span,
+            )
+        })?;
+        if let Some(file) = self.loaded_files.get(&canonical) {
+            let loaded = self.module_path(*file).join("::");
+            return Err(Diag::new(
+                format!(
+                    "`{}` is already loaded as module `{loaded}`",
+                    canonical.display()
+                ),
+                span,
+            ));
+        }
+        let text = fs::read_to_string(&canonical).map_err(|error| {
+            Diag::new(
+                format!("cannot read `{}`: {error}", canonical.display()),
+                span,
+            )
+        })?;
+        let file = self.add_module_file(canonical.display().to_string(), path.clone(), text);
+        self.modules.insert(path, file);
+        self.module_files.push(file);
+        self.loaded_files.insert(canonical, file);
+        self.load_imports(file)?;
+        Ok(file)
+    }
+
+    fn find_module(&self, path: &[String], span: Span) -> KResult<PathBuf> {
+        let joined = path.join("/");
+        let leaf = self.module_root.join(format!("{joined}.fern"));
+        let package = self
+            .module_root
+            .join(&joined)
+            .join(format!("{}.fern", path.last().expect("non-empty module path")));
+        if leaf.is_file() {
+            Ok(leaf)
+        } else if package.is_file() {
+            Ok(package)
+        } else {
+            Err(Diag::new(
+                format!(
+                    "cannot find module `{}` (tried `{}` and `{}`)",
+                    path.join("::"),
+                    leaf.display(),
+                    package.display()
+                ),
+                span,
+            ))
+        }
     }
 
     pub fn set_text(&mut self, file: FileId, text: impl Into<String>) {
@@ -199,7 +356,7 @@ impl Session {
                 }
             }
             Err(diag) => ParseResult {
-                program: Program { items: Vec::new() },
+                program: Program::single(Vec::new()),
                 incomplete: diag.incomplete,
                 diags: vec![diag],
             },
@@ -215,7 +372,16 @@ impl Session {
     }
 
     /// Merge the parsed items of `files`, in order, into one program.
+    ///
+    /// Module zero is always the prelude and module one is the root. Both
+    /// share an empty canonical prefix, so single-file programs keep using
+    /// bare names; their IDs still differ for ownership checks.
     pub fn program(&self, files: &[FileId]) -> (Program, Vec<Diag>, bool) {
+        let mut modules = vec![
+            ast::ModuleInfo { path: Vec::new() },
+            ast::ModuleInfo { path: Vec::new() },
+        ];
+        let mut module_ids: HashMap<Vec<String>, ast::ModuleId> = HashMap::new();
         let mut items = Vec::new();
         let mut diags = Vec::new();
         let mut incomplete = false;
@@ -223,9 +389,28 @@ impl Session {
             let parsed = self.parse(file);
             diags.extend(parsed.diags.iter().cloned());
             incomplete |= parsed.incomplete;
-            items.extend(parsed.program.items.iter().cloned());
+            let module = if file == FileId::PRELUDE {
+                ast::ModuleId::ROOT
+            } else {
+                let path = self.module_path(file);
+                if path.is_empty() {
+                    ast::ModuleId(1)
+                } else {
+                    *module_ids.entry(path.to_vec()).or_insert_with(|| {
+                        let id = ast::ModuleId(modules.len() as u32);
+                        modules.push(ast::ModuleInfo {
+                            path: path.to_vec(),
+                        });
+                        id
+                    })
+                }
+            };
+            items.extend(parsed.program.items.iter().cloned().map(|mut item| {
+                item.module = module;
+                item
+            }));
         }
-        (Program { items }, diags, incomplete)
+        (Program { modules, items }, diags, incomplete)
     }
 
     /// Parse and check `files`, without lowering. This is the query LSP
@@ -246,12 +431,28 @@ impl Session {
             }
         }
 
-        let (program, diags, _) = self.program(files);
+        let (mut program, diags, _) = self.program(files);
         if !diags.is_empty() {
             return Err(diags);
         }
+        let modular = program.modules.iter().any(|module| !module.path.is_empty())
+            || program.items.iter().any(|item| {
+                matches!(item.kind, ast::ItemKind::Import(_) | ast::ItemKind::Use(_))
+            });
+        if modular {
+            resolve::qualify(&mut program).map_err(|diag| vec![diag])?;
+        }
         let items = self.item_keys(&program);
         self.unit_compiles.set(self.unit_compiles.get() + 1);
+
+        if modular {
+            let analysis = self.analyze_full(program, items)?;
+            *self.analysis_cache.borrow_mut() = Some(AnalysisCache {
+                key,
+                analysis: analysis.clone(),
+            });
+            return Ok(analysis);
+        }
 
         let previous = self.analysis_cache.borrow().as_ref().map(|c| c.analysis.clone());
         let analysis = match previous {
@@ -451,6 +652,8 @@ fn item_kind(kind: &ast::ItemKind) -> ItemKindKey {
         ast::ItemKind::Extern(_) => ItemKindKey::Extern,
         ast::ItemKind::Fun(_) => ItemKindKey::Fun,
         ast::ItemKind::Let(_) => ItemKindKey::Let,
+        ast::ItemKind::Import(_) => ItemKindKey::Import,
+        ast::ItemKind::Use(_) => ItemKindKey::Use,
     }
 }
 
@@ -474,7 +677,7 @@ fn item_counts(items: &[ast::Item]) -> (usize, usize, usize) {
             ast::ItemKind::Fun(_) => fns += 1,
             ast::ItemKind::Let(_) => values += 1,
             ast::ItemKind::Instance(_) => instances += 1,
-            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
+            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     (fns, values, instances)
@@ -503,7 +706,7 @@ fn roots_of(program: &Program, from: usize) -> (Vec<BodyKey>, Vec<String>) {
                 names.push(v.name.clone());
                 value_index += 1;
             }
-            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Instance(_) | ast::ItemKind::Extern(_) => {}
+            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Instance(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     (roots, names)
@@ -568,12 +771,12 @@ mod tests {
     #[test]
     fn parse_is_cached_until_the_revision_changes() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun main() = 1");
+        let file = session.add_file("t.fern", "fun main() : Int = 1");
         let first = session.parse(file);
         let second = session.parse(file);
         assert!(Rc::ptr_eq(&first, &second));
 
-        session.set_text(file, "fun main() = 2");
+        session.set_text(file, "fun main() : Int = 2");
         let third = session.parse(file);
         assert!(!Rc::ptr_eq(&second, &third));
     }
@@ -581,14 +784,14 @@ mod tests {
     #[test]
     fn unchanged_unit_does_not_recompile() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun main() = 1");
+        let file = session.add_file("t.fern", "fun main() : Int = 1");
         let files = unit(&session, file);
 
         session.compile(&files).expect("compiles");
         session.compile(&files).expect("compiles again");
         assert_eq!(session.unit_compiles.get(), 1);
 
-        session.set_text(file, "fun main() = 2");
+        session.set_text(file, "fun main() : Int = 2");
         let files = unit(&session, file);
         session.compile(&files).expect("compiles after edit");
         assert_eq!(session.unit_compiles.get(), 2);
@@ -597,14 +800,14 @@ mod tests {
     #[test]
     fn analysis_is_reused_for_an_unchanged_unit() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun main() = 1");
+        let file = session.add_file("t.fern", "fun main() : Int = 1");
         let files = unit(&session, file);
         let first = session.analyze(&files).expect("checks");
         let second = session.analyze(&files).expect("checks again");
         assert!(Rc::ptr_eq(&first, &second));
         assert_eq!(session.unit_compiles.get(), 1);
 
-        session.set_text(file, "fun main() = 2");
+        session.set_text(file, "fun main() : Int = 2");
         let third = session.analyze(&unit(&session, file)).expect("checks");
         assert!(!Rc::ptr_eq(&first, &third));
     }
@@ -612,7 +815,7 @@ mod tests {
     #[test]
     fn session_surfaces_recovered_items_and_diags() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun broken( = 1\nfun ok() = 2\n");
+        let file = session.add_file("t.fern", "fun broken( = 1\nfun ok() : Int = 2\n");
         let parsed = session.parse(file);
         assert!(!parsed.diags.is_empty());
         let names: Vec<&str> = parsed
@@ -630,8 +833,8 @@ mod tests {
     #[test]
     fn multiple_files_merge_in_order() {
         let mut session = Session::new();
-        let a = session.add_file("a.fern", "fun twice(x) = x * 2");
-        let b = session.add_file("b.fern", "fun main() = twice(21)");
+        let a = session.add_file("a.fern", "fun twice(x : Int) : Int = x * 2");
+        let b = session.add_file("b.fern", "fun main() : Int = twice(21)");
         let files = [session.prelude(), a, b];
         let (program, diags, _) = session.program(&files);
         assert!(diags.is_empty(), "{diags:?}");
@@ -650,28 +853,43 @@ mod tests {
     #[test]
     fn appending_a_definition_rechecks_only_it() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\nfun b() = 2\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\nfun b() : Int = 2\n");
         let files = unit(&session, file);
         session.analyze(&files).expect("checks");
 
-        session.set_text(file, "fun a() = 1\nfun b() = 2\nfun c() = 3\n");
+        session.set_text(file, "fun a() : Int = 1\nfun b() : Int = 2\nfun c() : Int = 3\n");
         let second = session.analyze(&files).expect("checks again");
         assert_eq!(session.unit_compiles.get(), 2);
         assert_eq!(second.checked.get(), 1, "only the appended item is checked");
     }
 
     #[test]
-    fn replacing_a_temporary_expression_rechecks_only_it() {
+    fn appended_functions_can_forward_reference_each_other() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\n");
         let files = unit(&session, file);
         session.analyze(&files).expect("checks");
 
-        session.set_text(file, "fun a() = 1\nfun __repl_0() = (a())\n");
+        session.set_text(
+            file,
+            "fun a() : Int = 1\nfun f() : Int = g()\nfun g() : Int = 2\n",
+        );
+        let second = session.analyze(&files).expect("checks forward references");
+        assert_eq!(second.checked.get(), 2, "both appended bodies are checked");
+    }
+
+    #[test]
+    fn replacing_a_temporary_expression_rechecks_only_it() {
+        let mut session = Session::new();
+        let file = session.add_file("t.fern", "fun a() : Int = 1\n");
+        let files = unit(&session, file);
+        session.analyze(&files).expect("checks");
+
+        session.set_text(file, "fun a() : Int = 1\nfun __repl_0() : Int = (a())\n");
         let first = session.analyze(&files).expect("checks the expression");
         assert_eq!(first.checked.get(), 1);
 
-        session.set_text(file, "fun a() = 1\nfun __repl_1() = (a() + 1)\n");
+        session.set_text(file, "fun a() : Int = 1\nfun __repl_1() : Int = (a() + 1)\n");
         let second = session.analyze(&files).expect("checks the next expression");
         assert_eq!(second.checked.get(), 1, "only the new expression is checked");
         assert!(
@@ -684,11 +902,11 @@ mod tests {
     #[test]
     fn editing_the_last_item_rechecks_from_there() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\nfun b() = 2\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\nfun b() : Int = 2\n");
         let files = unit(&session, file);
         session.analyze(&files).expect("checks");
 
-        session.set_text(file, "fun a() = 1\nfun b() = 20\n");
+        session.set_text(file, "fun a() : Int = 1\nfun b() : Int = 20\n");
         let second = session.analyze(&files).expect("checks the edit");
         assert_eq!(second.checked.get(), 1, "only the edited item is checked");
     }
@@ -696,12 +914,12 @@ mod tests {
     #[test]
     fn appending_lowers_only_the_new_body() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\nfun b() = 2\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\nfun b() : Int = 2\n");
         let files = unit(&session, file);
         session.compile_shared(&files).expect("compiles");
         assert!(session.lower_stats().full);
 
-        session.set_text(file, "fun a() = 1\nfun b() = 2\nfun c() = 3\n");
+        session.set_text(file, "fun a() : Int = 1\nfun b() : Int = 2\nfun c() : Int = 3\n");
         let module = session.compile_shared(&files).expect("compiles again");
         let stats = session.lower_stats();
         assert!(!stats.full, "the new item resumes the previous lowering");
@@ -713,16 +931,16 @@ mod tests {
     #[test]
     fn replacing_an_expression_keeps_earlier_bodies() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\n");
         let files = unit(&session, file);
         session.compile_shared(&files).expect("compiles the definitions");
 
-        session.set_text(file, "fun a() = 1\nfun __repl_0() = (a())\n");
+        session.set_text(file, "fun a() : Int = 1\nfun __repl_0() : Int = (a())\n");
         let module = session.compile_shared(&files).expect("compiles");
         assert!(module.funcs.iter().any(|f| f.name == "__repl_0"));
         assert!(!session.lower_stats().full);
 
-        session.set_text(file, "fun a() = 1\nfun __repl_1() = (a() + 1)\n");
+        session.set_text(file, "fun a() : Int = 1\nfun __repl_1() : Int = (a() + 1)\n");
         let module = session.compile_shared(&files).expect("compiles again");
         assert!(!session.lower_stats().full, "the prefix is reused");
         assert_eq!(session.lower_stats().bodies, 1, "only the new expression is emitted");
@@ -733,11 +951,11 @@ mod tests {
     #[test]
     fn editing_a_definition_drops_the_stale_lowering() {
         let mut session = Session::new();
-        let file = session.add_file("t.fern", "fun a() = 1\nfun b() = 2\n");
+        let file = session.add_file("t.fern", "fun a() : Int = 1\nfun b() : Int = 2\n");
         let files = unit(&session, file);
         session.compile_shared(&files).expect("compiles");
 
-        session.set_text(file, "fun a() = 1\nfun b() = 20\n");
+        session.set_text(file, "fun a() : Int = 1\nfun b() : Int = 20\n");
         let module = session.compile_shared(&files).expect("recompiles");
         assert!(session.lower_stats().full, "a changed body forces a fresh module");
         assert_eq!(module.funcs.iter().filter(|f| f.name == "b").count(), 1);

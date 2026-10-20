@@ -133,9 +133,9 @@ fn collects_extern_signatures() {
 
 #[test]
 fn externs_share_the_value_namespace() {
-    let err = collect_err("fun f(x) = x\nextern f : Int -> Int");
+    let err = collect_err("fun f(x : Int) : Int = x\nextern f : Int -> Int");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
-    let err = collect_err("extern f : Int -> Int\nfun f(x) = x");
+    let err = collect_err("extern f : Int -> Int\nfun f(x : Int) : Int = x");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
 }
 
@@ -144,7 +144,7 @@ fn reports_duplicate_definitions() {
     let err = collect_err("data Foo = A\ndata Foo = B");
     assert!(err.msg.contains("duplicate type name"), "{}", err.msg);
 
-    let err = collect_err("fun f(x) = x\nlet f = 1");
+    let err = collect_err("fun f(x : Int) : Int = x\nlet f = 1");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
 
     let err = collect_err("data A = Same\ndata B = Same");
@@ -159,7 +159,7 @@ fn reports_unknown_types() {
 
 #[test]
 fn fern_prefix_is_reserved_for_the_runtime() {
-    for src in ["fun fern_alloc(x) = x", "let fern_two = 2"] {
+    for src in ["fun fern_alloc(x : Int) : Int = x", "let fern_two = 2"] {
         let diag = collect_err(src);
         assert!(diag.msg.contains("reserved"), "{src}: {}", diag.msg);
     }

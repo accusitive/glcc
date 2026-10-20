@@ -140,8 +140,8 @@ impl<'d> Check<'d> {
     }
 
     fn run(&mut self, program: &ast::Program) -> KResult<HirProgram> {
-        self.fn_schemes = vec![None; self.defs.fns.len()];
-        self.value_schemes = vec![None; self.defs.values.len()];
+        self.fn_schemes = self.defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        self.value_schemes = self.defs.values.iter().map(|v| v.scheme.clone()).collect();
         self.run_from(program, 0)
     }
 
@@ -152,12 +152,20 @@ impl<'d> Check<'d> {
                 ast::ItemKind::Instance(_) => instance_index += 1,
                 ast::ItemKind::Fun(_) => fn_index += 1,
                 ast::ItemKind::Let(_) => value_index += 1,
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
             }
         }
         for item in &program.items[first_item..] {
             match &item.kind {
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) => {}
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     self.check_instance(instance_index)?;
                     instance_index += 1;
@@ -180,22 +188,31 @@ impl<'d> Check<'d> {
     fn check_fn(&mut self, id: FnId, f: &ast::FnDecl) -> KResult<()> {
         let span = f.span;
         let name = f.name.clone();
-        let (scheme, hir_fn) = self.check_root(BodyKey::Fn(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
-            check_param_names(&f.params, span)?;
-            let ret = this.infer.fresh();
-            let mut params = Vec::new();
-            let mut param_tys = Vec::new();
-            for p in &f.params {
-                let t = this.infer.fresh();
-                param_tys.push(t.clone());
-                params.push(this.check_pat(p, &t, span)?);
-            }
-            let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, t| Ty::arrow(t.clone(), acc));
-            this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
-            let body = this.check_expr(&f.body, &ret)?;
-            Ok((params, ret, body, fn_ty))
-        })?;
-        self.fn_schemes[id.index()] = Some(scheme);
+        let def = &self.defs.fns[id.index()];
+        let declared = def.scheme.clone().expect("function signatures are resolved during collection");
+        let param_tys: Vec<Ty> = def.params.iter().map(|p| p.ty.clone()).collect();
+        let ret = def.ret.clone();
+        let fn_ty = declared.ty.clone();
+        let (_, hir_fn) = self.check_root(
+            BodyKey::Fn(id),
+            name,
+            span,
+            declared.vars.clone(),
+            Vec::new(),
+            false,
+            Some(declared.clone()),
+            &mut |this| {
+                check_param_names(f.params.iter().map(|p| &p.pat), span)?;
+                let mut params = Vec::new();
+                for (param, ty) in f.params.iter().zip(&param_tys) {
+                    params.push(this.check_pat(&param.pat, ty, span)?);
+                }
+                this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
+                let body = this.check_expr(&f.body, &ret)?;
+                Ok((params, ret.clone(), body, fn_ty.clone()))
+            },
+        )?;
+        self.fn_schemes[id.index()] = Some(declared);
         self.hir.bodies.push(hir_fn);
         Ok(())
     }
@@ -203,12 +220,42 @@ impl<'d> Check<'d> {
     fn check_value(&mut self, id: ValueId, v: &ast::ValueDecl) -> KResult<()> {
         let span = v.span;
         let name = v.name.clone();
-        let (scheme, hir_fn) = self.check_root(BodyKey::Value(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
-            let ty = this.infer.fresh();
-            this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-            let body = this.check_expr(&v.body, &ty)?;
-            Ok((Vec::new(), ty.clone(), body, ty))
-        })?;
+        if let Some(declared) = self.defs.values[id.index()].scheme.clone() {
+            let ty = declared.ty.clone();
+            let (_, hir_fn) = self.check_root(
+                BodyKey::Value(id),
+                name,
+                span,
+                declared.vars.clone(),
+                Vec::new(),
+                false,
+                Some(declared.clone()),
+                &mut |this| {
+                    this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+                    let body = this.check_expr(&v.body, &ty)?;
+                    Ok((Vec::new(), ty.clone(), body, ty.clone()))
+                },
+            )?;
+            self.value_schemes[id.index()] = Some(declared);
+            self.hir.bodies.push(hir_fn);
+            return Ok(());
+        }
+
+        let (scheme, hir_fn) = self.check_root(
+            BodyKey::Value(id),
+            name,
+            span,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            &mut |this| {
+                let ty = this.infer.fresh();
+                this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+                let body = this.check_expr(&v.body, &ty)?;
+                Ok((Vec::new(), ty.clone(), body, ty))
+            },
+        )?;
         self.value_schemes[id.index()] = Some(scheme);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -274,8 +321,9 @@ impl<'d> Check<'d> {
             generics,
             bounds,
             true,
+            None,
             &mut |this| {
-                check_param_names(&impl_m.params, span)?;
+                check_param_names(impl_m.params.iter(), span)?;
                 let (param_tys, ret) = split_arrows(&sig);
                 if param_tys.len() != impl_m.params.len() {
                     return Err(Diag::new(
@@ -312,6 +360,7 @@ impl<'d> Check<'d> {
         generics: Vec<(String, Kind)>,
         bounds: Vec<Bound>,
         is_method: bool,
+        declared: Option<Scheme>,
         build: &mut dyn FnMut(&mut Check<'d>) -> KResult<(Vec<HirPat>, Ty, HirExpr, Ty)>,
     ) -> KResult<(Scheme, HirFn)> {
         let closure_start = self.hir.closures.len();
@@ -327,7 +376,7 @@ impl<'d> Check<'d> {
         };
         let state = self.bodies.pop().unwrap();
 
-        let scheme = self.infer.generalize(&fn_ty);
+        let scheme = declared.unwrap_or_else(|| self.infer.generalize(&fn_ty));
         let item_generics = if is_method { generics } else { scheme.vars.clone() };
         let allowed: HashSet<String> = item_generics.iter().map(|(n, _)| n.clone()).collect();
         let ids = self.infer.unbound_ids();
@@ -1339,7 +1388,7 @@ fn split_arrows(ty: &Ty) -> (Vec<Ty>, Ty) {
 
 /// Parameter lists bind distinct names: `fun f(x, x)` is an error even
 /// though each pattern alone is fine.
-fn check_param_names(params: &[ast::Pat], span: Span) -> KResult<()> {
+fn check_param_names<'a>(params: impl IntoIterator<Item = &'a ast::Pat>, span: Span) -> KResult<()> {
     let mut seen = HashSet::new();
     for p in params {
         for name in p.binds() {

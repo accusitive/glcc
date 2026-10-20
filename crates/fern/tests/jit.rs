@@ -135,54 +135,54 @@ fn run_f64(src: &str) -> f64 {
 
 #[test]
 fn arithmetic() {
-    assert_eq!(run_i64("fun main() = 2 + 3 * 4"), 14);
-    assert_eq!(run_i64("fun main() = (10 - 3) * 2"), 14);
-    assert_eq!(run_i64("fun main() = -5 + 12"), 7);
-    assert_eq!(run_i64("fun main() = 17 / 5"), 3);
-    assert_eq!(run_i64("fun main() = -17 / 5"), -3);
+    assert_eq!(run_i64("fun main() : Int = 2 + 3 * 4"), 14);
+    assert_eq!(run_i64("fun main() : Int = (10 - 3) * 2"), 14);
+    assert_eq!(run_i64("fun main() : Int = -5 + 12"), 7);
+    assert_eq!(run_i64("fun main() : Int = 17 / 5"), 3);
+    assert_eq!(run_i64("fun main() : Int = -17 / 5"), -3);
 }
 
 #[test]
 fn conditionals() {
-    assert_eq!(run_i64("fun abs(x) = if x < 0 then -x else x\nfun main() = abs(-9)"), 9);
-    assert_eq!(run_i64("fun max(x, y) = if x > y then x else y\nfun main() = max(3, 8)"), 8);
-    assert_eq!(run_i64("fun main() = if true then 1 else 2"), 1);
+    assert_eq!(run_i64("fun abs(x : Int) : Int = if x < 0 then -x else x\nfun main() : Int = abs(-9)"), 9);
+    assert_eq!(run_i64("fun max(x : Int, y : Int) : Int = if x > y then x else y\nfun main() : Int = max(3, 8)"), 8);
+    assert_eq!(run_i64("fun main() : Int = if true then 1 else 2"), 1);
 }
 
 #[test]
 fn short_circuit() {
-    assert_eq!(run_i64("fun main() = if 1 < 2 && 2 < 3 then 1 else 0"), 1);
-    assert_eq!(run_i64("fun main() = if 1 < 2 || 2 < 1 then 1 else 0"), 1);
-    assert_eq!(run_i64("fun main() = if 3 < 2 && 1 < 2 then 1 else 0"), 0);
-    assert_eq!(run_i64("fun main() = if 3 < 2 || 2 < 1 then 1 else 0"), 0);
+    assert_eq!(run_i64("fun main() : Int = if 1 < 2 && 2 < 3 then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() : Int = if 1 < 2 || 2 < 1 then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() : Int = if 3 < 2 && 1 < 2 then 1 else 0"), 0);
+    assert_eq!(run_i64("fun main() : Int = if 3 < 2 || 2 < 1 then 1 else 0"), 0);
 }
 
 #[test]
 fn recursion() {
-    assert_eq!(run_i64("fun fac(n) = if n == 0 then 1 else n * fac(n - 1)\nfun main() = fac(6)"), 720);
-    assert_eq!(run_i64("fun fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfun main() = fib(12)"), 144);
+    assert_eq!(run_i64("fun fac(n : Int) : Int = if n == 0 then 1 else n * fac(n - 1)\nfun main() : Int = fac(6)"), 720);
+    assert_eq!(run_i64("fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)\nfun main() : Int = fib(12)"), 144);
 }
 
 #[test]
 fn lists() {
     assert_eq!(
         run_i64(
-            "fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
-             fun main() = sum([1, 2, 3])"
+            "fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
+             fun main() : Int = sum([1, 2, 3])"
         ),
         6
     );
     assert_eq!(
         run_i64(
-            "fun len(xs) = match xs { case Nil => 0 case Cons(_, xs) => 1 + len(xs) }\n\
-             fun main() = len(Cons(1, Cons(2, Nil)))"
+            "fun len(xs : List a) : Int = match xs { case Nil => 0 case Cons(_, xs) => 1 + len(xs) }\n\
+             fun main() : Int = len(Cons(1, Cons(2, Nil)))"
         ),
         2
     );
     assert_eq!(
         run_i64(
-            "fun head(xs) = match xs { case Nil => -1 case Cons(x, _) => x }\n\
-             fun main() = head(Cons(4, Nil)) + head(Nil)"
+            "fun head(xs : List Int) : Int = match xs { case Nil => -1 case Cons(x, _) => x }\n\
+             fun main() : Int = head(Cons(4, Nil)) + head(Nil)"
         ),
         3
     );
@@ -191,35 +191,35 @@ fn lists() {
 #[test]
 fn heap_keeps_up_with_allocations() {
     let src = "\
-        fun range(n) = if n == 0 then Nil else Cons(n, range(n - 1))\n\
-        fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
-        fun main() = sum(range(500))";
+        fun range(n : Int) : List Int = if n == 0 then Nil else Cons(n, range(n - 1))\n\
+        fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
+        fun main() : Int = sum(range(500))";
     assert_eq!(run_i64(src), 500 * 501 / 2);
 }
 
 #[test]
 fn tuples_and_patterns() {
-    assert_eq!(run_i64("fun fst(p) = match p { case (a, _) => a }\nfun main() = fst((7, 9))"), 7);
+    assert_eq!(run_i64("fun fst(p : (a, b)) : a = match p { case (a, _) => a }\nfun main() : Int = fst((7, 9))"), 7);
     assert_eq!(
         run_i64(
-            "fun fst(p) = match p { case (a, _) => a }\n\
-             fun swap(p) = match p { case (a, b) => (b, a) }\n\
-             fun main() = fst(swap((1, 2)))"
+            "fun fst(p : (a, b)) : a = match p { case (a, _) => a }\n\
+             fun swap(p : (a, b)) : (b, a) = match p { case (a, b) => (b, a) }\n\
+             fun main() : Int = fst(swap((1, 2)))"
         ),
         2
     );
-    assert_eq!(run_i64("fun main() = { let (a, b) = (3, 4); a * b }"), 12);
-    assert_eq!(run_i64("fun main() = { let u = {}; 1 }"), 1);
+    assert_eq!(run_i64("fun main() : Int = { let (a, b) = (3, 4); a * b }"), 12);
+    assert_eq!(run_i64("fun main() : Int = { let u = {}; 1 }"), 1);
 }
 
 #[test]
 fn parameter_patterns() {
-    assert_eq!(run_i64("fun uncurry((a, b)) = a * b\nfun main() = uncurry((6, 7))"), 42);
+    assert_eq!(run_i64("fun uncurry((a, b) : (Int, Int)) : Int = a * b\nfun main() : Int = uncurry((6, 7))"), 42);
     assert_eq!(
         run_i64(
-            "fun swap((a, b)) = (b, a)\n\
-             fun fst(p) = match p { case (a, _) => a }\n\
-             fun main() = fst(swap((1, 2)))"
+            "fun swap((a, b) : (Int, Int)) : (Int, Int) = (b, a)\n\
+             fun fst(p : (a, b)) : a = match p { case (a, _) => a }\n\
+             fun main() : Int = fst(swap((1, 2)))"
         ),
         2
     );
@@ -229,21 +229,21 @@ fn parameter_patterns() {
 fn user_data_types() {
     let src = "\
         data Shape = Circle(Int) | Rect(Int, Int) | Point\n\
-        fun area(s) = match s {\n\
+        fun area(s : Shape) : Int = match s {\n\
             case Circle(r) => r * r * 3\n\
             case Rect(w, h) => w * h\n\
             case Point => 0\n\
         }\n\
-        fun main() = area(Circle(2)) + area(Rect(3, 4)) + area(Point)\n\
+        fun main() : Int = area(Circle(2)) + area(Rect(3, 4)) + area(Point)\n\
             + match Point { case Point => 1 }";
     assert_eq!(run_i64(src), 25);
 }
 
 #[test]
 fn boolean_not() {
-    assert!(run_bool("fun main() = not(false)"));
-    assert!(!run_bool("fun main() = not(1 < 2)"));
-    assert!(run_bool("fun main() = not(eq([1], [2]))"));
+    assert!(run_bool("fun main() : Bool = not(false)"));
+    assert!(!run_bool("fun main() : Bool = not(1 < 2)"));
+    assert!(run_bool("fun main() : Bool = not(eq([1], [2]))"));
 }
 
 #[test]
@@ -252,30 +252,30 @@ fn self_reference_as_a_value() {
     // their thunks must not collide on a placeholder symbol. `a` is the
     // identity, `b` is constantly zero, so a mix-up changes the answer.
     let src = "\
-        fun twice(f, x) = f(f(x))\n\
-        fun a(n) = if n == 0 then 0 else twice(a, n - 1) + 1\n\
-        fun b(n) = if n == 0 then 0 else twice(b, n - 1) * 2\n\
-        fun main() = a(3) * 100 + b(999)";
+        fun twice(f : a -> a, x : a) : a = f(f(x))\n\
+        fun a(n : Int) : Int = if n == 0 then 0 else twice(a, n - 1) + 1\n\
+        fun b(n : Int) : Int = if n == 0 then 0 else twice(b, n - 1) * 2\n\
+        fun main() : Int = a(3) * 100 + b(999)";
     assert_eq!(run_i64(src), 300);
 }
 
 #[test]
 fn literal_patterns_and_guards() {
-    let sign = "fun sign(x) = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n";
-    assert_eq!(run_i64(&format!("{sign}fun main() = sign(-4)")), -1);
-    assert_eq!(run_i64(&format!("{sign}fun main() = sign(0)")), 0);
-    assert_eq!(run_i64(&format!("{sign}fun main() = sign(9)")), 1);
-    assert_eq!(run_i64("fun f(b) = match b { case true => 1 case false => 0 }\nfun main() = f(false)"), 0);
+    let sign = "fun sign(x : Int) : Int = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n";
+    assert_eq!(run_i64(&format!("{sign}fun main() : Int = sign(-4)")), -1);
+    assert_eq!(run_i64(&format!("{sign}fun main() : Int = sign(0)")), 0);
+    assert_eq!(run_i64(&format!("{sign}fun main() : Int = sign(9)")), 1);
+    assert_eq!(run_i64("fun f(b : Bool) : Int = match b { case true => 1 case false => 0 }\nfun main() : Int = f(false)"), 0);
 }
 
 #[test]
 fn higher_order_functions() {
-    assert_eq!(run_i64("fun apply(f, x) = f(x)\nfun adder(n) = y -> y + n\nfun main() = apply(adder(3), 4)"), 7);
-    assert_eq!(run_i64("fun twice(f, x) = f(f(x))\nfun inc(x) = x + 1\nfun main() = twice(inc, 10)"), 12);
+    assert_eq!(run_i64("fun apply(f : a -> b, x : a) : b = f(x)\nfun adder(n : Int) : Int -> Int = y -> y + n\nfun main() : Int = apply(adder(3), 4)"), 7);
+    assert_eq!(run_i64("fun twice(f : a -> a, x : a) : a = f(f(x))\nfun inc(x : Int) : Int = x + 1\nfun main() : Int = twice(inc, 10)"), 12);
     assert_eq!(
         run_i64(
-            "fun compose(f, g) = x -> f(g(x))\n\
-             fun main() = { let h = compose(y -> y + 1, y -> y * 2); h(5) }"
+            "fun compose(f : b -> c, g : a -> b) : a -> c = x -> f(g(x))\n\
+             fun main() : Int = { let h = compose(y -> y + 1, y -> y * 2); h(5) }"
         ),
         11
     );
@@ -284,27 +284,27 @@ fn higher_order_functions() {
 #[test]
 fn closures_escape_their_frame() {
     let src = "\
-        fun make(n) = { let f = x -> x + n; let g = y -> f(y) + 1; g }\n\
-        fun main() = { let h = make(10); h(5) }";
+        fun make(n : Int) : Int -> Int = { let f = x -> x + n; let g = y -> f(y) + 1; g }\n\
+        fun main() : Int = { let h = make(10); h(5) }";
     assert_eq!(run_i64(src), 16);
 }
 
 #[test]
 fn boxing_closures_survive() {
     let src = "\
-        fun make(n) = { let f = x -> x + n; let g = y -> f(y) + 1; g }\n\
-        fun apply(f, x) = f(x)\n\
-        fun main() = apply(make(2), 3) + apply(make(4), 5)";
+        fun make(n : Int) : Int -> Int = { let f = x -> x + n; let g = y -> f(y) + 1; g }\n\
+        fun apply(f : a -> b, x : a) : b = f(x)\n\
+        fun main() : Int = apply(make(2), 3) + apply(make(4), 5)";
     assert_eq!(run_i64(src), 6 + 10);
 }
 
 #[test]
 fn class_dispatch() {
-    assert!(run_bool("fun main() = eq([1, 2], [1, 2])"));
-    assert!(!run_bool("fun main() = eq([1, 2], [1, 3])"));
-    assert!(run_bool("fun main() = eq(Just([1]), Just([1]))"));
-    assert!(!run_bool("fun main() = eq(Nothing, Just(1))"));
-    assert!(run_bool("fun main() = eq(1.5, 1.5) && eq(true, true)"));
+    assert!(run_bool("fun main() : Bool = eq([1, 2], [1, 2])"));
+    assert!(!run_bool("fun main() : Bool = eq([1, 2], [1, 3])"));
+    assert!(run_bool("fun main() : Bool = eq(Just([1]), Just([1]))"));
+    assert!(!run_bool("fun main() : Bool = eq(Nothing, Just(1))"));
+    assert!(run_bool("fun main() : Bool = eq(1.5, 1.5) && eq(true, true)"));
 }
 
 #[test]
@@ -314,8 +314,8 @@ fn hkt_map_over_list() {
         instance Functor List {\n\
             map(f, xs) = match xs { case Nil => Nil case Cons(x, xs) => Cons(f(x), map(f, xs)) }\n\
         }\n\
-        fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
-        fun main() = sum(map(x -> x * 2, [1, 2, 3]))";
+        fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
+        fun main() : Int = sum(map(x -> x * 2, [1, 2, 3]))";
     assert_eq!(run_i64(src), 12);
 }
 
@@ -326,8 +326,8 @@ fn hkt_map_over_maybe() {
         instance Functor Maybe {\n\
             map(f, m) = match m { case Nothing => Nothing case Just(x) => Just(f(x)) }\n\
         }\n\
-        fun get(m) = match m { case Nothing => -1 case Just(x) => x }\n\
-        fun main() = get(map(x -> x + 1, Just(4))) + get(map(x -> x + 1, Nothing))";
+        fun get(m : Maybe Int) : Int = match m { case Nothing => -1 case Just(x) => x }\n\
+        fun main() : Int = get(map(x -> x + 1, Just(4))) + get(map(x -> x + 1, Nothing))";
     assert_eq!(run_i64(src), 5 - 1);
 }
 
@@ -337,20 +337,20 @@ fn multi_parameter_classes() {
         class Convert a b { convert : a -> b }\n\
         instance Convert Int Int { convert(x) = x + 10 }\n\
         instance Convert Float Int { convert(x) = 7 }\n\
-        fun main() = convert(1) + convert(1.5)";
+        fun main() : Int = convert(1) + convert(1.5)";
     assert_eq!(run_i64(src), 18);
 }
 
 #[test]
 fn floats() {
-    assert_eq!(run_f64("fun main() = 1.5 + 2.25"), 3.75);
-    assert!(run_bool("fun main() = 1.5 < 2.0"));
-    assert!(!run_bool("fun main() = 2.5 < 2.0"));
-    assert!(!run_bool("fun main() = 1.5 == 1.25"));
+    assert_eq!(run_f64("fun main() : Float = 1.5 + 2.25"), 3.75);
+    assert!(run_bool("fun main() : Bool = 1.5 < 2.0"));
+    assert!(!run_bool("fun main() : Bool = 2.5 < 2.0"));
+    assert!(!run_bool("fun main() : Bool = 1.5 == 1.25"));
     assert_eq!(
         run_i64(
-            "fun near(x) = if x > 25.0 then 1 else 0\n\
-             fun main() = near(3.0 * 3.0 + 4.0 * 4.0) + near(3.0 * 3.0 + 5.0 * 5.0)"
+            "fun near(x : Float) : Int = if x > 25.0 then 1 else 0\n\
+             fun main() : Int = near(3.0 * 3.0 + 4.0 * 4.0) + near(3.0 * 3.0 + 5.0 * 5.0)"
         ),
         1
     );
@@ -361,7 +361,7 @@ fn top_level_values() {
     let src = "\
         let two = 2\n\
         let inc = x -> x + two\n\
-        fun main() = inc(40)";
+        fun main() : Int = inc(40)";
     assert_eq!(run_i64(src), 42);
 }
 
@@ -390,7 +390,7 @@ fn collect_now(jit: &Jit) {
 /// headroom.
 #[test]
 fn allocator_recycles_garbage() {
-    let jit = build("fun main() = 0");
+    let jit = build("fun main() : Int = 0");
     type Alloc = unsafe extern "C" fn(i64) -> *mut u8;
     type Pin = unsafe extern "C" fn(i64, i64, *mut u8);
     type Enter = unsafe extern "C" fn() -> i64;
@@ -424,7 +424,7 @@ fn allocator_recycles_garbage() {
 /// payload pointers and keep every node.
 #[test]
 fn marking_follows_payloads() {
-    let jit = build("fun main() = 0");
+    let jit = build("fun main() : Int = 0");
     type Alloc = unsafe extern "C" fn(i64) -> *mut u8;
     type Pin = unsafe extern "C" fn(i64, i64, *mut u8);
     type Enter = unsafe extern "C" fn() -> i64;
@@ -462,10 +462,10 @@ fn marking_follows_payloads() {
 #[test]
 fn live_values_survive_collections() {
     let src = "\
-        fun churn(n) = if n == 0 then 0 else { let (a, _) = (n, n); a + churn(n - 1) }\n\
-        fun keep(xs, n) = if n == 0 then xs else { let dead = churn(2000); keep(xs, n - 1) }\n\
-        fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
-        fun main() = sum(keep([1, 2, 3], 200))";
+        fun churn(n : Int) : Int = if n == 0 then 0 else { let (a, _) = (n, n); a + churn(n - 1) }\n\
+        fun keep(xs : List Int, n : Int) : List Int = if n == 0 then xs else { let dead = churn(2000); keep(xs, n - 1) }\n\
+        fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
+        fun main() : Int = sum(keep([1, 2, 3], 200))";
     let mut jit = build(src);
     assert_eq!(jit.i64("main", &[]), 6);
     let (live, used, collections) = stats(&jit);
@@ -480,155 +480,155 @@ fn live_values_survive_collections() {
 
 #[test]
 fn value_pipe_applies_functions() {
-    let src = "fun inc(x) = x + 1\nfun main() = ((5 |> inc |> inc) * 10) + (1 |> inc)";
+    let src = "fun inc(x : Int) : Int = x + 1\nfun main() : Int = ((5 |> inc |> inc) * 10) + (1 |> inc)";
     assert_eq!(run_i64(src), 72);
-    let src = "fun inc(x) = x + 1\nfun main() = 1 |> inc == 2";
+    let src = "fun inc(x : Int) : Int = x + 1\nfun main() : Bool = 1 |> inc == 2";
     assert!(build(src).bool("main", &[]));
-    let src = "fun inc(x) = x + 1\nfun main() = 10 - 2 |> inc";
+    let src = "fun inc(x : Int) : Int = x + 1\nfun main() : Int = 10 - 2 |> inc";
     assert_eq!(run_i64(src), 9);
 }
 
 #[test]
 fn hash_builtins_resolve_to_prelude_functions() {
-    assert!(build("fun main() = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
-    assert_eq!(build("fun main() = #str_of_int(7)").string("main"), "7");
+    assert!(build("fun main() : Bool = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
+    assert_eq!(build("fun main() : String = #str_of_int(7)").string("main"), "7");
 }
 
 #[test]
 fn strings_concatenate_and_compare() {
-    assert_eq!(build("fun main() = \"hello\"").string("main"), "hello");
+    assert_eq!(build("fun main() : String = \"hello\"").string("main"), "hello");
     assert_eq!(
-        build("fun main() = concat(\"foo\", \"bar\")").string("main"),
+        build("fun main() : String = concat(\"foo\", \"bar\")").string("main"),
         "foobar"
     );
     assert_eq!(
-        build("fun main() = str_of_int(-1234)").string("main"),
+        build("fun main() : String = str_of_int(-1234)").string("main"),
         "-1234"
     );
-    assert!(build("fun main() = \"abc\" == \"abc\"").bool("main", &[]));
-    assert!(!build("fun main() = \"abc\" == \"abd\"").bool("main", &[]));
-    assert!(build("fun main() = \"abc\" != \"abd\"").bool("main", &[]));
-    assert!(build("fun main() = Eq::eq([\"a\", \"b\"], [\"a\", \"b\"])").bool("main", &[]));
-    assert!(!build("fun main() = Eq::eq([\"a\", \"b\"], [\"a\", \"c\"])").bool("main", &[]));
+    assert!(build("fun main() : Bool = \"abc\" == \"abc\"").bool("main", &[]));
+    assert!(!build("fun main() : Bool = \"abc\" == \"abd\"").bool("main", &[]));
+    assert!(build("fun main() : Bool = \"abc\" != \"abd\"").bool("main", &[]));
+    assert!(build("fun main() : Bool = Eq::eq([\"a\", \"b\"], [\"a\", \"b\"])").bool("main", &[]));
+    assert!(!build("fun main() : Bool = Eq::eq([\"a\", \"b\"], [\"a\", \"c\"])").bool("main", &[]));
 }
 
 #[test]
 fn string_search_split_and_join() {
     assert_eq!(
-        build("fun main() = str_slice(\"abcdef\", 1, 3)").string("main"),
+        build("fun main() : String = str_slice(\"abcdef\", 1, 3)").string("main"),
         "bcd"
     );
     assert_eq!(
-        build("fun main() = str_join(\"|\", str_split(\",\", \"a,b,c\"))").string("main"),
+        build("fun main() : String = str_join(\"|\", str_split(\",\", \"a,b,c\"))").string("main"),
         "a|b|c"
     );
     assert_eq!(
-        build("fun main() = str_join(\",\", str_lines(\"a\\nb\\nc\"))").string("main"),
+        build("fun main() : String = str_join(\",\", str_lines(\"a\\nb\\nc\"))").string("main"),
         "a,b,c"
     );
-    assert!(build("fun main() = str_contains(\"bc\", \"abcd\")").bool("main", &[]));
-    assert!(!build("fun main() = str_contains(\"zz\", \"abcd\")").bool("main", &[]));
+    assert!(build("fun main() : Bool = str_contains(\"bc\", \"abcd\")").bool("main", &[]));
+    assert!(!build("fun main() : Bool = str_contains(\"zz\", \"abcd\")").bool("main", &[]));
     assert_eq!(
-        build("fun main() = str_of_int(str_find(\"bc\", \"abcd\"))").string("main"),
+        build("fun main() : String = str_of_int(str_find(\"bc\", \"abcd\"))").string("main"),
         "1"
     );
-    assert!(build("fun main() = ok(0)").bool("main", &[]));
-    assert!(!build("fun main() = ok(1)").bool("main", &[]));
+    assert!(build("fun main() : Bool = ok(0)").bool("main", &[]));
+    assert!(!build("fun main() : Bool = ok(1)").bool("main", &[]));
 }
 
 #[test]
 fn externs_work_as_values() {
     let src = "\
-        fun apply(f, x, y) = f(x, y)\n\
-        fun main() = if apply(str_eq, \"same\", \"same\") then 1 else 0";
+        fun apply(f : a -> b -> c, x : a, y : b) : c = f(x, y)\n\
+        fun main() : Int = if apply(str_eq, \"same\", \"same\") then 1 else 0";
     assert_eq!(run_i64(src), 1);
 }
 
 #[test]
 fn spawn_status_and_capture() {
-    assert_eq!(run_i64("fun main() = spawn_status(\"true\", [])"), 0);
-    assert_eq!(run_i64("fun main() = spawn_status(\"false\", [])"), 1);
+    assert_eq!(run_i64("fun main() : Int = spawn_status(\"true\", [])"), 0);
+    assert_eq!(run_i64("fun main() : Int = spawn_status(\"false\", [])"), 1);
     assert_eq!(
-        build("fun main() = spawn_capture(\"echo\", [\"hi\"])").string("main"),
+        build("fun main() : String = spawn_capture(\"echo\", [\"hi\"])").string("main"),
         "hi\n"
     );
     assert_eq!(
-        run_i64("fun main() = if spawn(\"true\", []) then 1 else 0"),
+        run_i64("fun main() : Int = if spawn(\"true\", []) then 1 else 0"),
         1
     );
 }
 
 #[test]
 fn shell_commands_and_captures() {
-    assert_eq!(run_i64("fun main() = if $ true then 1 else 0"), 1);
-    assert_eq!(run_i64("fun main() = if $ false then 1 else 0"), 0);
-    assert_eq!(build("fun main() = $(echo hi)").string("main"), "hi\n");
+    assert_eq!(run_i64("fun main() : Int = if $ true then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() : Int = if $ false then 1 else 0"), 0);
+    assert_eq!(build("fun main() : String = $(echo hi)").string("main"), "hi\n");
     assert_eq!(
-        build("fun main() = $(printf \"[%s]\" ${\"a b\"})").string("main"),
+        build("fun main() : String = $(printf \"[%s]\" ${\"a b\"})").string("main"),
         "[a b]"
     );
     assert_eq!(
-        build("fun main() = $(printf \"%s\" ${concat(\"x\", \"y\")})").string("main"),
+        build("fun main() : String = $(printf \"%s\" ${concat(\"x\", \"y\")})").string("main"),
         "xy"
     );
     assert_eq!(
-        build("fun main() = $(echo $(echo nested))").string("main"),
+        build("fun main() : String = $(echo $(echo nested))").string("main"),
         "nested\n\n"
     );
     assert_eq!(
-        build("fun main() = $(printf \"%s\" 'a b')").string("main"),
+        build("fun main() : String = $(printf \"%s\" 'a b')").string("main"),
         "a b"
     );
     assert_eq!(
-        build("fun main() = $(echo \"a|b\")").string("main"),
+        build("fun main() : String = $(echo \"a|b\")").string("main"),
         "a|b\n"
     );
 }
 
 #[test]
 fn shell_pipelines() {
-    assert_eq!(run_i64("fun main() = if $ true | false then 1 else 0"), 0);
-    assert_eq!(run_i64("fun main() = if $ false | true then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() : Int = if $ true | false then 1 else 0"), 0);
+    assert_eq!(run_i64("fun main() : Int = if $ false | true then 1 else 0"), 1);
     assert_eq!(
-        build("fun main() = $(echo hi | tr a-z A-Z)").string("main"),
+        build("fun main() : String = $(echo hi | tr a-z A-Z)").string("main"),
         "HI\n"
     );
     assert!(build(
-        "fun main() = str_contains(\"3\", $(printf \"a\\nb\\nc\\n\" | wc -l))"
+        "fun main() : Bool = str_contains(\"3\", $(printf \"a\\nb\\nc\\n\" | wc -l))"
     )
     .bool("main", &[]));
 }
 
 #[test]
 fn shell_builtins_and_bool_composition() {
-    assert!(build("fun main() = ($ #env HOME) == getenv(\"HOME\")").bool("main", &[]));
-    assert!(build("fun main() = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
-    assert!(build("fun main() = $ true && $ true").bool("main", &[]));
-    assert!(!build("fun main() = $ true && $ false").bool("main", &[]));
-    assert!(build("fun main() = $ false || $ true").bool("main", &[]));
+    assert!(build("fun main() : Bool = ($ #env HOME) == getenv(\"HOME\")").bool("main", &[]));
+    assert!(build("fun main() : Bool = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
+    assert!(build("fun main() : Bool = $ true && $ true").bool("main", &[]));
+    assert!(!build("fun main() : Bool = $ true && $ false").bool("main", &[]));
+    assert!(build("fun main() : Bool = $ false || $ true").bool("main", &[]));
     assert_eq!(
-        build("fun main() = $(printf hi) |> str_len").i64("main", &[]),
+        build("fun main() : Int = $(printf hi) |> str_len").i64("main", &[]),
         2
     );
-    assert_eq!(run_i64("fun main() = if $ true && $ true then 1 else 0"), 1);
-    assert_eq!(run_i64("fun main() = if $ false then 0 else 1"), 1);
+    assert_eq!(run_i64("fun main() : Int = if $ true && $ true then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() : Int = if $ false then 0 else 1"), 1);
     assert_eq!(
-        run_i64("fun main() = if $ true | false |> not then 1 else 0"),
+        run_i64("fun main() : Int = if $ true | false |> not then 1 else 0"),
         1
     );
     assert_eq!(
-        run_i64("fun main() = { let ok = $ true; if ok then 1 else 0 }"),
+        run_i64("fun main() : Int = { let ok = $ true; if ok then 1 else 0 }"),
         1
     );
 }
 
 #[test]
 fn shell_rejects_bare_env_vars_and_builtin_pipelines() {
-    let err = fern::compile("fun main() = $(echo $HOME)").expect_err("rejects");
+    let err = fern::compile("fun main() : Int = $(echo $HOME)").expect_err("rejects");
     assert!(err.msg.contains("${expr}"), "{:?}", err.msg);
-    let err = fern::compile("fun main() = $ #env HOME | cat").expect_err("rejects");
+    let err = fern::compile("fun main() : Int = $ #env HOME | cat").expect_err("rejects");
     assert!(err.msg.contains("pipeline stage"), "{:?}", err.msg);
-    let err = fern::compile("fun main() = $(echo ${1})").expect_err("rejects");
+    let err = fern::compile("fun main() : Int = $(echo ${1})").expect_err("rejects");
     assert!(err.msg.contains("expected `String`"), "{:?}", err.msg);
 }
 

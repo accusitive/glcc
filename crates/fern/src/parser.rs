@@ -10,8 +10,8 @@
 //! class    := 'class' Upper lower* '{' (lower ':' ty ';')* '}'
 //! instance := 'instance' Upper ty ('when' ty (',' ty)*)? '{' method* '}'
 //! method   := lower '(' pat-list? ')' '=' expr ';'?       (params may be empty)
-//! fun      := 'fun' lower '(' pat-list? ')' '=' expr
-//! let      := 'let' lower '=' expr
+//! fun      := 'fun' lower '(' (pat ':' ty),* ')' ':' ty '=' expr
+//! let      := 'let' lower (':' ty)? '=' expr
 //! expr     := if | match | block | lambda | prefix
 //! if       := 'if' expr 'then' expr 'else' expr
 //! match    := 'match' expr '{' ('case' pat ('when' expr)? '=>' expr ';')* '}'
@@ -157,7 +157,7 @@ impl Parser {
             }
         }
         ParseOutput {
-            program: Program { items },
+            program: Program::single(items),
             diags,
             incomplete,
         }
@@ -218,14 +218,20 @@ impl Parser {
             Tok::Extern => ItemKind::Extern(self.extern_item()?),
             Tok::Fun => ItemKind::Fun(self.fun_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
+            Tok::Import => ItemKind::Import(self.import_item()?),
+            Tok::Use => ItemKind::Use(self.use_item()?),
+            Tok::Priv => {
+                return Err(Diag::new("`priv` is reserved for module privacy and is not implemented yet", self.span()));
+            }
             other => {
                 return Err(self.complete_if_eof(Diag::new(
-                    format!("expected an item (`data`, `class`, `instance`, `extern`, `fun`, or `let`), found {}", other.describe()),
+                    format!("expected an item (`data`, `class`, `instance`, `extern`, `fun`, `let`, `import`, or `use`), found {}", other.describe()),
                     self.span(),
                 )));
             }
         };
         Ok(Item {
+            module: ModuleId::ROOT,
             span: lo.to(self.prev_span()),
             kind,
         })
@@ -412,7 +418,10 @@ impl Parser {
         } else {
             let mut params = Vec::new();
             loop {
-                params.push(self.pat()?);
+                let pat = self.pat()?;
+                self.expect(&Tok::Colon, "`:` and a type annotation after the parameter")?;
+                let ty = self.ty_expr()?;
+                params.push(FnParam { pat, ty });
                 if self.eat(&Tok::Comma) {
                     continue;
                 }
@@ -421,12 +430,15 @@ impl Parser {
             params
         };
         self.expect(&Tok::RParen, "`)` after the function parameters")?;
+        self.expect(&Tok::Colon, "`:` and the return type after the function parameters")?;
+        let ret = self.ty_expr()?;
         self.expect(&Tok::Eq, "`=` before the function body")?;
         let body = self.expr()?;
         Ok(FnDecl {
             span: start.to(self.prev_span()),
             name,
             params,
+            ret,
             body,
         })
     }
@@ -435,13 +447,66 @@ impl Parser {
         let start = self.span();
         self.bump();
         let name = self.lower("a value name")?;
+        let ty = if self.eat(&Tok::Colon) {
+            Some(self.ty_expr()?)
+        } else {
+            None
+        };
         self.expect(&Tok::Eq, "`=` after the value name")?;
         let body = self.expr()?;
         Ok(ValueDecl {
             span: start.to(self.prev_span()),
             name,
+            ty,
             body,
         })
+    }
+
+    fn import_item(&mut self) -> KResult<ImportDecl> {
+        let start = self.span();
+        self.bump();
+        let path = self.module_path("a module path")?;
+        let alias = if self.eat(&Tok::As) {
+            Some(self.lower("an import alias")?)
+        } else {
+            None
+        };
+        Ok(ImportDecl {
+            span: start.to(self.prev_span()),
+            path,
+            alias,
+        })
+    }
+
+    fn use_item(&mut self) -> KResult<UseDecl> {
+        let start = self.span();
+        self.bump();
+        let mut path = vec![self.lower("a module path")?];
+        while self.eat(&Tok::ColonColon) {
+            if matches!(self.peek(), Tok::Upper(_)) {
+                path.push(self.upper("an imported item")?);
+            } else {
+                path.push(self.lower("a module path or imported item")?);
+            }
+        }
+        let alias = if self.eat(&Tok::As) {
+            Some(self.lower("an import alias")?)
+        } else {
+            None
+        };
+        Ok(UseDecl {
+            span: start.to(self.prev_span()),
+            path,
+            alias,
+        })
+    }
+
+    fn module_path(&mut self, what: &str) -> KResult<Vec<String>> {
+        let mut path = vec![self.lower(what)?];
+        while self.eat(&Tok::ColonColon) {
+            path.push(self.lower("a module path segment")?);
+        }
+        Ok(path)
     }
 
     // ------------------------------------------------------------ types --
@@ -479,13 +544,29 @@ impl Parser {
         let span = self.span();
         match self.peek() {
             Tok::Upper(_) | Tok::Lower(_) => {
-                let name = match self.bump() {
+                let mut name = match self.bump() {
                     Token {
                         tok: Tok::Upper(name) | Tok::Lower(name),
                         ..
                     } => name,
                     _ => unreachable!("checked above"),
                 };
+                while self.eat(&Tok::Dot) {
+                    let segment = match self.bump() {
+                        Token {
+                            tok: Tok::Upper(segment) | Tok::Lower(segment),
+                            ..
+                        } => segment,
+                        other => {
+                            return Err(Diag::new(
+                                format!("expected a type name after `.`, found {}", other.tok.describe()),
+                                other.span,
+                            ));
+                        }
+                    };
+                    name.push('.');
+                    name.push_str(&segment);
+                }
                 Ok(TyExpr {
                     kind: TyExprKind::Name(name),
                     span: span.to(self.prev_span()),
@@ -565,8 +646,32 @@ impl Parser {
             }
             Tok::Float(_) => Err(Diag::new("float literals cannot be matched; compare with `==` instead".to_string(), self.span())),
             Tok::Lower(_) => {
-                let name = self.lower("a pattern")?;
-                Ok(Pat::Bind(name))
+                let mut name = self.lower("a pattern")?;
+                while self.eat(&Tok::Dot) {
+                    name.push('.');
+                    name.push_str(&self.upper("a constructor name after `.`")?);
+                }
+                if !name.contains('.') {
+                    return Ok(Pat::Bind(name));
+                }
+                let fields = if self.is(&Tok::LParen) {
+                    self.bump();
+                    let mut fields = Vec::new();
+                    if !self.is(&Tok::RParen) {
+                        loop {
+                            fields.push(self.pat()?);
+                            if self.eat(&Tok::Comma) {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect(&Tok::RParen, "`)` after the constructor pattern")?;
+                    fields
+                } else {
+                    Vec::new()
+                };
+                Ok(Pat::Ctor { name, fields })
             }
             Tok::Upper(_) => {
                 let name = self.upper("a pattern")?;
@@ -811,6 +916,40 @@ impl Parser {
     fn postfix(&mut self) -> KResult<Expr> {
         let mut atom = self.atom()?;
         loop {
+            if self.eat(&Tok::Dot) {
+                let member = match self.bump() {
+                    Token {
+                        tok: Tok::Upper(name) | Tok::Lower(name),
+                        ..
+                    } => name,
+                    other => {
+                        return Err(Diag::new(
+                            format!("expected a module member, found {}", other.tok.describe()),
+                            other.span,
+                        ));
+                    }
+                };
+                let path = match atom.kind {
+                    ExprKind::Var(path) => path,
+                    _ => {
+                        return Err(Diag::new(
+                            "member access is only supported on module names",
+                            atom.span,
+                        ));
+                    }
+                };
+                let path = format!("{path}.{member}");
+                let kind = if member.as_bytes()[0].is_ascii_uppercase() {
+                    ExprKind::Ctor { name: path }
+                } else {
+                    ExprKind::Var(path)
+                };
+                atom = Expr {
+                    kind,
+                    span: atom.span.to(self.prev_span()),
+                };
+                continue;
+            }
             if self.is(&Tok::LParen) {
                 let callee_span = atom.span;
                 self.bump();
@@ -1101,7 +1240,15 @@ impl Parser {
 fn is_item_start(tok: &Tok) -> bool {
     matches!(
         tok,
-        Tok::Data | Tok::Class | Tok::Instance | Tok::Extern | Tok::Fun | Tok::Let
+        Tok::Data
+            | Tok::Class
+            | Tok::Instance
+            | Tok::Extern
+            | Tok::Fun
+            | Tok::Let
+            | Tok::Import
+            | Tok::Use
+            | Tok::Priv
     )
 }
 

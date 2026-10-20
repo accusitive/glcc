@@ -20,6 +20,7 @@ use fern_exec::ExecSession;
 pub struct Repl {
     session: fern::Session,
     file: FileId,
+    modules: Vec<FileId>,
     source: String,
     next_expr: u32,
     exec: ExecSession,
@@ -38,19 +39,40 @@ impl Repl {
         Repl {
             session,
             file,
+            modules: Vec::new(),
             source: String::new(),
             next_expr: 0,
             exec: ExecSession::new(),
         }
     }
 
+    /// Set the directory used to resolve `import` paths.
+    pub fn set_module_root(&mut self, root: impl Into<std::path::PathBuf>) {
+        self.session.set_module_root(root);
+    }
+
     /// Validate and persist a definition. Returns the signature lines to
     /// show. On any error the previous definitions are restored.
     pub fn define(&mut self, chunk: &str) -> Result<Vec<String>, Vec<fern::Diag>> {
         let previous = self.source.clone();
+        let modules_before = self.modules.len();
         let (chunk_items, chunk_diags) = parse_chunk(chunk);
         if !chunk_diags.is_empty() {
             return Err(chunk_diags);
+        }
+
+        for import in chunk_imports(chunk) {
+            match self.session.load_import(import) {
+                Ok(file) => {
+                    if !self.modules.contains(&file) {
+                        self.modules.push(file);
+                    }
+                }
+                Err(diags) => {
+                    self.modules.truncate(modules_before);
+                    return Err(diags);
+                }
+            }
         }
 
         let current = parse_chunk(&self.source).0;
@@ -84,6 +106,7 @@ impl Repl {
             }
             Err(diags) => {
                 self.source = previous;
+                self.modules.truncate(modules_before);
                 self.sync();
                 Err(diags)
             }
@@ -99,7 +122,7 @@ impl Repl {
         if !self.source.is_empty() && !self.source.ends_with('\n') {
             self.source.push('\n');
         }
-        self.source.push_str(&format!("fun {name}() = ({expr})\n"));
+        self.source.push_str(&format!("let {name} = ({expr})\n"));
         self.sync();
 
         let files = self.files();
@@ -139,6 +162,7 @@ impl Repl {
 
     pub fn clear(&mut self) {
         self.source.clear();
+        self.modules.clear();
         self.sync();
         self.exec.reset();
         self.session.reset_lowering();
@@ -158,8 +182,10 @@ impl Repl {
         self.session.set_text(self.file, self.source.clone());
     }
 
-    fn files(&self) -> [FileId; 2] {
-        [self.session.prelude(), self.file]
+    fn files(&self) -> Vec<FileId> {
+        let mut files = vec![self.session.prelude(), self.file];
+        files.extend(self.modules.iter().copied());
+        files
     }
 }
 
@@ -185,11 +211,27 @@ fn parse_chunk(src: &str) -> (Vec<NamedSpan>, Vec<fern::Diag>) {
             ItemKind::Data(data) => Some((data.name.clone(), item.span)),
             ItemKind::Class(class) => Some((class.name.clone(), item.span)),
             ItemKind::Extern(extern_item) => Some((extern_item.name.clone(), item.span)),
-            ItemKind::Instance(_) => None,
+            ItemKind::Instance(_) | ItemKind::Import(_) | ItemKind::Use(_) => None,
         })
         .map(|(name, span)| NamedSpan { name, span })
         .collect();
     (items, parsed.diags)
+}
+
+fn chunk_imports(src: &str) -> Vec<Vec<String>> {
+    let tokens = match fern::lexer::lex(src) {
+        Ok(tokens) => tokens,
+        Err(_) => return Vec::new(),
+    };
+    fern::parser::parse_recovering(tokens)
+        .program
+        .items
+        .into_iter()
+        .filter_map(|item| match item.kind {
+            ItemKind::Import(import) => Some(import.path),
+            _ => None,
+        })
+        .collect()
 }
 
 fn blank_range(source: &mut String, span: Span) {
@@ -206,12 +248,20 @@ fn blank_range(source: &mut String, span: Span) {
 }
 
 fn return_type(analysis: &fern::Analysis, name: &str) -> Option<Ty> {
-    let id = *analysis.defs.fn_ids.get(name)?;
+    if let Some(id) = analysis.defs.fn_ids.get(name) {
+        return analysis
+            .hir
+            .bodies
+            .iter()
+            .find(|body| body.key == BodyKey::Fn(*id))
+            .map(|body| body.ret.clone());
+    }
+    let id = *analysis.defs.value_ids.get(name)?;
     analysis
         .hir
         .bodies
         .iter()
-        .find(|body| body.key == BodyKey::Fn(id))
+        .find(|body| body.key == BodyKey::Value(id))
         .map(|body| body.ret.clone())
 }
 
@@ -282,7 +332,7 @@ fn rename_vars(text: &str, names: &[(&str, String)]) -> String {
 
 pub fn is_definition(chunk: &str) -> bool {
     let trimmed = chunk.trim_start();
-    ["data ", "class ", "instance ", "extern ", "fun ", "let "]
+    ["data ", "class ", "instance ", "extern ", "fun ", "let ", "import ", "use "]
         .iter()
         .any(|keyword| trimmed.starts_with(keyword))
 }

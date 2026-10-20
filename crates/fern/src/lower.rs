@@ -457,12 +457,17 @@ impl<'d> Lowerer<'d> {
     /// a generic one, `Head::Class::method$$T1` for an instance method.
     fn symbol(&self, hir: &HirFn, subst: &HashMap<String, Ty>) -> KResult<String> {
         let base = match hir.key {
-            BodyKey::Fn(_) | BodyKey::Value(_) => hir.name.clone(),
+            BodyKey::Fn(_) | BodyKey::Value(_) => hir.name.replace("::", "$"),
             BodyKey::Method { instance, method } => {
                 let inst = &self.defs.instances[instance];
                 let class = &self.defs.classes[inst.class_id.index()];
                 let head = inst.args[0].substitute(subst).mangle();
-                format!("{}::{}::{}", head, class.name, class.methods[method].name)
+                format!(
+                    "{}::{}::{}",
+                    head,
+                    class.name.replace("::", "$"),
+                    class.methods[method].name
+                )
             }
         };
         if hir.generics.is_empty() {

@@ -146,12 +146,19 @@ impl InstanceDef {
 }
 
 #[derive(Debug, Clone)]
+pub struct FnParamDef {
+    pub pat: ast::Pat,
+    pub ty: Ty,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnDef {
     pub span: Span,
     pub name: String,
-    pub params: Vec<ast::Pat>,
+    pub params: Vec<FnParamDef>,
+    pub ret: Ty,
     pub body: ast::Expr,
-    /// Filled by the checker after the body generalizes.
+    /// The declared signature. The checker verifies the body against it.
     pub scheme: Option<Scheme>,
     pub is_prelude: bool,
 }
@@ -160,7 +167,10 @@ pub struct FnDef {
 pub struct ValueDef {
     pub span: Span,
     pub name: String,
+    pub ty: Option<Ty>,
     pub body: ast::Expr,
+    /// The declared type for an annotated value, or the inferred scheme
+    /// for an unannotated one.
     pub scheme: Option<Scheme>,
     pub is_prelude: bool,
 }
@@ -685,7 +695,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 kinds_of.insert(c.name.clone(), head);
                 arity.insert(c.name.clone(), c.params.len());
             }
-            ast::ItemKind::Instance(..) => {}
+            ast::ItemKind::Instance(..) | ast::ItemKind::Import(..) | ast::ItemKind::Use(..) => {}
             ast::ItemKind::Extern(e) => {
                 check_reserved(&e.name, e.span)?;
                 if !seen_names.insert(e.name.clone()) {
@@ -711,7 +721,15 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 defs.fns.push(FnDef {
                     span: f.span,
                     name: f.name.clone(),
-                    params: f.params.clone(),
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| FnParamDef {
+                            pat: p.pat.clone(),
+                            ty: Ty::unit_ty(),
+                        })
+                        .collect(),
+                    ret: Ty::unit_ty(),
                     body: f.body.clone(),
                     scheme: None,
                     is_prelude: f.span.file == FileId::PRELUDE,
@@ -727,6 +745,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 defs.values.push(ValueDef {
                     span: v.span,
                     name: v.name.clone(),
+                    ty: None,
                     body: v.body.clone(),
                     scheme: None,
                     is_prelude: v.span.file == FileId::PRELUDE,
@@ -795,7 +814,83 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 method_var_kinds.insert(class_id, vars_per_method);
             }
-            ast::ItemKind::Instance(..) | ast::ItemKind::Extern(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) => {}
+            ast::ItemKind::Instance(..)
+            | ast::ItemKind::Extern(..)
+            | ast::ItemKind::Fun(..)
+            | ast::ItemKind::Let(..)
+            | ast::ItemKind::Import(..)
+            | ast::ItemKind::Use(..) => {}
+        }
+    }
+
+    // Function and annotated-value signatures are explicit interfaces.
+    // Resolve them before any body so every function is visible regardless
+    // of declaration order.
+    let mut fn_signature_vars: Vec<Vec<(String, RawKind)>> = vec![Vec::new(); defs.fns.len()];
+    let mut value_signature_vars: Vec<Vec<(String, RawKind)>> = vec![Vec::new(); defs.values.len()];
+    for item in &program.items {
+        match &item.kind {
+            ast::ItemKind::Fun(f) => {
+                let id = defs.fn_ids[&f.name];
+                let mut free_names = Vec::new();
+                for param in &f.params {
+                    for name in free_type_vars(&param.ty, &ctx.kinds_of) {
+                        if !free_names.contains(&name) {
+                            free_names.push(name);
+                        }
+                    }
+                }
+                for name in free_type_vars(&f.ret, &ctx.kinds_of) {
+                    if !free_names.contains(&name) {
+                        free_names.push(name);
+                    }
+                }
+                let mut scope = HashMap::new();
+                let mut vars = Vec::with_capacity(free_names.len());
+                for name in free_names {
+                    let kind = ctx.kinds.var();
+                    scope.insert(name.clone(), kind.clone());
+                    vars.push((name, kind));
+                }
+                ctx.scope = scope;
+                let mut param_tys = Vec::with_capacity(f.params.len());
+                for param in &f.params {
+                    let ty = ctx.resolve(&param.ty)?;
+                    ctx.star_check(&ty, param.ty.span)?;
+                    param_tys.push(ty);
+                }
+                let ret = ctx.resolve(&f.ret)?;
+                ctx.star_check(&ret, f.ret.span)?;
+                let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, ty| Ty::arrow(ty.clone(), acc));
+                let def = &mut defs.fns[id.index()];
+                for (param, ty) in def.params.iter_mut().zip(param_tys) {
+                    param.ty = ty;
+                }
+                def.ret = ret;
+                def.scheme = Some(Scheme { vars: Vec::new(), ty: fn_ty });
+                fn_signature_vars[id.index()] = vars;
+            }
+            ast::ItemKind::Let(v) => {
+                let Some(ty_expr) = &v.ty else {
+                    continue;
+                };
+                let id = defs.value_ids[&v.name];
+                let mut scope = HashMap::new();
+                let mut vars = Vec::new();
+                for name in free_type_vars(ty_expr, &ctx.kinds_of) {
+                    let kind = ctx.kinds.var();
+                    scope.insert(name.clone(), kind.clone());
+                    vars.push((name, kind));
+                }
+                ctx.scope = scope;
+                let ty = ctx.resolve(ty_expr)?;
+                ctx.star_check(&ty, ty_expr.span)?;
+                let def = &mut defs.values[id.index()];
+                def.ty = Some(ty.clone());
+                def.scheme = Some(Scheme { vars: Vec::new(), ty });
+                value_signature_vars[id.index()] = vars;
+            }
+            _ => {}
         }
     }
 
@@ -903,6 +998,17 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     defs.arity = arity;
 
     defs.kinds_of = kinds_of.iter().map(|(name, raw)| (name.clone(), kinds.to_kind(raw))).collect();
+
+    for (def, vars) in defs.fns.iter_mut().zip(fn_signature_vars) {
+        if let Some(scheme) = &mut def.scheme {
+            scheme.vars = vars.into_iter().map(|(name, raw)| (name, kinds.to_kind(&raw))).collect();
+        }
+    }
+    for (def, vars) in defs.values.iter_mut().zip(value_signature_vars) {
+        if let Some(scheme) = &mut def.scheme {
+            scheme.vars = vars.into_iter().map(|(name, raw)| (name, kinds.to_kind(&raw))).collect();
+        }
+    }
 
     for d in &mut defs.data {
         if let Some(head) = kinds_of.get(&d.name) {

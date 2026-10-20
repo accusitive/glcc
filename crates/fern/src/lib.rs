@@ -21,6 +21,7 @@ pub mod lexer;
 pub mod lower;
 pub mod parser;
 pub mod prelude;
+pub mod resolve;
 pub mod shell;
 #[cfg(feature = "c-rt")]
 pub mod runtime;

@@ -2,14 +2,41 @@
 
 use crate::span::Span;
 
-/// A whole fern source: the prelude comes first, user items after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct ModuleId(pub u32);
+
+impl ModuleId {
+    pub const ROOT: ModuleId = ModuleId(0);
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    pub path: Vec<String>,
+}
+
+/// A whole fern program: modules, then their items in source order.
+#[derive(Debug, Clone, Default)]
 pub struct Program {
+    pub modules: Vec<ModuleInfo>,
     pub items: Vec<Item>,
+}
+
+impl Program {
+    pub fn single(items: Vec<Item>) -> Program {
+        Program {
+            modules: vec![ModuleInfo { path: Vec::new() }],
+            items,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Item {
+    pub module: ModuleId,
     pub span: Span,
     pub kind: ItemKind,
 }
@@ -22,6 +49,24 @@ pub enum ItemKind {
     Extern(ExternDecl),
     Fun(FnDecl),
     Let(ValueDecl),
+    Import(ImportDecl),
+    Use(UseDecl),
+}
+
+/// `import geo::point` or `import geo::point as p`.
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub span: Span,
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+}
+
+/// `use math::sqrt` or `use math::sqrt as root`.
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub span: Span,
+    pub path: Vec<String>,
+    pub alias: Option<String>,
 }
 
 /// `extern "symbol" name : ty`. The optional string renames the linked
@@ -81,10 +126,17 @@ pub struct MethodBody {
 }
 
 #[derive(Debug, Clone)]
+pub struct FnParam {
+    pub pat: Pat,
+    pub ty: TyExpr,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnDecl {
     pub span: Span,
     pub name: String,
-    pub params: Vec<Pat>,
+    pub params: Vec<FnParam>,
+    pub ret: TyExpr,
     pub body: Expr,
 }
 
@@ -92,6 +144,7 @@ pub struct FnDecl {
 pub struct ValueDecl {
     pub span: Span,
     pub name: String,
+    pub ty: Option<TyExpr>,
     pub body: Expr,
 }
 

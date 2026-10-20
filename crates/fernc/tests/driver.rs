@@ -68,11 +68,11 @@ fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
 }
 
 const PROGRAM: &str = r#"
-fun range(n) = if n == 0 then Nil else Cons(n, range(n - 1))
-fun sum(xs) = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }
-fun twice(f, x) = f(f(x))
-fun inc(x) = x + 1
-fun fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)
+fun range(n : Int) : List Int = if n == 0 then Nil else Cons(n, range(n - 1))
+fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }
+fun twice(f : a -> a, x : a) : a = f(f(x))
+fun inc(x : Int) : Int = x + 1
+fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)
 
 class Functor f { map : (a -> b) -> f a -> f b }
 
@@ -80,7 +80,7 @@ instance Functor List {
     map(f, xs) = match xs { case Nil => Nil case Cons(x, xs) => Cons(f(x), map(f, xs)) }
 }
 
-fun answer() = sum(map(x -> x * 2, range(10))) + twice(inc, 0) + if eq([1], [1]) then 1 else 0
+fun answer() : Int = sum(map(x -> x * 2, range(10))) + twice(inc, 0) + if eq([1], [1]) then 1 else 0
 "#;
 
 #[test]
@@ -107,7 +107,7 @@ fn optimized_object_runs_the_same() {
     assert_eq!(stdout, "113\n");
 }
 
-const FIB: &str = "fun fib(n) = if n < 2 then n else fib(n - 1) + fib(n - 2)\n";
+const FIB: &str = "fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)\n";
 
 #[test]
 fn emit_mir_writes_the_module_to_stdout() {
@@ -153,7 +153,7 @@ fn emit_full_mir_honors_the_output_path() {
 fn emit_check_stops_before_object_emission() {
     let dir = temp_dir("check");
     let fern_path = dir.join("main.fern");
-    fs::write(&fern_path, "fun main() = 1\n").expect("write source");
+    fs::write(&fern_path, "fun main() : Int = 1\n").expect("write source");
     let out = Command::new(FERNC).arg(&fern_path).arg("--emit=check").output().expect("run fernc");
     assert!(out.status.success());
     assert!(!dir.join("main.o").exists());
@@ -163,7 +163,7 @@ fn emit_check_stops_before_object_emission() {
 fn type_errors_are_reported_with_a_location() {
     let dir = temp_dir("error");
     let fern_path = dir.join("main.fern");
-    fs::write(&fern_path, "fun main() = 1 + true\n").expect("write source");
+    fs::write(&fern_path, "fun main() : Int = 1 + true\n").expect("write source");
     let out = Command::new(FERNC).arg(&fern_path).arg("-o").arg(dir.join("main.o")).output().expect("run fernc");
     assert!(!out.status.success(), "expected a compile error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -187,4 +187,76 @@ fn brainfuck_example_links_and_runs() {
     // "Hello World!\n", '*', '@', a NUL byte, and "He", folded into a
     // base-31 checksum mod 1_000_000_007 (seed 7).
     assert_eq!(stdout, "49729618\n");
+}
+
+#[test]
+fn module_imports_link_and_run() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("modules");
+    let main_path = dir.join("main.fern");
+    fs::write(
+        &main_path,
+        "import math\nfun answer() : Int = math.double(math.origin()) + 1\n",
+    )
+    .expect("write main");
+    fs::write(
+        dir.join("math.fern"),
+        "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 20\n",
+    )
+    .expect("write math");
+    let object = dir.join("main.o");
+    let out = Command::new(FERNC)
+        .arg(&main_path)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run fernc");
+    assert!(
+        out.status.success(),
+        "fernc failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "41\n");
+}
+
+#[test]
+fn same_named_modules_link_and_run() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("module-names");
+    let source = |n: i64| {
+        format!(
+            "data Tree a = Leaf(a)\n\
+             fun make() : Tree Int = Leaf({n})\n\
+             fun get(t : Tree Int) : Int = match t {{ case Leaf(x) => x }}\n"
+        )
+    };
+    let main_path = dir.join("main.fern");
+    fs::write(
+        &main_path,
+        "import a\nimport b\nfun answer() : Int = a.get(a.make()) + b.get(b.make())\n",
+    )
+    .expect("write main");
+    fs::write(dir.join("a.fern"), source(20)).expect("write a");
+    fs::write(dir.join("b.fern"), source(22)).expect("write b");
+    let object = dir.join("main.o");
+    let out = Command::new(FERNC)
+        .arg(&main_path)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run fernc");
+    assert!(
+        out.status.success(),
+        "fernc failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "42\n");
 }
