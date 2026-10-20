@@ -1,20 +1,9 @@
 # fern showcase with fernc: make, make run, make clean.
-# fernc comes from the repo's build tree; `cargo build -p fernc` builds it.
-FERNC ?= $(firstword $(wildcard ../../../target/debug/fernc) fernc)
+# fernc and glcc come from the repo's build tree.
+PROGRAM = showcase
+SOURCE = showcase.fern
+OPT = -O1
+FERNC ?= $(firstword $(wildcard ../../../target/debug/fernc ../../../target/debug/fernc.exe) fernc)
+GLCC ?= $(firstword $(wildcard ../../../target/debug/glcc ../../../target/debug/glcc.exe) glcc)
 
-all: build/showcase
-
-build/showcase: build/showcase.o driver.c
-	$(CC) driver.c build/showcase.o -o $@
-
-build/showcase.o: showcase.fern
-	mkdir -p $(dir $@)
-	$(FERNC) -O1 $< -o $@
-
-run: build/showcase
-	./build/showcase
-
-clean:
-	rm -rf build
-
-.PHONY: all run clean
+include ../common.mk

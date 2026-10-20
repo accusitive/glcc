@@ -29,10 +29,12 @@ use crate::span::KResult;
 use super::func::FnCtx;
 
 pub(crate) struct Runtime {
-    enter: mir::Extern,
-    pin: mir::Extern,
-    leave: mir::Extern,
+    pub(crate) enter: mir::Extern,
+    pub(crate) pin: mir::Extern,
+    pub(crate) leave: mir::Extern,
     pub(crate) alloc: mir::Extern,
+    /// Content equality for NUL-terminated strings.
+    pub(crate) str_eq: mir::Extern,
 }
 
 /// Declare the runtime's entry points on the module.
@@ -43,7 +45,11 @@ pub(crate) fn declare(module: &mut mir::Module) -> Runtime {
         enter: module.push_extern("fern_enter", mir::Signature::new(vec![], word.clone())),
         pin: module.push_extern("fern_pin", mir::Signature::new(vec![word.clone(), word.clone(), ptr.clone()], mir::Ty::Void)),
         leave: module.push_extern("fern_leave", mir::Signature::new(vec![word], mir::Ty::Void)),
-        alloc: module.push_extern("fern_alloc", mir::Signature::new(vec![mir::Ty::int(64)], ptr)),
+        alloc: module.push_extern("fern_alloc", mir::Signature::new(vec![mir::Ty::int(64)], ptr.clone())),
+        str_eq: module.push_extern(
+            "fern_str_eq",
+            mir::Signature::new(vec![ptr.clone(), ptr], mir::Ty::Bool),
+        ),
     }
 }
 

@@ -2,14 +2,41 @@
 
 use crate::span::Span;
 
-/// A whole fern source: the prelude comes first, user items after.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct ModuleId(pub u32);
+
+impl ModuleId {
+    pub const ROOT: ModuleId = ModuleId(0);
+
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 #[derive(Debug, Clone)]
+pub struct ModuleInfo {
+    pub path: Vec<String>,
+}
+
+/// A whole fern program: modules, then their items in source order.
+#[derive(Debug, Clone, Default)]
 pub struct Program {
+    pub modules: Vec<ModuleInfo>,
     pub items: Vec<Item>,
+}
+
+impl Program {
+    pub fn single(items: Vec<Item>) -> Program {
+        Program {
+            modules: vec![ModuleInfo { path: Vec::new() }],
+            items,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Item {
+    pub module: ModuleId,
     pub span: Span,
     pub kind: ItemKind,
 }
@@ -19,8 +46,37 @@ pub enum ItemKind {
     Data(DataDecl),
     Class(ClassDecl),
     Instance(InstanceDecl),
+    Extern(ExternDecl),
     Fun(FnDecl),
     Let(ValueDecl),
+    Import(ImportDecl),
+    Use(UseDecl),
+}
+
+/// `import geo::point` or `import geo::point as p`.
+#[derive(Debug, Clone)]
+pub struct ImportDecl {
+    pub span: Span,
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+}
+
+/// `use math::sqrt` or `use math::sqrt as root`.
+#[derive(Debug, Clone)]
+pub struct UseDecl {
+    pub span: Span,
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+}
+
+/// `extern "symbol" name : ty`. The optional string renames the linked
+/// symbol; without it the symbol and the fern name are the same.
+#[derive(Debug, Clone)]
+pub struct ExternDecl {
+    pub span: Span,
+    pub name: String,
+    pub symbol: Option<String>,
+    pub ty: TyExpr,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +91,8 @@ pub struct DataDecl {
 pub struct CtorDecl {
     pub name: String,
     pub fields: Vec<TyExpr>,
+    /// `Rule { name : T, ... }`; `None` for positional constructors.
+    pub field_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -70,10 +128,17 @@ pub struct MethodBody {
 }
 
 #[derive(Debug, Clone)]
+pub struct FnParam {
+    pub pat: Pat,
+    pub ty: TyExpr,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnDecl {
     pub span: Span,
     pub name: String,
-    pub params: Vec<Pat>,
+    pub params: Vec<FnParam>,
+    pub ret: TyExpr,
     pub body: Expr,
 }
 
@@ -81,6 +146,7 @@ pub struct FnDecl {
 pub struct ValueDecl {
     pub span: Span,
     pub name: String,
+    pub ty: Option<TyExpr>,
     pub body: Expr,
 }
 
@@ -247,6 +313,7 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     BoolConst(bool),
+    Str(String),
     Unit,
     /// `Just(x)`: constructor call.
     CtorCall {
@@ -261,6 +328,18 @@ pub enum ExprKind {
     Var(String),
     /// `f(x, y)`
     Call(Box<Expr>, Vec<Expr>),
+    /// `Rule { targets = ..., recipe = ... }`: a record constructor.
+    Record {
+        ctor: String,
+        fields: Vec<(String, Expr)>,
+    },
+    /// `state.rules`: a record field, or a module member before resolution.
+    Field {
+        base: Box<Expr>,
+        field: String,
+    },
+    /// `expr?`: unwrap a `Result`/`Maybe`, early-returning the residual.
+    Try(Box<Expr>),
     /// `Eq::eq(x, y)` — a class-method call.
     ClassSel {
         class: String,
@@ -294,6 +373,38 @@ pub enum ExprKind {
     Block(Box<Expr>),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     UnOp(UnOp, Box<Expr>),
+    /// `$ command` (status) or `$(command)` (capture).
+    Shell {
+        command: Box<ShellCommand>,
+        capture: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellCommand {
+    pub stages: Vec<ShellStage>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellStage {
+    pub words: Vec<ShellWord>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellWord {
+    pub parts: Vec<ShellWordPart>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellWordPart {
+    Lit(String),
+    /// `${expr}`: parsed with the surrounding file's spans.
+    Interp(Expr),
+    /// `$(command)`: the captured stdout.
+    Capture(Box<ShellCommand>),
 }
 
 #[derive(Debug, Clone)]

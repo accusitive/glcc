@@ -117,11 +117,34 @@ instance Sum Int {}
 }
 
 #[test]
+fn collects_extern_signatures() {
+    let defs = collect_ok("extern \"puts\" put : String -> Int\nextern twice : Int -> Int -> Int");
+    let put = defs.extern_by_name("put").expect("put");
+    assert_eq!(defs.externs[put.index()].symbol, "puts");
+    assert_eq!(defs.externs[put.index()].params.len(), 1);
+    assert_eq!(defs.externs[put.index()].params[0].to_string(), "String");
+    assert_eq!(defs.externs[put.index()].ret.to_string(), "Int");
+
+    let twice = defs.extern_by_name("twice").expect("twice");
+    assert_eq!(defs.externs[twice.index()].symbol, "twice");
+    assert_eq!(defs.externs[twice.index()].params.len(), 2);
+    assert_eq!(defs.externs[twice.index()].ret.to_string(), "Int");
+}
+
+#[test]
+fn externs_share_the_value_namespace() {
+    let err = collect_err("fun f(x : Int) : Int = x\nextern f : Int -> Int");
+    assert!(err.msg.contains("already defined"), "{}", err.msg);
+    let err = collect_err("extern f : Int -> Int\nfun f(x : Int) : Int = x");
+    assert!(err.msg.contains("already defined"), "{}", err.msg);
+}
+
+#[test]
 fn reports_duplicate_definitions() {
     let err = collect_err("data Foo = A\ndata Foo = B");
     assert!(err.msg.contains("duplicate type name"), "{}", err.msg);
 
-    let err = collect_err("fun f(x) = x\nlet f = 1");
+    let err = collect_err("fun f(x : Int) : Int = x\nlet f = 1");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
 
     let err = collect_err("data A = Same\ndata B = Same");
@@ -136,7 +159,7 @@ fn reports_unknown_types() {
 
 #[test]
 fn fern_prefix_is_reserved_for_the_runtime() {
-    for src in ["fun fern_alloc(x) = x", "let fern_two = 2"] {
+    for src in ["fun fern_alloc(x : Int) : Int = x", "let fern_two = 2"] {
         let diag = collect_err(src);
         assert!(diag.msg.contains("reserved"), "{src}: {}", diag.msg);
     }

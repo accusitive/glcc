@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{self, BinOp, UnOp};
 use crate::defs::{Bound, Defs, FnId, Scheme, ValueId};
-use crate::hir::{BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn, HirLocal, HirPat, HirPatKind, HirProgram};
+use crate::hir::{BodyKey, ConstValue, FnRef, HirArm, HirCapture, HirClosure, HirExpr, HirExprKind, HirFn, HirLocal, HirPat, HirPatKind, HirProgram, TryResidual};
 use crate::infer::InferCtx;
 use crate::solve::{Obligation, Solution, Solver};
 use crate::span::{Diag, KResult, Span};
@@ -28,6 +28,94 @@ pub fn check(defs: &mut Defs, program: &ast::Program) -> KResult<HirProgram> {
     let (hir, fn_schemes, value_schemes) = {
         let mut state = Check::new(defs);
         let hir = state.run(program)?;
+        (hir, state.fn_schemes, state.value_schemes)
+    };
+    for (def, scheme) in defs.fns.iter_mut().zip(fn_schemes) {
+        def.scheme = scheme;
+    }
+    for (def, scheme) in defs.values.iter_mut().zip(value_schemes) {
+        def.scheme = scheme;
+    }
+    Ok(hir)
+}
+
+/// Check only the items from `first_item` on, reusing the schemes and
+/// HIR of everything before it.
+///
+/// `start_hir` must hold the bodies of the prefix items (and may hold
+/// unreachable bodies from earlier analyses; they are kept as-is).
+/// `defs.fns`/`defs.values` must already carry the schemes of the
+/// prefix, which [`Defs`] collection leaves as `None`.
+/// Recheck only `selected` items, keeping the bodies of everything else
+/// from `start_hir`. The item list and its IDs must have the same shape as
+/// the one `start_hir` was checked from.
+pub fn check_selected(
+    defs: &mut Defs,
+    program: &ast::Program,
+    selected: &HashSet<usize>,
+    mut start_hir: HirProgram,
+) -> KResult<HirProgram> {
+    let mut fn_ids = HashSet::new();
+    let mut value_ids = HashSet::new();
+    let mut instances = HashSet::new();
+    let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
+    for (index, item) in program.items.iter().enumerate() {
+        match &item.kind {
+            ast::ItemKind::Fun(_) => {
+                if selected.contains(&index) {
+                    fn_ids.insert(FnId(fn_index as u32));
+                }
+                fn_index += 1;
+            }
+            ast::ItemKind::Let(_) => {
+                if selected.contains(&index) {
+                    value_ids.insert(ValueId(value_index as u32));
+                }
+                value_index += 1;
+            }
+            ast::ItemKind::Instance(_) => {
+                if selected.contains(&index) {
+                    instances.insert(instance_index);
+                }
+                instance_index += 1;
+            }
+            ast::ItemKind::Data(_)
+            | ast::ItemKind::Class(_)
+            | ast::ItemKind::Extern(_)
+            | ast::ItemKind::Import(_)
+            | ast::ItemKind::Use(_) => {}
+        }
+    }
+    start_hir.bodies.retain(|body| match body.key {
+        BodyKey::Fn(id) => !fn_ids.contains(&id),
+        BodyKey::Value(id) => !value_ids.contains(&id),
+        BodyKey::Method { instance, .. } => !instances.contains(&instance),
+    });
+
+    let (hir, fn_schemes, value_schemes) = {
+        let mut state = Check::new(defs);
+        state.fn_schemes = defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        state.value_schemes = defs.values.iter().map(|v| v.scheme.clone()).collect();
+        state.hir = start_hir;
+        let hir = state.run_selected(program, selected)?;
+        (hir, state.fn_schemes, state.value_schemes)
+    };
+    for (def, scheme) in defs.fns.iter_mut().zip(fn_schemes) {
+        def.scheme = scheme;
+    }
+    for (def, scheme) in defs.values.iter_mut().zip(value_schemes) {
+        def.scheme = scheme;
+    }
+    Ok(hir)
+}
+
+pub fn check_from(defs: &mut Defs, program: &ast::Program, first_item: usize, start_hir: HirProgram) -> KResult<HirProgram> {
+    let (hir, fn_schemes, value_schemes) = {
+        let mut state = Check::new(defs);
+        state.fn_schemes = defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        state.value_schemes = defs.values.iter().map(|v| v.scheme.clone()).collect();
+        state.hir = start_hir;
+        let hir = state.run_from(program, first_item)?;
         (hir, state.fn_schemes, state.value_schemes)
     };
     for (def, scheme) in defs.fns.iter_mut().zip(fn_schemes) {
@@ -51,6 +139,8 @@ struct Check<'d> {
     bodies: Vec<BodyState>,
     /// The bounds in scope for the current body.
     env: Vec<Bound>,
+    /// Return types of the enclosing bodies, innermost last.
+    returns: Vec<Ty>,
     /// The name and in-progress type of the item being checked, when it
     /// may refer to itself.
     self_ref: Option<SelfRef>,
@@ -59,6 +149,19 @@ struct Check<'d> {
 enum SelfRef {
     Fn(FnId, String, Ty),
     Value(ValueId, String, Ty),
+}
+
+fn ctor_short(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
+struct TryInfo {
+    name: String,
+    success: Ty,
+    error: Option<Ty>,
+    ok_ctor: usize,
+    err_ctor: usize,
+    is_maybe: bool,
 }
 
 struct BodyState {
@@ -110,17 +213,74 @@ impl<'d> Check<'d> {
             value_schemes: Vec::new(),
             bodies: Vec::new(),
             env: Vec::new(),
+            returns: Vec::new(),
             self_ref: None,
         }
     }
 
     fn run(&mut self, program: &ast::Program) -> KResult<HirProgram> {
-        self.fn_schemes = vec![None; self.defs.fns.len()];
-        self.value_schemes = vec![None; self.defs.values.len()];
+        self.fn_schemes = self.defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        self.value_schemes = self.defs.values.iter().map(|v| v.scheme.clone()).collect();
+        self.run_from(program, 0)
+    }
+
+    fn run_selected(
+        &mut self,
+        program: &ast::Program,
+        selected: &HashSet<usize>,
+    ) -> KResult<HirProgram> {
         let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
-        for item in &program.items {
+        for (index, item) in program.items.iter().enumerate() {
             match &item.kind {
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) => {}
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Instance(_) => {
+                    if selected.contains(&index) {
+                        self.check_instance(instance_index)?;
+                    }
+                    instance_index += 1;
+                }
+                ast::ItemKind::Fun(f) => {
+                    if selected.contains(&index) {
+                        self.check_fn(FnId(fn_index as u32), f)?;
+                    }
+                    fn_index += 1;
+                }
+                ast::ItemKind::Let(v) => {
+                    if selected.contains(&index) {
+                        self.check_value(ValueId(value_index as u32), v)?;
+                    }
+                    value_index += 1;
+                }
+            }
+        }
+        Ok(std::mem::take(&mut self.hir))
+    }
+
+    fn run_from(&mut self, program: &ast::Program, first_item: usize) -> KResult<HirProgram> {
+        let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
+        for item in &program.items[..first_item] {
+            match &item.kind {
+                ast::ItemKind::Instance(_) => instance_index += 1,
+                ast::ItemKind::Fun(_) => fn_index += 1,
+                ast::ItemKind::Let(_) => value_index += 1,
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
+            }
+        }
+        for item in &program.items[first_item..] {
+            match &item.kind {
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     self.check_instance(instance_index)?;
                     instance_index += 1;
@@ -143,22 +303,33 @@ impl<'d> Check<'d> {
     fn check_fn(&mut self, id: FnId, f: &ast::FnDecl) -> KResult<()> {
         let span = f.span;
         let name = f.name.clone();
-        let (scheme, hir_fn) = self.check_root(BodyKey::Fn(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
-            check_param_names(&f.params, span)?;
-            let ret = this.infer.fresh();
-            let mut params = Vec::new();
-            let mut param_tys = Vec::new();
-            for p in &f.params {
-                let t = this.infer.fresh();
-                param_tys.push(t.clone());
-                params.push(this.check_pat(p, &t, span)?);
-            }
-            let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, t| Ty::arrow(t.clone(), acc));
-            this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
-            let body = this.check_expr(&f.body, &ret)?;
-            Ok((params, ret, body, fn_ty))
-        })?;
-        self.fn_schemes[id.index()] = Some(scheme);
+        let def = &self.defs.fns[id.index()];
+        let declared = def.scheme.clone().expect("function signatures are resolved during collection");
+        let param_tys: Vec<Ty> = def.params.iter().map(|p| p.ty.clone()).collect();
+        let ret = def.ret.clone();
+        let fn_ty = declared.ty.clone();
+        let (_, hir_fn) = self.check_root(
+            BodyKey::Fn(id),
+            name,
+            span,
+            declared.vars.clone(),
+            Vec::new(),
+            false,
+            Some(declared.clone()),
+            &mut |this| {
+                check_param_names(f.params.iter().map(|p| &p.pat), span)?;
+                let mut params = Vec::new();
+                for (param, ty) in f.params.iter().zip(&param_tys) {
+                    params.push(this.check_pat(&param.pat, ty, span)?);
+                }
+                this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
+                this.returns.push(ret.clone());
+                let body = this.check_expr(&f.body, &ret);
+                this.returns.pop();
+                Ok((params, ret.clone(), body?, fn_ty.clone()))
+            },
+        )?;
+        self.fn_schemes[id.index()] = Some(declared);
         self.hir.bodies.push(hir_fn);
         Ok(())
     }
@@ -166,12 +337,46 @@ impl<'d> Check<'d> {
     fn check_value(&mut self, id: ValueId, v: &ast::ValueDecl) -> KResult<()> {
         let span = v.span;
         let name = v.name.clone();
-        let (scheme, hir_fn) = self.check_root(BodyKey::Value(id), name, span, Vec::new(), Vec::new(), false, &mut |this| {
-            let ty = this.infer.fresh();
-            this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-            let body = this.check_expr(&v.body, &ty)?;
-            Ok((Vec::new(), ty.clone(), body, ty))
-        })?;
+        if let Some(declared) = self.defs.values[id.index()].scheme.clone() {
+            let ty = declared.ty.clone();
+            let (_, hir_fn) = self.check_root(
+                BodyKey::Value(id),
+                name,
+                span,
+                declared.vars.clone(),
+                Vec::new(),
+                false,
+                Some(declared.clone()),
+                &mut |this| {
+                    this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+                    this.returns.push(ty.clone());
+                    let body = this.check_expr(&v.body, &ty);
+                    this.returns.pop();
+                    Ok((Vec::new(), ty.clone(), body?, ty.clone()))
+                },
+            )?;
+            self.value_schemes[id.index()] = Some(declared);
+            self.hir.bodies.push(hir_fn);
+            return Ok(());
+        }
+
+        let (scheme, hir_fn) = self.check_root(
+            BodyKey::Value(id),
+            name,
+            span,
+            Vec::new(),
+            Vec::new(),
+            false,
+            None,
+            &mut |this| {
+                let ty = this.infer.fresh();
+                this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+                this.returns.push(ty.clone());
+                let body = this.check_expr(&v.body, &ty);
+                this.returns.pop();
+                Ok((Vec::new(), ty.clone(), body?, ty))
+            },
+        )?;
         self.value_schemes[id.index()] = Some(scheme);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -237,8 +442,9 @@ impl<'d> Check<'d> {
             generics,
             bounds,
             true,
+            None,
             &mut |this| {
-                check_param_names(&impl_m.params, span)?;
+                check_param_names(impl_m.params.iter(), span)?;
                 let (param_tys, ret) = split_arrows(&sig);
                 if param_tys.len() != impl_m.params.len() {
                     return Err(Diag::new(
@@ -255,8 +461,10 @@ impl<'d> Check<'d> {
                 for (p, want) in impl_m.params.iter().zip(param_tys.iter()) {
                     params.push(this.check_pat(p, want, span)?);
                 }
-                let body = this.check_expr(&impl_m.body, &ret)?;
-                Ok((params, ret, body, sig.clone()))
+                this.returns.push(ret.clone());
+                let body = this.check_expr(&impl_m.body, &ret);
+                this.returns.pop();
+                Ok((params, ret, body?, sig.clone()))
             },
         )?;
         self.hir.bodies.push(hir_fn);
@@ -275,6 +483,7 @@ impl<'d> Check<'d> {
         generics: Vec<(String, Kind)>,
         bounds: Vec<Bound>,
         is_method: bool,
+        declared: Option<Scheme>,
         build: &mut dyn FnMut(&mut Check<'d>) -> KResult<(Vec<HirPat>, Ty, HirExpr, Ty)>,
     ) -> KResult<(Scheme, HirFn)> {
         let closure_start = self.hir.closures.len();
@@ -290,7 +499,7 @@ impl<'d> Check<'d> {
         };
         let state = self.bodies.pop().unwrap();
 
-        let scheme = self.infer.generalize(&fn_ty);
+        let scheme = declared.unwrap_or_else(|| self.infer.generalize(&fn_ty));
         let item_generics = if is_method { generics } else { scheme.vars.clone() };
         let allowed: HashSet<String> = item_generics.iter().map(|(n, _)| n.clone()).collect();
         let ids = self.infer.unbound_ids();
@@ -357,6 +566,11 @@ impl<'d> Check<'d> {
                 ty: Ty::bool_ty(),
                 span,
             }),
+            ast::ExprKind::Str(v) => Ok(HirExpr {
+                kind: HirExprKind::Const(ConstValue::Str(v.clone())),
+                ty: Ty::named0("String"),
+                span,
+            }),
             ast::ExprKind::Unit => Ok(HirExpr {
                 kind: HirExprKind::Tuple(Vec::new()),
                 ty: Ty::unit_ty(),
@@ -366,6 +580,9 @@ impl<'d> Check<'d> {
             ast::ExprKind::Ctor { name } => self.synthesize_ctor(name, &[], span),
             ast::ExprKind::Var(name) => self.synthesize_var(name, span),
             ast::ExprKind::Call(callee, args) => self.synthesize_call(callee, args, span),
+            ast::ExprKind::Record { ctor, fields } => self.synthesize_record(ctor, fields, span),
+            ast::ExprKind::Field { base, field } => self.synthesize_field(base, field, span),
+            ast::ExprKind::Try(inner) => self.synthesize_try(inner, span),
             ast::ExprKind::ClassSel { class, method, args } => self.synthesize_class_sel(class, method, args, span),
             ast::ExprKind::Lambda { params, body } => self.synthesize_lambda(params, body, span),
             ast::ExprKind::Let { binds, body } => self.synthesize_let(binds, body, span),
@@ -403,12 +620,130 @@ impl<'d> Check<'d> {
             ast::ExprKind::Block(inner) => self.synth(inner),
             ast::ExprKind::BinOp(op, lhs, rhs) => self.synthesize_binop(*op, lhs, rhs, span),
             ast::ExprKind::UnOp(op, operand) => self.synthesize_unop(*op, operand, span),
+            ast::ExprKind::Shell { command, capture } => {
+                let desugared = self.desugar_shell(command, *capture)?;
+                self.synth(&desugared)
+            }
         }
+    }
+
+    /// Shell commands are ordinary expressions once their words become
+    /// `String` values: a command is `spawn`, a capture is
+    /// `spawn_capture`, and a pipeline folds its stages into a `Pipe`.
+    fn desugar_shell(&self, command: &ast::ShellCommand, capture: bool) -> KResult<ast::Expr> {
+        if command.stages.len() == 1 {
+            let stage = &command.stages[0];
+            if let Some((name, args)) = self.shell_builtin(stage)? {
+                return Ok(shell_call(name, args, command.span));
+            }
+            let program = self.shell_word(&stage.words[0])?;
+            let args = stage.words[1..]
+                .iter()
+                .map(|word| self.shell_word(word))
+                .collect::<KResult<Vec<_>>>()?;
+            let list = ast::Expr {
+                kind: ast::ExprKind::List(args),
+                span: stage.span,
+            };
+            let function = if capture { "spawn_capture" } else { "spawn" };
+            return Ok(shell_call(function, vec![program, list], command.span));
+        }
+
+        let stages = command
+            .stages
+            .iter()
+            .map(|stage| {
+                if self.shell_builtin(stage)?.is_some() {
+                    return Err(Diag::new(
+                        "a `#` builtin cannot be a pipeline stage",
+                        stage.span,
+                    ));
+                }
+                let words = stage
+                    .words
+                    .iter()
+                    .map(|word| self.shell_word(word))
+                    .collect::<KResult<Vec<_>>>()?;
+                let list = ast::Expr {
+                    kind: ast::ExprKind::List(words),
+                    span: stage.span,
+                };
+                Ok(shell_call("argv", vec![list], stage.span))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        let list = ast::Expr {
+            kind: ast::ExprKind::List(stages),
+            span: command.span,
+        };
+        let pipe = shell_call("shell_pipe_of", vec![list], command.span);
+        let function = if capture {
+            "shell_pipeline_capture"
+        } else {
+            "shell_pipeline"
+        };
+        Ok(shell_call(function, vec![pipe], command.span))
+    }
+
+    /// A `#name` word at the start of a stage is a builtin call rather
+    /// than an executable. `#env` and `#set` mirror the parser's names.
+    fn shell_builtin(&self, stage: &ast::ShellStage) -> KResult<Option<(String, Vec<ast::Expr>)>> {
+        let Some(first) = stage.words.first() else {
+            return Ok(None);
+        };
+        let [ast::ShellWordPart::Lit(word)] = first.parts.as_slice() else {
+            return Ok(None);
+        };
+        let Some(name) = word.strip_prefix('#') else {
+            return Ok(None);
+        };
+        let mut chars = name.chars();
+        let Some(head) = chars.next() else {
+            return Ok(None);
+        };
+        if !(head.is_ascii_lowercase() || head == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Ok(None);
+        }
+        let name = crate::prelude::builtin_name(name);
+        let args = stage.words[1..]
+            .iter()
+            .map(|word| self.shell_word(word))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(Some((name, args)))
+    }
+
+    fn shell_word(&self, word: &ast::ShellWord) -> KResult<ast::Expr> {
+        let mut joined: Option<ast::Expr> = None;
+        for part in &word.parts {
+            let piece = match part {
+                ast::ShellWordPart::Lit(text) => ast::Expr {
+                    kind: ast::ExprKind::Str(text.clone()),
+                    span: word.span,
+                },
+                ast::ShellWordPart::Interp(expr) => {
+                    shell_call("shell_arg", vec![expr.clone()], word.span)
+                }
+                ast::ShellWordPart::Capture(command) => shell_call(
+                    "shell_arg",
+                    vec![self.desugar_shell(command, true)?],
+                    word.span,
+                ),
+            };
+            joined = Some(match joined {
+                None => piece,
+                Some(left) => shell_call("concat", vec![left, piece], word.span),
+            });
+        }
+        Ok(joined.unwrap_or_else(|| ast::Expr {
+            kind: ast::ExprKind::Str(String::new()),
+            span: word.span,
+        }))
     }
 
     fn check_expr(&mut self, e: &ast::Expr, expected: &Ty) -> KResult<HirExpr> {
         let hir = self.synth(e)?;
-        self.infer.unify(&hir.ty, expected, e.span)?;
+        self.infer.unify(expected, &hir.ty, e.span)?;
         Ok(hir)
     }
 
@@ -458,6 +793,13 @@ impl<'d> Check<'d> {
             return Ok(HirExpr {
                 kind: HirExprKind::Fn(FnRef::Value { id, args }),
                 ty,
+                span,
+            });
+        }
+        if let Some(id) = self.defs.extern_by_name(name) {
+            return Ok(HirExpr {
+                kind: HirExprKind::Fn(FnRef::Extern { id }),
+                ty: self.defs.externs[id.index()].ty.clone(),
                 span,
             });
         }
@@ -536,6 +878,86 @@ impl<'d> Check<'d> {
                 name: data.name.clone(),
                 args: fresh,
             },
+            span,
+        })
+    }
+
+    fn synthesize_record(&mut self, name: &str, fields: &[(String, ast::Expr)], span: Span) -> KResult<HirExpr> {
+        let (data_id, tag) = self.defs.ctor_by_name(name).ok_or_else(|| Diag::new(format!("cannot find constructor `{name}`"), span))?;
+        let data = self.defs.data[data_id.index()].clone();
+        let ctor = data.ctors[tag as usize].clone();
+        let Some(field_names) = &ctor.field_names else {
+            return Err(Diag::new(format!("constructor `{name}` does not have named fields"), span));
+        };
+        let mut values: Vec<Option<&ast::Expr>> = vec![None; field_names.len()];
+        for (field, value) in fields {
+            let Some(index) = field_names.iter().position(|name| name == field) else {
+                return Err(Diag::new(format!("`{name}` has no field `{field}`"), value.span));
+            };
+            if values[index].replace(value).is_some() {
+                return Err(Diag::new(format!("field `{field}` is given twice"), value.span));
+            }
+        }
+        let mut map = HashMap::new();
+        let mut fresh = Vec::new();
+        for (pname, _) in &data.params {
+            let v = self.infer.fresh();
+            fresh.push(v.clone());
+            map.insert(pname.clone(), v);
+        }
+        let mut hir_args = Vec::with_capacity(values.len());
+        for (index, value) in values.into_iter().enumerate() {
+            let Some(value) = value else {
+                return Err(Diag::new(
+                    format!("record constructor `{name}` is missing field `{}`", field_names[index]),
+                    span,
+                ));
+            };
+            let want = ctor.args[index].substitute(&map);
+            hir_args.push(self.check_expr(value, &want)?);
+        }
+        Ok(HirExpr {
+            kind: HirExprKind::Ctor {
+                data_id,
+                ctor: tag as usize,
+                args: hir_args,
+            },
+            ty: Ty::Named {
+                name: data.name.clone(),
+                args: fresh,
+            },
+            span,
+        })
+    }
+
+    fn synthesize_field(&mut self, base: &ast::Expr, field: &str, span: Span) -> KResult<HirExpr> {
+        let base = self.synth(base)?;
+        let ty = self.infer.resolve(&base.ty);
+        let Ty::Named { name, args } = &ty else {
+            return Err(Diag::new(format!("field access requires a record, found `{ty}`"), span));
+        };
+        let data_id = self.defs.data_by_name(name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
+        let data = self.defs.data[data_id.index()].clone();
+        let ctor = data.ctors.first().filter(|_| data.ctors.len() == 1).ok_or_else(|| {
+            Diag::new(format!("`{name}` is not a record type"), span)
+        })?;
+        let field_names = ctor.field_names.as_ref().ok_or_else(|| {
+            Diag::new(format!("`{name}` is not a record type"), span)
+        })?;
+        let Some(index) = field_names.iter().position(|name| name == field) else {
+            return Err(Diag::new(format!("`{name}` has no field `{field}`"), span));
+        };
+        if data.params.len() != args.len() {
+            return Err(Diag::new(format!("`{name}` is not fully applied"), span));
+        }
+        let subst: HashMap<String, Ty> = data.params.iter().map(|(n, _)| n.clone()).zip(args.iter().cloned()).collect();
+        let ty = ctor.args[index].substitute(&subst);
+        Ok(HirExpr {
+            kind: HirExprKind::Field {
+                base: Box::new(base),
+                index,
+            },
+            ty,
             span,
         })
     }
@@ -664,6 +1086,82 @@ impl<'d> Check<'d> {
         Ok(HirExpr { kind, ty: ret, span })
     }
 
+    fn try_info(&self, ty: &Ty, span: Span) -> KResult<TryInfo> {
+        let ty = self.infer.resolve(ty);
+        let Ty::Named { name, args } = ty else {
+            return Err(Diag::new(format!("`?` requires a `Maybe` or `Result`, found `{ty}`"), span));
+        };
+        let is_maybe = match name.as_str() {
+            "Maybe" => true,
+            "std::result::Result" => false,
+            _ => return Err(Diag::new(format!("`?` requires a `Maybe` or `Result`, found `{name}`"), span)),
+        };
+        let arity = if is_maybe { 1 } else { 2 };
+        if args.len() != arity {
+            return Err(Diag::new(format!("`{name}` is not fully applied in `?`"), span));
+        }
+        let data_id = self.defs.data_by_name(&name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
+        let data = &self.defs.data[data_id.index()];
+        let (ok_name, err_name) = if is_maybe { ("Just", "Nothing") } else { ("Ok", "Err") };
+        let ok_ctor = data.ctors.iter().position(|c| ctor_short(&c.name) == ok_name);
+        let err_ctor = data.ctors.iter().position(|c| ctor_short(&c.name) == err_name);
+        let (Some(ok_ctor), Some(err_ctor)) = (ok_ctor, err_ctor) else {
+            return Err(Diag::new(format!("`{name}` does not have the expected constructors"), span));
+        };
+        Ok(TryInfo {
+            name,
+            success: args[0].clone(),
+            error: if is_maybe { None } else { Some(args[1].clone()) },
+            ok_ctor,
+            err_ctor,
+            is_maybe,
+        })
+    }
+
+    fn synthesize_try(&mut self, inner: &ast::Expr, span: Span) -> KResult<HirExpr> {
+        let value = self.synth(inner)?;
+        let input = self.try_info(&value.ty, inner.span)?;
+        let ret = self.returns.last().cloned().ok_or_else(|| {
+            Diag::new("`?` can only be used inside a function body", span)
+        })?;
+        let mut ret = self.infer.shallow(&ret);
+        if matches!(ret, Ty::Var(_)) {
+            let fresh = self.infer.fresh();
+            let wrapper = if input.is_maybe {
+                Ty::named(&input.name, vec![fresh])
+            } else {
+                Ty::named(&input.name, vec![fresh, input.error.clone().unwrap()])
+            };
+            self.infer.unify(&ret, &wrapper, span)?;
+            ret = wrapper;
+        }
+        let want = if input.is_maybe { "Maybe" } else { "Result" };
+        let out = self.try_info(&ret, span).map_err(|_| {
+            Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span)
+        })?;
+        if input.is_maybe != out.is_maybe {
+            return Err(Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span));
+        }
+        let residual = if input.is_maybe {
+            TryResidual::Reuse
+        } else {
+            self.infer.unify(input.error.as_ref().unwrap(), out.error.as_ref().unwrap(), span)?;
+            TryResidual::Rebuild {
+                err_ctor: input.err_ctor,
+                ret_err_ctor: out.err_ctor,
+            }
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Try {
+                value: Box::new(value),
+                ok_ctor: input.ok_ctor,
+                residual,
+            },
+            ty: input.success,
+            span,
+        })
+    }
+
     fn synthesize_lambda(&mut self, params: &[ast::Pat], body: &ast::Expr, span: Span) -> KResult<HirExpr> {
         check_param_names(params, span)?;
         self.bodies.push(BodyState::new());
@@ -673,7 +1171,9 @@ impl<'d> Check<'d> {
             param_pats.push(self.check_pat(p, &t, span)?);
         }
         let ret = self.infer.fresh();
+        self.returns.push(ret.clone());
         let built = self.check_expr(body, &ret);
+        self.returns.pop();
         let body_hir = match built {
             Ok(body_hir) => body_hir,
             Err(diag) => {
@@ -1117,7 +1617,12 @@ impl<'d> Check<'d> {
     fn comparable(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool") => Ok(()),
+            Ty::Named { name, args }
+                if args.is_empty()
+                    && (name == "Int" || name == "Float" || name == "Bool" || name == "String") =>
+            {
+                Ok(())
+            }
             other => Err(Diag::new(format!("cannot compare values of type `{other}`"), span)),
         }
     }
@@ -1146,6 +1651,7 @@ impl<'d> Check<'d> {
             FnRef::Fn { id, .. } => Some(self.defs.fns[id.index()].params.len()),
             FnRef::Value { .. } => None,
             FnRef::Instance { instance, method, .. } => Some(self.defs.instances[*instance].methods[*method].params.len()),
+            FnRef::Extern { id } => Some(self.defs.externs[id.index()].params.len()),
             FnRef::Class { class_id, method, .. } => {
                 let sig = &self.defs.classes[class_id.index()].methods[*method].ty;
                 Some(split_arrows(sig).0.len())
@@ -1166,7 +1672,7 @@ fn split_arrows(ty: &Ty) -> (Vec<Ty>, Ty) {
 
 /// Parameter lists bind distinct names: `fun f(x, x)` is an error even
 /// though each pattern alone is fine.
-fn check_param_names(params: &[ast::Pat], span: Span) -> KResult<()> {
+fn check_param_names<'a>(params: impl IntoIterator<Item = &'a ast::Pat>, span: Span) -> KResult<()> {
     let mut seen = HashSet::new();
     for p in params {
         for name in p.binds() {
@@ -1184,6 +1690,19 @@ fn finalize_ty(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, ty: &mu
     let resolved = infer.resolve(ty);
     *ty = infer.rigidify(&resolved, ids);
     check_unknown_params(ty, allowed, span)
+}
+
+fn shell_call(name: impl Into<String>, args: Vec<ast::Expr>, span: Span) -> ast::Expr {
+    ast::Expr {
+        kind: ast::ExprKind::Call(
+            Box::new(ast::Expr {
+                kind: ast::ExprKind::Var(name.into()),
+                span,
+            }),
+            args,
+        ),
+        span,
+    }
 }
 
 fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResult<()> {
@@ -1207,6 +1726,7 @@ fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResu
 fn finalize_ref(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, target: &mut FnRef, span: Span) -> KResult<()> {
     let args = match target {
         FnRef::Fn { args, .. } | FnRef::Value { args, .. } | FnRef::Instance { args, .. } | FnRef::Class { args, .. } => args,
+        FnRef::Extern { .. } => return Ok(()),
     };
     for a in args {
         finalize_ty(infer, ids, allowed, a, span)?;
@@ -1268,6 +1788,12 @@ fn finalize_expr(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, self_
             for a in args {
                 finalize_expr(infer, ids, allowed, self_ref, generics, a)?;
             }
+        }
+        HirExprKind::Field { base, .. } => {
+            finalize_expr(infer, ids, allowed, self_ref, generics, base)?;
+        }
+        HirExprKind::Try { value, .. } => {
+            finalize_expr(infer, ids, allowed, self_ref, generics, value)?;
         }
         HirExprKind::Let { binds, body } => {
             for (p, value) in binds {

@@ -1,7 +1,7 @@
 //! Diagnostic rendering: user spans point into the file, while prelude
-//! spans (tagged by [`fern::PRELUDE_TAG`]) point into the prelude.
+//! spans (in [`fern::FileId::PRELUDE`]) point into the prelude.
 
-use fern::{Diag, PRELUDE_TAG, Span};
+use fern::{Diag, FileId, Span};
 
 #[test]
 fn user_spans_render_against_the_source() {
@@ -15,8 +15,7 @@ fn user_spans_render_against_the_source() {
 
 #[test]
 fn prelude_spans_render_against_the_prelude() {
-    let off = PRELUDE_TAG as usize;
-    let text = fern::render_diag("", &Diag::new("boom", Span::new(off, off + 8)));
+    let text = fern::render_diag("", &Diag::new("boom", Span::in_file(FileId::PRELUDE, 0, 8)));
     assert!(text.contains("error: boom"), "{text}");
     assert!(text.contains(" --> prelude:1:"), "{text}");
     assert!(text.contains("data List a"), "{text}");

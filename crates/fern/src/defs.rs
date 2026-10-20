@@ -14,13 +14,13 @@
 //!   the checker ([`crate::check`]), which generalizes them in one pass
 //!   over the items in declaration order.
 //!
-//! Prelude items carry `Span`s tagged with [`crate::PRELUDE_TAG`];
-//! every later pass treats those as built-in.
+//! Prelude items carry spans in [`crate::FileId::PRELUDE`]; every later
+//! pass treats those as built-in.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast;
-use crate::span::{Diag, KResult, Span};
+use crate::span::{Diag, FileId, KResult, Span};
 use crate::ty::{Kind, Ty};
 
 macro_rules! id_type {
@@ -40,6 +40,7 @@ id_type!(DataId);
 id_type!(ClassId);
 id_type!(FnId);
 id_type!(ValueId);
+id_type!(ExternId);
 
 /// A value scheme once the checker generalized it.
 #[derive(Debug, Clone)]
@@ -62,6 +63,8 @@ pub struct CtorDef {
     pub span: Span,
     pub name: String,
     pub args: Vec<Ty>,
+    /// Field names for a record constructor, in `args` order.
+    pub field_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,12 +148,19 @@ impl InstanceDef {
 }
 
 #[derive(Debug, Clone)]
+pub struct FnParamDef {
+    pub pat: ast::Pat,
+    pub ty: Ty,
+}
+
+#[derive(Debug, Clone)]
 pub struct FnDef {
     pub span: Span,
     pub name: String,
-    pub params: Vec<ast::Pat>,
+    pub params: Vec<FnParamDef>,
+    pub ret: Ty,
     pub body: ast::Expr,
-    /// Filled by the checker after the body generalizes.
+    /// The declared signature. The checker verifies the body against it.
     pub scheme: Option<Scheme>,
     pub is_prelude: bool,
 }
@@ -159,9 +169,26 @@ pub struct FnDef {
 pub struct ValueDef {
     pub span: Span,
     pub name: String,
+    pub ty: Option<Ty>,
     pub body: ast::Expr,
+    /// The declared type for an annotated value, or the inferred scheme
+    /// for an unannotated one.
     pub scheme: Option<Scheme>,
     pub is_prelude: bool,
+}
+
+/// A foreign function: monomorphic, called with the C ABI. `symbol` is
+/// the linker name, which can differ from the fern name.
+#[derive(Debug, Clone)]
+pub struct ExternDef {
+    pub span: Span,
+    pub name: String,
+    pub symbol: String,
+    /// Domain types of the arity chain, outermost first.
+    pub params: Vec<Ty>,
+    pub ret: Ty,
+    /// The whole `params -> ret` type, as written.
+    pub ty: Ty,
 }
 
 pub struct Defs {
@@ -174,6 +201,8 @@ pub struct Defs {
     pub fn_ids: HashMap<String, FnId>,
     pub values: Vec<ValueDef>,
     pub value_ids: HashMap<String, ValueId>,
+    pub externs: Vec<ExternDef>,
+    pub extern_ids: HashMap<String, ExternId>,
     /// Constructor name → (its data type, constructor index).
     pub ctor_ids: HashMap<String, (DataId, u32)>,
     /// Saturated argument counts for type constructors: data types, the
@@ -200,6 +229,10 @@ impl Defs {
         self.value_ids.get(name).copied()
     }
 
+    pub fn extern_by_name(&self, name: &str) -> Option<ExternId> {
+        self.extern_ids.get(name).copied()
+    }
+
     pub fn ctor_by_name(&self, name: &str) -> Option<(DataId, u32)> {
         self.ctor_ids.get(name).copied()
     }
@@ -212,9 +245,9 @@ impl Defs {
         self.kinds_of.get(name)
     }
 
-    /// A prelude item's span is tagged beyond any source offset.
+    /// Whether a span belongs to the built-in prelude.
     pub fn is_prelude_span(&self, span: Span) -> bool {
-        span.lo >= crate::PRELUDE_TAG
+        span.file == FileId::PRELUDE
     }
 }
 
@@ -415,6 +448,9 @@ impl ResolveCtx {
             ast::TyExprKind::Name(name) => {
                 if self.scope.contains_key(name) {
                     Ok(Ty::Param(name.clone()))
+                } else if name == "Unit" {
+                    // `Unit` and `()` are the same type.
+                    Ok(Ty::unit_ty())
                 } else if self.kinds_of.contains_key(name) {
                     Ok(Ty::named0(name))
                 } else {
@@ -561,6 +597,17 @@ fn check_reserved(name: &str, span: Span) -> KResult<()> {
     Ok(())
 }
 
+/// Split an arity chain into its domains and result.
+fn split_arrows(ty: &Ty) -> (Vec<Ty>, Ty) {
+    let mut params = Vec::new();
+    let mut cur = ty.clone();
+    while let Ty::Arrow(domain, rest) = cur {
+        params.push(*domain);
+        cur = *rest;
+    }
+    (params, cur)
+}
+
 pub fn collect(program: &ast::Program) -> KResult<Defs> {
     let mut defs = Defs {
         data: Vec::new(),
@@ -572,6 +619,8 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         fn_ids: HashMap::new(),
         values: Vec::new(),
         value_ids: HashMap::new(),
+        externs: Vec::new(),
+        extern_ids: HashMap::new(),
         ctor_ids: HashMap::new(),
         arity: HashMap::new(),
         kinds_of: HashMap::new(),
@@ -587,7 +636,9 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     }
 
     // Register every item name so forward references resolve later, and
-    // reject duplicates.
+    // reject duplicates. Functions, values, and externs share one value
+    // namespace.
+    let mut seen_names: HashSet<String> = HashSet::new();
     for item in &program.items {
         match &item.kind {
             ast::ItemKind::Data(d) => {
@@ -646,35 +697,60 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 kinds_of.insert(c.name.clone(), head);
                 arity.insert(c.name.clone(), c.params.len());
             }
-            ast::ItemKind::Instance(..) => {}
+            ast::ItemKind::Instance(..) | ast::ItemKind::Import(..) | ast::ItemKind::Use(..) => {}
+            ast::ItemKind::Extern(e) => {
+                check_reserved(&e.name, e.span)?;
+                if !seen_names.insert(e.name.clone()) {
+                    return Err(Diag::new(format!("`{}` is already defined", e.name), e.span));
+                }
+                let id = ExternId(defs.externs.len() as u32);
+                defs.externs.push(ExternDef {
+                    span: e.span,
+                    name: e.name.clone(),
+                    symbol: e.symbol.clone().unwrap_or_else(|| e.name.clone()),
+                    params: Vec::new(),
+                    ret: Ty::unit_ty(),
+                    ty: Ty::unit_ty(),
+                });
+                defs.extern_ids.insert(e.name.clone(), id);
+            }
             ast::ItemKind::Fun(f) => {
                 check_reserved(&f.name, f.span)?;
-                if defs.fn_ids.contains_key(&f.name) || defs.value_ids.contains_key(&f.name) {
+                if !seen_names.insert(f.name.clone()) {
                     return Err(Diag::new(format!("`{}` is already defined", f.name), f.span));
                 }
                 let id = FnId(defs.fns.len() as u32);
                 defs.fns.push(FnDef {
                     span: f.span,
                     name: f.name.clone(),
-                    params: f.params.clone(),
+                    params: f
+                        .params
+                        .iter()
+                        .map(|p| FnParamDef {
+                            pat: p.pat.clone(),
+                            ty: Ty::unit_ty(),
+                        })
+                        .collect(),
+                    ret: Ty::unit_ty(),
                     body: f.body.clone(),
                     scheme: None,
-                    is_prelude: f.span.lo >= crate::PRELUDE_TAG,
+                    is_prelude: f.span.file == FileId::PRELUDE,
                 });
                 defs.fn_ids.insert(f.name.clone(), id);
             }
             ast::ItemKind::Let(v) => {
                 check_reserved(&v.name, v.span)?;
-                if defs.fn_ids.contains_key(&v.name) || defs.value_ids.contains_key(&v.name) {
+                if !seen_names.insert(v.name.clone()) {
                     return Err(Diag::new(format!("`{}` is already defined", v.name), v.span));
                 }
                 let id = ValueId(defs.values.len() as u32);
                 defs.values.push(ValueDef {
                     span: v.span,
                     name: v.name.clone(),
+                    ty: None,
                     body: v.body.clone(),
                     scheme: None,
-                    is_prelude: v.span.lo >= crate::PRELUDE_TAG,
+                    is_prelude: v.span.file == FileId::PRELUDE,
                 });
                 defs.value_ids.insert(v.name.clone(), id);
             }
@@ -700,6 +776,12 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 ctx.scope = scope;
                 let data_id = defs.data_ids[&d.name];
+                if d.ctors.iter().any(|c| c.field_names.is_some()) && d.ctors.len() != 1 {
+                    return Err(Diag::new(
+                        format!("record type `{}` must have exactly one constructor", d.name),
+                        d.span,
+                    ));
+                }
                 let mut ctors = Vec::with_capacity(d.ctors.len());
                 for ctor in &d.ctors {
                     let mut args = Vec::with_capacity(ctor.fields.len());
@@ -712,6 +794,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                         span: d.span,
                         name: ctor.name.clone(),
                         args,
+                        field_names: ctor.field_names.clone(),
                     });
                 }
                 defs.data[data_id.index()].ctors = ctors;
@@ -740,8 +823,103 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 method_var_kinds.insert(class_id, vars_per_method);
             }
-            ast::ItemKind::Instance(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) => {}
+            ast::ItemKind::Instance(..)
+            | ast::ItemKind::Extern(..)
+            | ast::ItemKind::Fun(..)
+            | ast::ItemKind::Let(..)
+            | ast::ItemKind::Import(..)
+            | ast::ItemKind::Use(..) => {}
         }
+    }
+
+    // Function and annotated-value signatures are explicit interfaces.
+    // Resolve them before any body so every function is visible regardless
+    // of declaration order.
+    let mut fn_signature_vars: Vec<Vec<(String, RawKind)>> = vec![Vec::new(); defs.fns.len()];
+    let mut value_signature_vars: Vec<Vec<(String, RawKind)>> = vec![Vec::new(); defs.values.len()];
+    for item in &program.items {
+        match &item.kind {
+            ast::ItemKind::Fun(f) => {
+                let id = defs.fn_ids[&f.name];
+                let mut free_names = Vec::new();
+                for param in &f.params {
+                    for name in free_type_vars(&param.ty, &ctx.kinds_of) {
+                        if !free_names.contains(&name) {
+                            free_names.push(name);
+                        }
+                    }
+                }
+                for name in free_type_vars(&f.ret, &ctx.kinds_of) {
+                    if !free_names.contains(&name) {
+                        free_names.push(name);
+                    }
+                }
+                let mut scope = HashMap::new();
+                let mut vars = Vec::with_capacity(free_names.len());
+                for name in free_names {
+                    let kind = ctx.kinds.var();
+                    scope.insert(name.clone(), kind.clone());
+                    vars.push((name, kind));
+                }
+                ctx.scope = scope;
+                let mut param_tys = Vec::with_capacity(f.params.len());
+                for param in &f.params {
+                    let ty = ctx.resolve(&param.ty)?;
+                    ctx.star_check(&ty, param.ty.span)?;
+                    param_tys.push(ty);
+                }
+                let ret = ctx.resolve(&f.ret)?;
+                ctx.star_check(&ret, f.ret.span)?;
+                let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, ty| Ty::arrow(ty.clone(), acc));
+                let def = &mut defs.fns[id.index()];
+                for (param, ty) in def.params.iter_mut().zip(param_tys) {
+                    param.ty = ty;
+                }
+                def.ret = ret;
+                def.scheme = Some(Scheme { vars: Vec::new(), ty: fn_ty });
+                fn_signature_vars[id.index()] = vars;
+            }
+            ast::ItemKind::Let(v) => {
+                let Some(ty_expr) = &v.ty else {
+                    continue;
+                };
+                let id = defs.value_ids[&v.name];
+                let mut scope = HashMap::new();
+                let mut vars = Vec::new();
+                for name in free_type_vars(ty_expr, &ctx.kinds_of) {
+                    let kind = ctx.kinds.var();
+                    scope.insert(name.clone(), kind.clone());
+                    vars.push((name, kind));
+                }
+                ctx.scope = scope;
+                let ty = ctx.resolve(ty_expr)?;
+                ctx.star_check(&ty, ty_expr.span)?;
+                let def = &mut defs.values[id.index()];
+                def.ty = Some(ty.clone());
+                def.scheme = Some(Scheme { vars: Vec::new(), ty });
+                value_signature_vars[id.index()] = vars;
+            }
+            _ => {}
+        }
+    }
+
+    // Extern signatures are monomorphic, so they resolve with no
+    // parameters in scope; a free type variable is rejected.
+    for item in &program.items {
+        let ast::ItemKind::Extern(e) = &item.kind else {
+            continue;
+        };
+        let id = defs.extern_ids[&e.name];
+        ctx.scope = HashMap::new();
+        let ty = ctx.resolve(&e.ty)?;
+        ctx.star_check(&ty, e.ty.span)?;
+        if !ty.is_concrete() {
+            return Err(Diag::new("extern signatures must be monomorphic", e.ty.span));
+        }
+        let (params, ret) = split_arrows(&ty);
+        defs.externs[id.index()].params = params;
+        defs.externs[id.index()].ret = ret;
+        defs.externs[id.index()].ty = ty;
     }
 
     let mut instance_generics_raw: Vec<Vec<(String, RawKind)>> = Vec::new();
@@ -829,6 +1007,17 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     defs.arity = arity;
 
     defs.kinds_of = kinds_of.iter().map(|(name, raw)| (name.clone(), kinds.to_kind(raw))).collect();
+
+    for (def, vars) in defs.fns.iter_mut().zip(fn_signature_vars) {
+        if let Some(scheme) = &mut def.scheme {
+            scheme.vars = vars.into_iter().map(|(name, raw)| (name, kinds.to_kind(&raw))).collect();
+        }
+    }
+    for (def, vars) in defs.values.iter_mut().zip(value_signature_vars) {
+        if let Some(scheme) = &mut def.scheme {
+            scheme.vars = vars.into_iter().map(|(name, raw)| (name, kinds.to_kind(&raw))).collect();
+        }
+    }
 
     for d in &mut defs.data {
         if let Some(head) = kinds_of.get(&d.name) {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/glcc_frontend", "crates/glcpp", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/fern", "crates/fernc"]
+members = ["crates/glcc_frontend", "crates/glcpp", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/fern", "crates/fernc", "crates/fern_exec", "crates/fern_repl"]
 
 [package]
 name = "glcc"

@@ -47,10 +47,43 @@ jobs:
           # PRs restore but never write: keep the 10 GB repo cache budget
           # for master runs.
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
-      # fern/fernc are experiments; their aarch64 JIT and Win64 paths are
-      # unfinished, so they stay out of the gate.
+      # fern's JIT tests are compiled out on Windows, and fernc's aarch64
+      # path is unproven; keep both out of the portable gate except on
+      # Windows, where fernc drives AOT builds through glcc.
       - name: Build and test
+        if: runner.os != 'Windows'
         run: cargo test --workspace --exclude fern --exclude fernc --locked
+      # fernc's link tests invoke glcc, which is a separate binary in the
+      # workspace and therefore is not built by `cargo test -p fernc`.
+      - name: Build Windows test drivers
+        if: runner.os == 'Windows'
+        run: cargo build -p glcc -p fernc --locked
+      - name: Build and test (fern + fernc)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Append Git Bash after MSVC: `usr/bin/link.exe` is coreutils and
+          # would otherwise shadow MSVC's linker during the tests.
+          $env:PATH = "$env:PATH;C:\Program Files\Git\usr\bin;C:\Program Files\Git\bin"
+          cargo test --workspace --locked
+      # Build fernmake with fernc + glcc, then run the PowerShell makefiles.
+      # This is the end-to-end path Windows users take through the examples.
+      - name: Build and run fern examples (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo run -q -p fernc --locked -- examples/fern/make/make.fern -O1 -o "$env:RUNNER_TEMP\fernmake.obj"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo run -q -p glcc --locked -- examples/fern/make/driver.c "$env:RUNNER_TEMP\fernmake.obj" -o "$env:RUNNER_TEMP\fernmake.exe"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($dir in @("make", "brainfuck", "modules", "showcase")) {
+            Push-Location "examples/fern/$dir"
+            & "$env:RUNNER_TEMP\fernmake.exe" Makefile.win
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & "$env:RUNNER_TEMP\fernmake.exe" Makefile.win run
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Pop-Location
+          }
       # Compile and run a C program through the driver, end to end.
       # build.rs staged glccrt.o and cc is present on the Linux runners.
       - name: C driver smoke test

@@ -10,7 +10,7 @@
 //! flow — pattern matches, guards, binds — is one node.
 
 use crate::ast::{BinOp, UnOp};
-use crate::defs::{Bound, ClassId, DataId, FnId, ValueId};
+use crate::defs::{Bound, ClassId, DataId, ExternId, FnId, ValueId};
 use crate::span::Span;
 use crate::ty::{Kind, Ty};
 
@@ -101,6 +101,18 @@ pub enum HirExprKind {
         ctor: usize,
         args: Vec<HirExpr>,
     },
+    /// A record field access; `index` is the field's position in the
+    /// constructor.
+    Field {
+        base: Box<HirExpr>,
+        index: usize,
+    },
+    /// `expr?` on `Maybe` or `std::result::Result`.
+    Try {
+        value: Box<HirExpr>,
+        ok_ctor: usize,
+        residual: TryResidual,
+    },
     /// A globally named function or value used as a value. Lowering
     /// wraps it in a parameterless closure thunk.
     Fn(FnRef),
@@ -145,6 +157,19 @@ pub enum HirExprKind {
     },
 }
 
+/// How the failure branch of `expr?` produces the enclosing function's
+/// residual value. `Maybe` can reuse the original cell (Nothing carries no
+/// payload); `Result` may need a new cell because changing the success
+/// type can move the error payload.
+#[derive(Debug, Clone, Copy)]
+pub enum TryResidual {
+    Reuse,
+    Rebuild {
+        err_ctor: usize,
+        ret_err_ctor: usize,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct HirArm {
     pub pattern: HirPat,
@@ -178,6 +203,8 @@ pub enum FnRef {
     /// An instance method; `args` instantiate the instance's generics
     /// followed by the method signature's own parameters.
     Instance { instance: usize, method: usize, args: Vec<Ty> },
+    /// A foreign function; monomorphic, so it carries no type arguments.
+    Extern { id: ExternId },
     /// A class method whose dispatch is still open; lowering resolves it
     /// through the solver once the class arguments are concrete. `args`
     /// holds the class arguments first, then the method's own
@@ -185,9 +212,10 @@ pub enum FnRef {
     Class { class_id: ClassId, method: usize, args: Vec<Ty> },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ConstValue {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
 }

@@ -1,0 +1,127 @@
+fun is_empty(xs : List a) : Bool = match xs {
+    case Nil => true
+    case Cons(_, _) => false
+}
+
+fun length(xs : List a) : Int = match xs {
+    case Nil => 0
+    case Cons(_, rest) => 1 + length(rest)
+}
+
+fun head(xs : List a) : Maybe a = match xs {
+    case Nil => Nothing
+    case Cons(x, _) => Just(x)
+}
+
+fun last(xs : List a) : Maybe a = match xs {
+    case Nil => Nothing
+    case Cons(x, Nil) => Just(x)
+    case Cons(_, rest) => last(rest)
+}
+
+fun tail(xs : List a) : List a = match xs {
+    case Nil => Nil
+    case Cons(_, rest) => rest
+}
+
+fun init(xs : List a) : List a = match xs {
+    case Nil => Nil
+    case Cons(_, Nil) => Nil
+    case Cons(x, rest) => Cons(x, init(rest))
+}
+
+fun map(f : a -> b, xs : List a) : List b = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => Cons(f(x), map(f, rest))
+}
+
+fun filter(p : a -> Bool, xs : List a) : List a = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => if p(x) then Cons(x, filter(p, rest)) else filter(p, rest)
+}
+
+fun foldl(f : b -> a -> b, z : b, xs : List a) : b = match xs {
+    case Nil => z
+    case Cons(x, rest) => foldl(f, f(z, x), rest)
+}
+
+fun foldr(f : a -> b -> b, z : b, xs : List a) : b = match xs {
+    case Nil => z
+    case Cons(x, rest) => f(x, foldr(f, z, rest))
+}
+
+fun any(p : a -> Bool, xs : List a) : Bool = match xs {
+    case Nil => false
+    case Cons(x, rest) => if p(x) then true else any(p, rest)
+}
+
+fun all(p : a -> Bool, xs : List a) : Bool = match xs {
+    case Nil => true
+    case Cons(x, rest) => if p(x) then all(p, rest) else false
+}
+
+fun find(p : a -> Bool, xs : List a) : Maybe a = match xs {
+    case Nil => Nothing
+    case Cons(x, rest) => if p(x) then Just(x) else find(p, rest)
+}
+
+fun find_index(p : a -> Bool, xs : List a) : Maybe Int = find_index_at(p, xs, 0)
+
+fun find_index_at(p : a -> Bool, xs : List a, i : Int) : Maybe Int = match xs {
+    case Nil => Nothing
+    case Cons(x, rest) => if p(x) then Just(i) else find_index_at(p, rest, i + 1)
+}
+
+fun contains(x : a, xs : List a) : Bool = any(y -> eq(x, y), xs)
+
+fun take(n : Int, xs : List a) : List a = if n <= 0 then Nil else match xs {
+    case Nil => Nil
+    case Cons(x, rest) => Cons(x, take(n - 1, rest))
+}
+
+fun drop(n : Int, xs : List a) : List a = if n <= 0 then xs else match xs {
+    case Nil => Nil
+    case Cons(_, rest) => drop(n - 1, rest)
+}
+
+fun append(xs : List a, ys : List a) : List a = match xs {
+    case Nil => ys
+    case Cons(x, rest) => Cons(x, append(rest, ys))
+}
+
+fun reverse(xs : List a) : List a = reverse_onto(xs, Nil)
+
+fun reverse_onto(xs : List a, acc : List a) : List a = match xs {
+    case Nil => acc
+    case Cons(x, rest) => reverse_onto(rest, Cons(x, acc))
+}
+
+fun flatten(xss : List (List a)) : List a = match xss {
+    case Nil => Nil
+    case Cons(xs, rest) => append(xs, flatten(rest))
+}
+
+fun zip(xs : List a, ys : List b) : List (a, b) = match xs {
+    case Nil => Nil
+    case Cons(x, xrest) => match ys {
+        case Nil => Nil
+        case Cons(y, yrest) => Cons((x, y), zip(xrest, yrest))
+    }
+}
+
+fun enumerate(xs : List a) : List (Int, a) = enumerate_at(xs, 0)
+
+fun enumerate_at(xs : List a, i : Int) : List (Int, a) = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => Cons((i, x), enumerate_at(rest, i + 1))
+}
+
+fun sum(xs : List Int) : Int = foldl((acc, x) -> acc + x, 0, xs)
+
+fun product(xs : List Int) : Int = foldl((acc, x) -> acc * x, 1, xs)
+
+fun range(from : Int, to : Int) : List Int =
+    if from >= to then Nil else Cons(from, range(from + 1, to))
+
+fun replicate(n : Int, x : a) : List a =
+    if n <= 0 then Nil else Cons(x, replicate(n - 1, x))

@@ -1,0 +1,16 @@
+# Windows build: run `fernmake Makefile.win` (or `... run`, `... clean`).
+# Recipes run in PowerShell; the shared rules live in ../common.mk.
+PROGRAM = brainfuck
+SOURCE = brainfuck.fern
+OPT = -O2
+SHELL = powershell
+.SHELLFLAGS = -NoProfile -Command
+FERNC ?= ../../../target/debug/fernc.exe
+GLCC ?= ../../../target/debug/glcc.exe
+MKDIR = New-Item -ItemType Directory -Force -Path
+REMOVE = if (Test-Path build) { Remove-Item -Recurse -Force build }
+RUN = & ./
+EXE = .exe
+OBJ = .obj
+
+include ../common.mk

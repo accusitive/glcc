@@ -15,3 +15,8 @@ are not part of `cargo test`: each builds with `make`, cleans with
 Each Makefile prefers the tool from the repo's build tree
 (`cargo build`, `cargo build -p fernc`) and falls back to `glcc`,
 `glcpp`, or `fernc` on `PATH`.
+
+When GNU make is not installed, bootstrap the runner in
+`fern/make/` with `./bootstrap.sh`, then use
+`fern/make/build/fernmake path/to/Makefile [target]` in place of
+`make` or `make <target>`.

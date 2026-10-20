@@ -6,11 +6,17 @@
 -- control flow is ordinary recursion. There is no mutable state, so no
 -- array or program counter even exists.
 --
--- `answer()` runs five programs — Hello World, 6 * 7, nested loops, a
--- walk off both ends of the tape, and a `cat` loop fed the input "He" —
--- and returns a rolling checksum of every byte they emitted.
+-- Programs are ordinary strings parsed into `Op`s, comments and
+-- whitespace included. `demo()` prints each program's output, and
+-- `run_file(path)` runs one loaded from disk.
 --
--- Build and run: make && make run (driver.c prints `answer()`).
+-- Build and run: make && make run (driver.c calls `demo()` and prints
+-- the checksum from `answer()`).
+
+import std::foldable
+import std::list
+use std::list::append
+use std::list::reverse
 
 data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
 
@@ -18,59 +24,40 @@ data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
 -- `(left, head, right)` holds the nearest cells first. Touching an
 -- unwritten cell materializes a zero.
 
-fun head(t) = match t { case (_, c, _) => c }
-fun poke(t, n) = match t { case (l, _, r) => (l, n, r) }
+fun head(t : (List Int, Int, List Int)) : Int = match t { case (_, c, _) => c }
+fun poke(t : (List Int, Int, List Int), n : Int) : (List Int, Int, List Int) = match t { case (l, _, r) => (l, n, r) }
 
-fun right(t) = match t {
+fun right(t : (List Int, Int, List Int)) : (List Int, Int, List Int) = match t {
     case (l, c, Nil) => (Cons(c, l), 0, Nil)
     case (l, c, Cons(h, r)) => (Cons(c, l), h, r)
 }
 
-fun left(t) = match t {
+fun left(t : (List Int, Int, List Int)) : (List Int, Int, List Int) = match t {
     case (Nil, c, r) => (Nil, 0, Cons(c, r))
     case (Cons(h, l), c, r) => (l, h, Cons(c, r))
 }
 
 -- Cells are bytes; `+` and `-` wrap like a real Brainfuck.
-fun bump(n) = if n == 255 then 0 else n + 1
-fun drop(n) = if n == 0 then 255 else n - 1
+fun bump(n : Int) : Int = if n == 255 then 0 else n + 1
+fun drop(n : Int) : Int = if n == 0 then 255 else n - 1
 
 -- ------------------------------------------------------------ the input --
 -- `,` consumes the front of the input stream; at EOF the byte reads as
 -- 0 and the stream stays empty.
 
-fun peek(stream) = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
-fun tail(stream) = match stream { case Nil => Nil case Cons(_, more) => more }
-
--- -------------------------------------------------------------- folding --
-class Foldable t {
-    fold : (b -> a -> b) -> b -> t a -> b
-}
-
-instance Foldable List {
-    fold(f, z, xs) = match xs {
-        case Nil => z
-        case Cons(x, xs) => fold(f, f(z, x), xs)
-    }
-}
-
-instance Foldable Maybe {
-    fold(f, z, m) = match m {
-        case Nothing => z
-        case Just(x) => f(z, x)
-    }
-}
+fun peek(stream : List Int) : Maybe Int = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
+fun tail(stream : List Int) : List Int = match stream { case Nil => Nil case Cons(_, more) => more }
 
 -- "Maybe a byte" from the input stream becomes a byte: `Just(b)` keeps
 -- `b`, and `Nothing` at EOF reads as 0.
-fun or_zero(m) = fold((_, b) -> b, 0, m)
+fun or_zero(m : Maybe Int) : Int = fold((_, b) -> b, 0, m)
 
 -- ---------------------------------------------------------- the program --
 -- `split(ops, depth)` runs with the `Open` already consumed: it cuts
 -- out the loop body up to the matching close and returns
 -- (body, program-after-that-close). `depth` counts loops still open.
 
-fun split(ops, depth) = match ops {
+fun split(ops : List Op, depth : Int) : (List Op, List Op) = match ops {
     case Nil => (Nil, Nil)
     case Cons(op, rest) => match op {
         case Open => { let (body, after) = split(rest, depth + 1); (Cons(op, body), after) }
@@ -83,7 +70,7 @@ fun split(ops, depth) = match ops {
 -- A `[` with a nonzero head pushes the body and falls into it; the
 -- matching `]` jumps back to the body while the head is nonzero and
 -- pops it otherwise. A zero head at `[` skips with `split`.
-fun exec(ops, loops, tape, input, out) = match ops {
+fun exec(ops : List Op, loops : List (List Op), tape : (List Int, Int, List Int), input : List Int, out : List Int) : ((List Int, Int, List Int), List Int, List Int) = match ops {
     case Nil => (tape, input, out)
     case Cons(op, rest) => match op {
         case Right => exec(rest, loops, right(tape), input, out)
@@ -106,75 +93,107 @@ fun exec(ops, loops, tape, input, out) = match ops {
     }
 }
 
-fun rev(xs, acc) = match xs { case Nil => acc case Cons(x, xs) => rev(xs, Cons(x, acc)) }
-fun reverse(xs) = rev(xs, Nil)
-
 -- One whole run, returning the emitted bytes oldest first. (`out`
 -- accumulates newest first, hence the `reverse`.)
-fun output(program, input) = {
+fun output(program : List Op, input : List Int) : List Int = {
     let (_, _, out) = exec(program, Nil, (Nil, 0, Nil), input, Nil);
     reverse(out)
 }
 
 -- ------------------------------------------------------------- programs --
--- The same five demos in Brainfuck text, for reference:
---
---   hello   ++++++++++[>+++++++>++++++++++>+++>+<<<<-]>++.>+.+++++++..+++.
---           >++.<<+++++++++++++++.>.+++.------.--------.>+.>.
---   forty   ++++++[>+++++++<-]>.
---   cubes   ++++[>++++[>++++<-]<-]>>.
---   wander  <<+>>.
---   cat     ,[.,]                    fed the input "He"
+-- Parse Brainfuck text: keep the eight commands and ignore everything
+-- else, so comments and layout are free.
+fun parse_op(c : String) : Maybe Op =
+    if c == ">" then Just(Right)
+    else if c == "<" then Just(Left)
+    else if c == "+" then Just(Inc)
+    else if c == "-" then Just(Dec)
+    else if c == "." then Just(Emit)
+    else if c == "," then Just(Read)
+    else if c == "[" then Just(Open)
+    else if c == "]" then Just(Close)
+    else Nothing
 
--- `asm` expands `(op, count)` chunks into program text, so each demo
--- below reads as run-length encoded source.
-fun rep(op, n) = if n == 0 then Nil else Cons(op, rep(op, n - 1))
-fun cats(xs, ys) = match xs { case Nil => ys case Cons(x, xs) => Cons(x, cats(xs, ys)) }
+fun parse_from(source : String, i : Int, n : Int) : List Op =
+    if i >= n then Nil
+    else match parse_op(str_slice(source, i, 1)) {
+        case Nothing => parse_from(source, i + 1, n)
+        case Just(op) => Cons(op, parse_from(source, i + 1, n))
+    }
 
-fun asm(chunks) = match chunks {
-    case Nil => Nil
-    case Cons((op, n), rest) => cats(rep(op, n), asm(rest))
+fun parse(source : String) : List Op = parse_from(source, 0, str_len(source))
+
+let hello_source = "
+    ++++++++++[>+++++++>++++++++++>+++>+<<<<-]
+    >++.>+.+++++++..+++.>++.<<+++++++++++++++.
+    >.+++.------.--------.>+.>.
+"
+let forty_source = "++++++[>+++++++<-]>."
+let cubes_source = "++++[>++++[>++++<-]<-]>>."
+let wander_source = "<<+>>."
+let cat_source = ",[.,]"
+
+let hello = parse(hello_source)
+let forty = parse(forty_source)
+let cubes = parse(cubes_source)
+let wander = parse(wander_source)
+let cat = parse(cat_source)
+
+-- --------------------------------------------------------------- output --
+-- Bytes become a printable string for the demo; control bytes use the
+-- same escapes the lexer accepts.
+fun render_byte(b : Int) : String =
+    if b == 0 then "\\0"
+    else if b == 10 then "\\n"
+    else if b == 9 then "\\t"
+    else if b == 13 then "\\r"
+    else str_of_byte(b)
+
+fun render(bytes : List Int) : String =
+    fold((text, b) -> concat(text, render_byte(b)), "", bytes)
+
+-- File output is raw text, so a trailing newline from the program stays
+-- a newline. A zero byte has no C-string representation and is dropped.
+fun decode(bytes : List Int) : String =
+    fold((text, b) -> if b == 0 then text else concat(text, str_of_byte(b)), "", bytes)
+
+fun run_source(source : String, input : List Int) : List Int =
+    output(parse(source), input)
+
+fun show(name : String, source : String, input : List Int) : Unit = {
+    let bytes = run_source(source, input);
+    println(concat(name, concat(" => ", render(bytes))));
+    ()
 }
 
-let hello = asm([
-    (Inc, 10), (Open, 1),
-    (Right, 1), (Inc, 7), (Right, 1), (Inc, 10), (Right, 1), (Inc, 3), (Right, 1), (Inc, 1),
-    (Left, 4), (Dec, 1), (Close, 1),
-    (Right, 1), (Inc, 2), (Emit, 1),
-    (Right, 1), (Inc, 1), (Emit, 1),
-    (Inc, 7), (Emit, 2), (Inc, 3), (Emit, 1),
-    (Right, 1), (Inc, 2), (Emit, 1),
-    (Left, 2), (Inc, 15), (Emit, 1),
-    (Right, 1), (Emit, 1),
-    (Inc, 3), (Emit, 1), (Dec, 6), (Emit, 1), (Dec, 8), (Emit, 1),
-    (Right, 1), (Inc, 1), (Emit, 1),
-    (Right, 1), (Emit, 1)
-])
+fun demo() : Unit = {
+    show("hello", hello_source, Nil);
+    show("forty", forty_source, Nil);
+    show("cubes", cubes_source, Nil);
+    show("wander", wander_source, Nil);
+    show("cat", cat_source, [72, 101]);
+    ()
+}
 
-let forty = asm([
-    (Inc, 6), (Open, 1), (Right, 1), (Inc, 7), (Left, 1), (Dec, 1), (Close, 1),
-    (Right, 1), (Emit, 1)
-])
-
-let cubes = asm([
-    (Inc, 4), (Open, 1),
-    (Right, 1), (Inc, 4), (Open, 1),
-    (Right, 1), (Inc, 4), (Left, 1), (Dec, 1), (Close, 1),
-    (Left, 1), (Dec, 1), (Close, 1),
-    (Right, 2), (Emit, 1)
-])
-
-let wander = asm([(Left, 2), (Inc, 1), (Right, 2), (Emit, 1)])
-
-let cat = asm([(Read, 1), (Open, 1), (Emit, 1), (Read, 1), (Close, 1)])
+-- Run one program from a file with no input, writing its bytes as text.
+fun run_file(path : String) : Int = {
+    let source = read_file(path);
+    if str_len(source) == 0 then {
+        println(concat("cannot read ", path));
+        1
+    } else {
+        print(decode(run_source(source, Nil)));
+        0
+    }
+}
 
 -- A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
 -- no `%`, so `reduce` spells the modulo by subtraction.
-fun reduce(h) = if h >= 1000000007 then reduce(h - 1000000007) else h
-fun checksum(bs) = fold((h, b) -> reduce(h * 31 + b), 7, bs)
+fun reduce(h : Int) : Int = if h >= 1000000007 then reduce(h - 1000000007) else h
+fun checksum(bs : List Int) : Int = fold((h, b) -> reduce(h * 31 + b), 7, bs)
 
-fun answer() = {
-    let spoken = cats(output(hello, Nil), cats(output(forty, Nil),
-        cats(output(cubes, Nil), cats(output(wander, Nil), output(cat, [72, 101])))));
+fun answer() : Int = {
+    let spoken = append(output(hello, Nil), append(output(forty, Nil),
+        append(output(cubes, Nil), append(output(wander, Nil), output(cat, [72, 101])))));
     checksum(spoken)
 }

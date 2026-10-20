@@ -1,0 +1,10 @@
+data Tree a = Leaf(a) | Node(Tree a, Tree a)
+
+fun double(x : Int) : Int = x * 2
+
+fun size(t : Tree a) : Int = match t {
+    case Leaf(_) => 1
+    case Node(l, r) => size(l) + size(r)
+}
+
+fun tree() : Tree Int = Node(Leaf(20), Leaf(1))

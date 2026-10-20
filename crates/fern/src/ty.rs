@@ -97,8 +97,8 @@ impl Ty {
     }
 
     /// Primitive type names with special lowering behavior.
-    pub fn intros() -> [&'static str; 4] {
-        ["Int", "Float", "Bool", "Unit"]
+    pub fn intros() -> [&'static str; 7] {
+        ["Int", "Float", "Bool", "Unit", "String", "Argv", "Pipe"]
     }
 
     pub fn int_ty() -> Ty {
@@ -163,10 +163,11 @@ impl Ty {
     pub fn mangle(&self) -> String {
         match self {
             Ty::Named { name, args } => {
+                let name = name.replace("::", "$");
                 if args.is_empty() {
-                    name.clone()
+                    name
                 } else {
-                    let mut out = name.clone();
+                    let mut out = name;
                     for a in args {
                         out.push('$');
                         out.push_str(&a.mangle());

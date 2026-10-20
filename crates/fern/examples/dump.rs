@@ -2,17 +2,14 @@
 //!
 //! Usage: `cargo run -p fern --example dump -- '<source>'`
 
-use fern::{PRELUDE_TAG, Span};
-
 fn main() {
     let src = std::env::args().nth(1).expect("usage: dump <source>");
-    let mut tokens = fern::lexer::lex(fern::prelude::SOURCE).expect("lex");
-    tokens.pop();
-    for token in &mut tokens {
-        token.span = Span::new((token.span.lo + PRELUDE_TAG) as usize, (token.span.hi + PRELUDE_TAG) as usize);
+    let mut session = fern::Session::new();
+    let file = session.add_file("<input>", src);
+    let (program, diags, _) = session.program(&[session.prelude(), file]);
+    for diag in &diags {
+        eprintln!("{}", session.render(diag));
     }
-    tokens.extend(fern::lexer::lex(&src).expect("lex"));
-    let program = fern::parser::parse(tokens).expect("parse");
     let mut defs = fern::defs::collect(&program).expect("defs");
     let hir = fern::check::check(&mut defs, &program).expect("check");
     println!("== HIR ==");

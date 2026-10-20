@@ -1,0 +1,11 @@
+[package]
+name = "fern_repl"
+version = "0.1.0"
+edition = "2024"
+
+# REPL/shell front-end. The core (`lib`) owns the session and the JIT so
+# it can be tested without stdin; the binary is a thin read/print loop.
+
+[dependencies]
+fern = { path = "../fern" }
+fern_exec = { path = "../fern_exec" }

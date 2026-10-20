@@ -3,30 +3,60 @@
 //! fern is a small pure ML-family surface:
 //!
 //! ```text
-//! item     := data | class | instance | fun | let
+//! item     := data | class | instance | extern | fun | let
 //! data     := 'data' Upper lower* '=' ctor ('|' ctor)*
+//! extern   := 'extern' string? lower ':' ty
 //! ctor     := Upper ( '(' ty (',' ty)* ')' )?
 //! class    := 'class' Upper lower* '{' (lower ':' ty ';')* '}'
 //! instance := 'instance' Upper ty ('when' ty (',' ty)*)? '{' method* '}'
 //! method   := lower '(' pat-list? ')' '=' expr ';'?       (params may be empty)
-//! fun      := 'fun' lower '(' pat-list? ')' '=' expr
-//! let      := 'let' lower '=' expr
+//! fun      := 'fun' lower '(' (pat ':' ty),* ')' ':' ty '=' expr
+//! let      := 'let' lower (':' ty)? '=' expr
 //! expr     := if | match | block | lambda | prefix
 //! if       := 'if' expr 'then' expr 'else' expr
 //! match    := 'match' expr '{' ('case' pat ('when' expr)? '=>' expr ';')* '}'
 //! block    := '{' ('let' pat '=' expr ';')* (expr ';')* expr? '}'
 //! ```
 //!
-//! Binary operators, loosest first: `||`, `&&`, comparisons, `::`
-//! (right-assoc cons), `+ -`, `* /`; unary `-`; postfix calls `f(x, y)`.
+//! Binary operators, loosest first: `||`, `&&`, comparisons, `|>`
+//! (left-assoc value pipe), `::` (right-assoc cons), `+ -`, `* /`;
+//! unary `-`; postfix calls `f(x, y)`.
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
 use crate::span::{Diag, KResult, Span};
 
-pub fn parse(tokens: Vec<Token>) -> KResult<Program> {
+#[derive(Debug, Clone)]
+pub struct ParseOutput {
+    pub program: Program,
+    pub diags: Vec<Diag>,
+    pub incomplete: bool,
+}
+
+/// Parse every item, reporting failures and resyncing at the next
+/// top-level item instead of stopping at the first error.
+pub fn parse_recovering(tokens: Vec<Token>) -> ParseOutput {
     let mut parser = Parser { tokens, pos: 0 };
-    parser.program()
+    parser.program_recovering()
+}
+
+/// Parse a single expression, as found inside `${...}`.
+pub fn parse_expr_fragment(tokens: Vec<Token>) -> KResult<Expr> {
+    let mut parser = Parser { tokens, pos: 0 };
+    let expr = parser.expr()?;
+    parser.expect(&Tok::Eof, "end of the interpolation expression")?;
+    Ok(expr)
+}
+
+/// Fail-fast wrapper over [`parse_recovering`]: returns the first
+/// diagnostic and discards the partially parsed program.
+pub fn parse(tokens: Vec<Token>) -> KResult<Program> {
+    let mut out = parse_recovering(tokens);
+    if out.diags.is_empty() {
+        Ok(out.program)
+    } else {
+        Err(out.diags.remove(0))
+    }
 }
 
 struct Parser {
@@ -62,11 +92,23 @@ impl Parser {
         self.peek() == want
     }
 
+    /// Mark an error as incomplete when the input ended while parsing.
+    fn complete_if_eof(&self, diag: Diag) -> Diag {
+        if self.is(&Tok::Eof) && !diag.incomplete {
+            Diag::incomplete(diag.msg, diag.span)
+        } else {
+            diag
+        }
+    }
+
     fn expect(&mut self, want: &Tok, what: &str) -> KResult<Token> {
         if self.is(want) {
             return Ok(self.bump());
         }
-        Err(Diag::new(format!("expected {what}, found {}", self.peek().describe()), self.span()))
+        Err(self.complete_if_eof(Diag::new(
+            format!("expected {what}, found {}", self.peek().describe()),
+            self.span(),
+        )))
     }
 
     fn eat(&mut self, want: &Tok) -> bool {
@@ -94,16 +136,71 @@ impl Parser {
 
     // ------------------------------------------------------------ items --
 
-    fn program(&mut self) -> KResult<Program> {
+    fn program_recovering(&mut self) -> ParseOutput {
         let mut items = Vec::new();
-        while !self.is(&Tok::Eof) {
+        let mut diags = Vec::new();
+        let mut incomplete = false;
+        loop {
             self.eat_seps();
             if self.is(&Tok::Eof) {
                 break;
             }
-            items.push(self.item()?);
+            let start = self.pos;
+            match self.item() {
+                Ok(item) => items.push(item),
+                Err(diag) => {
+                    let diag = self.complete_if_eof(diag);
+                    incomplete |= diag.incomplete;
+                    diags.push(diag);
+                    self.synchronize(start);
+                }
+            }
         }
-        Ok(Program { items })
+        ParseOutput {
+            program: Program::single(items),
+            diags,
+            incomplete,
+        }
+    }
+
+    /// Skip to the next top-level item keyword, ignoring keywords nested
+    /// inside braces, parentheses, or brackets. Always advances when the
+    /// failing item consumed nothing, so the recovery loop terminates.
+    /// An item keyword already at the cursor belongs to the next item and
+    /// is left for the caller.
+    fn synchronize(&mut self, item_start: usize) {
+        let lo = item_start.min(self.tokens.len());
+        let hi = self.pos.min(self.tokens.len());
+        let mut open = Vec::new();
+        // Only unmatched braces carry over from the failed item: a block
+        // or body can contain nested keywords, while an unclosed parameter
+        // list is abandoned at the next item keyword.
+        for token in &self.tokens[lo..hi] {
+            match token.tok {
+                Tok::LBrace => open.push(Delim::Brace),
+                Tok::RBrace => close_delim(&mut open, Delim::Brace),
+                _ => {}
+            }
+        }
+        let start = self.pos;
+        while !self.is(&Tok::Eof) {
+            if open.is_empty() && is_item_start(self.peek()) {
+                break;
+            }
+            match self.peek() {
+                Tok::LBrace => open.push(Delim::Brace),
+                Tok::LParen => open.push(Delim::Paren),
+                Tok::LBracket => open.push(Delim::Bracket),
+                Tok::RBrace => close_delim(&mut open, Delim::Brace),
+                Tok::RParen => close_delim(&mut open, Delim::Paren),
+                Tok::RBracket => close_delim(&mut open, Delim::Bracket),
+                _ => {}
+            }
+            self.bump();
+        }
+        if self.pos == start && !self.is(&Tok::Eof) && (self.pos == item_start || !is_item_start(self.peek())) {
+            self.bump();
+        }
     }
 
     fn eat_seps(&mut self) {
@@ -118,16 +215,23 @@ impl Parser {
             Tok::Data => ItemKind::Data(self.data_item()?),
             Tok::Class => ItemKind::Class(self.class_item()?),
             Tok::Instance => ItemKind::Instance(self.instance_item()?),
+            Tok::Extern => ItemKind::Extern(self.extern_item()?),
             Tok::Fun => ItemKind::Fun(self.fun_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
+            Tok::Import => ItemKind::Import(self.import_item()?),
+            Tok::Use => ItemKind::Use(self.use_item()?),
+            Tok::Priv => {
+                return Err(Diag::new("`priv` is reserved for module privacy and is not implemented yet", self.span()));
+            }
             other => {
-                return Err(Diag::new(
-                    format!("expected an item (`data`, `class`, `instance`, `fun`, or `let`), found {}", other.describe()),
+                return Err(self.complete_if_eof(Diag::new(
+                    format!("expected an item (`data`, `class`, `instance`, `extern`, `fun`, `let`, `import`, or `use`), found {}", other.describe()),
                     self.span(),
-                ));
+                )));
             }
         };
         Ok(Item {
+            module: ModuleId::ROOT,
             span: lo.to(self.prev_span()),
             kind,
         })
@@ -152,6 +256,7 @@ impl Parser {
             }
             ctor_names.push(name.clone());
             let mut fields = Vec::new();
+            let mut field_names = None;
             if self.is(&Tok::LParen) {
                 self.bump();
                 if !self.is(&Tok::RParen) {
@@ -164,8 +269,29 @@ impl Parser {
                     }
                 }
                 self.expect(&Tok::RParen, "`)` after the constructor fields")?;
+            } else if self.is(&Tok::LBrace) {
+                self.bump();
+                let mut names = Vec::new();
+                if !self.is(&Tok::RBrace) {
+                    loop {
+                        let field_span = self.span();
+                        let field = self.lower("a record field name")?;
+                        if names.contains(&field) {
+                            return Err(Diag::new(format!("duplicate record field `{field}`"), field_span));
+                        }
+                        names.push(field);
+                        self.expect(&Tok::Colon, "`:` after the record field name")?;
+                        fields.push(self.ty_expr()?);
+                        if self.eat(&Tok::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBrace, "`}` after the record fields")?;
+                field_names = Some(names);
             }
-            ctors.push(CtorDecl { name, fields });
+            ctors.push(CtorDecl { name, fields, field_names });
             if self.eat(&Tok::Pipe) {
                 continue;
             }
@@ -278,6 +404,32 @@ impl Parser {
         })
     }
 
+    fn extern_item(&mut self) -> KResult<ExternDecl> {
+        let start = self.span();
+        self.bump();
+        let symbol = if matches!(self.peek(), Tok::Str(_)) {
+            let Token {
+                tok: Tok::Str(symbol),
+                ..
+            } = self.bump()
+            else {
+                unreachable!("checked above");
+            };
+            Some(symbol)
+        } else {
+            None
+        };
+        let name = self.lower("an extern name")?;
+        self.expect(&Tok::Colon, "`:` before the extern signature")?;
+        let ty = self.ty_expr()?;
+        Ok(ExternDecl {
+            span: start.to(self.prev_span()),
+            name,
+            symbol,
+            ty,
+        })
+    }
+
     fn fun_item(&mut self) -> KResult<FnDecl> {
         let start = self.span();
         self.bump();
@@ -288,7 +440,10 @@ impl Parser {
         } else {
             let mut params = Vec::new();
             loop {
-                params.push(self.pat()?);
+                let pat = self.pat()?;
+                self.expect(&Tok::Colon, "`:` and a type annotation after the parameter")?;
+                let ty = self.ty_expr()?;
+                params.push(FnParam { pat, ty });
                 if self.eat(&Tok::Comma) {
                     continue;
                 }
@@ -297,12 +452,15 @@ impl Parser {
             params
         };
         self.expect(&Tok::RParen, "`)` after the function parameters")?;
+        self.expect(&Tok::Colon, "`:` and the return type after the function parameters")?;
+        let ret = self.ty_expr()?;
         self.expect(&Tok::Eq, "`=` before the function body")?;
         let body = self.expr()?;
         Ok(FnDecl {
             span: start.to(self.prev_span()),
             name,
             params,
+            ret,
             body,
         })
     }
@@ -311,13 +469,66 @@ impl Parser {
         let start = self.span();
         self.bump();
         let name = self.lower("a value name")?;
+        let ty = if self.eat(&Tok::Colon) {
+            Some(self.ty_expr()?)
+        } else {
+            None
+        };
         self.expect(&Tok::Eq, "`=` after the value name")?;
         let body = self.expr()?;
         Ok(ValueDecl {
             span: start.to(self.prev_span()),
             name,
+            ty,
             body,
         })
+    }
+
+    fn import_item(&mut self) -> KResult<ImportDecl> {
+        let start = self.span();
+        self.bump();
+        let path = self.module_path("a module path")?;
+        let alias = if self.eat(&Tok::As) {
+            Some(self.lower("an import alias")?)
+        } else {
+            None
+        };
+        Ok(ImportDecl {
+            span: start.to(self.prev_span()),
+            path,
+            alias,
+        })
+    }
+
+    fn use_item(&mut self) -> KResult<UseDecl> {
+        let start = self.span();
+        self.bump();
+        let mut path = vec![self.lower("a module path")?];
+        while self.eat(&Tok::ColonColon) {
+            if matches!(self.peek(), Tok::Upper(_)) {
+                path.push(self.upper("an imported item")?);
+            } else {
+                path.push(self.lower("a module path or imported item")?);
+            }
+        }
+        let alias = if self.eat(&Tok::As) {
+            Some(self.lower("an import alias")?)
+        } else {
+            None
+        };
+        Ok(UseDecl {
+            span: start.to(self.prev_span()),
+            path,
+            alias,
+        })
+    }
+
+    fn module_path(&mut self, what: &str) -> KResult<Vec<String>> {
+        let mut path = vec![self.lower(what)?];
+        while self.eat(&Tok::ColonColon) {
+            path.push(self.lower("a module path segment")?);
+        }
+        Ok(path)
     }
 
     // ------------------------------------------------------------ types --
@@ -355,13 +566,29 @@ impl Parser {
         let span = self.span();
         match self.peek() {
             Tok::Upper(_) | Tok::Lower(_) => {
-                let name = match self.bump() {
+                let mut name = match self.bump() {
                     Token {
                         tok: Tok::Upper(name) | Tok::Lower(name),
                         ..
                     } => name,
                     _ => unreachable!("checked above"),
                 };
+                while self.eat(&Tok::Dot) {
+                    let segment = match self.bump() {
+                        Token {
+                            tok: Tok::Upper(segment) | Tok::Lower(segment),
+                            ..
+                        } => segment,
+                        other => {
+                            return Err(Diag::new(
+                                format!("expected a type name after `.`, found {}", other.tok.describe()),
+                                other.span,
+                            ));
+                        }
+                    };
+                    name.push('.');
+                    name.push_str(&segment);
+                }
                 Ok(TyExpr {
                     kind: TyExprKind::Name(name),
                     span: span.to(self.prev_span()),
@@ -441,8 +668,32 @@ impl Parser {
             }
             Tok::Float(_) => Err(Diag::new("float literals cannot be matched; compare with `==` instead".to_string(), self.span())),
             Tok::Lower(_) => {
-                let name = self.lower("a pattern")?;
-                Ok(Pat::Bind(name))
+                let mut name = self.lower("a pattern")?;
+                while self.eat(&Tok::Dot) {
+                    name.push('.');
+                    name.push_str(&self.upper("a constructor name after `.`")?);
+                }
+                if !name.contains('.') {
+                    return Ok(Pat::Bind(name));
+                }
+                let fields = if self.is(&Tok::LParen) {
+                    self.bump();
+                    let mut fields = Vec::new();
+                    if !self.is(&Tok::RParen) {
+                        loop {
+                            fields.push(self.pat()?);
+                            if self.eat(&Tok::Comma) {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect(&Tok::RParen, "`)` after the constructor pattern")?;
+                    fields
+                } else {
+                    Vec::new()
+                };
+                Ok(Pat::Ctor { name, fields })
             }
             Tok::Upper(_) => {
                 let name = self.upper("a pattern")?;
@@ -612,6 +863,19 @@ impl Parser {
         if level >= BIN_LEVELS.len() {
             return self.prefix();
         }
+        if level == PIPE_LEVEL {
+            let mut lhs = self.binary(level + 1)?;
+            while self.is(&Tok::PipeGt) {
+                self.bump();
+                let rhs = self.binary(level + 1)?;
+                let span = lhs.span.to(rhs.span);
+                lhs = Expr {
+                    kind: ExprKind::Call(Box::new(rhs), vec![lhs]),
+                    span,
+                };
+            }
+            return Ok(lhs);
+        }
         let ops = BIN_LEVELS[level];
         if ops.is_empty() {
             // Cons level: right-assoc.
@@ -674,6 +938,82 @@ impl Parser {
     fn postfix(&mut self) -> KResult<Expr> {
         let mut atom = self.atom()?;
         loop {
+            if self.eat(&Tok::Question) {
+                let span = atom.span.to(self.prev_span());
+                atom = Expr {
+                    kind: ExprKind::Try(Box::new(atom)),
+                    span,
+                };
+                continue;
+            }
+            if self.is(&Tok::LBrace) {
+                let ExprKind::Ctor { name } = &atom.kind else {
+                    break;
+                };
+                let opens_record = matches!(
+                    (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
+                    (Some(Token { tok: Tok::RBrace, .. }), _)
+                        | (Some(Token { tok: Tok::Lower(_), .. }), Some(Token { tok: Tok::Eq, .. }))
+                );
+                if !opens_record {
+                    break;
+                }
+                let name = name.clone();
+                let open_span = atom.span;
+                self.bump();
+                let mut fields = Vec::new();
+                if !self.is(&Tok::RBrace) {
+                    loop {
+                        let field = self.lower("a record field name")?;
+                        self.expect(&Tok::Eq, "`=` after the record field name")?;
+                        let value = self.expr()?;
+                        fields.push((field, value));
+                        if self.eat(&Tok::Comma) {
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.expect(&Tok::RBrace, "`}` after the record fields")?;
+                atom = Expr {
+                    kind: ExprKind::Record { ctor: name, fields },
+                    span: open_span.to(self.prev_span()),
+                };
+                continue;
+            }
+            if self.eat(&Tok::Dot) {
+                let member = match self.bump() {
+                    Token {
+                        tok: Tok::Upper(name) | Tok::Lower(name),
+                        ..
+                    } => name,
+                    other => {
+                        return Err(Diag::new(
+                            format!("expected a member name, found {}", other.tok.describe()),
+                            other.span,
+                        ));
+                    }
+                };
+                let upper = member.as_bytes()[0].is_ascii_uppercase();
+                let span = atom.span.to(self.prev_span());
+                if upper {
+                    if let Some(path) = expr_path(&atom) {
+                        atom = Expr {
+                            kind: ExprKind::Ctor { name: format!("{path}.{member}") },
+                            span,
+                        };
+                        continue;
+                    }
+                }
+                atom = Expr {
+                    kind: ExprKind::Field {
+                        base: Box::new(atom),
+                        field: member,
+                    },
+                    span,
+                };
+                continue;
+            }
             if self.is(&Tok::LParen) {
                 let callee_span = atom.span;
                 self.bump();
@@ -709,7 +1049,7 @@ impl Parser {
     fn atom(&mut self) -> KResult<Expr> {
         let lo = self.span();
         if self.is(&Tok::Eof) {
-            return Err(Diag::new("expected an expression here", lo));
+            return Err(Diag::incomplete("expected an expression here", lo));
         }
         match self.peek() {
             Tok::Int(_) => {
@@ -719,6 +1059,10 @@ impl Parser {
             Tok::Float(_) => {
                 let Token { tok: Tok::Float(v), span } = self.bump() else { unreachable!() };
                 Ok(Expr { kind: ExprKind::Float(v), span })
+            }
+            Tok::Str(_) => {
+                let Token { tok: Tok::Str(s), span } = self.bump() else { unreachable!() };
+                Ok(Expr { kind: ExprKind::Str(s), span })
             }
             Tok::True | Tok::False => {
                 let Token { tok, span } = self.bump();
@@ -755,6 +1099,30 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Ctor { name },
                     span: lo.to(self.prev_span()),
+                })
+            }
+            Tok::Builtin(_) => {
+                let Token { tok: Tok::Builtin(name), span } = self.bump() else {
+                    unreachable!("checked above");
+                };
+                Ok(Expr {
+                    kind: ExprKind::Var(crate::prelude::builtin_name(&name)),
+                    span,
+                })
+            }
+            Tok::Shell { .. } => {
+                let Token { tok: Tok::Shell { src, capture }, span } = self.bump() else {
+                    unreachable!("checked above");
+                };
+                let base = span.lo + if capture { 2 } else { 1 };
+                let raw = crate::shell::parse_raw(span.file, &src, base)?;
+                let command = self.convert_shell(raw)?;
+                Ok(Expr {
+                    kind: ExprKind::Shell {
+                        command: Box::new(command),
+                        capture,
+                    },
+                    span,
                 })
             }
             Tok::Lower(_) => {
@@ -794,9 +1162,28 @@ impl Parser {
 
     /// After an opening `(`: unit, grouping, tuple, or a paren-list lambda.
     fn paren_expr(&mut self, open: Span) -> KResult<Expr> {
-        // Lambda attempt: `() ->`, `(pat, pat, ...) ->`. Rewind on any
-        // failure and reparse as a plain expression; patterns are a small
-        // subset of the expression grammar, so nothing is lost.
+        // `()` is the unit value, unless an arrow makes it a zero-arg
+        // lambda head.
+        if self.is(&Tok::RParen) {
+            self.bump();
+            if self.eat(&Tok::Arrow) {
+                let body = self.expr()?;
+                return Ok(Expr {
+                    kind: ExprKind::Lambda {
+                        params: Vec::new(),
+                        body: Box::new(body),
+                    },
+                    span: open.to(self.prev_span()),
+                });
+            }
+            return Ok(Expr {
+                kind: ExprKind::Unit,
+                span: open.to(self.prev_span()),
+            });
+        }
+        // Lambda attempt: `(pat, pat, ...) ->`. Rewind on any failure and
+        // reparse as a plain expression; patterns are a small subset of
+        // the expression grammar, so nothing is lost.
         let mark = self.pos;
         match self.try_lambda_pats() {
             Ok(Some(params)) => {
@@ -832,11 +1219,53 @@ impl Parser {
     /// `pat (',' pat)*` followed by `) ->`, or `() ->`. Returns `None`
     /// when the shape is not a lambda. Errors are abortive (the caller
     /// rewinds either way).
+    fn convert_shell(&mut self, raw: crate::shell::RawCommand) -> KResult<ShellCommand> {
+        let stages = raw
+            .stages
+            .into_iter()
+            .map(|stage| self.convert_stage(stage))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellCommand {
+            stages,
+            span: raw.span,
+        })
+    }
+
+    fn convert_stage(&mut self, raw: crate::shell::RawStage) -> KResult<ShellStage> {
+        let words = raw
+            .words
+            .into_iter()
+            .map(|word| self.convert_word(word))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellStage {
+            words,
+            span: raw.span,
+        })
+    }
+
+    fn convert_word(&mut self, raw: crate::shell::RawWord) -> KResult<ShellWord> {
+        let parts = raw
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                crate::shell::RawPart::Lit(text) => Ok(ShellWordPart::Lit(text)),
+                crate::shell::RawPart::Interp { src, span } => {
+                    let tokens = crate::lexer::lex_fragment(span.file, &src, span.lo)?;
+                    let expr = parse_expr_fragment(tokens)?;
+                    Ok(ShellWordPart::Interp(expr))
+                }
+                crate::shell::RawPart::Capture(command) => {
+                    Ok(ShellWordPart::Capture(Box::new(self.convert_shell(*command)?)))
+                }
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellWord {
+            parts,
+            span: raw.span,
+        })
+    }
+
     fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
-        if self.is(&Tok::RParen) {
-            self.bump();
-            return Ok(self.is(&Tok::Arrow)).map(|is_arrow| if is_arrow { Some(Vec::new()) } else { None });
-        }
         if !matches!(self.peek(), Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket) {
             return Ok(None);
         }
@@ -872,11 +1301,54 @@ impl Parser {
     }
 }
 
+fn expr_path(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Var(name) => Some(name.clone()),
+        ExprKind::Field { base, field } => Some(format!("{}.{}", expr_path(base)?, field)),
+        _ => None,
+    }
+}
+
+fn is_item_start(tok: &Tok) -> bool {
+    matches!(
+        tok,
+        Tok::Data
+            | Tok::Class
+            | Tok::Instance
+            | Tok::Extern
+            | Tok::Fun
+            | Tok::Let
+            | Tok::Import
+            | Tok::Use
+            | Tok::Priv
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Delim {
+    Brace,
+    Paren,
+    Bracket,
+}
+
+/// Remove the nearest matching opening delimiter, discarding any
+/// unterminated delimiters nested inside it.
+fn close_delim(open: &mut Vec<Delim>, close: Delim) {
+    if let Some(index) = open.iter().rposition(|&delim| delim == close) {
+        open.truncate(index);
+    }
+}
+
+/// `|>` binds tighter than comparisons but looser than `::`.
+const PIPE_LEVEL: usize = 3;
+
 const BIN_LEVELS: &[&[BinOp]] = &[
     &[BinOp::Or],
     &[BinOp::And],
     &[BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge],
-    // Cons: right-assoc, sits between comparisons and addition.
+    // Value pipe: handled before the operator table.
+    &[],
+    // Cons: right-assoc, sits between the pipe and addition.
     &[],
     &[BinOp::Add, BinOp::Sub],
     &[BinOp::Mul, BinOp::Div],

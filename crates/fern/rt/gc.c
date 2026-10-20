@@ -29,8 +29,10 @@
    runs a collection when it crosses `fern_threshold`, and aborts when
    the arena is genuinely full. */
 
-/* LP64: pointers, words, and `unsigned long` are all 64 bits. */
-typedef unsigned long u64;
+/* Fern Int and pointer-sized values are always 64 bits. `long` is
+   32-bit on Windows (LLP64), so spell the width explicitly. */
+typedef unsigned long long u64;
+typedef long long i64;
 
 #define HEAP_BYTES (1UL << 26)
 #define HEADER 16UL
@@ -70,14 +72,26 @@ static u64 fern_work_sp;
 static u64 fern_overflowed;
 static u64 fern_collections;
 
-long write(int fd, const void *buf, unsigned long count);
+#ifdef _WIN32
+int _write(int fd, const void *buf, unsigned int count);
+#else
+i64 write(int fd, const void *buf, u64 count);
+#endif
 void abort(void);
 
 static const char fern_oom_msg[] = "fern: heap full\n";
 static const char fern_root_msg[] = "fern: root overflow\n";
 
+static i64 fern_os_write(int fd, const void *buf, u64 count) {
+#ifdef _WIN32
+	return (i64)_write(fd, buf, (unsigned int)count);
+#else
+	return write(fd, buf, count);
+#endif
+}
+
 static void fern_die(const char *msg, u64 len) {
-	write(2, msg, len);
+	fern_os_write(2, msg, len);
 	abort();
 }
 
@@ -272,4 +286,748 @@ u64 fern_stats_roots(void) {
 
 u64 fern_stats_collections(void) {
 	return fern_collections;
+}
+
+/* ------------------------------------------------------------------ */
+/* strings                                                             */
+
+static u64 fern_strlen(const char *s) {
+	u64 n = 0;
+	while (s[n] != 0) n++;
+	return n;
+}
+
+i64 fern_print(const char *s) {
+	fern_os_write(1, s, fern_strlen(s));
+	return 0;
+}
+
+char *fern_str_concat(const char *a, const char *b) {
+	u64 na = fern_strlen(a);
+	u64 nb = fern_strlen(b);
+	char *out = (char *)fern_alloc(na + nb + 1);
+	u64 i;
+	for (i = 0; i < na; i++) out[i] = a[i];
+	for (i = 0; i < nb; i++) out[na + i] = b[i];
+	out[na + nb] = 0;
+	return out;
+}
+
+/* A typed hole in a shell word: `shell_arg` constrains `${expr}` to a
+ * string without copying it. */
+char *fern_str_identity(char *s) {
+	return s;
+}
+
+char fern_str_eq(const char *a, const char *b) {
+	u64 i = 0;
+	while (a[i] != 0 && b[i] != 0) {
+		if (a[i] != b[i]) return 0;
+		i++;
+	}
+	return a[i] == b[i];
+}
+
+i64 fern_str_len(const char *s) {
+	return (i64)fern_strlen(s);
+}
+
+/* Byte offset of `needle` in `s`, or -1. */
+i64 fern_str_find(const char *s, const char *needle) {
+	u64 n = fern_strlen(needle);
+	if (n == 0) return 0;
+	u64 i = 0;
+	while (s[i] != 0) {
+		u64 j = 0;
+		while (j < n && s[i + j] != 0 && s[i + j] == needle[j]) j++;
+		if (j == n) return (i64)i;
+		i++;
+	}
+	return -1;
+}
+
+/* A fresh GC string holding up to `len` bytes from `start`. */
+char *fern_str_slice(const char *s, i64 start, i64 len) {
+	u64 n = fern_strlen(s);
+	u64 begin = start < 0 ? 0 : (u64)start;
+	u64 take = len < 0 ? 0 : (u64)len;
+	if (begin > n) begin = n;
+	if (take > n - begin) take = n - begin;
+	char *out = (char *)fern_alloc(take + 1);
+	u64 i;
+	for (i = 0; i < take; i++) out[i] = s[begin + i];
+	out[take] = 0;
+	return out;
+}
+
+/* A fresh GC string holding one byte. Byte zero is the empty string
+   because fern strings are NUL-terminated; callers that need to display
+   a zero byte should render it separately. */
+char *fern_str_of_byte(i64 b) {
+	char *out = (char *)fern_alloc(2);
+	out[0] = (char)(b & 0xff);
+	out[1] = 0;
+	return out;
+}
+
+/* Decimal rendering of a signed 64-bit value into a GC string. */
+char *fern_str_of_int(i64 v) {
+	char *out = (char *)fern_alloc(32);
+	char tmp[32];
+	int n = 0;
+	int neg = v < 0;
+	u64 u;
+	if (neg) u = (u64)(-(v + 1)) + 1;
+	else u = (u64)v;
+	if (u == 0) tmp[n++] = '0';
+	while (u != 0) {
+		tmp[n++] = (char)('0' + (int)(u % 10));
+		u = u / 10;
+	}
+	if (neg) tmp[n++] = '-';
+	int i = 0;
+	while (n > 0) out[i++] = tmp[--n];
+	out[i] = 0;
+	return out;
+}
+
+char *getenv(const char *name);
+
+#ifdef _WIN32
+int _chdir(const char *path);
+int _putenv_s(const char *name, const char *value);
+int _write(int fd, const void *buf, unsigned int count);
+int _read(int fd, void *buf, unsigned int count);
+int _open(const char *path, int flags, ...);
+int _close(int fd);
+int _dup(int fd);
+int _dup2(int oldfd, int newfd);
+int _pipe(int *pfds, unsigned int psize, int textmode);
+long long _lseeki64(int fd, long long offset, int origin);
+char *_tempnam(const char *dir, const char *prefix);
+int remove(const char *path);
+typedef long long fern_intptr;
+fern_intptr _spawnvp(int mode, const char *cmdname, char *const *argv);
+int _cwait(int *status, fern_intptr process, int action);
+int system(const char *command);
+void *_popen(const char *command, const char *mode);
+int _pclose(void *stream);
+u64 fread(void *ptr, u64 size, u64 count, void *stream);
+#else
+int chdir(const char *path);
+int setenv(const char *name, const char *value, int overwrite);
+i64 write(int fd, const void *buf, u64 count);
+int open(const char *path, int flags);
+int close(int fd);
+i64 read(int fd, void *buf, u64 count);
+int fork(void);
+int execvp(const char *file, char **argv);
+int waitpid(int pid, int *status, int options);
+int pipe(int *fds);
+int dup2(int oldfd, int newfd);
+int kill(int pid, int sig);
+#endif
+
+void *malloc(u64 size);
+void free(void *p);
+
+char *fern_getenv(const char *name) {
+	char *v = getenv(name);
+	if (v == 0) return "";
+	return v;
+}
+
+i64 fern_chdir(const char *path) {
+#ifdef _WIN32
+	return (i64)_chdir(path);
+#else
+	return (i64)chdir(path);
+#endif
+}
+
+i64 fern_setenv(const char *name, const char *value) {
+#ifdef _WIN32
+	return (i64)_putenv_s(name, value);
+#else
+	return (i64)setenv(name, value, 1);
+#endif
+}
+
+void _exit(int code);
+
+i64 fern_exit(i64 code) {
+	_exit((int)code);
+	return 0;
+}
+
+#ifdef _WIN32
+int _access(const char *path, int mode);
+int GetFileAttributesExA(const char *path, int level, void *data);
+typedef struct {
+	unsigned int attributes;
+	unsigned int creation_low, creation_high;
+	unsigned int access_low, access_high;
+	unsigned int write_low, write_high;
+	unsigned int size_low, size_high;
+} fern_file_attr;
+#else
+int access(const char *path, int mode);
+#endif
+
+char fern_path_exists(const char *path) {
+#ifdef _WIN32
+	return _access(path, 0) == 0;
+#else
+	return access(path, 0) == 0;
+#endif
+}
+
+/* Whether `prereq` is strictly newer than `target`. A missing target
+   reports true so callers rebuild; a missing prerequisite reports false. */
+char fern_path_newer(const char *target, const char *prereq) {
+#ifdef _WIN32
+	fern_file_attr t;
+	fern_file_attr p;
+	if (!GetFileAttributesExA(target, 0, &t)) return 1;
+	if (!GetFileAttributesExA(prereq, 0, &p)) return 0;
+	u64 tw = ((u64)t.write_high << 32) | (u64)t.write_low;
+	u64 pw = ((u64)p.write_high << 32) | (u64)p.write_low;
+	return pw > tw;
+#else
+	int pid = fork();
+	if (pid == 0) {
+		char *argv[5];
+		argv[0] = (char *)"test";
+		argv[1] = (char *)prereq;
+		argv[2] = (char *)"-nt";
+		argv[3] = (char *)target;
+		argv[4] = 0;
+		execvp(argv[0], argv);
+		_exit(127);
+	}
+	if (pid < 0) return 0;
+	int status = 0;
+	if (waitpid(pid, &status, 0) != pid) return 0;
+	return status == 0;
+#endif
+}
+
+/* ------------------------------------------------------------------ */
+/* processes                                                           */
+
+/* A linked argv list built by the prelude from `List String`. */
+typedef struct fargv {
+	char *s;
+	struct fargv *next;
+} fargv;
+
+fargv *fern_argv_nil(i64 unused) {
+	(void)unused;
+	return 0;
+}
+
+fargv *fern_argv_cons(char *s, fargv *next) {
+	fargv *node = (fargv *)fern_alloc(sizeof(fargv));
+	node->s = s;
+	node->next = next;
+	return node;
+}
+
+static u64 fern_argv_count(fargv *a) {
+	u64 n = 0;
+	while (a != 0) {
+		n++;
+		a = a->next;
+	}
+	return n;
+}
+
+/* A NULL-terminated `char **` with the program name at index 0. */
+static char **fern_argv_array(char *name, fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)fern_alloc((n + 2) * sizeof(char *));
+	u64 i = 0;
+	out[0] = name;
+	while (args != 0) {
+		i++;
+		out[i] = args->s;
+		args = args->next;
+	}
+	out[n + 1] = 0;
+	return out;
+}
+
+#ifdef _WIN32
+/* _spawnvp joins argv with spaces without quoting, so a recipe reaches
+   the shell as separate words. Quote each argument for CreateProcess's
+   command-line parser before handing it to _spawnvp. */
+static char *fern_win_quote(const char *arg) {
+	u64 n = fern_strlen(arg);
+	char *out = (char *)fern_alloc(2 * n + 3);
+	u64 i = 0;
+	int quote = n == 0;
+	for (u64 j = 0; j < n; j++) {
+		if (arg[j] == ' ' || arg[j] == '\t' || arg[j] == '"') quote = 1;
+	}
+	if (!quote) {
+		for (u64 j = 0; j < n; j++) out[i++] = arg[j];
+		out[i] = 0;
+		return out;
+	}
+	out[i++] = '"';
+	u64 j = 0;
+	while (j < n) {
+		u64 backslashes = 0;
+		while (j < n && arg[j] == '\\') {
+			backslashes++;
+			j++;
+		}
+		if (j == n) {
+			for (u64 k = 0; k < backslashes * 2; k++) out[i++] = '\\';
+		} else if (arg[j] == '"') {
+			for (u64 k = 0; k < backslashes * 2 + 1; k++) out[i++] = '\\';
+			out[i++] = '"';
+			j++;
+		} else {
+			for (u64 k = 0; k < backslashes; k++) out[i++] = '\\';
+			out[i++] = arg[j++];
+		}
+	}
+	out[i++] = '"';
+	out[i] = 0;
+	return out;
+}
+
+static char **fern_win_argv_array(char *name, fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)fern_alloc((n + 2) * sizeof(char *));
+	u64 i = 0;
+	out[0] = name;
+	while (args != 0) {
+		i++;
+		out[i] = fern_win_quote(args->s);
+		args = args->next;
+	}
+	out[n + 1] = 0;
+	return out;
+}
+
+/* Pipeline stages become one shell command line. Quote only arguments
+   that need it: cmd.exe treats an all-quoted line as a single token. */
+static int fern_arg_is_simple(const char *s) {
+	if (*s == 0) return 0;
+	while (*s != 0) {
+		char c = *s++;
+		if (c == ' ' || c == '\t' || c == '"' || c == '&' || c == '|' || c == '<' || c == '>' || c == '^' || c == '(' || c == ')' || c == '%' || c == '!') return 0;
+	}
+	return 1;
+}
+
+static void fern_append_char(char *out, u64 *len, u64 cap, char c) {
+	if (*len + 1 < cap) out[(*len)++] = c;
+}
+
+static void fern_append_arg(char *out, u64 *len, u64 cap, const char *arg) {
+	if (fern_arg_is_simple(arg)) {
+		while (*arg != 0) fern_append_char(out, len, cap, *arg++);
+		return;
+	}
+	fern_append_char(out, len, cap, '"');
+	while (*arg != 0) {
+		if (*arg == '"') fern_append_char(out, len, cap, '\\');
+		fern_append_char(out, len, cap, *arg++);
+	}
+	fern_append_char(out, len, cap, '"');
+}
+
+static void fern_append_argv(char *out, u64 *len, u64 cap, char *name, fargv *args) {
+	fern_append_arg(out, len, cap, name);
+	while (args != 0) {
+		fern_append_char(out, len, cap, ' ');
+		fern_append_arg(out, len, cap, args->s);
+		args = args->next;
+	}
+}
+
+i64 fern_spawn_status(char *name, fargv *args) {
+	return (i64)_spawnvp(0, name, fern_win_argv_array(name, args));
+}
+
+/* A regular file's contents, truncated at 64 KiB. A missing file reads
+   as the empty string. */
+char *fern_read_file(const char *path) {
+	int fd = _open(path, 0);
+	if (fd < 0) return "";
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	for (;;) {
+		int got = _read(fd, out + len, (unsigned int)(cap - 1 - len));
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	_close(fd);
+	out[len] = 0;
+	return out;
+}
+
+/* Captured stdout, truncated at 64 KiB. MSVCRT has no captured spawn
+   that passes an argv array, so point fd 1 at a temporary file while
+   the child runs and read it back afterwards. */
+char *fern_spawn_capture(char *name, fargv *args) {
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	out[0] = 0;
+	char *tmp = _tempnam(0, "fern");
+	if (tmp == 0) return out;
+	int fd = _open(tmp, 0x0002 | 0x0100 | 0x0200 | 0x8000, 0x0100 | 0x0080);
+	if (fd < 0) {
+		free(tmp);
+		return out;
+	}
+	int saved = _dup(1);
+	if (saved < 0 || _dup2(fd, 1) < 0) {
+		if (saved >= 0) _close(saved);
+		_close(fd);
+		remove(tmp);
+		free(tmp);
+		return out;
+	}
+	_spawnvp(0, name, fern_win_argv_array(name, args));
+	_dup2(saved, 1);
+	_close(saved);
+	_lseeki64(fd, 0, 0);
+	u64 len = 0;
+	for (;;) {
+		int got = _read(fd, out + len, (unsigned int)(cap - 1 - len));
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	_close(fd);
+	remove(tmp);
+	free(tmp);
+	out[len] = 0;
+	return out;
+}
+#else
+/* Wait status as a shell would report it: exit code, or 128 + signal. */
+static i64 fern_status_of(int status) {
+	if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
+	return 128 + (status & 0x7f);
+}
+
+i64 fern_spawn_status(char *name, fargv *args) {
+	char **argv = fern_argv_array(name, args);
+	int pid = fork();
+	if (pid == 0) {
+		execvp(name, argv);
+		_exit(127);
+	}
+	if (pid < 0) return -1;
+	int status = 0;
+	if (waitpid(pid, &status, 0) < 0) return -1;
+	return fern_status_of(status);
+}
+
+/* A regular file's contents, truncated at 64 KiB. A missing file reads
+   as the empty string. */
+char *fern_read_file(const char *path) {
+	int fd = open(path, 0);
+	if (fd < 0) return "";
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	for (;;) {
+		i64 got = read(fd, out + len, cap - 1 - len);
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	close(fd);
+	out[len] = 0;
+	return out;
+}
+
+/* Captured stdout, truncated at 64 KiB. */
+char *fern_spawn_capture(char *name, fargv *args) {
+	char **argv = fern_argv_array(name, args);
+	int fds[2];
+	if (pipe(fds) != 0) return "";
+	int pid = fork();
+	if (pid == 0) {
+		close(fds[0]);
+		dup2(fds[1], 1);
+		close(fds[1]);
+		execvp(name, argv);
+		_exit(127);
+	}
+	if (pid < 0) {
+		close(fds[0]);
+		close(fds[1]);
+		return "";
+	}
+	close(fds[1]);
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	for (;;) {
+		i64 got = read(fds[0], out + len, cap - 1 - len);
+		if (got <= 0) break;
+		len += (u64)got;
+		if (len >= cap - 1) break;
+	}
+	close(fds[0]);
+	out[len] = 0;
+	int status = 0;
+	waitpid(pid, &status, 0);
+	return out;
+}
+#endif
+
+/* ------------------------------------------------------------------ */
+/* pipelines                                                           */
+
+typedef struct fpipe {
+	fargv *argv;
+	struct fpipe *next;
+} fpipe;
+
+fpipe *fern_pipe_nil(i64 unused) {
+	(void)unused;
+	return 0;
+}
+
+fpipe *fern_pipe_cons(fargv *argv, fpipe *next) {
+	fpipe *node = (fpipe *)fern_alloc(sizeof(fpipe));
+	node->argv = argv;
+	node->next = next;
+	return node;
+}
+
+#ifdef _WIN32
+static char *fern_pipeline_line(fpipe *stages) {
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	u64 len = 0;
+	while (stages != 0) {
+		if (stages->argv == 0) break;
+		if (len > 0) {
+			fern_append_char(out, &len, cap, ' ');
+			fern_append_char(out, &len, cap, '|');
+			fern_append_char(out, &len, cap, ' ');
+		}
+		fern_append_argv(out, &len, cap, stages->argv->s, stages->argv->next);
+		stages = stages->next;
+	}
+	out[len] = 0;
+	return out;
+}
+
+static i64 fern_pipeline_run(fpipe *stages, char *out, u64 cap) {
+	char *line = fern_pipeline_line(stages);
+	if (out == 0) return (i64)system(line);
+	void *pipe = _popen(line, "r");
+	if (pipe == 0) {
+		if (cap > 0) out[0] = 0;
+		return -1;
+	}
+	u64 len = 0;
+	for (;;) {
+		u64 got = fread(out + len, 1, cap - 1 - len, pipe);
+		if (got == 0) break;
+		len += got;
+		if (len >= cap - 1) break;
+	}
+	int status = _pclose(pipe);
+	out[len] = 0;
+	return (i64)status;
+}
+#else
+static char **fern_argv_vec(fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)malloc((n + 1) * sizeof(char *));
+	u64 i = 0;
+	if (out == 0) return 0;
+	while (args != 0) {
+		out[i] = args->s;
+		i++;
+		args = args->next;
+	}
+	out[n] = 0;
+	return out;
+}
+
+static void fern_argv_vecs_free(char ***argvs, u64 n) {
+	u64 i;
+	if (argvs == 0) return;
+	for (i = 0; i < n; i++) free(argvs[i]);
+	free(argvs);
+}
+
+static i64 fern_pipeline_wait(int *pids, u64 n) {
+	i64 last = -1;
+	u64 i;
+	for (i = 0; i < n; i++) {
+		int status = 0;
+		if (waitpid(pids[i], &status, 0) >= 0) last = fern_status_of(status);
+	}
+	return last;
+}
+
+static void fern_pipeline_close(int *fds, u64 nfds, int *out_fds) {
+	u64 i;
+	for (i = 0; i < nfds; i++) {
+		if (fds[i] >= 0) close(fds[i]);
+	}
+	if (out_fds[0] >= 0) close(out_fds[0]);
+	if (out_fds[1] >= 0) close(out_fds[1]);
+}
+
+/* Run the stages with real OS pipes. When `out` is non-NULL the last
+ * stage's stdout is captured (truncated at `cap` bytes). */
+static i64 fern_pipeline_run(fpipe *stages, char *out, u64 cap) {
+	u64 n = 0;
+	u64 connectors;
+	u64 nfds;
+	u64 i;
+	u64 k;
+	fpipe *p;
+	int *fds = 0;
+	int *pids;
+	char ***argvs;
+	int out_fds[2];
+	u64 started = 0;
+
+	p = stages;
+	while (p != 0) {
+		n++;
+		p = p->next;
+	}
+	if (n == 0) {
+		if (out != 0 && cap > 0) out[0] = 0;
+		return -1;
+	}
+	connectors = n - 1;
+	nfds = connectors * 2;
+	if (nfds > 0) {
+		fds = (int *)malloc(nfds * sizeof(int));
+		if (fds == 0) return -1;
+		for (i = 0; i < nfds; i++) fds[i] = -1;
+	}
+	pids = (int *)malloc(n * sizeof(int));
+	if (pids == 0) {
+		free(fds);
+		return -1;
+	}
+	argvs = (char ***)malloc(n * sizeof(char **));
+	if (argvs == 0) {
+		free(pids);
+		free(fds);
+		return -1;
+	}
+	p = stages;
+	for (i = 0; i < n; i++) {
+		argvs[i] = p == 0 ? 0 : fern_argv_vec(p->argv);
+		if (argvs[i] == 0 || argvs[i][0] == 0) {
+			fern_argv_vecs_free(argvs, i + 1);
+			free(pids);
+			free(fds);
+			return -1;
+		}
+		p = p->next;
+	}
+	out_fds[0] = -1;
+	out_fds[1] = -1;
+	if (out != 0 && pipe(out_fds) != 0) {
+		fern_argv_vecs_free(argvs, n);
+		free(pids);
+		free(fds);
+		return -1;
+	}
+
+	for (i = 0; i < n; i++) {
+		int pid;
+		if (i + 1 < n) {
+			int pair[2];
+			if (pipe(pair) != 0) {
+				fern_pipeline_close(fds, nfds, out_fds);
+				for (k = 0; k < started; k++) kill(pids[k], 15);
+				fern_pipeline_wait(pids, started);
+				fern_argv_vecs_free(argvs, n);
+				free(pids);
+				free(fds);
+				if (out != 0 && cap > 0) out[0] = 0;
+				return -1;
+			}
+			fds[2 * i] = pair[0];
+			fds[2 * i + 1] = pair[1];
+		}
+		pid = fork();
+		if (pid == 0) {
+			char **argv;
+			if (i > 0) dup2(fds[2 * (i - 1)], 0);
+			if (i + 1 < n) {
+				dup2(fds[2 * i + 1], 1);
+			} else if (out_fds[1] >= 0) {
+				dup2(out_fds[1], 1);
+			}
+			fern_pipeline_close(fds, nfds, out_fds);
+			argv = argvs[i];
+			if (argv == 0 || argv[0] == 0) _exit(127);
+			execvp(argv[0], argv);
+			_exit(127);
+		}
+		if (pid < 0) {
+			fern_pipeline_close(fds, nfds, out_fds);
+			for (k = 0; k < started; k++) kill(pids[k], 15);
+			fern_pipeline_wait(pids, started);
+			fern_argv_vecs_free(argvs, n);
+			free(pids);
+			free(fds);
+			if (out != 0 && cap > 0) out[0] = 0;
+			return -1;
+		}
+		pids[i] = pid;
+		started = i + 1;
+		if (i > 0) close(fds[2 * (i - 1)]);
+		if (i + 1 < n) close(fds[2 * i + 1]);
+	}
+
+	if (out != 0) {
+		u64 len = 0;
+		if (out_fds[1] >= 0) {
+			close(out_fds[1]);
+			out_fds[1] = -1;
+		}
+		for (;;) {
+			i64 got = read(out_fds[0], out + len, cap - 1 - len);
+			if (got <= 0) break;
+			len += (u64)got;
+			if (len >= cap - 1) break;
+		}
+		close(out_fds[0]);
+		out_fds[0] = -1;
+		out[len] = 0;
+	}
+
+	i64 status = fern_pipeline_wait(pids, n);
+	fern_argv_vecs_free(argvs, n);
+	free(pids);
+	free(fds);
+	return status;
+}
+#endif
+
+i64 fern_pipeline_status(fpipe *stages) {
+	return fern_pipeline_run(stages, 0, 0);
+}
+
+char *fern_pipeline_capture(fpipe *stages) {
+	u64 cap = 65536;
+	char *out = (char *)fern_alloc(cap);
+	out[0] = 0;
+	fern_pipeline_run(stages, out, cap);
+	return out;
 }

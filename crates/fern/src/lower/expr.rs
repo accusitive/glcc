@@ -3,6 +3,7 @@
 use glcc_mir as mir;
 
 use crate::ast::{BinOp, UnOp};
+use crate::defs::ExternId;
 use crate::hir::*;
 use crate::span::{Diag, KResult, Span};
 use crate::ty::Ty;
@@ -12,9 +13,11 @@ use super::func::FnCtx;
 impl<'l, 'd> FnCtx<'l, 'd> {
     pub(super) fn expr(&mut self, e: &HirExpr) -> KResult<mir::Value> {
         match &e.kind {
-            HirExprKind::Const(c) => Ok(self.const_value(c)),
+            HirExprKind::Const(c) => self.const_value(c),
             HirExprKind::Local(id) => self.read_local(*id),
             HirExprKind::Ctor { ctor, args, .. } => self.ctor(e, *ctor, args),
+            HirExprKind::Field { base, index } => self.field_expr(e, base, *index),
+            HirExprKind::Try { value, ok_ctor, residual } => self.try_expr(e, value, *ok_ctor, *residual),
             HirExprKind::Fn(target) => self.fn_value(target, e),
             HirExprKind::Closure { id, captures } => self.closure_value(*id, captures, e.span),
             HirExprKind::CallDirect { target, args } => self.call_direct(target, args, e),
@@ -28,12 +31,38 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         }
     }
 
-    fn const_value(&mut self, c: &ConstValue) -> mir::Value {
-        match c {
+    fn const_value(&mut self, c: &ConstValue) -> KResult<mir::Value> {
+        Ok(match c {
             ConstValue::Int(v) => self.iconst(64, *v as i128),
             ConstValue::Float(v) => self.fconst(*v),
             ConstValue::Bool(b) => self.iconst(8, *b as i128),
-        }
+            ConstValue::Str(s) => self.string_const(s)?,
+        })
+    }
+
+    /// A string literal is a NUL-terminated byte array in a private
+    /// global. The bytes are never mutated, so the address is a valid
+    /// `String` for the program's lifetime.
+    fn string_const(&mut self, s: &str) -> KResult<mir::Value> {
+        let mut image = s.as_bytes().to_vec();
+        image.push(0);
+        let n = self.lw.str_count;
+        self.lw.str_count += 1;
+        let ty = mir::Ty::Array {
+            elem: Box::new(mir::Ty::int(8)),
+            len: image.len() as u64,
+        };
+        let global = self
+            .lw
+            .module
+            .push_global(&format!("__fern_str.{n}"), ty, Some(mir::Const::Bytes(image)));
+        let data = &mut self.lw.module.globals[global];
+        data.local = true;
+        data.align = Some(1);
+        self.emit(
+            mir::InstKind::GlobalAddr { global },
+            mir::Ty::ptr(mir::Ty::int(8)),
+        )
     }
 
     /// Build a data cell: the tag, then the constructor's payload. The
@@ -57,6 +86,77 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         Ok(cell)
     }
 
+    /// Read a named record field from its constructor payload.
+    fn field_expr(&mut self, e: &HirExpr, base: &HirExpr, index: usize) -> KResult<mir::Value> {
+        let cell = self.expr(base)?;
+        let mark = self.hold(cell.clone())?;
+        let ty = base.ty.substitute(&self.sub);
+        let layout = self.lw.types.data_layout(&ty, base.span)?;
+        let payload = self.offset_addr(cell, layout.payload_offsets[0])?;
+        let addr = self.offset_addr(payload, layout.field_offsets[0][index])?;
+        let ty = self.ty_of(&e.ty, e.span)?;
+        let value = self.load(addr, &ty)?;
+        self.release(mark)?;
+        Ok(value)
+    }
+
+    /// Lower `expr?`. The success path loads the payload from the
+    /// constructor's cell; the failure path builds the enclosing
+    /// function's residual and branches to its shared return block.
+    fn try_expr(&mut self, e: &HirExpr, value: &HirExpr, ok_ctor: usize, residual: TryResidual) -> KResult<mir::Value> {
+        let cell = self.expr(value)?;
+        let mark = self.hold(cell.clone())?;
+        let src = value.ty.substitute(&self.sub);
+        let layout = self.lw.types.data_layout(&src, value.span)?;
+        let tag = self.load(cell.clone(), &mir::Ty::int(32))?;
+        let want = self.iconst(32, ok_ctor as i128);
+        let ok = self.emit(
+            mir::InstKind::Icmp {
+                pred: mir::IcmpPred::Eq,
+                lhs: tag,
+                rhs: want,
+            },
+            mir::Ty::Bool,
+        )?;
+        let success = self.new_block(Vec::new());
+        let failure = self.new_block(Vec::new());
+        self.terminate(mir::Terminator::CondBr {
+            cond: ok,
+            then_block: success,
+            else_block: failure,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+
+        self.goto(failure);
+        let residual = match residual {
+            TryResidual::Reuse => cell.clone(),
+            TryResidual::Rebuild { err_ctor, ret_err_ctor } => {
+                let src_err = layout.payload_offsets[err_ctor] + layout.field_offsets[err_ctor][0];
+                let src_addr = self.offset_addr(cell.clone(), src_err)?;
+                let err_ty = layout.field_tys[err_ctor][0].clone();
+                let ret_ty = self.return_ty.substitute(&self.sub);
+                let ret_layout = self.lw.types.data_layout(&ret_ty, e.span)?;
+                let out = self.alloc_cell(ret_layout.cell_size)?;
+                let ret_tag = self.iconst(32, ret_err_ctor as i128);
+                self.store(out.clone(), ret_tag)?;
+                let err = self.load(src_addr, &err_ty)?;
+                let dst = ret_layout.payload_offsets[ret_err_ctor] + ret_layout.field_offsets[ret_err_ctor][0];
+                let dst = self.offset_addr(out.clone(), dst)?;
+                self.store(dst, err)?;
+                out
+            }
+        };
+        self.branch(self.return_block, vec![residual]);
+
+        self.goto(success);
+        let payload = self.offset_addr(cell, layout.payload_offsets[ok_ctor])?;
+        let ty = self.ty_of(&e.ty, e.span)?;
+        let value = self.load(payload, &ty)?;
+        self.release(mark)?;
+        Ok(value)
+    }
+
     /// A named function as a value: allocate a cell holding a thunk's
     /// code address; the environment slot stays empty. A top-level
     /// `let` body already evaluates to its closure cell, so it is
@@ -67,6 +167,29 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             let (callee, _) = self.lw.resolve_callee(target, &sub, e.span)?;
             let ret = self.ty_of(&e.ty, e.span)?;
             return self.emit(mir::InstKind::Call { callee, args: Vec::new().into() }, ret);
+        }
+        if let FnRef::Extern { id } = target {
+            let (name, params, ret) = {
+                let def = &self.lw.defs.externs[id.index()];
+                (def.name.clone(), def.params.clone(), def.ret.clone())
+            };
+            if params.is_empty() {
+                return Err(Diag::new(
+                    format!("`{name}` has no parameters and cannot be used as a value"),
+                    e.span,
+                ));
+            }
+            let mut param_tys = Vec::with_capacity(params.len());
+            for param in &params {
+                param_tys.push(self.lw.types.get(param, e.span)?);
+            }
+            let ret_ty = self.lw.types.get(&ret, e.span)?;
+            let imported = self.lw.externs[id];
+            let thunk = self.lw.thunk_extern(imported, &name, &param_tys, &ret_ty)?;
+            let cell = self.alloc_cell(8)?;
+            let code = self.emit(mir::InstKind::FuncAddr { func: thunk }, mir::Ty::ptr(mir::Ty::Void))?;
+            self.store(cell, code)?;
+            return Ok(cell);
         }
         let (callee, name) = self.lw.resolve_callee(target, &sub, e.span)?;
         let src = e.ty.substitute(&sub);
@@ -108,6 +231,9 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     }
 
     fn call_direct(&mut self, target: &FnRef, args: &[HirExpr], e: &HirExpr) -> KResult<mir::Value> {
+        if let FnRef::Extern { id } = target {
+            return self.call_extern(*id, args, e);
+        }
         let sub = self.sub.clone();
         let (callee, _) = self.lw.resolve_callee(target, &sub, e.span)?;
         let mark = self.mark();
@@ -121,6 +247,30 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         }
         let ret = self.ty_of(&e.ty, e.span)?;
         let call = self.emit(mir::InstKind::Call { callee, args: values.into() }, ret);
+        self.release(mark)?;
+        call
+    }
+
+    /// A foreign call. Every pointer argument stays held across the call:
+    /// the C callee cannot pin its own parameters, and helpers such as
+    /// `fern_str_concat` allocate while reading them.
+    fn call_extern(&mut self, id: ExternId, args: &[HirExpr], e: &HirExpr) -> KResult<mir::Value> {
+        let target = self.lw.externs[&id];
+        let mark = self.mark();
+        let mut values = Vec::with_capacity(args.len());
+        for a in args {
+            let value = self.expr(a)?;
+            self.hold(value.clone())?;
+            values.push(value);
+        }
+        let ret = self.ty_of(&e.ty, e.span)?;
+        let call = self.emit(
+            mir::InstKind::CallExtern {
+                target,
+                args: values.into(),
+            },
+            ret,
+        );
         self.release(mark)?;
         call
     }
@@ -251,6 +401,22 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let r = self.expr(rhs)?;
         self.release(mark)?;
         let operand = self.ty_of(&lhs.ty, lhs.span)?;
+        // Strings compare by contents, not by address. The runtime
+        // helper walks both NUL-terminated byte arrays.
+        if matches!(op, BinOp::Eq | BinOp::Ne) && matches!(operand, mir::Ty::Ptr { .. }) {
+            let call = self.emit(
+                mir::InstKind::CallExtern {
+                    target: self.lw.rt.str_eq,
+                    args: vec![l, r].into(),
+                },
+                mir::Ty::Bool,
+            )?;
+            if matches!(op, BinOp::Ne) {
+                let one = self.iconst(8, 1);
+                return self.emit(mir::InstKind::Xor(call, one), mir::Ty::Bool);
+            }
+            return Ok(call);
+        }
         let float = matches!(operand, mir::Ty::Float(_));
         let (kind, result) = match op {
             BinOp::Add => (arith_op(float, mir::InstKind::FAdd(l, r), mir::InstKind::Add(l, r)), operand),

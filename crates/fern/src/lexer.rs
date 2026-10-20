@@ -4,7 +4,7 @@
 //! few operators. Names are split into `Lower` (values, type variables)
 //! and `Upper` (type and constructor names) — the ML convention.
 
-use crate::span::{Diag, KResult, Span};
+use crate::span::{Diag, FileId, KResult, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
@@ -12,8 +12,13 @@ pub enum Tok {
     Data,
     Class,
     Instance,
+    Extern,
     Fun,
     Let,
+    Import,
+    Use,
+    As,
+    Priv,
     If,
     Then,
     Else,
@@ -25,8 +30,14 @@ pub enum Tok {
     // names and literals
     Lower(String),
     Upper(String),
+    /// `#name`: a builtin namespace reference.
+    Builtin(String),
     Int(i64),
     Float(f64),
+    Str(String),
+    /// `$ command` or `$(command)`: `src` is the command text, `capture`
+    /// selects `$()`.
+    Shell { src: String, capture: bool },
     // punctuation
     LParen,
     RParen,
@@ -38,6 +49,7 @@ pub enum Tok {
     Semi,
     Colon,
     ColonColon, // ::
+    Dot,        // .
     Arrow,      // ->
     FatArrow,   // =>
     Eq,         // =
@@ -53,7 +65,9 @@ pub enum Tok {
     Ne,
     AmpAmp,
     PipePipe,
-    Pipe, // | (data decl separator)
+    PipeGt, // |> value pipe
+    Pipe,   // | (data decl separator)
+    Question,
     Underscore,
     Eof,
 }
@@ -64,8 +78,11 @@ impl Tok {
         match self {
             Tok::Lower(s) => format!("name `{s}`"),
             Tok::Upper(s) => format!("name `{s}`"),
+            Tok::Builtin(s) => format!("builtin `#{s}`"),
             Tok::Int(v) => format!("integer `{v}`"),
             Tok::Float(v) => format!("float `{v}`"),
+            Tok::Str(_) => "a string literal".to_string(),
+            Tok::Shell { .. } => "a shell command".to_string(),
             Tok::Eof => "end of file".to_string(),
             other => format!("`{}`", other.spelling()),
         }
@@ -76,8 +93,13 @@ impl Tok {
             Tok::Data => "data",
             Tok::Class => "class",
             Tok::Instance => "instance",
+            Tok::Extern => "extern",
             Tok::Fun => "fun",
             Tok::Let => "let",
+            Tok::Import => "import",
+            Tok::Use => "use",
+            Tok::As => "as",
+            Tok::Priv => "priv",
             Tok::If => "if",
             Tok::Then => "then",
             Tok::Else => "else",
@@ -96,6 +118,7 @@ impl Tok {
             Tok::Semi => ";",
             Tok::Colon => ":",
             Tok::ColonColon => "::",
+            Tok::Dot => ".",
             Tok::Arrow => "->",
             Tok::FatArrow => "=>",
             Tok::Eq => "=",
@@ -111,8 +134,12 @@ impl Tok {
             Tok::Ne => "!=",
             Tok::AmpAmp => "&&",
             Tok::PipePipe => "||",
+            Tok::PipeGt => "|>",
             Tok::Pipe => "|",
+            Tok::Question => "?",
             Tok::Underscore => "_",
+            Tok::Str(_) => "string",
+            Tok::Shell { .. } => "shell",
             _ => "?",
         }
     }
@@ -124,27 +151,53 @@ pub struct Token {
     pub span: Span,
 }
 
+const IDENT_REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+
 pub fn lex(src: &str) -> KResult<Vec<Token>> {
-    Lexer::new(src).lex_all()
+    lex_in(FileId::UNSPECIFIED, src)
+}
+
+/// Lex `src`, stamping every token and diagnostic with `file`.
+pub fn lex_in(file: FileId, src: &str) -> KResult<Vec<Token>> {
+    Lexer::new(file, src).lex_all()
+}
+
+/// Lex a source fragment whose first byte is at `base` in its file. Used
+/// for `${expr}` holes so their spans stay in the enclosing file.
+pub fn lex_fragment(file: FileId, src: &str, base: u32) -> KResult<Vec<Token>> {
+    Lexer::new_at(file, src, base).lex_all()
 }
 
 struct Lexer<'s> {
+    file: FileId,
     src: &'s str,
     bytes: &'s [u8],
     pos: usize,
+    base: u32,
 }
 
 impl<'s> Lexer<'s> {
-    fn new(src: &'s str) -> Lexer<'s> {
+    fn new(file: FileId, src: &'s str) -> Lexer<'s> {
+        Lexer::new_at(file, src, 0)
+    }
+
+    fn new_at(file: FileId, src: &'s str, base: u32) -> Lexer<'s> {
         Lexer {
+            file,
             src,
             bytes: src.as_bytes(),
             pos: 0,
+            base,
         }
     }
 
+    fn span(&self, lo: usize, hi: usize) -> Span {
+        let base = self.base as usize;
+        Span::in_file(self.file, base + lo, base + hi)
+    }
+
     fn err(&self, msg: impl Into<String>, lo: usize, hi: usize) -> Diag {
-        Diag::new(msg, Span::new(lo, hi))
+        Diag::new(msg, self.span(lo, hi))
     }
 
     fn peek(&self) -> u8 {
@@ -188,7 +241,10 @@ impl<'s> Lexer<'s> {
         let mut depth = 1;
         loop {
             if self.pos + 1 >= self.bytes.len() {
-                return Err(self.err("unterminated block comment", lo, self.pos));
+                return Err(Diag::incomplete(
+                    "unterminated block comment",
+                    self.span(lo, self.pos),
+                ));
             }
             if self.peek() == b'*' && self.peek2() == b'/' {
                 depth -= 1;
@@ -209,14 +265,13 @@ impl<'s> Lexer<'s> {
     fn push(&mut self, tok: Tok, lo: usize, tokens: &mut Vec<Token>) {
         tokens.push(Token {
             tok,
-            span: Span::new(lo, self.pos),
+            span: self.span(lo, self.pos),
         });
     }
 
     fn ident(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
-        const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
         let mut end = self.pos;
-        while end < self.bytes.len() && REST.contains(&self.bytes[end]) {
+        while end < self.bytes.len() && IDENT_REST.contains(&self.bytes[end]) {
             end += 1;
         }
         self.pos = end;
@@ -229,8 +284,13 @@ impl<'s> Lexer<'s> {
             "data" => Tok::Data,
             "class" => Tok::Class,
             "instance" => Tok::Instance,
+            "extern" => Tok::Extern,
             "fun" => Tok::Fun,
             "let" => Tok::Let,
+            "import" => Tok::Import,
+            "use" => Tok::Use,
+            "as" => Tok::As,
+            "priv" => Tok::Priv,
             "if" => Tok::If,
             "then" => Tok::Then,
             "else" => Tok::Else,
@@ -248,6 +308,58 @@ impl<'s> Lexer<'s> {
             }
         };
         self.push(tok, lo, tokens);
+        Ok(())
+    }
+
+    fn builtin(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        self.pos += 1;
+        let start = self.pos;
+        let mut end = start;
+        while end < self.bytes.len() && IDENT_REST.contains(&self.bytes[end]) {
+            end += 1;
+        }
+        if end == start || !self.bytes[start].is_ascii_lowercase() {
+            return Err(self.err(
+                "`#` must be followed by a lowercase builtin name",
+                lo,
+                end.max(start + 1),
+            ));
+        }
+        self.pos = end;
+        let name = self.src[start..end].to_string();
+        self.push(Tok::Builtin(name), lo, tokens);
+        Ok(())
+    }
+
+    fn dollar(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        use crate::shell::{Stop, command_end};
+
+        if self.peek2() == b'{' {
+            return Err(self.err(
+                "`${...}` is an interpolation inside a shell word; start a command with `$`",
+                lo,
+                lo + 2,
+            ));
+        }
+        if self.peek2() == b'(' {
+            let start = self.pos + 2;
+            let end = command_end(self.file, self.src, start, Stop::RParen)?;
+            let src = self.src[start..end - 1].to_string();
+            if src.trim().is_empty() {
+                return Err(Diag::new("expected a command inside `$(`", self.span(lo, end)));
+            }
+            self.pos = end;
+            self.push(Tok::Shell { src, capture: true }, lo, tokens);
+            return Ok(());
+        }
+        let start = self.pos + 1;
+        let end = command_end(self.file, self.src, start, Stop::TopLevel)?;
+        let src = self.src[start..end].to_string();
+        if src.trim().is_empty() {
+            return Err(Diag::new("expected a command after `$`", self.span(lo, end)));
+        }
+        self.pos = end;
+        self.push(Tok::Shell { src, capture: false }, lo, tokens);
         Ok(())
     }
 
@@ -284,77 +396,77 @@ impl<'s> Lexer<'s> {
             b'(' => {
                 tokens.push(Token {
                     tok: Tok::LParen,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b')' => {
                 tokens.push(Token {
                     tok: Tok::RParen,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'{' => {
                 tokens.push(Token {
                     tok: Tok::LBrace,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'}' => {
                 tokens.push(Token {
                     tok: Tok::RBrace,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'[' => {
                 tokens.push(Token {
                     tok: Tok::LBracket,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b']' => {
                 tokens.push(Token {
                     tok: Tok::RBracket,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b',' => {
                 tokens.push(Token {
                     tok: Tok::Comma,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b';' => {
                 tokens.push(Token {
                     tok: Tok::Semi,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'*' => {
                 tokens.push(Token {
                     tok: Tok::Star,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'+' => {
                 tokens.push(Token {
                     tok: Tok::Plus,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
             b'/' => {
                 tokens.push(Token {
                     tok: Tok::Slash,
-                    span: Span::new(lo, start + 1),
+                    span: self.span(lo, start + 1),
                 });
                 Ok(())
             }
@@ -363,12 +475,12 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::Arrow,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Minus,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
                 Ok(())
@@ -378,12 +490,18 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::PipePipe,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
+                    });
+                } else if two(self) == b'>' {
+                    self.bump();
+                    tokens.push(Token {
+                        tok: Tok::PipeGt,
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Pipe,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
                 Ok(())
@@ -393,18 +511,18 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::EqEq,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else if two(self) == b'>' {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::FatArrow,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Eq,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
                 Ok(())
@@ -414,7 +532,7 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::Ne,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                     Ok(())
                 } else {
@@ -426,12 +544,12 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::Le,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Lt,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
                 Ok(())
@@ -441,14 +559,28 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::Ge,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Gt,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
+                Ok(())
+            }
+            b'.' => {
+                tokens.push(Token {
+                    tok: Tok::Dot,
+                    span: self.span(lo, start + 1),
+                });
+                Ok(())
+            }
+            b'?' => {
+                tokens.push(Token {
+                    tok: Tok::Question,
+                    span: self.span(lo, start + 1),
+                });
                 Ok(())
             }
             b':' => {
@@ -456,12 +588,12 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::ColonColon,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Colon,
-                        span: Span::new(lo, start + 1),
+                        span: self.span(lo, start + 1),
                     });
                 }
                 Ok(())
@@ -471,7 +603,7 @@ impl<'s> Lexer<'s> {
                     self.bump();
                     tokens.push(Token {
                         tok: Tok::AmpAmp,
-                        span: Span::new(lo, start + 2),
+                        span: self.span(lo, start + 2),
                     });
                     Ok(())
                 } else {
@@ -502,7 +634,53 @@ impl<'s> Lexer<'s> {
         if b.is_ascii_alphabetic() || b == b'_' {
             return self.ident(lo, tokens);
         }
+        if b == b'"' {
+            return self.string(lo, tokens);
+        }
+        if b == b'#' {
+            return self.builtin(lo, tokens);
+        }
+        if b == b'$' {
+            return self.dollar(lo, tokens);
+        }
         self.punct(lo, tokens)
+    }
+
+    /// A double-quoted literal. Newlines survive verbatim; the escapes
+    /// are the small portable set, with `\0` reserved for NUL.
+    fn string(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        self.pos += 1;
+        let mut out = String::new();
+        loop {
+            if self.pos >= self.bytes.len() {
+                return Err(Diag::incomplete("unterminated string literal", self.span(lo, self.pos)));
+            }
+            let c = self.src[self.pos..].chars().next().expect("char boundary");
+            self.pos += c.len_utf8();
+            match c {
+                '"' => {
+                    self.push(Tok::Str(out), lo, tokens);
+                    return Ok(());
+                }
+                '\\' => {
+                    if self.pos >= self.bytes.len() {
+                        return Err(Diag::incomplete("unterminated string literal", self.span(lo, self.pos)));
+                    }
+                    let escape = self.src[self.pos..].chars().next().expect("char boundary");
+                    self.pos += escape.len_utf8();
+                    match escape {
+                        'n' => out.push('\n'),
+                        't' => out.push('\t'),
+                        'r' => out.push('\r'),
+                        '0' => out.push('\0'),
+                        '\\' => out.push('\\'),
+                        '"' => out.push('"'),
+                        other => return Err(self.err(format!("unknown string escape `\\{other}`"), lo, self.pos)),
+                    }
+                }
+                other => out.push(other),
+            }
+        }
     }
 
     fn lex_all(mut self) -> KResult<Vec<Token>> {
@@ -516,7 +694,7 @@ impl<'s> Lexer<'s> {
         tokens.pop().unwrap();
         tokens.push(Token {
             tok: Tok::Eof,
-            span: Span::new(self.pos, self.pos),
+            span: self.span(self.pos, self.pos),
         });
         Ok(tokens)
     }

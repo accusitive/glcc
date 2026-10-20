@@ -195,6 +195,7 @@ impl<'d> Solver<'d> {
 
         match proven.len() {
             0 if saw_deferred => Ok(Solution::Deferred),
+            0 if resolved.args.iter().any(|a| a.contains_param()) => Ok(Solution::Deferred),
             0 => Ok(Solution::Unsatisfied),
             1 => self.apply_instance(infer, env, &resolved, proven[0], span, depth, stack),
             _ => Ok(Solution::Ambiguous { instances: proven }),

@@ -32,5 +32,5 @@ pub mod quad;
 pub mod ty;
 
 pub use abi::{Arch, Os, Target};
-pub use lower::{NarrowReloc, NarrowTarget, WinUnwindEntry, lower_module, lower_module_collecting, lower_module_with_debug};
+pub use lower::{NarrowReloc, NarrowTarget, WinUnwindEntry, lower_module, lower_module_collecting, lower_module_selected, lower_module_with_debug};
 pub use ty::{LoweredSig, clif_ty, lower_sig};
