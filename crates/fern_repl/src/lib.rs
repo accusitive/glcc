@@ -99,10 +99,7 @@ impl Repl {
                     self.exec.reset();
                     self.session.reset_lowering();
                 }
-                Ok(chunk_items
-                    .iter()
-                    .filter_map(|defined| signature_line(&analysis, &defined.name))
-                    .collect())
+                Ok(chunk_items.iter().filter_map(|defined| signature_line(&analysis, &defined.name)).collect())
             }
             Err(diags) => {
                 self.source = previous;
@@ -138,10 +135,7 @@ impl Repl {
         let Some(ret) = return_type(&analysis, &name) else {
             self.source = previous;
             self.sync();
-            return Err(vec![fern::Diag::new(
-                format!("no checked body for `{name}`"),
-                Span::new(0, 0),
-            )]);
+            return Err(vec![fern::Diag::new(format!("no checked body for `{name}`"), Span::new(0, 0))]);
         };
 
         let module = match self.session.compile_shared(&files) {
@@ -166,6 +160,26 @@ impl Repl {
         self.sync();
         self.exec.reset();
         self.session.reset_lowering();
+    }
+
+    /// Re-read every imported module from disk and recheck the program.
+    /// The next expression rebuilds the JIT image with the new bodies.
+    pub fn reload(&mut self) -> Result<(), Vec<fern::Diag>> {
+        let mut changed = false;
+        for &file in &self.modules {
+            let path = self.session.path(file).to_string();
+            let text = std::fs::read_to_string(&path).map_err(|error| vec![fern::Diag::new(format!("cannot reload `{path}`: {error}"), Span::new(0, 0))])?;
+            if self.session.text(file) != text {
+                self.session.set_text(file, text);
+                changed = true;
+            }
+        }
+        if changed {
+            self.exec.reset();
+            self.session.reset_lowering();
+            self.session.analyze(&self.files())?;
+        }
+        Ok(())
     }
 
     /// What the last `eval_expr`'s lowering did. Tests use it to prove
@@ -240,37 +254,21 @@ fn blank_range(source: &mut String, span: Span) {
     if lo >= hi || lo >= source.len() {
         return;
     }
-    let blanks: String = source[lo..hi]
-        .chars()
-        .map(|c| if c == '\n' { '\n' } else { ' ' })
-        .collect();
+    let blanks: String = source[lo..hi].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
     source.replace_range(lo..hi, &blanks);
 }
 
 fn return_type(analysis: &fern::Analysis, name: &str) -> Option<Ty> {
     if let Some(id) = analysis.defs.fn_ids.get(name) {
-        return analysis
-            .hir
-            .bodies
-            .iter()
-            .find(|body| body.key == BodyKey::Fn(*id))
-            .map(|body| body.ret.clone());
+        return analysis.hir.bodies.iter().find(|body| body.key == BodyKey::Fn(*id)).map(|body| body.ret.clone());
     }
     let id = *analysis.defs.value_ids.get(name)?;
-    analysis
-        .hir
-        .bodies
-        .iter()
-        .find(|body| body.key == BodyKey::Value(id))
-        .map(|body| body.ret.clone())
+    analysis.hir.bodies.iter().find(|body| body.key == BodyKey::Value(id)).map(|body| body.ret.clone())
 }
 
 fn signature_line(analysis: &fern::Analysis, name: &str) -> Option<String> {
     if let Some(id) = analysis.defs.fn_ids.get(name) {
-        analysis.defs.fns[id.index()]
-            .scheme
-            .as_ref()
-            .map(|scheme| format!("{name} : {}", display_scheme(scheme)))
+        analysis.defs.fns[id.index()].scheme.as_ref().map(|scheme| format!("{name} : {}", display_scheme(scheme)))
     } else if let Some(id) = analysis.defs.value_ids.get(name) {
         analysis.defs.values[id.index()]
             .scheme
@@ -300,11 +298,7 @@ fn display_scheme(scheme: &fern::defs::Scheme) -> String {
 }
 
 fn var_letter(index: usize) -> String {
-    if index < 26 {
-        ((b'a' + index as u8) as char).to_string()
-    } else {
-        format!("t{index}")
-    }
+    if index < 26 { ((b'a' + index as u8) as char).to_string() } else { format!("t{index}") }
 }
 
 /// Replace `t$<digits>` tokens in a rendered type with scheme letters.

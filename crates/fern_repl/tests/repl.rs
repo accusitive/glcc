@@ -260,3 +260,22 @@ fn import_lines_are_definitions() {
     assert!(is_definition("import math"));
     assert!(!input_incomplete("import math"));
 }
+
+#[test]
+fn reload_picks_up_changed_module_bodies() {
+    let dir = std::env::temp_dir().join(format!("fern-repl-reload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let module = dir.join("math.fern");
+    std::fs::write(&module, "fun double(x : Int) : Int = x * 2\n").expect("write math");
+
+    let mut repl = Repl::new();
+    repl.set_module_root(&dir);
+    repl.define("import math").expect("import");
+    assert_eq!(repl.eval_expr("math.double(21)").expect("runs"), "42");
+
+    std::fs::write(&module, "fun double(x : Int) : Int = x * 3\n").expect("rewrite math");
+    repl.reload().expect("reload");
+    assert_eq!(repl.eval_expr("math.double(14)").expect("runs"), "42");
+    let _ = std::fs::remove_dir_all(&dir);
+}

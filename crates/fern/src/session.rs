@@ -22,7 +22,7 @@ use crate::defs::{Defs, FnId, ValueId};
 use crate::hir::{BodyKey, HirProgram};
 use crate::intern::Interner;
 use crate::span::{self, Diag, FileId, KResult, Span};
-use crate::{check, defs, lexer, lower, parser, prelude, resolve, MirModule};
+use crate::{MirModule, check, defs, lexer, lower, parser, prelude, resolve};
 
 #[derive(Debug, Clone)]
 pub struct ParseResult {
@@ -89,6 +89,8 @@ pub struct Analysis {
     pub(crate) roots: RefCell<Vec<BodyKey>>,
     /// Names of the root items behind those bodies.
     pub(crate) root_names: RefCell<Vec<String>>,
+    /// Import graph and SCCs for this analysis.
+    pub module_graph: ModuleGraph,
 }
 
 struct AnalysisCache {
@@ -102,6 +104,35 @@ struct LowerState {
     items: Vec<ItemKey>,
     roots: HashSet<String>,
     cache: lower::LowerCache,
+}
+
+/// One file in the import graph. The prelude is not a node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleNode {
+    pub file: FileId,
+    pub path: Vec<String>,
+    pub imports: Vec<FileId>,
+    /// Hash of the exported interface: signatures, data/class declarations,
+    /// uses/imports, and instances. Function bodies are excluded.
+    pub interface: u64,
+}
+
+/// A strongly connected component of the import graph. A component with
+/// more than one file, or one file with a self-edge, is an import cycle
+/// and therefore one codegen unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleGroup {
+    pub files: Vec<FileId>,
+    /// Combined interface hash of every file in the component.
+    pub interface: u64,
+}
+
+/// The reachable import graph over a file list. Groups are ordered so that
+/// dependencies come before their importers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModuleGraph {
+    pub nodes: Vec<ModuleNode>,
+    pub groups: Vec<ModuleGroup>,
 }
 
 /// What the last [`Session::compile`] did, for performance tests.
@@ -172,12 +203,7 @@ impl Session {
         file
     }
 
-    pub fn add_module_file(
-        &mut self,
-        path: impl Into<String>,
-        module_path: Vec<String>,
-        text: impl Into<String>,
-    ) -> FileId {
+    pub fn add_module_file(&mut self, path: impl Into<String>, module_path: Vec<String>, text: impl Into<String>) -> FileId {
         let file = FileId(self.files.len() as u32);
         self.files.push(SourceFile {
             path: path.into(),
@@ -196,6 +222,64 @@ impl Session {
         &self.module_files
     }
 
+    /// Build the import graph over `files` and group cycles (Tarjan SCC).
+    /// The prelude is omitted; the entry/root file and every module are
+    /// nodes. Dependencies are ordered before their importers.
+    pub fn module_graph(&self, files: &[FileId]) -> ModuleGraph {
+        let files: Vec<FileId> = files.iter().copied().filter(|file| *file != FileId::PRELUDE).collect();
+        let index_of: HashMap<FileId, usize> = files.iter().enumerate().map(|(i, f)| (*f, i)).collect();
+        let by_path: HashMap<Vec<String>, FileId> = files
+            .iter()
+            .copied()
+            .filter_map(|file| {
+                let path = self.module_path(file);
+                if path.is_empty() { None } else { Some((path.to_vec(), file)) }
+            })
+            .collect();
+
+        let mut nodes = Vec::with_capacity(files.len());
+        let mut adjacency = vec![Vec::new(); files.len()];
+        for (i, &file) in files.iter().enumerate() {
+            let parsed = self.parse(file);
+            let mut imports = Vec::new();
+            for item in &parsed.program.items {
+                let ast::ItemKind::Import(import) = &item.kind else {
+                    continue;
+                };
+                if let Some(target) = by_path.get(&import.path).copied() {
+                    if let Some(&target_index) = index_of.get(&target) {
+                        if !imports.contains(&target) {
+                            imports.push(target);
+                            adjacency[i].push(target_index);
+                        }
+                    }
+                }
+            }
+            nodes.push(ModuleNode {
+                file,
+                path: self.module_path(file).to_vec(),
+                imports,
+                interface: interface_hash(self.text(file), &parsed.program.items, self.module_path(file)),
+            });
+        }
+
+        let components = tarjan(&adjacency);
+        let groups = components
+            .into_iter()
+            .map(|mut component| {
+                component.sort_unstable();
+                let interface = component
+                    .iter()
+                    .fold(0xcbf29ce484222325u64, |hash, i| hash.wrapping_mul(0x100000001b3) ^ nodes[*i].interface);
+                ModuleGroup {
+                    files: component.into_iter().map(|i| files[i]).collect(),
+                    interface,
+                }
+            })
+            .collect();
+        ModuleGraph { nodes, groups }
+    }
+
     pub fn set_module_root(&mut self, root: impl Into<PathBuf>) {
         self.module_root = root.into();
     }
@@ -203,22 +287,9 @@ impl Session {
     /// Load an entry file and every module it imports, returning the files
     /// in prelude-independent order: the entry first, then imports.
     pub fn load_entry(&mut self, entry: &Path) -> Result<Vec<FileId>, Vec<Diag>> {
-        let canonical = fs::canonicalize(entry).map_err(|error| {
-            vec![Diag::new(
-                format!("cannot read `{}`: {error}", entry.display()),
-                Span::new(0, 0),
-            )]
-        })?;
-        self.module_root = canonical
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .to_path_buf();
-        let text = fs::read_to_string(&canonical).map_err(|error| {
-            vec![Diag::new(
-                format!("cannot read `{}`: {error}", canonical.display()),
-                Span::new(0, 0),
-            )]
-        })?;
+        let canonical = fs::canonicalize(entry).map_err(|error| vec![Diag::new(format!("cannot read `{}`: {error}", entry.display()), Span::new(0, 0))])?;
+        self.module_root = canonical.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+        let text = fs::read_to_string(&canonical).map_err(|error| vec![Diag::new(format!("cannot read `{}`: {error}", canonical.display()), Span::new(0, 0))])?;
         let file = self.add_module_file(canonical.display().to_string(), Vec::new(), text);
         if let Err(diag) = self.load_imports(file) {
             return Err(vec![diag]);
@@ -231,8 +302,7 @@ impl Session {
     /// Load one module into the session. REPL imports use this with the
     /// session's module root; the compiler driver uses [`Session::load_entry`].
     pub fn load_import(&mut self, path: Vec<String>) -> Result<FileId, Vec<Diag>> {
-        self.load_module(path, Span::new(0, 0))
-            .map_err(|diag| vec![diag])
+        self.load_module(path, Span::new(0, 0)).map_err(|diag| vec![diag])
     }
 
     fn load_imports(&mut self, file: FileId) -> KResult<()> {
@@ -260,28 +330,12 @@ impl Session {
             return Err(Diag::new("an import needs a module path", span));
         }
         let source = self.find_module(&path, span)?;
-        let canonical = fs::canonicalize(&source).map_err(|error| {
-            Diag::new(
-                format!("cannot read `{}`: {error}", source.display()),
-                span,
-            )
-        })?;
+        let canonical = fs::canonicalize(&source).map_err(|error| Diag::new(format!("cannot read `{}`: {error}", source.display()), span))?;
         if let Some(file) = self.loaded_files.get(&canonical) {
             let loaded = self.module_path(*file).join("::");
-            return Err(Diag::new(
-                format!(
-                    "`{}` is already loaded as module `{loaded}`",
-                    canonical.display()
-                ),
-                span,
-            ));
+            return Err(Diag::new(format!("`{}` is already loaded as module `{loaded}`", canonical.display()), span));
         }
-        let text = fs::read_to_string(&canonical).map_err(|error| {
-            Diag::new(
-                format!("cannot read `{}`: {error}", canonical.display()),
-                span,
-            )
-        })?;
+        let text = fs::read_to_string(&canonical).map_err(|error| Diag::new(format!("cannot read `{}`: {error}", canonical.display()), span))?;
         let file = self.add_module_file(canonical.display().to_string(), path.clone(), text);
         self.modules.insert(path, file);
         self.module_files.push(file);
@@ -293,22 +347,14 @@ impl Session {
     fn find_module(&self, path: &[String], span: Span) -> KResult<PathBuf> {
         let joined = path.join("/");
         let leaf = self.module_root.join(format!("{joined}.fern"));
-        let package = self
-            .module_root
-            .join(&joined)
-            .join(format!("{}.fern", path.last().expect("non-empty module path")));
+        let package = self.module_root.join(&joined).join(format!("{}.fern", path.last().expect("non-empty module path")));
         if leaf.is_file() {
             Ok(leaf)
         } else if package.is_file() {
             Ok(package)
         } else {
             Err(Diag::new(
-                format!(
-                    "cannot find module `{}` (tried `{}` and `{}`)",
-                    path.join("::"),
-                    leaf.display(),
-                    package.display()
-                ),
+                format!("cannot find module `{}` (tried `{}` and `{}`)", path.join("::"), leaf.display(), package.display()),
                 span,
             ))
         }
@@ -377,10 +423,7 @@ impl Session {
     /// share an empty canonical prefix, so single-file programs keep using
     /// bare names; their IDs still differ for ownership checks.
     pub fn program(&self, files: &[FileId]) -> (Program, Vec<Diag>, bool) {
-        let mut modules = vec![
-            ast::ModuleInfo { path: Vec::new() },
-            ast::ModuleInfo { path: Vec::new() },
-        ];
+        let mut modules = vec![ast::ModuleInfo { path: Vec::new() }, ast::ModuleInfo { path: Vec::new() }];
         let mut module_ids: HashMap<Vec<String>, ast::ModuleId> = HashMap::new();
         let mut items = Vec::new();
         let mut diags = Vec::new();
@@ -398,9 +441,7 @@ impl Session {
                 } else {
                     *module_ids.entry(path.to_vec()).or_insert_with(|| {
                         let id = ast::ModuleId(modules.len() as u32);
-                        modules.push(ast::ModuleInfo {
-                            path: path.to_vec(),
-                        });
+                        modules.push(ast::ModuleInfo { path: path.to_vec() });
                         id
                     })
                 }
@@ -435,38 +476,27 @@ impl Session {
         if !diags.is_empty() {
             return Err(diags);
         }
-        let modular = program.modules.iter().any(|module| !module.path.is_empty())
-            || program.items.iter().any(|item| {
-                matches!(item.kind, ast::ItemKind::Import(_) | ast::ItemKind::Use(_))
-            });
+        let modular =
+            program.modules.iter().any(|module| !module.path.is_empty()) || program.items.iter().any(|item| matches!(item.kind, ast::ItemKind::Import(_) | ast::ItemKind::Use(_)));
+        let graph = self.module_graph(files);
         if modular {
             resolve::qualify(&mut program).map_err(|diag| vec![diag])?;
         }
         let items = self.item_keys(&program);
         self.unit_compiles.set(self.unit_compiles.get() + 1);
 
-        if modular {
-            let analysis = self.analyze_full(program, items)?;
-            *self.analysis_cache.borrow_mut() = Some(AnalysisCache {
-                key,
-                analysis: analysis.clone(),
-            });
-            return Ok(analysis);
-        }
-
         let previous = self.analysis_cache.borrow().as_ref().map(|c| c.analysis.clone());
-        let analysis = match previous {
-            Some(previous) => self.analyze_from(program, items, previous),
-            None => self.analyze_full(program, items),
-        }?;
-        *self.analysis_cache.borrow_mut() = Some(AnalysisCache {
-            key,
-            analysis: analysis.clone(),
-        });
+        let analysis = match (modular, previous) {
+            (true, Some(previous)) => self.analyze_modules(program, items, graph, previous)?,
+            (true, None) => self.analyze_full(program, items, graph)?,
+            (false, Some(previous)) => self.analyze_from(program, items, graph, previous)?,
+            (false, None) => self.analyze_full(program, items, graph)?,
+        };
+        *self.analysis_cache.borrow_mut() = Some(AnalysisCache { key, analysis: analysis.clone() });
         Ok(analysis)
     }
 
-    fn analyze_full(&self, program: Program, items: Vec<ItemKey>) -> Result<Rc<Analysis>, Vec<Diag>> {
+    fn analyze_full(&self, program: Program, items: Vec<ItemKey>, module_graph: ModuleGraph) -> Result<Rc<Analysis>, Vec<Diag>> {
         let mut collected = defs::collect(&program).map_err(|d| vec![d])?;
         let hir = check::check(&mut collected, &program).map_err(|d| vec![d])?;
         let (roots, names) = roots_of(&program, 0);
@@ -479,10 +509,11 @@ impl Session {
             incremental: false,
             roots: RefCell::new(roots),
             root_names: RefCell::new(names),
+            module_graph,
         }))
     }
 
-    fn analyze_from(&self, program: Program, items: Vec<ItemKey>, previous: Rc<Analysis>) -> Result<Rc<Analysis>, Vec<Diag>> {
+    fn analyze_from(&self, program: Program, items: Vec<ItemKey>, module_graph: ModuleGraph, previous: Rc<Analysis>) -> Result<Rc<Analysis>, Vec<Diag>> {
         let common = common_prefix(&previous.items, &items);
         if common == items.len() {
             if items.len() == previous.items.len() {
@@ -491,16 +522,16 @@ impl Session {
                 previous.root_names.borrow_mut().clear();
                 return Ok(previous);
             }
-            return self.analyze_full(program, items);
+            return self.analyze_full(program, items, module_graph);
         }
         if common == 0 || !plain_items(&items[common..]) {
-            return self.analyze_full(program, items);
+            return self.analyze_full(program, items, module_graph);
         }
 
         let (fn_count, value_count, _) = item_counts(&program.items[..common]);
         let mut collected = defs::collect(&program).map_err(|d| vec![d])?;
         if !inherit_schemes(&mut collected, &previous.defs, fn_count, value_count) {
-            return self.analyze_full(program, items);
+            return self.analyze_full(program, items, module_graph);
         }
         let start_hir = trim_hir(&previous, &program, common);
         let hir = match check::check_from(&mut collected, &program, common, start_hir) {
@@ -517,6 +548,55 @@ impl Session {
             incremental: true,
             roots: RefCell::new(roots),
             root_names: RefCell::new(names),
+            module_graph,
+        }))
+    }
+
+    fn analyze_modules(&self, program: Program, items: Vec<ItemKey>, module_graph: ModuleGraph, previous: Rc<Analysis>) -> Result<Rc<Analysis>, Vec<Diag>> {
+        if !same_item_shape(&items, &previous.items) || !same_module_files(&module_graph, &previous.module_graph) {
+            return self.analyze_full(program, items, module_graph);
+        }
+
+        let affected = affected_files(&previous.module_graph, &module_graph);
+        let mut selected: HashSet<usize> = items
+            .iter()
+            .zip(&previous.items)
+            .enumerate()
+            .filter_map(|(index, (current, old))| (current.hash != old.hash).then_some(index))
+            .collect();
+        for (index, item) in program.items.iter().enumerate() {
+            if affected.contains(&item.span.file) {
+                selected.insert(index);
+            }
+        }
+
+        if selected.is_empty() {
+            return Ok(Rc::new(Analysis {
+                defs: previous.defs.clone(),
+                hir: previous.hir.clone(),
+                items,
+                checked: Cell::new(0),
+                incremental: true,
+                roots: RefCell::new(Vec::new()),
+                root_names: RefCell::new(Vec::new()),
+                module_graph,
+            }));
+        }
+
+        let mut collected = defs::collect(&program).map_err(|d| vec![d])?;
+        let start_hir = (*previous.hir).clone();
+        let hir = check::check_selected(&mut collected, &program, &selected, start_hir).map_err(|diag| vec![diag])?;
+        let (roots, names) = roots_of(&program, 0);
+        let checked = selected.len();
+        Ok(Rc::new(Analysis {
+            defs: Rc::new(collected),
+            hir: Rc::new(hir),
+            items,
+            checked: Cell::new(checked),
+            incremental: false,
+            roots: RefCell::new(roots),
+            root_names: RefCell::new(names),
+            module_graph,
         }))
     }
 
@@ -546,10 +626,7 @@ impl Session {
             roots,
             cache,
         });
-        *self.unit_cache.borrow_mut() = Some(UnitCache {
-            key,
-            module: module.clone(),
-        });
+        *self.unit_cache.borrow_mut() = Some(UnitCache { key, module: module.clone() });
         self.lower_stats.set(stats);
         Ok(module)
     }
@@ -559,7 +636,8 @@ impl Session {
         let new_names: HashSet<String> = analysis.root_names.borrow().iter().cloned().collect();
         if let Some(previous) = previous {
             let common = common_prefix(&previous.items, &analysis.items);
-            let append_only = analysis.incremental && common > 0 && analysis.items.len() > common && analysis.items.len() >= previous.items.len() && new_names.is_disjoint(&previous.roots);
+            let append_only =
+                analysis.incremental && common > 0 && analysis.items.len() > common && analysis.items.len() >= previous.items.len() && new_names.is_disjoint(&previous.roots);
             if append_only {
                 let before = previous.cache.lowered();
                 let new_count = new_names.len();
@@ -609,9 +687,7 @@ impl Session {
                 let text = if item.span.file == FileId::UNSPECIFIED {
                     ""
                 } else {
-                    self.text(item.span.file)
-                        .get(item.span.lo as usize..item.span.hi as usize)
-                        .unwrap_or("")
+                    self.text(item.span.file).get(item.span.lo as usize..item.span.hi as usize).unwrap_or("")
                 };
                 ItemKey {
                     span: item.span,
@@ -639,9 +715,193 @@ impl Session {
 pub fn compile_str(src: &str) -> KResult<MirModule> {
     let mut session = Session::new();
     let file = session.add_file("<input>", src);
-    session
-        .compile(&[session.prelude(), file])
-        .map_err(|mut diags| diags.remove(0))
+    session.compile(&[session.prelude(), file]).map_err(|mut diags| diags.remove(0))
+}
+
+fn same_item_shape(current: &[ItemKey], previous: &[ItemKey]) -> bool {
+    current.len() == previous.len() && current.iter().zip(previous).all(|(a, b)| a.span.file == b.span.file && a.kind == b.kind)
+}
+
+fn same_module_files(current: &ModuleGraph, previous: &ModuleGraph) -> bool {
+    current.nodes.len() == previous.nodes.len() && current.nodes.iter().zip(&previous.nodes).all(|(a, b)| a.file == b.file && a.path == b.path)
+}
+
+fn affected_files(previous: &ModuleGraph, current: &ModuleGraph) -> HashSet<FileId> {
+    let previous_interfaces: HashMap<FileId, u64> = previous.nodes.iter().map(|node| (node.file, node.interface)).collect();
+    let mut affected: HashSet<FileId> = current
+        .nodes
+        .iter()
+        .filter(|node| previous_interfaces.get(&node.file) != Some(&node.interface))
+        .map(|node| node.file)
+        .collect();
+    let mut reverse: HashMap<FileId, Vec<FileId>> = HashMap::new();
+    for node in &current.nodes {
+        for &import in &node.imports {
+            reverse.entry(import).or_default().push(node.file);
+        }
+    }
+    let mut queue: Vec<FileId> = affected.iter().copied().collect();
+    while let Some(file) = queue.pop() {
+        if let Some(importers) = reverse.get(&file) {
+            for &importer in importers {
+                if affected.insert(importer) {
+                    queue.push(importer);
+                }
+            }
+        }
+    }
+    affected
+}
+
+fn hash_str(hash: &mut u64, text: &str) {
+    for byte in text.bytes() {
+        *hash ^= u64::from(byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    *hash ^= 0xff;
+    *hash = hash.wrapping_mul(0x100000001b3);
+}
+
+fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    hash_str(&mut hash, &module_path.join("::"));
+    for item in items {
+        match &item.kind {
+            ast::ItemKind::Fun(fun) => {
+                hash_str(&mut hash, "fun");
+                hash_str(&mut hash, &fun.name);
+                for param in &fun.params {
+                    hash_str(&mut hash, &param.ty.display());
+                }
+                hash_str(&mut hash, &fun.ret.display());
+            }
+            ast::ItemKind::Let(value) => {
+                hash_str(&mut hash, "let");
+                hash_str(&mut hash, &value.name);
+                match &value.ty {
+                    Some(ty) => hash_str(&mut hash, &ty.display()),
+                    None => {
+                        let lo = item.span.lo as usize;
+                        let hi = (item.span.hi as usize).min(source.len());
+                        hash_str(&mut hash, source.get(lo..hi).unwrap_or(""));
+                    }
+                }
+            }
+            ast::ItemKind::Data(data) => {
+                hash_str(&mut hash, "data");
+                hash_str(&mut hash, &data.name);
+                for param in &data.params {
+                    hash_str(&mut hash, param);
+                }
+                for ctor in &data.ctors {
+                    hash_str(&mut hash, &ctor.name);
+                    for field in &ctor.fields {
+                        hash_str(&mut hash, &field.display());
+                    }
+                }
+            }
+            ast::ItemKind::Class(class) => {
+                hash_str(&mut hash, "class");
+                hash_str(&mut hash, &class.name);
+                for param in &class.params {
+                    hash_str(&mut hash, param);
+                }
+                for method in &class.methods {
+                    hash_str(&mut hash, &method.name);
+                    hash_str(&mut hash, &method.ty.display());
+                }
+            }
+            ast::ItemKind::Instance(instance) => {
+                hash_str(&mut hash, "instance");
+                hash_str(&mut hash, &instance.class);
+                for bound in &instance.ctx {
+                    hash_str(&mut hash, &bound.display());
+                }
+                hash_str(&mut hash, &instance.self_ty.display());
+                for method in &instance.methods {
+                    hash_str(&mut hash, &method.name);
+                }
+            }
+            ast::ItemKind::Extern(extern_decl) => {
+                hash_str(&mut hash, "extern");
+                hash_str(&mut hash, &extern_decl.name);
+                hash_str(&mut hash, extern_decl.symbol.as_deref().unwrap_or(""));
+                hash_str(&mut hash, &extern_decl.ty.display());
+            }
+            ast::ItemKind::Import(import) => {
+                hash_str(&mut hash, "import");
+                hash_str(&mut hash, &import.path.join("::"));
+                hash_str(&mut hash, import.alias.as_deref().unwrap_or(""));
+            }
+            ast::ItemKind::Use(use_decl) => {
+                hash_str(&mut hash, "use");
+                hash_str(&mut hash, &use_decl.path.join("::"));
+                hash_str(&mut hash, use_decl.alias.as_deref().unwrap_or(""));
+            }
+        }
+    }
+    hash
+}
+
+fn tarjan(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    struct State<'a> {
+        adjacency: &'a [Vec<usize>],
+        next: usize,
+        indices: Vec<Option<usize>>,
+        low: Vec<usize>,
+        stack: Vec<usize>,
+        on_stack: Vec<bool>,
+        out: Vec<Vec<usize>>,
+    }
+
+    impl State<'_> {
+        fn visit(&mut self, node: usize) {
+            let index = self.next;
+            self.next += 1;
+            self.indices[node] = Some(index);
+            self.low[node] = index;
+            self.stack.push(node);
+            self.on_stack[node] = true;
+
+            for &next in &self.adjacency[node] {
+                if self.indices[next].is_none() {
+                    self.visit(next);
+                    self.low[node] = self.low[node].min(self.low[next]);
+                } else if self.on_stack[next] {
+                    self.low[node] = self.low[node].min(self.indices[next].expect("visited"));
+                }
+            }
+
+            if self.low[node] == index {
+                let mut component = Vec::new();
+                loop {
+                    let member = self.stack.pop().expect("stack holds the component");
+                    self.on_stack[member] = false;
+                    component.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                self.out.push(component);
+            }
+        }
+    }
+
+    let mut state = State {
+        adjacency,
+        next: 0,
+        indices: vec![None; adjacency.len()],
+        low: vec![0; adjacency.len()],
+        stack: Vec::new(),
+        on_stack: vec![false; adjacency.len()],
+        out: Vec::new(),
+    };
+    for node in 0..adjacency.len() {
+        if state.indices[node].is_none() {
+            state.visit(node);
+        }
+    }
+    state.out
 }
 
 fn item_kind(kind: &ast::ItemKind) -> ItemKindKey {
@@ -661,9 +921,7 @@ fn item_kind(kind: &ast::ItemKind) -> ItemKindKey {
 /// introduces no instance that the class solver could pick up for code
 /// already checked.
 fn plain_items(items: &[ItemKey]) -> bool {
-    items
-        .iter()
-        .all(|item| matches!(item.kind, ItemKindKey::Fun | ItemKindKey::Let | ItemKindKey::Extern))
+    items.iter().all(|item| matches!(item.kind, ItemKindKey::Fun | ItemKindKey::Let | ItemKindKey::Extern))
 }
 
 fn common_prefix(left: &[ItemKey], right: &[ItemKey]) -> usize {
@@ -838,11 +1096,7 @@ mod tests {
         let files = [session.prelude(), a, b];
         let (program, diags, _) = session.program(&files);
         assert!(diags.is_empty(), "{diags:?}");
-        let user_items = program
-            .items
-            .iter()
-            .filter(|item| item.span.file == a || item.span.file == b)
-            .count();
+        let user_items = program.items.iter().filter(|item| item.span.file == a || item.span.file == b).count();
         assert_eq!(user_items, 2);
         let module = session.compile(&files).unwrap_or_else(|d| {
             panic!("compile failed: {}", d[0].msg);
@@ -870,10 +1124,7 @@ mod tests {
         let files = unit(&session, file);
         session.analyze(&files).expect("checks");
 
-        session.set_text(
-            file,
-            "fun a() : Int = 1\nfun f() : Int = g()\nfun g() : Int = 2\n",
-        );
+        session.set_text(file, "fun a() : Int = 1\nfun f() : Int = g()\nfun g() : Int = 2\n");
         let second = session.analyze(&files).expect("checks forward references");
         assert_eq!(second.checked.get(), 2, "both appended bodies are checked");
     }
@@ -892,10 +1143,7 @@ mod tests {
         session.set_text(file, "fun a() : Int = 1\nfun __repl_1() : Int = (a() + 1)\n");
         let second = session.analyze(&files).expect("checks the next expression");
         assert_eq!(second.checked.get(), 1, "only the new expression is checked");
-        assert!(
-            !second.hir.bodies.iter().any(|body| body.name == "__repl_0"),
-            "the old expression's body is dropped"
-        );
+        assert!(!second.hir.bodies.iter().any(|body| body.name == "__repl_0"), "the old expression's body is dropped");
         assert!(second.hir.bodies.iter().any(|body| body.name == "__repl_1"));
     }
 

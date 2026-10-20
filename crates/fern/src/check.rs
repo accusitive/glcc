@@ -46,6 +46,69 @@ pub fn check(defs: &mut Defs, program: &ast::Program) -> KResult<HirProgram> {
 /// unreachable bodies from earlier analyses; they are kept as-is).
 /// `defs.fns`/`defs.values` must already carry the schemes of the
 /// prefix, which [`Defs`] collection leaves as `None`.
+/// Recheck only `selected` items, keeping the bodies of everything else
+/// from `start_hir`. The item list and its IDs must have the same shape as
+/// the one `start_hir` was checked from.
+pub fn check_selected(
+    defs: &mut Defs,
+    program: &ast::Program,
+    selected: &HashSet<usize>,
+    mut start_hir: HirProgram,
+) -> KResult<HirProgram> {
+    let mut fn_ids = HashSet::new();
+    let mut value_ids = HashSet::new();
+    let mut instances = HashSet::new();
+    let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
+    for (index, item) in program.items.iter().enumerate() {
+        match &item.kind {
+            ast::ItemKind::Fun(_) => {
+                if selected.contains(&index) {
+                    fn_ids.insert(FnId(fn_index as u32));
+                }
+                fn_index += 1;
+            }
+            ast::ItemKind::Let(_) => {
+                if selected.contains(&index) {
+                    value_ids.insert(ValueId(value_index as u32));
+                }
+                value_index += 1;
+            }
+            ast::ItemKind::Instance(_) => {
+                if selected.contains(&index) {
+                    instances.insert(instance_index);
+                }
+                instance_index += 1;
+            }
+            ast::ItemKind::Data(_)
+            | ast::ItemKind::Class(_)
+            | ast::ItemKind::Extern(_)
+            | ast::ItemKind::Import(_)
+            | ast::ItemKind::Use(_) => {}
+        }
+    }
+    start_hir.bodies.retain(|body| match body.key {
+        BodyKey::Fn(id) => !fn_ids.contains(&id),
+        BodyKey::Value(id) => !value_ids.contains(&id),
+        BodyKey::Method { instance, .. } => !instances.contains(&instance),
+    });
+
+    let (hir, fn_schemes, value_schemes) = {
+        let mut state = Check::new(defs);
+        state.fn_schemes = defs.fns.iter().map(|f| f.scheme.clone()).collect();
+        state.value_schemes = defs.values.iter().map(|v| v.scheme.clone()).collect();
+        state.hir = start_hir;
+        let hir = state.run_selected(program, selected)?;
+        (hir, state.fn_schemes, state.value_schemes)
+    };
+    for (def, scheme) in defs.fns.iter_mut().zip(fn_schemes) {
+        def.scheme = scheme;
+    }
+    for (def, scheme) in defs.values.iter_mut().zip(value_schemes) {
+        def.scheme = scheme;
+    }
+    Ok(hir)
+}
+
 pub fn check_from(defs: &mut Defs, program: &ast::Program, first_item: usize, start_hir: HirProgram) -> KResult<HirProgram> {
     let (hir, fn_schemes, value_schemes) = {
         let mut state = Check::new(defs);
@@ -143,6 +206,42 @@ impl<'d> Check<'d> {
         self.fn_schemes = self.defs.fns.iter().map(|f| f.scheme.clone()).collect();
         self.value_schemes = self.defs.values.iter().map(|v| v.scheme.clone()).collect();
         self.run_from(program, 0)
+    }
+
+    fn run_selected(
+        &mut self,
+        program: &ast::Program,
+        selected: &HashSet<usize>,
+    ) -> KResult<HirProgram> {
+        let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
+        for (index, item) in program.items.iter().enumerate() {
+            match &item.kind {
+                ast::ItemKind::Data(_)
+                | ast::ItemKind::Class(_)
+                | ast::ItemKind::Extern(_)
+                | ast::ItemKind::Import(_)
+                | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Instance(_) => {
+                    if selected.contains(&index) {
+                        self.check_instance(instance_index)?;
+                    }
+                    instance_index += 1;
+                }
+                ast::ItemKind::Fun(f) => {
+                    if selected.contains(&index) {
+                        self.check_fn(FnId(fn_index as u32), f)?;
+                    }
+                    fn_index += 1;
+                }
+                ast::ItemKind::Let(v) => {
+                    if selected.contains(&index) {
+                        self.check_value(ValueId(value_index as u32), v)?;
+                    }
+                    value_index += 1;
+                }
+            }
+        }
+        Ok(std::mem::take(&mut self.hir))
     }
 
     fn run_from(&mut self, program: &ast::Program, first_item: usize) -> KResult<HirProgram> {

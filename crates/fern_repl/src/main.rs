@@ -2,7 +2,7 @@
 
 use std::io::{self, BufRead, Write};
 
-use fern_repl::{input_incomplete, is_definition, Repl};
+use fern_repl::{Repl, input_incomplete, is_definition};
 
 fn main() -> io::Result<()> {
     let mut repl = Repl::new();
@@ -31,12 +31,16 @@ fn main() -> io::Result<()> {
                     println!("cleared");
                     continue;
                 }
+                ":reload" | ":r" => {
+                    match repl.reload() {
+                        Ok(()) => println!("reloaded"),
+                        Err(diags) => report(&repl, &diags),
+                    }
+                    continue;
+                }
                 _ => {}
             }
-            if let Some(expr) = trimmed
-                .strip_prefix(":e ")
-                .or_else(|| trimmed.strip_prefix(":eval "))
-            {
+            if let Some(expr) = trimmed.strip_prefix(":e ").or_else(|| trimmed.strip_prefix(":eval ")) {
                 run_expr(&mut repl, expr);
                 continue;
             }
@@ -88,6 +92,7 @@ fn print_help() {
 :help            show this
 :quit, :q        exit
 :clear           forget all definitions
+:reload, :r      re-read imported modules
 :e <expr>        evaluate as an expression (even if it starts with `let`)
 definitions      fun / let / data / class / instance (latest wins by name)
 anything else    evaluated as an expression
