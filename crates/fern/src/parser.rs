@@ -18,8 +18,9 @@
 //! block    := '{' ('let' pat '=' expr ';')* (expr ';')* expr? '}'
 //! ```
 //!
-//! Binary operators, loosest first: `||`, `&&`, comparisons, `::`
-//! (right-assoc cons), `+ -`, `* /`; unary `-`; postfix calls `f(x, y)`.
+//! Binary operators, loosest first: `||`, `&&`, comparisons, `|>`
+//! (left-assoc value pipe), `::` (right-assoc cons), `+ -`, `* /`;
+//! unary `-`; postfix calls `f(x, y)`.
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -37,6 +38,14 @@ pub struct ParseOutput {
 pub fn parse_recovering(tokens: Vec<Token>) -> ParseOutput {
     let mut parser = Parser { tokens, pos: 0 };
     parser.program_recovering()
+}
+
+/// Parse a single expression, as found inside `${...}`.
+pub fn parse_expr_fragment(tokens: Vec<Token>) -> KResult<Expr> {
+    let mut parser = Parser { tokens, pos: 0 };
+    let expr = parser.expr()?;
+    parser.expect(&Tok::Eof, "end of the interpolation expression")?;
+    Ok(expr)
 }
 
 /// Fail-fast wrapper over [`parse_recovering`]: returns the first
@@ -727,6 +736,19 @@ impl Parser {
         if level >= BIN_LEVELS.len() {
             return self.prefix();
         }
+        if level == PIPE_LEVEL {
+            let mut lhs = self.binary(level + 1)?;
+            while self.is(&Tok::PipeGt) {
+                self.bump();
+                let rhs = self.binary(level + 1)?;
+                let span = lhs.span.to(rhs.span);
+                lhs = Expr {
+                    kind: ExprKind::Call(Box::new(rhs), vec![lhs]),
+                    span,
+                };
+            }
+            return Ok(lhs);
+        }
         let ops = BIN_LEVELS[level];
         if ops.is_empty() {
             // Cons level: right-assoc.
@@ -824,7 +846,7 @@ impl Parser {
     fn atom(&mut self) -> KResult<Expr> {
         let lo = self.span();
         if self.is(&Tok::Eof) {
-            return Err(Diag::new("expected an expression here", lo));
+            return Err(Diag::incomplete("expected an expression here", lo));
         }
         match self.peek() {
             Tok::Int(_) => {
@@ -874,6 +896,30 @@ impl Parser {
                 Ok(Expr {
                     kind: ExprKind::Ctor { name },
                     span: lo.to(self.prev_span()),
+                })
+            }
+            Tok::Builtin(_) => {
+                let Token { tok: Tok::Builtin(name), span } = self.bump() else {
+                    unreachable!("checked above");
+                };
+                Ok(Expr {
+                    kind: ExprKind::Var(crate::prelude::builtin_name(&name)),
+                    span,
+                })
+            }
+            Tok::Shell { .. } => {
+                let Token { tok: Tok::Shell { src, capture }, span } = self.bump() else {
+                    unreachable!("checked above");
+                };
+                let base = span.lo + if capture { 2 } else { 1 };
+                let raw = crate::shell::parse_raw(span.file, &src, base)?;
+                let command = self.convert_shell(raw)?;
+                Ok(Expr {
+                    kind: ExprKind::Shell {
+                        command: Box::new(command),
+                        capture,
+                    },
+                    span,
                 })
             }
             Tok::Lower(_) => {
@@ -970,6 +1016,52 @@ impl Parser {
     /// `pat (',' pat)*` followed by `) ->`, or `() ->`. Returns `None`
     /// when the shape is not a lambda. Errors are abortive (the caller
     /// rewinds either way).
+    fn convert_shell(&mut self, raw: crate::shell::RawCommand) -> KResult<ShellCommand> {
+        let stages = raw
+            .stages
+            .into_iter()
+            .map(|stage| self.convert_stage(stage))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellCommand {
+            stages,
+            span: raw.span,
+        })
+    }
+
+    fn convert_stage(&mut self, raw: crate::shell::RawStage) -> KResult<ShellStage> {
+        let words = raw
+            .words
+            .into_iter()
+            .map(|word| self.convert_word(word))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellStage {
+            words,
+            span: raw.span,
+        })
+    }
+
+    fn convert_word(&mut self, raw: crate::shell::RawWord) -> KResult<ShellWord> {
+        let parts = raw
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                crate::shell::RawPart::Lit(text) => Ok(ShellWordPart::Lit(text)),
+                crate::shell::RawPart::Interp { src, span } => {
+                    let tokens = crate::lexer::lex_fragment(span.file, &src, span.lo)?;
+                    let expr = parse_expr_fragment(tokens)?;
+                    Ok(ShellWordPart::Interp(expr))
+                }
+                crate::shell::RawPart::Capture(command) => {
+                    Ok(ShellWordPart::Capture(Box::new(self.convert_shell(*command)?)))
+                }
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(ShellWord {
+            parts,
+            span: raw.span,
+        })
+    }
+
     fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
         if !matches!(self.peek(), Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket) {
             return Ok(None);
@@ -1028,11 +1120,16 @@ fn close_delim(open: &mut Vec<Delim>, close: Delim) {
     }
 }
 
+/// `|>` binds tighter than comparisons but looser than `::`.
+const PIPE_LEVEL: usize = 3;
+
 const BIN_LEVELS: &[&[BinOp]] = &[
     &[BinOp::Or],
     &[BinOp::And],
     &[BinOp::Eq, BinOp::Ne, BinOp::Lt, BinOp::Le, BinOp::Gt, BinOp::Ge],
-    // Cons: right-assoc, sits between comparisons and addition.
+    // Value pipe: handled before the operator table.
+    &[],
+    // Cons: right-assoc, sits between the pipe and addition.
     &[],
     &[BinOp::Add, BinOp::Sub],
     &[BinOp::Mul, BinOp::Div],

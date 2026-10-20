@@ -26,9 +26,14 @@ pub enum Tok {
     // names and literals
     Lower(String),
     Upper(String),
+    /// `#name`: a builtin namespace reference.
+    Builtin(String),
     Int(i64),
     Float(f64),
     Str(String),
+    /// `$ command` or `$(command)`: `src` is the command text, `capture`
+    /// selects `$()`.
+    Shell { src: String, capture: bool },
     // punctuation
     LParen,
     RParen,
@@ -55,7 +60,8 @@ pub enum Tok {
     Ne,
     AmpAmp,
     PipePipe,
-    Pipe, // | (data decl separator)
+    PipeGt, // |> value pipe
+    Pipe,   // | (data decl separator)
     Underscore,
     Eof,
 }
@@ -66,9 +72,11 @@ impl Tok {
         match self {
             Tok::Lower(s) => format!("name `{s}`"),
             Tok::Upper(s) => format!("name `{s}`"),
+            Tok::Builtin(s) => format!("builtin `#{s}`"),
             Tok::Int(v) => format!("integer `{v}`"),
             Tok::Float(v) => format!("float `{v}`"),
             Tok::Str(_) => "a string literal".to_string(),
+            Tok::Shell { .. } => "a shell command".to_string(),
             Tok::Eof => "end of file".to_string(),
             other => format!("`{}`", other.spelling()),
         }
@@ -115,9 +123,11 @@ impl Tok {
             Tok::Ne => "!=",
             Tok::AmpAmp => "&&",
             Tok::PipePipe => "||",
+            Tok::PipeGt => "|>",
             Tok::Pipe => "|",
             Tok::Underscore => "_",
             Tok::Str(_) => "string",
+            Tok::Shell { .. } => "shell",
             _ => "?",
         }
     }
@@ -129,6 +139,8 @@ pub struct Token {
     pub span: Span,
 }
 
+const IDENT_REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+
 pub fn lex(src: &str) -> KResult<Vec<Token>> {
     lex_in(FileId::UNSPECIFIED, src)
 }
@@ -138,25 +150,38 @@ pub fn lex_in(file: FileId, src: &str) -> KResult<Vec<Token>> {
     Lexer::new(file, src).lex_all()
 }
 
+/// Lex a source fragment whose first byte is at `base` in its file. Used
+/// for `${expr}` holes so their spans stay in the enclosing file.
+pub fn lex_fragment(file: FileId, src: &str, base: u32) -> KResult<Vec<Token>> {
+    Lexer::new_at(file, src, base).lex_all()
+}
+
 struct Lexer<'s> {
     file: FileId,
     src: &'s str,
     bytes: &'s [u8],
     pos: usize,
+    base: u32,
 }
 
 impl<'s> Lexer<'s> {
     fn new(file: FileId, src: &'s str) -> Lexer<'s> {
+        Lexer::new_at(file, src, 0)
+    }
+
+    fn new_at(file: FileId, src: &'s str, base: u32) -> Lexer<'s> {
         Lexer {
             file,
             src,
             bytes: src.as_bytes(),
             pos: 0,
+            base,
         }
     }
 
     fn span(&self, lo: usize, hi: usize) -> Span {
-        Span::in_file(self.file, lo, hi)
+        let base = self.base as usize;
+        Span::in_file(self.file, base + lo, base + hi)
     }
 
     fn err(&self, msg: impl Into<String>, lo: usize, hi: usize) -> Diag {
@@ -233,9 +258,8 @@ impl<'s> Lexer<'s> {
     }
 
     fn ident(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
-        const REST: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
         let mut end = self.pos;
-        while end < self.bytes.len() && REST.contains(&self.bytes[end]) {
+        while end < self.bytes.len() && IDENT_REST.contains(&self.bytes[end]) {
             end += 1;
         }
         self.pos = end;
@@ -268,6 +292,58 @@ impl<'s> Lexer<'s> {
             }
         };
         self.push(tok, lo, tokens);
+        Ok(())
+    }
+
+    fn builtin(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        self.pos += 1;
+        let start = self.pos;
+        let mut end = start;
+        while end < self.bytes.len() && IDENT_REST.contains(&self.bytes[end]) {
+            end += 1;
+        }
+        if end == start || !self.bytes[start].is_ascii_lowercase() {
+            return Err(self.err(
+                "`#` must be followed by a lowercase builtin name",
+                lo,
+                end.max(start + 1),
+            ));
+        }
+        self.pos = end;
+        let name = self.src[start..end].to_string();
+        self.push(Tok::Builtin(name), lo, tokens);
+        Ok(())
+    }
+
+    fn dollar(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        use crate::shell::{Stop, command_end};
+
+        if self.peek2() == b'{' {
+            return Err(self.err(
+                "`${...}` is an interpolation inside a shell word; start a command with `$`",
+                lo,
+                lo + 2,
+            ));
+        }
+        if self.peek2() == b'(' {
+            let start = self.pos + 2;
+            let end = command_end(self.file, self.src, start, Stop::RParen)?;
+            let src = self.src[start..end - 1].to_string();
+            if src.trim().is_empty() {
+                return Err(Diag::new("expected a command inside `$(`", self.span(lo, end)));
+            }
+            self.pos = end;
+            self.push(Tok::Shell { src, capture: true }, lo, tokens);
+            return Ok(());
+        }
+        let start = self.pos + 1;
+        let end = command_end(self.file, self.src, start, Stop::TopLevel)?;
+        let src = self.src[start..end].to_string();
+        if src.trim().is_empty() {
+            return Err(Diag::new("expected a command after `$`", self.span(lo, end)));
+        }
+        self.pos = end;
+        self.push(Tok::Shell { src, capture: false }, lo, tokens);
         Ok(())
     }
 
@@ -400,6 +476,12 @@ impl<'s> Lexer<'s> {
                         tok: Tok::PipePipe,
                         span: self.span(lo, start + 2),
                     });
+                } else if two(self) == b'>' {
+                    self.bump();
+                    tokens.push(Token {
+                        tok: Tok::PipeGt,
+                        span: self.span(lo, start + 2),
+                    });
                 } else {
                     tokens.push(Token {
                         tok: Tok::Pipe,
@@ -524,6 +606,12 @@ impl<'s> Lexer<'s> {
         }
         if b == b'"' {
             return self.string(lo, tokens);
+        }
+        if b == b'#' {
+            return self.builtin(lo, tokens);
+        }
+        if b == b'$' {
+            return self.dollar(lo, tokens);
         }
         self.punct(lo, tokens)
     }

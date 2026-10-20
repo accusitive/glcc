@@ -86,6 +86,8 @@ impl<'d> Types<'d> {
             "String" => return Ok(mir::Ty::ptr(mir::Ty::int(8))),
             // Opaque process argument list; only the prelude builds one.
             "Argv" => return Ok(mir::Ty::ptr(mir::Ty::Void)),
+            // Opaque pipeline stage list, built by the prelude.
+            "Pipe" => return Ok(mir::Ty::ptr(mir::Ty::Void)),
             _ => {}
         }
         if self.defs.data_by_name(name).is_none() {

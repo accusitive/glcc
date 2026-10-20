@@ -306,6 +306,38 @@ pub enum ExprKind {
     Block(Box<Expr>),
     BinOp(BinOp, Box<Expr>, Box<Expr>),
     UnOp(UnOp, Box<Expr>),
+    /// `$ command` (status) or `$(command)` (capture).
+    Shell {
+        command: Box<ShellCommand>,
+        capture: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellCommand {
+    pub stages: Vec<ShellStage>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellStage {
+    pub words: Vec<ShellWord>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellWord {
+    pub parts: Vec<ShellWordPart>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ShellWordPart {
+    Lit(String),
+    /// `${expr}`: parsed with the surrounding file's spans.
+    Interp(Expr),
+    /// `$(command)`: the captured stdout.
+    Capture(Box<ShellCommand>),
 }
 
 #[derive(Debug, Clone)]

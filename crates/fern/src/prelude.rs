@@ -42,6 +42,7 @@ fun not(x) = if x then false else true
 
 extern \"fern_print\" print_raw : String -> Int
 extern \"fern_str_concat\" concat : String -> String -> String
+extern \"fern_str_identity\" shell_arg : String -> String
 extern \"fern_str_of_int\" str_of_int : Int -> String
 extern \"fern_str_eq\" str_eq : String -> String -> Bool
 extern \"fern_str_len\" str_len : String -> Int
@@ -55,6 +56,10 @@ extern \"fern_argv_nil\" argv_nil : Int -> Argv
 extern \"fern_argv_cons\" argv_cons : String -> Argv -> Argv
 extern \"fern_spawn_status\" spawn_status_raw : String -> Argv -> Int
 extern \"fern_spawn_capture\" spawn_capture_raw : String -> Argv -> String
+extern \"fern_pipe_nil\" pipe_nil : Int -> Pipe
+extern \"fern_pipe_cons\" pipe_cons : Argv -> Pipe -> Pipe
+extern \"fern_pipeline_status\" pipeline_status_raw : Pipe -> Int
+extern \"fern_pipeline_capture\" pipeline_capture_raw : Pipe -> String
 
 fun print(s) = { let _ = print_raw(s); () }
 fun println(s) = { let _ = print_raw(concat(s, \"\\n\")); () }
@@ -93,7 +98,24 @@ fun spawn_status(name, args) = spawn_status_raw(name, argv(args))
 fun spawn_capture(name, args) = spawn_capture_raw(name, argv(args))
 fun spawn(name, args) = spawn_status(name, args) == 0
 
+fun shell_pipe_of(xs) = match xs {
+    case Nil => pipe_nil(0)
+    case Cons(stage, rest) => pipe_cons(stage, shell_pipe_of(rest))
+}
+fun shell_pipeline(pipe) = pipeline_status_raw(pipe) == 0
+fun shell_pipeline_capture(pipe) = pipeline_capture_raw(pipe)
+
 instance Eq String {
     eq(x, y) = str_eq(x, y)
 }
 ";
+
+/// `#name` names a builtin. `#env` and `#set` are the shell-facing
+/// spellings of `getenv` and `set_env`; every other name passes through.
+pub fn builtin_name(name: &str) -> String {
+    match name {
+        "env" => "getenv".to_string(),
+        "set" => "set_env".to_string(),
+        _ => name.to_string(),
+    }
+}

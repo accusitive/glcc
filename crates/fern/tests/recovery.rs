@@ -94,3 +94,33 @@ fn recovery_reports_multiple_items() {
     assert!(names.contains(&"good_one"), "{names:?}");
     assert!(names.contains(&"good_two"), "{names:?}");
 }
+
+#[test]
+fn unterminated_shell_quote_is_incomplete() {
+    let out = parse_src("fun main() = $ echo \"oops\n");
+    assert!(out.incomplete, "{:?}", out.diags);
+}
+
+#[test]
+fn unterminated_shell_capture_is_incomplete() {
+    let out = parse_src("fun main() = $(echo hi\n");
+    assert!(out.incomplete, "{:?}", out.diags);
+}
+
+#[test]
+fn unterminated_interpolation_is_incomplete() {
+    let out = parse_src("fun main() = $ echo ${name\n");
+    assert!(out.incomplete, "{:?}", out.diags);
+}
+
+#[test]
+fn trailing_pipe_is_incomplete() {
+    let out = parse_src("fun main() = $ echo hi |\n");
+    assert!(out.incomplete, "{:?}", out.diags);
+}
+
+#[test]
+fn trailing_operator_is_incomplete() {
+    let out = parse_src("fun main() = $ true &&\n");
+    assert!(out.incomplete, "{:?}", out.diags);
+}

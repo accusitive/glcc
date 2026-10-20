@@ -6,8 +6,9 @@
 //! the shell front-end.
 //!
 //! This is a proof of concept: results print for `Int`, `Float`, `Bool`,
-//! and `Unit`; other values report their type. There is no string, IO, or
-//! extern support yet.
+//! `String`, and `Unit`; other values report their type. Definitions
+//! persist in one session, and failed input rolls back to the last good
+//! program.
 
 use std::collections::HashMap;
 
@@ -354,8 +355,18 @@ pub fn is_definition(chunk: &str) -> bool {
 }
 
 pub fn input_incomplete(chunk: &str) -> bool {
-    match fern::lexer::lex(chunk) {
-        Ok(tokens) => fern::parser::parse_recovering(tokens).incomplete,
+    let tokens = match fern::lexer::lex(chunk) {
+        Ok(tokens) => tokens,
+        Err(diag) => return diag.incomplete,
+    };
+    if tokens.len() == 1 {
+        return false;
+    }
+    if is_definition(chunk) {
+        return fern::parser::parse_recovering(tokens).incomplete;
+    }
+    match fern::parser::parse_expr_fragment(tokens) {
+        Ok(_) => false,
         Err(diag) => diag.incomplete,
     }
 }

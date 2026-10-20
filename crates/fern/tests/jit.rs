@@ -479,6 +479,22 @@ fn live_values_survive_collections() {
 }
 
 #[test]
+fn value_pipe_applies_functions() {
+    let src = "fun inc(x) = x + 1\nfun main() = ((5 |> inc |> inc) * 10) + (1 |> inc)";
+    assert_eq!(run_i64(src), 72);
+    let src = "fun inc(x) = x + 1\nfun main() = 1 |> inc == 2";
+    assert!(build(src).bool("main", &[]));
+    let src = "fun inc(x) = x + 1\nfun main() = 10 - 2 |> inc";
+    assert_eq!(run_i64(src), 9);
+}
+
+#[test]
+fn hash_builtins_resolve_to_prelude_functions() {
+    assert!(build("fun main() = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
+    assert_eq!(build("fun main() = #str_of_int(7)").string("main"), "7");
+}
+
+#[test]
 fn strings_concatenate_and_compare() {
     assert_eq!(build("fun main() = \"hello\"").string("main"), "hello");
     assert_eq!(
@@ -541,3 +557,78 @@ fn spawn_status_and_capture() {
         1
     );
 }
+
+#[test]
+fn shell_commands_and_captures() {
+    assert_eq!(run_i64("fun main() = if $ true then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() = if $ false then 1 else 0"), 0);
+    assert_eq!(build("fun main() = $(echo hi)").string("main"), "hi\n");
+    assert_eq!(
+        build("fun main() = $(printf \"[%s]\" ${\"a b\"})").string("main"),
+        "[a b]"
+    );
+    assert_eq!(
+        build("fun main() = $(printf \"%s\" ${concat(\"x\", \"y\")})").string("main"),
+        "xy"
+    );
+    assert_eq!(
+        build("fun main() = $(echo $(echo nested))").string("main"),
+        "nested\n\n"
+    );
+    assert_eq!(
+        build("fun main() = $(printf \"%s\" 'a b')").string("main"),
+        "a b"
+    );
+    assert_eq!(
+        build("fun main() = $(echo \"a|b\")").string("main"),
+        "a|b\n"
+    );
+}
+
+#[test]
+fn shell_pipelines() {
+    assert_eq!(run_i64("fun main() = if $ true | false then 1 else 0"), 0);
+    assert_eq!(run_i64("fun main() = if $ false | true then 1 else 0"), 1);
+    assert_eq!(
+        build("fun main() = $(echo hi | tr a-z A-Z)").string("main"),
+        "HI\n"
+    );
+    assert!(build(
+        "fun main() = str_contains(\"3\", $(printf \"a\\nb\\nc\\n\" | wc -l))"
+    )
+    .bool("main", &[]));
+}
+
+#[test]
+fn shell_builtins_and_bool_composition() {
+    assert!(build("fun main() = ($ #env HOME) == getenv(\"HOME\")").bool("main", &[]));
+    assert!(build("fun main() = #env(\"HOME\") == getenv(\"HOME\")").bool("main", &[]));
+    assert!(build("fun main() = $ true && $ true").bool("main", &[]));
+    assert!(!build("fun main() = $ true && $ false").bool("main", &[]));
+    assert!(build("fun main() = $ false || $ true").bool("main", &[]));
+    assert_eq!(
+        build("fun main() = $(printf hi) |> str_len").i64("main", &[]),
+        2
+    );
+    assert_eq!(run_i64("fun main() = if $ true && $ true then 1 else 0"), 1);
+    assert_eq!(run_i64("fun main() = if $ false then 0 else 1"), 1);
+    assert_eq!(
+        run_i64("fun main() = if $ true | false |> not then 1 else 0"),
+        1
+    );
+    assert_eq!(
+        run_i64("fun main() = { let ok = $ true; if ok then 1 else 0 }"),
+        1
+    );
+}
+
+#[test]
+fn shell_rejects_bare_env_vars_and_builtin_pipelines() {
+    let err = fern::compile("fun main() = $(echo $HOME)").expect_err("rejects");
+    assert!(err.msg.contains("${expr}"), "{:?}", err.msg);
+    let err = fern::compile("fun main() = $ #env HOME | cat").expect_err("rejects");
+    assert!(err.msg.contains("pipeline stage"), "{:?}", err.msg);
+    let err = fern::compile("fun main() = $(echo ${1})").expect_err("rejects");
+    assert!(err.msg.contains("expected `String`"), "{:?}", err.msg);
+}
+

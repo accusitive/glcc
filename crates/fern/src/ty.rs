@@ -97,8 +97,8 @@ impl Ty {
     }
 
     /// Primitive type names with special lowering behavior.
-    pub fn intros() -> [&'static str; 6] {
-        ["Int", "Float", "Bool", "Unit", "String", "Argv"]
+    pub fn intros() -> [&'static str; 7] {
+        ["Int", "Float", "Bool", "Unit", "String", "Argv", "Pipe"]
     }
 
     pub fn int_ty() -> Ty {

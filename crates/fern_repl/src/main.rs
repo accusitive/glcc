@@ -90,6 +90,14 @@ fn print_help() {
 :clear           forget all definitions
 :e <expr>        evaluate as an expression (even if it starts with `let`)
 definitions      fun / let / data / class / instance (latest wins by name)
-anything else    evaluated as an expression"
+anything else    evaluated as an expression
+
+shell commands
+$ cmd args       run a command; yields Bool (exit success)
+$(cmd)           capture stdout as String
+${{expr}}          one argv element inside a command
+cmd1 | cmd2      OS pipeline
+x |> f           apply f to x
+#env / #set / #cd  builtin namespace (also callable as #env(\"NAME\"))"
     );
 }

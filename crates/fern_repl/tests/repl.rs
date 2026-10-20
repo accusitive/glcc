@@ -131,6 +131,65 @@ fn externs_and_shell_primitives() {
 }
 
 #[test]
+fn shell_commands_capture_and_pipe() {
+    let mut repl = Repl::new();
+    assert_eq!(repl.eval_expr("$ true").expect("runs"), "true");
+    assert_eq!(repl.eval_expr("$ false").expect("runs"), "false");
+    assert_eq!(repl.eval_expr("$(echo hi)").expect("runs"), "hi\n");
+    assert_eq!(
+        repl.eval_expr("$(echo hi | tr a-z A-Z)").expect("runs"),
+        "HI\n"
+    );
+    assert_eq!(
+        repl.eval_expr("$(printf \"[%s]\" ${\"a b\"})")
+            .expect("runs"),
+        "[a b]"
+    );
+    assert_eq!(
+        repl.eval_expr("($ #env HOME) == getenv(\"HOME\")")
+            .expect("runs"),
+        "true"
+    );
+    assert_eq!(
+        repl.eval_expr("$ true && $ false").expect("runs"),
+        "false"
+    );
+    assert_eq!(
+        repl.eval_expr("$(printf hi) |> str_len").expect("runs"),
+        "2"
+    );
+}
+
+#[test]
+fn shell_commands_work_in_definitions() {
+    let mut repl = Repl::new();
+    let sig = repl
+        .define("let shell_ok = $ true")
+        .expect("defines a command value");
+    assert_eq!(sig, vec!["shell_ok : Bool"]);
+    assert_eq!(repl.eval_expr("shell_ok").expect("runs"), "true");
+    repl.define("fun upper(s) = $(printf \"%s\" ${s} | tr a-z A-Z)")
+        .expect("defines a capture");
+    assert_eq!(repl.eval_expr("upper(\"abc\")").expect("runs"), "ABC");
+}
+
+#[test]
+fn incomplete_shell_input_is_recognized() {
+    assert!(input_incomplete("$ echo hi |"));
+    assert!(input_incomplete("$ echo \"oops"));
+    assert!(input_incomplete("$(echo hi"));
+    assert!(input_incomplete("$ echo ${x"));
+    assert!(input_incomplete("$ echo hi &&"));
+    assert!(input_incomplete("1 +"));
+    assert!(!input_incomplete("$ echo hi"));
+    assert!(!input_incomplete("$(echo hi)"));
+    assert!(!input_incomplete("$ true && $ false"));
+    assert!(!input_incomplete(""));
+    assert!(!input_incomplete("   \n"));
+    assert!(!input_incomplete("-- just a comment"));
+}
+
+#[test]
 fn classifies_input_for_the_driver() {
     assert!(is_definition("fun f(x) = x"));
     assert!(is_definition("let a = 1"));

@@ -299,6 +299,12 @@ char *fern_str_concat(const char *a, const char *b) {
 	return out;
 }
 
+/* A typed hole in a shell word: `shell_arg` constrains `${expr}` to a
+ * string without copying it. */
+char *fern_str_identity(char *s) {
+	return s;
+}
+
 char fern_str_eq(const char *a, const char *b) {
 	u64 i = 0;
 	while (a[i] != 0 && b[i] != 0) {
@@ -397,6 +403,9 @@ int pipe(int *fds);
 int dup2(int oldfd, int newfd);
 int close(int fd);
 long read(int fd, void *buf, unsigned long count);
+int kill(int pid, int sig);
+void *malloc(unsigned long size);
+void free(void *p);
 
 /* A linked argv list built by the prelude from `List String`. */
 typedef struct fargv {
@@ -441,6 +450,11 @@ static char **fern_argv_array(char *name, fargv *args) {
 }
 
 /* Wait status as a shell would report it: exit code, or 128 + signal. */
+static long fern_status_of(int status) {
+	if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
+	return 128 + (status & 0x7f);
+}
+
 long fern_spawn_status(char *name, fargv *args) {
 	char **argv = fern_argv_array(name, args);
 	int pid = fork();
@@ -451,8 +465,7 @@ long fern_spawn_status(char *name, fargv *args) {
 	if (pid < 0) return -1;
 	int status = 0;
 	if (waitpid(pid, &status, 0) < 0) return -1;
-	if ((status & 0x7f) == 0) return (status >> 8) & 0xff;
-	return 128 + (status & 0x7f);
+	return fern_status_of(status);
 }
 
 /* Captured stdout, truncated at 64 KiB. */
@@ -487,5 +500,221 @@ char *fern_spawn_capture(char *name, fargv *args) {
 	out[len] = 0;
 	int status = 0;
 	waitpid(pid, &status, 0);
+	return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* pipelines                                                           */
+
+typedef struct fpipe {
+	fargv *argv;
+	struct fpipe *next;
+} fpipe;
+
+fpipe *fern_pipe_nil(long unused) {
+	(void)unused;
+	return 0;
+}
+
+fpipe *fern_pipe_cons(fargv *argv, fpipe *next) {
+	fpipe *node = (fpipe *)fern_alloc(sizeof(fpipe));
+	node->argv = argv;
+	node->next = next;
+	return node;
+}
+
+static char **fern_argv_vec(fargv *args) {
+	u64 n = fern_argv_count(args);
+	char **out = (char **)malloc((n + 1) * sizeof(char *));
+	u64 i = 0;
+	if (out == 0) return 0;
+	while (args != 0) {
+		out[i] = args->s;
+		i++;
+		args = args->next;
+	}
+	out[n] = 0;
+	return out;
+}
+
+static void fern_argv_vecs_free(char ***argvs, u64 n) {
+	u64 i;
+	if (argvs == 0) return;
+	for (i = 0; i < n; i++) free(argvs[i]);
+	free(argvs);
+}
+
+static long fern_pipeline_wait(int *pids, u64 n) {
+	long last = -1;
+	u64 i;
+	for (i = 0; i < n; i++) {
+		int status = 0;
+		if (waitpid(pids[i], &status, 0) >= 0) last = fern_status_of(status);
+	}
+	return last;
+}
+
+static void fern_pipeline_close(int *fds, u64 nfds, int *out_fds) {
+	u64 i;
+	for (i = 0; i < nfds; i++) {
+		if (fds[i] >= 0) close(fds[i]);
+	}
+	if (out_fds[0] >= 0) close(out_fds[0]);
+	if (out_fds[1] >= 0) close(out_fds[1]);
+}
+
+/* Run the stages with real OS pipes. When `out` is non-NULL the last
+ * stage's stdout is captured (truncated at `cap` bytes). */
+static long fern_pipeline_run(fpipe *stages, char *out, u64 cap) {
+	u64 n = 0;
+	u64 connectors;
+	u64 nfds;
+	u64 i;
+	u64 k;
+	fpipe *p;
+	int *fds = 0;
+	int *pids;
+	char ***argvs;
+	int out_fds[2];
+	u64 started = 0;
+
+	p = stages;
+	while (p != 0) {
+		n++;
+		p = p->next;
+	}
+	if (n == 0) {
+		if (out != 0 && cap > 0) out[0] = 0;
+		return -1;
+	}
+	connectors = n - 1;
+	nfds = connectors * 2;
+	if (nfds > 0) {
+		fds = (int *)malloc(nfds * sizeof(int));
+		if (fds == 0) return -1;
+		for (i = 0; i < nfds; i++) fds[i] = -1;
+	}
+	pids = (int *)malloc(n * sizeof(int));
+	if (pids == 0) {
+		free(fds);
+		return -1;
+	}
+	argvs = (char ***)malloc(n * sizeof(char **));
+	if (argvs == 0) {
+		free(pids);
+		free(fds);
+		return -1;
+	}
+	p = stages;
+	for (i = 0; i < n; i++) {
+		argvs[i] = p == 0 ? 0 : fern_argv_vec(p->argv);
+		if (argvs[i] == 0 || argvs[i][0] == 0) {
+			fern_argv_vecs_free(argvs, i + 1);
+			free(pids);
+			free(fds);
+			return -1;
+		}
+		p = p->next;
+	}
+	out_fds[0] = -1;
+	out_fds[1] = -1;
+	if (out != 0 && pipe(out_fds) != 0) {
+		fern_argv_vecs_free(argvs, n);
+		free(pids);
+		free(fds);
+		return -1;
+	}
+
+	for (i = 0; i < n; i++) {
+		int pid;
+		if (i + 1 < n) {
+			int pair[2];
+			if (pipe(pair) != 0) {
+				fern_pipeline_close(fds, nfds, out_fds);
+				for (k = 0; k < started; k++) kill(pids[k], 15);
+				fern_pipeline_wait(pids, started);
+				fern_argv_vecs_free(argvs, n);
+				free(pids);
+				free(fds);
+				if (out != 0 && cap > 0) out[0] = 0;
+				return -1;
+			}
+			fds[2 * i] = pair[0];
+			fds[2 * i + 1] = pair[1];
+		}
+		pid = fork();
+		if (pid == 0) {
+			char **argv;
+			if (i > 0) dup2(fds[2 * (i - 1)], 0);
+			if (i + 1 < n) {
+				dup2(fds[2 * i + 1], 1);
+			} else if (out_fds[1] >= 0) {
+				dup2(out_fds[1], 1);
+			}
+			fern_pipeline_close(fds, nfds, out_fds);
+			argv = argvs[i];
+			if (argv == 0 || argv[0] == 0) _exit(127);
+			execvp(argv[0], argv);
+			_exit(127);
+		}
+		if (pid < 0) {
+			fern_pipeline_close(fds, nfds, out_fds);
+			for (k = 0; k < started; k++) kill(pids[k], 15);
+			fern_pipeline_wait(pids, started);
+			fern_argv_vecs_free(argvs, n);
+			free(pids);
+			free(fds);
+			if (out != 0 && cap > 0) out[0] = 0;
+			return -1;
+		}
+		pids[i] = pid;
+		started = i + 1;
+		if (i > 0) close(fds[2 * (i - 1)]);
+		if (i + 1 < n) close(fds[2 * i + 1]);
+	}
+
+	if (out != 0) {
+		u64 len = 0;
+		if (out_fds[1] >= 0) {
+			close(out_fds[1]);
+			out_fds[1] = -1;
+		}
+		for (;;) {
+			long got = read(out_fds[0], out + len, cap - 1 - len);
+			if (got <= 0) break;
+			len += (u64)got;
+			if (len >= cap - 1) break;
+		}
+		close(out_fds[0]);
+		out_fds[0] = -1;
+		out[len] = 0;
+	}
+
+	long status = fern_pipeline_wait(pids, n);
+	fern_argv_vecs_free(argvs, n);
+	free(pids);
+	free(fds);
+	return status;
+}
+
+long fern_pipeline_status(fpipe *stages) {
+	return fern_pipeline_run(stages, 0, 0);
+}
+
+char *fern_pipeline_capture(fpipe *stages) {
+	u64 cap = 65536;
+	u64 i = 0;
+	char *buf = (char *)malloc(cap);
+	char *out;
+	if (buf == 0) return "";
+	buf[0] = 0;
+	fern_pipeline_run(stages, buf, cap);
+	out = (char *)fern_alloc(fern_strlen(buf) + 1);
+	while (buf[i] != 0) {
+		out[i] = buf[i];
+		i++;
+	}
+	out[i] = 0;
+	free(buf);
 	return out;
 }

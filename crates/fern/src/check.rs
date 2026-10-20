@@ -408,12 +408,130 @@ impl<'d> Check<'d> {
             ast::ExprKind::Block(inner) => self.synth(inner),
             ast::ExprKind::BinOp(op, lhs, rhs) => self.synthesize_binop(*op, lhs, rhs, span),
             ast::ExprKind::UnOp(op, operand) => self.synthesize_unop(*op, operand, span),
+            ast::ExprKind::Shell { command, capture } => {
+                let desugared = self.desugar_shell(command, *capture)?;
+                self.synth(&desugared)
+            }
         }
+    }
+
+    /// Shell commands are ordinary expressions once their words become
+    /// `String` values: a command is `spawn`, a capture is
+    /// `spawn_capture`, and a pipeline folds its stages into a `Pipe`.
+    fn desugar_shell(&self, command: &ast::ShellCommand, capture: bool) -> KResult<ast::Expr> {
+        if command.stages.len() == 1 {
+            let stage = &command.stages[0];
+            if let Some((name, args)) = self.shell_builtin(stage)? {
+                return Ok(shell_call(name, args, command.span));
+            }
+            let program = self.shell_word(&stage.words[0])?;
+            let args = stage.words[1..]
+                .iter()
+                .map(|word| self.shell_word(word))
+                .collect::<KResult<Vec<_>>>()?;
+            let list = ast::Expr {
+                kind: ast::ExprKind::List(args),
+                span: stage.span,
+            };
+            let function = if capture { "spawn_capture" } else { "spawn" };
+            return Ok(shell_call(function, vec![program, list], command.span));
+        }
+
+        let stages = command
+            .stages
+            .iter()
+            .map(|stage| {
+                if self.shell_builtin(stage)?.is_some() {
+                    return Err(Diag::new(
+                        "a `#` builtin cannot be a pipeline stage",
+                        stage.span,
+                    ));
+                }
+                let words = stage
+                    .words
+                    .iter()
+                    .map(|word| self.shell_word(word))
+                    .collect::<KResult<Vec<_>>>()?;
+                let list = ast::Expr {
+                    kind: ast::ExprKind::List(words),
+                    span: stage.span,
+                };
+                Ok(shell_call("argv", vec![list], stage.span))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        let list = ast::Expr {
+            kind: ast::ExprKind::List(stages),
+            span: command.span,
+        };
+        let pipe = shell_call("shell_pipe_of", vec![list], command.span);
+        let function = if capture {
+            "shell_pipeline_capture"
+        } else {
+            "shell_pipeline"
+        };
+        Ok(shell_call(function, vec![pipe], command.span))
+    }
+
+    /// A `#name` word at the start of a stage is a builtin call rather
+    /// than an executable. `#env` and `#set` mirror the parser's names.
+    fn shell_builtin(&self, stage: &ast::ShellStage) -> KResult<Option<(String, Vec<ast::Expr>)>> {
+        let Some(first) = stage.words.first() else {
+            return Ok(None);
+        };
+        let [ast::ShellWordPart::Lit(word)] = first.parts.as_slice() else {
+            return Ok(None);
+        };
+        let Some(name) = word.strip_prefix('#') else {
+            return Ok(None);
+        };
+        let mut chars = name.chars();
+        let Some(head) = chars.next() else {
+            return Ok(None);
+        };
+        if !(head.is_ascii_lowercase() || head == '_')
+            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
+            return Ok(None);
+        }
+        let name = crate::prelude::builtin_name(name);
+        let args = stage.words[1..]
+            .iter()
+            .map(|word| self.shell_word(word))
+            .collect::<KResult<Vec<_>>>()?;
+        Ok(Some((name, args)))
+    }
+
+    fn shell_word(&self, word: &ast::ShellWord) -> KResult<ast::Expr> {
+        let mut joined: Option<ast::Expr> = None;
+        for part in &word.parts {
+            let piece = match part {
+                ast::ShellWordPart::Lit(text) => ast::Expr {
+                    kind: ast::ExprKind::Str(text.clone()),
+                    span: word.span,
+                },
+                ast::ShellWordPart::Interp(expr) => {
+                    shell_call("shell_arg", vec![expr.clone()], word.span)
+                }
+                ast::ShellWordPart::Capture(command) => shell_call(
+                    "shell_arg",
+                    vec![self.desugar_shell(command, true)?],
+                    word.span,
+                ),
+            };
+            joined = Some(match joined {
+                None => piece,
+                Some(left) => shell_call("concat", vec![left, piece], word.span),
+            });
+        }
+        Ok(joined.unwrap_or_else(|| ast::Expr {
+            kind: ast::ExprKind::Str(String::new()),
+            span: word.span,
+        }))
     }
 
     fn check_expr(&mut self, e: &ast::Expr, expected: &Ty) -> KResult<HirExpr> {
         let hir = self.synth(e)?;
-        self.infer.unify(&hir.ty, expected, e.span)?;
+        self.infer.unify(expected, &hir.ty, e.span)?;
         Ok(hir)
     }
 
@@ -1202,6 +1320,19 @@ fn finalize_ty(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, ty: &mu
     let resolved = infer.resolve(ty);
     *ty = infer.rigidify(&resolved, ids);
     check_unknown_params(ty, allowed, span)
+}
+
+fn shell_call(name: impl Into<String>, args: Vec<ast::Expr>, span: Span) -> ast::Expr {
+    ast::Expr {
+        kind: ast::ExprKind::Call(
+            Box::new(ast::Expr {
+                kind: ast::ExprKind::Var(name.into()),
+                span,
+            }),
+            args,
+        ),
+        span,
+    }
 }
 
 fn check_unknown_params(ty: &Ty, allowed: &HashSet<String>, span: Span) -> KResult<()> {
