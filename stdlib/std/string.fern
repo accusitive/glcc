@@ -1,0 +1,99 @@
+fun is_empty(s : String) : Bool = str_len(s) == 0
+
+fun is_space(c : String) : Bool =
+    c == " " || c == "\t" || c == "\r" || c == "\n"
+
+fun starts_with(prefix : String, s : String) : Bool =
+    if str_len(prefix) > str_len(s) then false
+    else str_slice(s, 0, str_len(prefix)) == prefix
+
+fun ends_with(suffix : String, s : String) : Bool = {
+    let n = str_len(suffix);
+    let m = str_len(s);
+    if n > m then false else str_slice(s, m - n, n) == suffix
+}
+
+fun contains(needle : String, s : String) : Bool = str_contains(needle, s)
+
+fun trim_left(s : String) : String =
+    if str_len(s) == 0 then s
+    else if is_space(str_slice(s, 0, 1)) then trim_left(str_slice(s, 1, str_len(s) - 1))
+    else s
+
+fun trim_right(s : String) : String =
+    if str_len(s) == 0 then s
+    else if is_space(str_slice(s, str_len(s) - 1, 1)) then trim_right(str_slice(s, 0, str_len(s) - 1))
+    else s
+
+fun trim(s : String) : String = trim_right(trim_left(s))
+
+fun slice(s : String, start : Int, len : Int) : String = str_slice(s, start, len)
+
+fun take(s : String, n : Int) : String =
+    if n <= 0 then "" else str_slice(s, 0, if n > str_len(s) then str_len(s) else n)
+
+fun drop(s : String, n : Int) : String =
+    if n <= 0 then s
+    else if n >= str_len(s) then ""
+    else str_slice(s, n, str_len(s) - n)
+
+fun char_at(s : String, i : Int) : Maybe String =
+    if i < 0 || i >= str_len(s) then Nothing
+    else Just(str_slice(s, i, 1))
+
+fun index_of(needle : String, s : String) : Maybe Int = {
+    let at = str_find(needle, s);
+    if at < 0 then Nothing else Just(at)
+}
+
+fun split(sep : String, s : String) : List String = str_split(sep, s)
+
+fun lines(s : String) : List String = drop_trailing_empty(str_split("\n", s))
+
+fun drop_trailing_empty(xs : List String) : List String = match xs {
+    case Nil => Nil
+    case Cons(x, Nil) => if str_len(x) == 0 then Nil else Cons(x, Nil)
+    case Cons(x, rest) => Cons(x, drop_trailing_empty(rest))
+}
+
+fun join(sep : String, xs : List String) : String = str_join(sep, xs)
+
+fun replace(needle : String, replacement : String, s : String) : String =
+    if str_len(needle) == 0 then s
+    else {
+        let at = str_find(needle, s);
+        if at < 0 then s
+        else {
+            let n = str_len(needle);
+            let rest = str_slice(s, at + n, str_len(s) - at - n);
+            concat(str_slice(s, 0, at), concat(replacement, replace(needle, replacement, rest)))
+        }
+    }
+
+fun repeat(s : String, n : Int) : String =
+    if n <= 0 then "" else concat(s, repeat(s, n - 1))
+
+fun reverse(s : String) : String =
+    if str_len(s) == 0 then ""
+    else concat(reverse(str_slice(s, 1, str_len(s) - 1)), str_slice(s, 0, 1))
+
+fun words(s : String) : List String = words_at(s, 0, str_len(s), "", Nil)
+
+fun words_at(s : String, i : Int, n : Int, current : String, out : List String) : List String =
+    if i >= n then reverse_words(if str_len(current) == 0 then out else Cons(current, out))
+    else {
+        let c = str_slice(s, i, 1);
+        if is_space(c) then
+            words_at(s, i + 1, n, "", if str_len(current) == 0 then out else Cons(current, out))
+        else words_at(s, i + 1, n, concat(current, c), out)
+    }
+
+fun reverse_words(xs : List String) : List String = match xs {
+    case Nil => Nil
+    case Cons(x, rest) => append_words(reverse_words(rest), Cons(x, Nil))
+}
+
+fun append_words(xs : List String, ys : List String) : List String = match xs {
+    case Nil => ys
+    case Cons(x, rest) => Cons(x, append_words(rest, ys))
+}

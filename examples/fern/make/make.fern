@@ -9,71 +9,26 @@
 -- Build with `make`, or run `./bootstrap.sh` when GNU make is absent.
 -- Then try `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
 
+import std::list
+import std::path
+import std::string
+use std::list::contains
+use std::list::filter
+use std::list::head
+use std::list::is_empty
+use std::list::reverse
+use std::path::dirname
+use std::string::ends_with
+use std::string::replace
+use std::string::starts_with
+use std::string::take
+use std::string::trim
+use std::string::trim_left
+use std::string::trim_right
+use std::string::words
+
 data Rule = Rule(List String, List String, List String)
 data Parsed = Parsed(List (String, String), List Rule, List String)
-
--- ------------------------------------------------------------- strings --
-
-fun rev(xs : List a, acc : List a) : List a = match xs {
-    case Nil => acc
-    case Cons(x, rest) => rev(rest, Cons(x, acc))
-}
-
-fun reverse(xs : List a) : List a = rev(xs, Nil)
-
-fun member(x : String, xs : List String) : Bool = match xs {
-    case Nil => false
-    case Cons(y, rest) => if x == y then true else member(x, rest)
-}
-
-fun first(xs : List String) : Maybe String = match xs {
-    case Nil => Nothing
-    case Cons(x, _) => Just(x)
-}
-
-fun is_empty(xs : List a) : Bool = match xs {
-    case Nil => true
-    case Cons(_, _) => false
-}
-
-fun is_space(c : String) : Bool =
-    c == " " || c == "\t" || c == "\r" || c == "\n"
-
-fun starts_with(prefix : String, s : String) : Bool =
-    if str_len(prefix) > str_len(s) then false
-    else str_slice(s, 0, str_len(prefix)) == prefix
-
-fun ends_with(suffix : String, s : String) : Bool = {
-    let n = str_len(suffix);
-    let m = str_len(s);
-    if n > m then false else str_slice(s, m - n, n) == suffix
-}
-
-fun drop_last(s : String) : String = str_slice(s, 0, str_len(s) - 1)
-
-fun trim_left(s : String) : String =
-    if str_len(s) == 0 then s
-    else if is_space(str_slice(s, 0, 1)) then trim_left(str_slice(s, 1, str_len(s) - 1))
-    else s
-
-fun trim_right(s : String) : String =
-    if str_len(s) == 0 then s
-    else if is_space(str_slice(s, str_len(s) - 1, 1)) then trim_right(str_slice(s, 0, str_len(s) - 1))
-    else s
-
-fun trim(s : String) : String = trim_right(trim_left(s))
-
-fun words_at(s : String, i : Int, n : Int, current : String, out : List String) : List String =
-    if i >= n then
-        reverse(if str_len(current) == 0 then out else Cons(current, out))
-    else {
-        let c = str_slice(s, i, 1);
-        if is_space(c) then
-            words_at(s, i + 1, n, "", if str_len(current) == 0 then out else Cons(current, out))
-        else words_at(s, i + 1, n, concat(current, c), out)
-    }
-
-fun words(s : String) : List String = words_at(s, 0, str_len(s), "", Nil)
 
 -- Join backslash-newline continuations before classifying lines. The
 -- continuation's leading whitespace (including a recipe tab) is dropped.
@@ -83,37 +38,27 @@ fun logical_lines(lines : List String, acc : List String) : List String = match 
         if ends_with("\\", line) then match rest {
             case Nil => reverse(Cons(line, acc))
             case Cons(next, more) =>
-                logical_lines(Cons(concat(trim_right(drop_last(line)), concat(" ", trim_left(next))), more), acc)
+                logical_lines(Cons(concat(trim_right(take(line, str_len(line) - 1)), concat(" ", trim_left(next))), more), acc)
         }
         else logical_lines(rest, Cons(line, acc))
 }
 
-fun last_slash_at(s : String, i : Int, found : Int) : Int =
-    if i >= str_len(s) then found
-    else if str_slice(s, i, 1) == "/" then last_slash_at(s, i + 1, i)
-    else last_slash_at(s, i + 1, found)
-
 fun dir_name(s : String) : String = {
-    let at = last_slash_at(s, 0, -1);
-    if at < 0 then "./" else str_slice(s, 0, at + 1)
+    let dir = dirname(s);
+    if ends_with("/", dir) then dir else concat(dir, "/")
 }
+
+fun first_word(s : String) : String = match head(words(s)) {
+    case Nothing => ""
+    case Just(word) => word
+}
+
+fun compact(xs : List String) : List String = filter(x -> str_len(x) > 0, xs)
 
 fun strip_comment(s : String) : String = {
     let at = str_find("#", s);
     if at < 0 then s else str_slice(s, 0, at)
 }
-
-fun replace_all(needle : String, replacement : String, s : String) : String =
-    if str_len(needle) == 0 then s
-    else {
-        let at = str_find(needle, s);
-        if at < 0 then s
-        else {
-            let n = str_len(needle);
-            let rest = str_slice(s, at + n, str_len(s) - at - n);
-            concat(str_slice(s, 0, at), concat(replacement, replace_all(needle, replacement, rest)))
-        }
-    }
 
 -- ----------------------------------------------------------- variables --
 
@@ -160,11 +105,6 @@ fun shell_value(command : String) : String = trim(spawn_capture("sh", ["-c", com
 fun wildcard(pattern : String) : String = {
     let script = concat("for f in ", concat(pattern, "; do [ -e \"$f\" ] && printf '%s\\n' \"$f\"; done"));
     str_join(" ", compact(str_split("\n", shell_value(script))))
-}
-
-fun first_word(s : String) : String = match first(words(s)) {
-    case Nothing => ""
-    case Just(word) => word
 }
 
 -- `realpath` and `abspath` are enough for the examples and avoid
@@ -219,11 +159,6 @@ fun expand_names(xs : List String, vars : List (String, String)) : List String =
     case Cons(x, rest) => Cons(expand(x, vars), expand_names(rest, vars))
 }
 
-fun compact(xs : List String) : List String = match xs {
-    case Nil => Nil
-    case Cons(x, rest) => if str_len(x) == 0 then compact(rest) else Cons(x, compact(rest))
-}
-
 -- ------------------------------------------------------------- parsing --
 
 fun is_recipe(line : String) : Bool = starts_with("\t", line)
@@ -241,8 +176,8 @@ fun parse_assignment(line : String) : Maybe (String, String, Bool) = {
         let left = trim(str_slice(line, 0, eq));
         let value = trim(str_slice(line, eq + 1, str_len(line) - eq - 1));
         if str_len(left) == 0 then Nothing
-        else if ends_with(":", left) then Just((trim(drop_last(left)), value, false))
-        else if ends_with("?", left) then Just((trim(drop_last(left)), value, true))
+        else if ends_with(":", left) then Just((trim(take(left, str_len(left) - 1)), value, false))
+        else if ends_with("?", left) then Just((trim(take(left, str_len(left) - 1)), value, true))
         else if is_name(left) then Just((left, value, false))
         else Nothing
     }
@@ -363,12 +298,12 @@ fun rule_targets(rule : Rule) : List String = match rule {
 fun lookup_rule(target : String, rules : List Rule) : Maybe Rule = match rules {
     case Nil => Nothing
     case Cons(rule, rest) =>
-        if member(target, rule_targets(rule)) then Just(rule) else lookup_rule(target, rest)
+        if contains(target, rule_targets(rule)) then Just(rule) else lookup_rule(target, rest)
 }
 
 fun default_target(rules : List Rule) : Maybe String = match rules {
     case Nil => Nothing
-    case Cons(rule, rest) => match first(rule_targets(rule)) {
+    case Cons(rule, rest) => match head(rule_targets(rule)) {
         case Nothing => default_target(rest)
         case Just(target) => Just(target)
     }
@@ -388,20 +323,20 @@ fun any_newer(target : String, prereqs : List String) : Bool = match prereqs {
 fun any_phony(prereqs : List String, phony : List String) : Bool = match prereqs {
     case Nil => false
     case Cons(prereq, rest) =>
-        if member(prereq, phony) then true else any_phony(rest, phony)
+        if contains(prereq, phony) then true else any_phony(rest, phony)
 }
 
 fun needs_build(target : String, prereqs : List String, phony : List String) : Bool =
-    member(target, phony) || not(file_exists(target)) || any_phony(prereqs, phony) || any_newer(target, prereqs)
+    contains(target, phony) || not(file_exists(target)) || any_phony(prereqs, phony) || any_newer(target, prereqs)
 
 fun automatic_variables(s : String, target : String, prereqs : List String) : String = {
-    let first_prereq = match first(prereqs) {
+    let first_prereq = match head(prereqs) {
         case Nothing => ""
         case Just(prereq) => prereq
     };
-    let expanded = replace_all("$@", target, s);
-    let expanded = replace_all("$<", first_prereq, expanded);
-    replace_all("$^", str_join(" ", prereqs), expanded)
+    let expanded = replace("$@", target, s);
+    let expanded = replace("$<", first_prereq, expanded);
+    replace("$^", str_join(" ", prereqs), expanded)
 }
 
 fun recipe_line(raw : String, target : String, prereqs : List String, vars : List (String, String)) : String = {
@@ -444,8 +379,8 @@ fun build_all(prereqs : List String, rules : List Rule, vars : List (String, Str
 }
 
 fun build(target : String, rules : List Rule, vars : List (String, String), phony : List String, done : List String, visiting : List String) : (Bool, List String) =
-    if member(target, done) then (true, done)
-    else if member(target, visiting) then {
+    if contains(target, done) then (true, done)
+    else if contains(target, visiting) then {
         println(concat("fernmake: circular dependency: ", target));
         (false, done)
     } else match lookup_rule(target, rules) {

@@ -14,6 +14,9 @@
 -- the checksum from `answer()`).
 
 import std::foldable
+import std::list
+use std::list::append
+use std::list::reverse
 
 data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
 
@@ -89,9 +92,6 @@ fun exec(ops : List Op, loops : List (List Op), tape : (List Int, Int, List Int)
         }
     }
 }
-
-fun rev(xs : List a, acc : List a) : List a = match xs { case Nil => acc case Cons(x, xs) => rev(xs, Cons(x, acc)) }
-fun reverse(xs : List a) : List a = rev(xs, Nil)
 
 -- One whole run, returning the emitted bytes oldest first. (`out`
 -- accumulates newest first, hence the `reverse`.)
@@ -187,15 +187,13 @@ fun run_file(path : String) : Int = {
     }
 }
 
-fun cats(xs : List a, ys : List a) : List a = match xs { case Nil => ys case Cons(x, xs) => Cons(x, cats(xs, ys)) }
-
 -- A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
 -- no `%`, so `reduce` spells the modulo by subtraction.
 fun reduce(h : Int) : Int = if h >= 1000000007 then reduce(h - 1000000007) else h
 fun checksum(bs : List Int) : Int = fold((h, b) -> reduce(h * 31 + b), 7, bs)
 
 fun answer() : Int = {
-    let spoken = cats(output(hello, Nil), cats(output(forty, Nil),
-        cats(output(cubes, Nil), cats(output(wander, Nil), output(cat, [72, 101])))));
+    let spoken = append(output(hello, Nil), append(output(forty, Nil),
+        append(output(cubes, Nil), append(output(wander, Nil), output(cat, [72, 101])))));
     checksum(spoken)
 }

@@ -1,0 +1,61 @@
+data Result a e = Ok(a) | Err(e)
+
+fun is_ok(r : Result a e) : Bool = match r {
+    case Ok(_) => true
+    case Err(_) => false
+}
+
+fun is_err(r : Result a e) : Bool = match r {
+    case Ok(_) => false
+    case Err(_) => true
+}
+
+fun map(f : a -> b, r : Result a e) : Result b e = match r {
+    case Ok(x) => Ok(f(x))
+    case Err(error) => Err(error)
+}
+
+fun map_err(f : e -> f, r : Result a e) : Result a f = match r {
+    case Ok(x) => Ok(x)
+    case Err(error) => Err(f(error))
+}
+
+fun and_then(f : a -> Result b e, r : Result a e) : Result b e = match r {
+    case Ok(x) => f(x)
+    case Err(error) => Err(error)
+}
+
+fun or_else(f : e -> Result a f, r : Result a e) : Result a f = match r {
+    case Ok(x) => Ok(x)
+    case Err(error) => f(error)
+}
+
+fun unwrap_or(default : a, r : Result a e) : a = match r {
+    case Ok(x) => x
+    case Err(_) => default
+}
+
+fun unwrap_or_else(f : e -> a, r : Result a e) : a = match r {
+    case Ok(x) => x
+    case Err(error) => f(error)
+}
+
+fun flatten(r : Result (Result a e) e) : Result a e = match r {
+    case Ok(inner) => inner
+    case Err(error) => Err(error)
+}
+
+fun to_maybe(r : Result a e) : Maybe a = match r {
+    case Ok(x) => Just(x)
+    case Err(_) => Nothing
+}
+
+fun to_list(r : Result a e) : List a = match r {
+    case Ok(x) => Cons(x, Nil)
+    case Err(_) => Nil
+}
+
+fun from_maybe(error : e, m : Maybe a) : Result a e = match m {
+    case Nothing => Err(error)
+    case Just(x) => Ok(x)
+}

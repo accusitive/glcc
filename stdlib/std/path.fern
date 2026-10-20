@@ -1,0 +1,68 @@
+fun is_absolute(path : String) : Bool = starts_with_path("/", path)
+
+fun starts_with_path(prefix : String, s : String) : Bool =
+    if str_len(prefix) > str_len(s) then false
+    else str_slice(s, 0, str_len(prefix)) == prefix
+
+fun ends_with_path(suffix : String, s : String) : Bool = {
+    let n = str_len(suffix);
+    let m = str_len(s);
+    if n > m then false else str_slice(s, m - n, n) == suffix
+}
+
+fun strip_trailing(path : String) : String =
+    if str_len(path) <= 1 then path
+    else if ends_with_path("/", path) then strip_trailing(str_slice(path, 0, str_len(path) - 1))
+    else path
+
+fun last_slash_at(s : String, i : Int, found : Int) : Int =
+    if i >= str_len(s) then found
+    else if str_slice(s, i, 1) == "/" then last_slash_at(s, i + 1, i)
+    else last_slash_at(s, i + 1, found)
+
+fun dirname(path : String) : String = {
+    let path = strip_trailing(path);
+    if str_len(path) == 0 then "."
+    else {
+        let at = last_slash_at(path, 0, -1);
+        if at < 0 then "."
+        else if at == 0 then "/"
+        else str_slice(path, 0, at)
+    }
+}
+
+fun basename(path : String) : String = {
+    let path = strip_trailing(path);
+    if path == "/" then "/"
+    else {
+        let at = last_slash_at(path, 0, -1);
+        if at < 0 then path else str_slice(path, at + 1, str_len(path) - at - 1)
+    }
+}
+
+fun last_dot_at(s : String, i : Int, found : Int) : Int =
+    if i >= str_len(s) then found
+    else if str_slice(s, i, 1) == "." then last_dot_at(s, i + 1, i)
+    else last_dot_at(s, i + 1, found)
+
+fun extension(path : String) : Maybe String = {
+    let name = basename(path);
+    let at = last_dot_at(name, 0, -1);
+    if at <= 0 || at + 1 >= str_len(name) then Nothing
+    else Just(str_slice(name, at + 1, str_len(name) - at - 1))
+}
+
+fun stem(path : String) : String = {
+    let name = basename(path);
+    let at = last_dot_at(name, 0, -1);
+    if at <= 0 then name else str_slice(name, 0, at)
+}
+
+fun join(first : String, second : String) : String =
+    if str_len(second) == 0 then first
+    else if is_absolute(second) then second
+    else if str_len(first) == 0 then second
+    else if ends_with_path("/", first) then concat(first, second)
+    else concat(first, concat("/", second))
+
+fun components(path : String) : List String = str_split("/", path)

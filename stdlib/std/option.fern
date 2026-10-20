@@ -1,0 +1,61 @@
+import std::result
+
+fun is_some(m : Maybe a) : Bool = match m {
+    case Nothing => false
+    case Just(_) => true
+}
+
+fun is_none(m : Maybe a) : Bool = match m {
+    case Nothing => true
+    case Just(_) => false
+}
+
+fun map(f : a -> b, m : Maybe a) : Maybe b = match m {
+    case Nothing => Nothing
+    case Just(x) => Just(f(x))
+}
+
+fun and_then(f : a -> Maybe b, m : Maybe a) : Maybe b = match m {
+    case Nothing => Nothing
+    case Just(x) => f(x)
+}
+
+fun filter(p : a -> Bool, m : Maybe a) : Maybe a = match m {
+    case Nothing => Nothing
+    case Just(x) => if p(x) then Just(x) else Nothing
+}
+
+fun unwrap_or(default : a, m : Maybe a) : a = match m {
+    case Nothing => default
+    case Just(x) => x
+}
+
+fun unwrap_or_else(f : Unit -> a, m : Maybe a) : a = match m {
+    case Nothing => f(())
+    case Just(x) => x
+}
+
+fun or_else(f : Unit -> Maybe a, m : Maybe a) : Maybe a = match m {
+    case Nothing => f(())
+    case Just(x) => Just(x)
+}
+
+fun flatten(m : Maybe (Maybe a)) : Maybe a = match m {
+    case Nothing => Nothing
+    case Just(inner) => inner
+}
+
+fun to_list(m : Maybe a) : List a = match m {
+    case Nothing => Nil
+    case Just(x) => Cons(x, Nil)
+}
+
+fun from_list(xs : List a) : Maybe a = match xs {
+    case Nil => Nothing
+    case Cons(x, _) => Just(x)
+}
+
+fun to_result(error : e, m : Maybe a) : result.Result a e = match m {
+    case Nothing => result.Err(error)
+    case Just(x) => result.Ok(x)
+}

@@ -363,6 +363,64 @@ fn makefile_runner_builds_and_skips_up_to_date_targets() {
 }
 
 #[test]
+fn stdlib_modules_link_and_run() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("stdlib-modules");
+    let source = dir.join("main.fern");
+    fs::write(
+        &source,
+        "import std::iter\n\
+         import std::list\n\
+         import std::option\n\
+         import std::path\n\
+         import std::result\n\
+         import std::string\n\
+         \n\
+         fun use_result(r : result.Result Int String) : Int = result.unwrap_or(0, r)\n\
+         fun ext_len(p : String) : Int = match path.extension(p) {\n\
+             case Nothing => 0\n\
+             case Just(ext) => str_len(ext)\n\
+         }\n\
+         fun answer() : Int = {\n\
+             let xs = list.range(1, 6);\n\
+             let ys = list.map(x -> x * 2, list.filter(x -> x > 2, xs));\n\
+             let repeated = iter.collect(iter.take(5, iter.repeat(7)));\n\
+             let flat = iter.collect(iter.take(5, iter.flat_map(x -> iter.range(0, x), iter.range(1, 10))));\n\
+             let zipped = list.zip(list.range(0, 3), list.range(10, 20));\n\
+             let dropped = iter.collect(iter.take(2, iter.drop_while(x -> x < 5, iter.range(0, 10))));\n\
+             let p = path.join(\"examples/fern\", \"make/main.fern\");\n\
+             let text = string.replace(\"world\", \"fern\", string.trim(\"  hello world  \"));\n\
+             if list.contains(6, ys) && eq(list.sum(ys), 24) && eq(list.sum(repeated), 35)\n\
+                && eq(list.sum(flat), 2) && eq(list.length(zipped), 3) && eq(list.sum(dropped), 11)\n\
+                && eq(str_len(text), 10) && eq(ext_len(p), 4) && eq(path.basename(\"/\"), \"/\")\n\
+                && eq(option.unwrap_or_else(u -> 3, Nothing), 3)\n\
+                && eq(use_result(option.to_result(\"bad\", Just(7))), 7) then 42 else 0\n\
+         }\n",
+    )
+    .expect("write stdlib program");
+
+    let object = dir.join("main.o");
+    let out = Command::new(FERNC)
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run fernc");
+    assert!(
+        out.status.success(),
+        "fernc failed:\n{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
 fn module_imports_link_and_run() {
     if !have_cc() {
         return;

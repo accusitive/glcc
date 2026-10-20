@@ -1,0 +1,120 @@
+data Step a = Done | Yield(a, Iterator a)
+data Iterator a = Iterator(Unit -> Step a)
+
+fun next(it : Iterator a) : Step a = match it {
+    case Iterator(step) => step(())
+}
+
+fun empty() : Iterator a = Iterator(u -> Done)
+
+fun cons(x : a, rest : Iterator a) : Iterator a = Iterator(u -> Yield(x, rest))
+
+fun from_list(xs : List a) : Iterator a = Iterator(u -> match xs {
+    case Nil => Done
+    case Cons(x, rest) => Yield(x, from_list(rest))
+})
+
+fun from_maybe(m : Maybe a) : Iterator a = match m {
+    case Nothing => empty()
+    case Just(x) => cons(x, empty())
+}
+
+fun repeat(x : a) : Iterator a = Iterator(u -> Yield(x, repeat(x)))
+
+fun range(from : Int, to : Int) : Iterator Int =
+    if from >= to then empty() else Iterator(u -> Yield(from, range(from + 1, to)))
+
+fun iterate(f : a -> a, x : a) : Iterator a = Iterator(u -> Yield(x, iterate(f, f(x))))
+
+fun map(f : a -> b, it : Iterator a) : Iterator b = Iterator(u -> match next(it) {
+    case Done => Done
+    case Yield(x, rest) => Yield(f(x), map(f, rest))
+})
+
+fun filter(p : a -> Bool, it : Iterator a) : Iterator a =
+    Iterator(u -> advance(p, next(it)))
+
+fun advance(p : a -> Bool, step : Step a) : Step a = match step {
+    case Done => Done
+    case Yield(x, rest) =>
+        if p(x) then Yield(x, filter(p, rest))
+        else advance(p, next(filter(p, rest)))
+}
+
+fun take(n : Int, it : Iterator a) : Iterator a =
+    if n <= 0 then empty()
+    else Iterator(u -> match next(it) {
+        case Done => Done
+        case Yield(x, rest) => Yield(x, take(n - 1, rest))
+    })
+
+fun drop(n : Int, it : Iterator a) : Iterator a = if n <= 0 then it else match next(it) {
+    case Done => empty()
+    case Yield(_, rest) => drop(n - 1, rest)
+}
+
+fun take_while(p : a -> Bool, it : Iterator a) : Iterator a = Iterator(u -> match next(it) {
+    case Done => Done
+    case Yield(x, rest) => if p(x) then Yield(x, take_while(p, rest)) else Done
+})
+
+fun drop_while(p : a -> Bool, it : Iterator a) : Iterator a = match next(it) {
+    case Done => empty()
+    case Yield(x, rest) => if p(x) then drop_while(p, rest) else cons(x, rest)
+}
+
+fun chain(first : Iterator a, second : Iterator a) : Iterator a = Iterator(u -> match next(first) {
+    case Done => next(second)
+    case Yield(x, rest) => Yield(x, chain(rest, second))
+})
+
+fun flat_map(f : a -> Iterator b, it : Iterator a) : Iterator b =
+    Iterator(u -> match next(it) {
+        case Done => Done
+        case Yield(x, rest) => match next(f(x)) {
+            case Done => next(flat_map(f, rest))
+            case Yield(y, inner) => Yield(y, chain(inner, flat_map(f, rest)))
+        }
+    })
+
+fun zip(first : Iterator a, second : Iterator b) : Iterator (a, b) = Iterator(u -> match next(first) {
+    case Done => Done
+    case Yield(x, first_rest) => match next(second) {
+        case Done => Done
+        case Yield(y, second_rest) => Yield((x, y), zip(first_rest, second_rest))
+    }
+})
+
+fun enumerate(it : Iterator a) : Iterator (Int, a) = enumerate_from(0, it)
+
+fun enumerate_from(i : Int, it : Iterator a) : Iterator (Int, a) = Iterator(u -> match next(it) {
+    case Done => Done
+    case Yield(x, rest) => Yield((i, x), enumerate_from(i + 1, rest))
+})
+
+fun collect(it : Iterator a) : List a = match next(it) {
+    case Done => Nil
+    case Yield(x, rest) => Cons(x, collect(rest))
+}
+
+fun fold(f : b -> a -> b, z : b, it : Iterator a) : b = match next(it) {
+    case Done => z
+    case Yield(x, rest) => fold(f, f(z, x), rest)
+}
+
+fun count(it : Iterator a) : Int = fold((n, _) -> n + 1, 0, it)
+
+fun any(p : a -> Bool, it : Iterator a) : Bool = match next(it) {
+    case Done => false
+    case Yield(x, rest) => if p(x) then true else any(p, rest)
+}
+
+fun all(p : a -> Bool, it : Iterator a) : Bool = match next(it) {
+    case Done => true
+    case Yield(x, rest) => if p(x) then all(p, rest) else false
+}
+
+fun find(p : a -> Bool, it : Iterator a) : Maybe a = match next(it) {
+    case Done => Nothing
+    case Yield(x, rest) => if p(x) then Just(x) else find(p, rest)
+}

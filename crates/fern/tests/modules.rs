@@ -289,6 +289,41 @@ fn the_bundled_std_provides_foldable() {
 }
 
 #[test]
+fn the_bundled_std_provides_core_modules() {
+    let mut session = fern::Session::new();
+    for name in ["result", "option", "list", "iter", "string", "path"] {
+        session
+            .load_import(vec!["std".into(), name.into()])
+            .unwrap_or_else(|diags| panic!("std::{name} load failed: {}", diags[0].msg));
+    }
+
+    let main = session.add_file(
+        "<main>",
+        "import std::list\n\
+         import std::iter\n\
+         import std::option\n\
+         import std::path\n\
+         import std::result\n\
+         import std::string\n\
+         use std::result::Result\n\
+         fun consume(r : Result Int String) : Int = result.unwrap_or(0, r)\n\
+         fun main() : Int = {\n\
+             let xs = list.range(0, 5);\n\
+             let it = iter.range(0, 5);\n\
+             let n = list.sum(iter.collect(it));\n\
+             let m = option.to_result(\"bad\", Just(7));\n\
+             let p = path.join(\"a\", \"b.fern\");\n\
+             let s = string.trim(\" x \");\n\
+             if eq(n, 10) && eq(consume(m) + consume(result.Ok(1)) + consume(result.Err(\"no\")), 8)\n\
+                && eq(str_len(p), 8) && eq(s, \"x\") then 0 else 1\n\
+         }\n",
+    );
+    let mut files = vec![session.prelude(), main];
+    files.extend(session.module_files().iter().copied());
+    session.compile(&files).unwrap_or_else(|diags| panic!("compile failed: {}", diags[0].msg));
+}
+
+#[test]
 fn module_search_paths_are_searched_before_the_stdlib() {
     let dir = std::env::temp_dir().join(format!("fern-modules-search-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
