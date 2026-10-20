@@ -146,6 +146,7 @@ fn run(opts: &Options) -> Result<(), String> {
         // code to a fixpoint.
         let mut pm = PassManager::new()
             .add_module_pass(passes::Inline::small())
+            .add_func_pass(passes::Sroa)
             .add_func_pass(passes::Mem2Reg)
             .add_func_pass(passes::ConstFold)
             .add_func_pass(passes::Sccp)

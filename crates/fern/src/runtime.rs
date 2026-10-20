@@ -52,6 +52,7 @@ fn compile() -> mir::Module {
     use glcc_mir::pass::PassManager;
     PassManager::new()
         .add_module_pass(glcc_mir::passes::Inline::small())
+        .add_func_pass(glcc_mir::passes::Sroa)
         .add_func_pass(glcc_mir::passes::Mem2Reg)
         .add_func_pass(glcc_mir::passes::ConstFold)
         .add_func_pass(glcc_mir::passes::Sccp)
