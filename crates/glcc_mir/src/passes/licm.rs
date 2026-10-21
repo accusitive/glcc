@@ -25,7 +25,7 @@
 //! preheader (outside every loop block), which the invariance test
 //! picks up in the same run.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::ir::{Block, Def, Function, Inst, InstKind, Value};
 use crate::pass::FunctionPass;
@@ -53,6 +53,9 @@ impl FunctionPass for Licm {
         // later fixpoint turn, and one hoistable out of an outer loop
         // in one run should not settle for the inner one.
         let mut loops: Vec<(Block, HashSet<Block>)> = loops;
+        if loops.is_empty() {
+            return false;
+        }
         loops.sort_by_key(|(header, _)| header.index());
         let uses = func.count_resident_uses();
         let non_escaping = non_escaping_stack_slots(func);
@@ -128,7 +131,7 @@ fn hoist_loop(
     func: &mut Function,
     preheader: Block,
     loop_blocks: &HashSet<Block>,
-    uses: &HashMap<Value, usize>,
+    uses: &[u32],
     non_escaping: &HashSet<Value>,
 ) -> bool {
     let mut changed = false;
@@ -163,13 +166,13 @@ fn should_hoist(
     func: &Function,
     inst: Inst,
     loop_blocks: &HashSet<Block>,
-    uses: &HashMap<Value, usize>,
+    uses: &[u32],
     non_escaping: &HashSet<Value>,
 ) -> bool {
     let Some(result) = func.insts[inst].result else {
         return false;
     };
-    if uses.get(&result).copied().unwrap_or(0) == 0 {
+    if uses.get(result.index()).copied().unwrap_or(0) == 0 {
         return false;
     }
     let kind = &func.insts[inst].kind;

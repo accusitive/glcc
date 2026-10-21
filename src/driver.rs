@@ -1271,6 +1271,9 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, pic: b
         flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
         flag_builder.set("is_pic", if pic { "true" } else { "false" }).expect("pic");
         flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
+        // Cranelift's MachInst verifier is a dev-time safety net; our own
+        // MIR verifier still runs in every build.
+        flag_builder.set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" }).expect("verifier");
         // TLS access (`tls_value` for the x86-64 foreign-variadic
         // trampoline) has no lowering unless a model is selected;
         // `elf_gd` lowers on all supported ISAs, like the legacy

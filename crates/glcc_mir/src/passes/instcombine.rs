@@ -33,6 +33,9 @@ impl FunctionPass for InstCombine {
         // would keep firing until the fixpoint bound; DCE owns them.
         let use_counts = func.count_resident_uses();
         let mut changed = false;
+        // Collect rewrites and apply them in one sweep; rewriting per
+        // fold is O(function size).
+        let mut redirect: std::collections::HashMap<Value, Value> = std::collections::HashMap::new();
         for idx in 0..func.blocks.len() {
             let block = Block::from_usize(idx);
             let old = std::mem::take(&mut func.blocks[block].insts);
@@ -42,19 +45,31 @@ impl FunctionPass for InstCombine {
                     out.push(inst);
                     continue;
                 };
-                if use_counts.get(&result).copied().unwrap_or(0) == 0 {
+                if use_counts.get(result.index()).copied().unwrap_or(0) == 0 {
                     out.push(inst);
                     continue;
                 }
-                let Some(plan) = plan(func, inst) else {
+                let mut kind = func.insts[inst].kind.clone();
+                if !redirect.is_empty() {
+                    let mut hit = false;
+                    kind.for_each_operand(&mut |v| hit |= redirect.contains_key(&v));
+                    if hit {
+                        kind = crate::ir::remap_inst(&kind, |v| redirect.get(&v).copied().unwrap_or(v));
+                    }
+                }
+                let Some(plan) = plan(func, inst, &kind) else {
                     out.push(inst);
                     continue;
                 };
                 changed = true;
                 let replacement = apply(func, block, inst, result, plan, &mut out);
-                func.replace_uses(result, replacement);
+                redirect.insert(result, replacement);
             }
             func.blocks[block].insts = out;
+        }
+        if !redirect.is_empty() {
+            super::collapse_chains(&mut redirect);
+            func.remap_operands(&redirect);
         }
         changed
     }
@@ -79,10 +94,10 @@ enum Plan {
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
-fn plan(func: &Function, inst: Inst) -> Option<Plan> {
+fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
     let result = func.insts[inst].result?;
     let result_ty = &func.values[result].ty;
-    match &func.insts[inst].kind {
+    match kind {
         InstKind::Add(a, b) => {
             if is_int_zero(func, *b) {
                 Some(Plan::Value(*a))

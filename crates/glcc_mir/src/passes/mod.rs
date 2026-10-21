@@ -172,9 +172,24 @@ impl FunctionPass for ConstFold {
 
     fn run(&mut self, func: &mut Function) -> bool {
         let mut changed = false;
+        // Folded instructions leave the block even when they are impure
+        // (`udiv` and friends): the fold proved they cannot trap, and
+        // leaving them behind makes the pass fire forever, because DCE
+        // does not remove impure instructions.
+        let mut folded_away: std::collections::HashSet<crate::ir::Inst> = std::collections::HashSet::new();
+        // Collect replacements and apply them in one sweep; rewriting
+        // per fold is O(function size).
+        let mut redirect: std::collections::HashMap<Value, Value> = std::collections::HashMap::new();
         let insts: Vec<_> = func.blocks.iter().flat_map(|b| b.insts.clone()).collect();
         for inst in insts {
-            let kind = func.insts[inst].kind.clone();
+            let mut kind = func.insts[inst].kind.clone();
+            if !redirect.is_empty() {
+                let mut hit = false;
+                kind.for_each_operand(&mut |v| hit |= redirect.contains_key(&v));
+                if hit {
+                    kind = crate::ir::remap_inst(&kind, |v| redirect.get(&v).copied().unwrap_or(v));
+                }
+            }
             let result_ty = func.insts[inst].result.map(|v| func.values[v].ty.clone());
             let folded: Option<Const> = match &kind {
                 InstKind::Add(a, b) => fold_int2(func, *a, *b, |x, y| x.wrapping_add(y)),
@@ -239,14 +254,29 @@ impl FunctionPass for ConstFold {
                     };
                     let replacement = func.values.push(crate::ir::ValueData { ty, def: Def::Const(c) });
                     func.origins.insert(replacement, origin);
-                    func.replace_uses(result, replacement);
+                    redirect.insert(result, replacement);
+                    folded_away.insert(inst);
                     changed = true;
                 }
+            }
+        }
+        if !folded_away.is_empty() {
+            for block in func.blocks.iter_mut() {
+                block.insts.retain(|i| !folded_away.contains(i));
             }
         }
         for idx in 0..func.blocks.len() {
             let block_id = crate::ir::Block::from_usize(idx);
             let term = func.blocks[block_id].term.clone();
+            let term = term.map(|t| {
+                let mut hit = false;
+                t.for_each_operand(&mut |v| hit |= redirect.contains_key(&v));
+                if hit {
+                    crate::ir::remap_term(&t, |v| redirect.get(&v).copied().unwrap_or(v))
+                } else {
+                    t
+                }
+            });
             let folded = match term {
                 Some(Terminator::CondBr {
                     cond,
@@ -292,6 +322,9 @@ impl FunctionPass for ConstFold {
                 func.blocks[block_id].term = Some(term);
                 changed = true;
             }
+        }
+        if !redirect.is_empty() {
+            func.remap_operands(&redirect);
         }
         changed
     }
@@ -423,7 +456,7 @@ impl FunctionPass for ForwardAggregateCopy {
                 let Some(result) = func.insts[load_inst].result else {
                     continue;
                 };
-                if *val != result || counts.get(&result).copied().unwrap_or(0) != 1 {
+                if *val != result || counts.get(result.index()).copied().unwrap_or(0) != 1 {
                     continue;
                 }
                 if load_flags.volatile || store_flags.volatile {
@@ -907,18 +940,18 @@ impl FunctionPass for DeadCodeElim {
 
     fn run(&mut self, func: &mut Function) -> bool {
         use std::collections::HashSet;
-        let resident: HashSet<crate::ir::Inst> = func.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
+        let resident = func.resident_mask();
         let counts = func.count_resident_uses();
         let mut dead = Vec::new();
         for (id, inst) in func.insts.iter_enumerated() {
-            if !resident.contains(&id) {
+            if !resident[id.index()] {
                 continue;
             }
             if !inst.kind.is_pure() {
                 continue;
             }
             if let Some(result) = inst.result {
-                if counts.get(&result).copied().unwrap_or(0) == 0 {
+                if counts.get(result.index()).copied().unwrap_or(0) == 0 {
                     dead.push(id);
                 }
             }
@@ -942,27 +975,18 @@ impl FunctionPass for DeadCodeElim {
 /// reuse. Arena-orphaned instructions (removed from block lists by
 /// earlier passes) still count: conservatively sound, and consistent
 /// with `Function::use_count`.
-pub fn escaping_addresses(func: &Function) -> std::collections::HashSet<Value> {
-    use std::collections::HashSet;
-    let mut escaped = HashSet::new();
+pub fn escaping_addresses(func: &Function) -> Vec<bool> {
+    let mut escaped = vec![false; func.values.len()];
     for inst in func.insts.iter() {
         match &inst.kind {
             InstKind::Load { .. } => {}
-            InstKind::Store { val, .. } => {
-                escaped.insert(*val);
-            }
-            other => {
-                other.for_each_operand(&mut |v| {
-                    escaped.insert(v);
-                });
-            }
+            InstKind::Store { val, .. } => escaped[val.index()] = true,
+            other => other.for_each_operand(&mut |v| escaped[v.index()] = true),
         }
     }
     for block in func.blocks.iter() {
         if let Some(term) = &block.term {
-            term.for_each_operand(&mut |v| {
-                escaped.insert(v);
-            });
+            term.for_each_operand(&mut |v| escaped[v.index()] = true);
         }
     }
     escaped
@@ -1019,35 +1043,40 @@ struct SlotSites {
 }
 
 fn promote_slots(func: &mut Function) -> bool {
-    use std::collections::{HashMap, HashSet};
-
     // A `setjmp` call site can be re-entered by `longjmp` with the
     // registers of the first return: any slot written between the two
     // would read stale. Leave every slot in memory.
     if func.returns_twice {
         return false;
     }
-
-    let resident: HashSet<Inst> = func.blocks.iter().flat_map(|block| block.insts.iter().copied()).collect();
+    let resident = func.resident_mask();
+    // Every alloca from lowering is promoted on the first run; later
+    // pipeline turns only hold orphaned ones in the arena. Check before
+    // the remaining scans so those turns stay cheap.
+    if !func.insts.iter_enumerated().any(|(id, inst)| {
+        resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_scalar())
+    }) {
+        return false;
+    }
     let escaped = escaping_addresses(func);
     let reachable = func.reachable_blocks();
 
     // Index load/store sites by address once: the per-slot scan used
     // to be O(slots * insts).
-    let mut sites: HashMap<Value, Vec<Inst>> = HashMap::new();
+    let mut sites: Vec<Vec<Inst>> = vec![Vec::new(); func.values.len()];
     for (id, inst) in func.insts.iter_enumerated() {
-        if !resident.contains(&id) {
+        if !resident[id.index()] {
             continue;
         }
         if let InstKind::Load { addr, .. } | InstKind::Store { addr, .. } = &inst.kind {
-            sites.entry(*addr).or_default().push(id);
+            sites[addr.index()].push(id);
         }
     }
 
     let mut promotable: Vec<SlotSites> = Vec::new();
     let mut unused: Vec<Inst> = Vec::new();
     for (id, inst) in func.insts.iter_enumerated() {
-        if !resident.contains(&id) {
+        if !resident[id.index()] {
             continue;
         }
         let InstKind::Alloca { pointee, count } = &inst.kind else {
@@ -1057,7 +1086,7 @@ fn promote_slots(func: &mut Function) -> bool {
             continue;
         }
         let Some(addr) = inst.result else { continue };
-        if escaped.contains(&addr) {
+        if escaped[addr.index()] {
             continue;
         }
         let mut slot = SlotSites {
@@ -1068,11 +1097,7 @@ fn promote_slots(func: &mut Function) -> bool {
             stores: Vec::new(),
         };
         let mut ok = true;
-        let mut slot_sites: &[Inst] = &[];
-        if let Some(ids) = sites.get(&addr) {
-            slot_sites = ids;
-        }
-        for &site in slot_sites {
+        for &site in &sites[addr.index()] {
             let data = &func.insts[site];
             if !reachable[data.block.index()] {
                 ok = false;
@@ -1881,6 +1906,10 @@ fn predecessor_counts(func: &Function) -> Vec<usize> {
 /// the trampoline blocks mem2reg leaves around dead edges.
 fn merge_single_pred_blocks(func: &mut Function) -> bool {
     let mut changed = false;
+    // Each merge rewrites uses of the destination's params. Collect the
+    // substitutions and sweep once: remapping per merge is O(function
+    // size) and quadratic when many blocks collapse.
+    let mut redirect: std::collections::HashMap<Value, Value> = std::collections::HashMap::new();
     loop {
         let preds = predecessor_counts(func);
         let mut merged = false;
@@ -1898,8 +1927,7 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
                 continue;
             }
             let params = func.blocks[dest].params.clone();
-            let map: std::collections::HashMap<Value, Value> = params.iter().copied().zip(args.iter().copied()).collect();
-            func.remap_operands(&map);
+            redirect.extend(params.iter().copied().zip(args.iter().copied()));
             func.blocks[dest].params.clear();
             let insts = std::mem::take(&mut func.blocks[dest].insts);
             for inst in &insts {
@@ -1912,9 +1940,14 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
             merged = true;
         }
         if !merged {
-            return changed;
+            break;
         }
     }
+    if !redirect.is_empty() {
+        collapse_chains(&mut redirect);
+        func.remap_operands(&redirect);
+    }
+    changed
 }
 
 /// For every value with uses, the one block all of them live in —
@@ -4852,8 +4885,8 @@ mod tests {
         let loaded = emit_load(&mut func, entry, slot, Ty::int(32), false);
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
         let escaped = escaping_addresses(&func);
-        assert!(!escaped.contains(&slot));
-        assert!(escaped.contains(&loaded));
+        assert!(!escaped[slot.index()]);
+        assert!(escaped[loaded.index()]);
     }
 
     #[test]

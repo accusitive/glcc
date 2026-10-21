@@ -20,7 +20,7 @@
 //!   `Unreachable` terminators ([`SimplifyCfg`](super::SimplifyCfg)
 //!   deletes them and their instructions).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::ir::{Block, Const, Def, FcmpPred, Function, Inst, InstKind, Terminator, Value, ValueData, ValueOrigin};
 use crate::pass::FunctionPass;
@@ -93,9 +93,10 @@ impl State {
                 _ => lattice[i] = Lat::Unknown,
             }
         }
-        let resident: HashSet<Inst> = func.blocks.iter().flat_map(|b| b.insts.iter().copied()).collect();
-        for inst in resident {
-            func.insts[inst].kind.for_each_operand(&mut |op| users[op.index()].push(inst));
+        for block in func.blocks.iter() {
+            for &inst in &block.insts {
+                func.insts[inst].kind.for_each_operand(&mut |op| users[op.index()].push(inst));
+            }
         }
         for (idx, block) in func.blocks.iter().enumerate() {
             let here = Block::from_usize(idx);
@@ -240,12 +241,18 @@ impl State {
     /// A widened value feeds its instruction users immediately and its
     /// terminator users through the block queue.
     fn propagate(&mut self, func: &Function, v: Value) {
-        let users = self.users[v.index()].clone();
-        for user in users {
+        // The user lists are fixed while solving, so walk them by index
+        // instead of cloning a vector per assignment.
+        let mut i = 0;
+        while i < self.users[v.index()].len() {
+            let user = self.users[v.index()][i];
+            i += 1;
             self.eval_inst(func, user);
         }
-        let term_blocks = self.term_users[v.index()].clone();
-        for block in term_blocks {
+        let mut i = 0;
+        while i < self.term_users[v.index()].len() {
+            let block = self.term_users[v.index()][i];
+            i += 1;
             self.enqueue_bb(block);
         }
     }
@@ -256,28 +263,28 @@ impl State {
         for i in 0..func.blocks[block].insts.len() {
             self.eval_inst(func, func.blocks[block].insts[i]);
         }
-        let Some(term) = func.blocks[block].term.clone() else {
+        let Some(term) = &func.blocks[block].term else {
             return;
         };
         match term {
-            Terminator::Br { dest, .. } => self.mark_edge(block, dest),
-            Terminator::CondBr { cond, then_block, else_block, .. } => match branch_targets(&self.lattice[cond.index()], then_block, else_block) {
+            Terminator::Br { dest, .. } => self.mark_edge(block, *dest),
+            Terminator::CondBr { cond, then_block, else_block, .. } => match branch_targets(&self.lattice[cond.index()], *then_block, *else_block) {
                 EdgeSet::None => {}
                 EdgeSet::Only(dest) => self.mark_edge(block, dest),
                 EdgeSet::Both => {
-                    self.mark_edge(block, then_block);
-                    self.mark_edge(block, else_block);
+                    self.mark_edge(block, *then_block);
+                    self.mark_edge(block, *else_block);
                 }
             },
             Terminator::Switch { scrutinee, cases, default } => match &self.lattice[scrutinee.index()] {
                 Lat::Unknown => {}
                 Lat::Const(_) => {
-                    self.mark_edge(block, switch_take(&self.lattice[scrutinee.index()], &cases, default));
+                    self.mark_edge(block, switch_take(&self.lattice[scrutinee.index()], cases, *default));
                 }
                 _ => {
-                    self.mark_edge(block, default);
+                    self.mark_edge(block, *default);
                     for (_, dest) in cases {
-                        self.mark_edge(block, dest);
+                        self.mark_edge(block, *dest);
                     }
                 }
             },
@@ -291,9 +298,7 @@ impl State {
         let Some(result) = func.insts[inst].result else {
             return;
         };
-        let kind = func.insts[inst].kind.clone();
-        let result_ty = func.values[result].ty.clone();
-        let next = eval(&kind, &result_ty, &self.lattice);
+        let next = eval(&func.insts[inst].kind, &func.values[result].ty, &self.lattice);
         self.assign(func, result, next);
     }
 }
@@ -554,12 +559,14 @@ fn rewrite(func: &mut Function, lattice: &[Lat], executable: &[bool]) -> bool {
 
     for block_idx in 0..func.blocks.len() {
         let block = Block::from_usize(block_idx);
-        for &param in func.blocks[block].params.clone().iter() {
+        for i in 0..func.blocks[block].params.len() {
+            let param = func.blocks[block].params[i];
             if used[param.index()] {
                 note_value(func, &mut map, lattice, param);
             }
         }
-        for inst in func.blocks[block].insts.clone() {
+        for i in 0..func.blocks[block].insts.len() {
+            let inst = func.blocks[block].insts[i];
             if let Some(result) = func.insts[inst].result {
                 if used[result.index()] {
                     note_value(func, &mut map, lattice, result);

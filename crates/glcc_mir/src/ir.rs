@@ -834,34 +834,54 @@ impl Function {
     }
 
     /// Count uses from instructions and terminators still present in
-    /// blocks. Arena-orphaned instructions (unlinked by an earlier pass)
-    /// do not count: they cannot execute, and letting them keep their
-    /// operands alive would defeat dead-code elimination after any pass
-    /// that removes instructions from blocks.
-    pub fn count_resident_uses(&self) -> std::collections::HashMap<Value, usize> {
-        let mut counts = std::collections::HashMap::new();
+    /// blocks, indexed by value. Arena-orphaned instructions (unlinked
+    /// by an earlier pass) do not count: they cannot execute, and
+    /// letting them keep their operands alive would defeat dead-code
+    /// elimination after any pass that removes instructions from blocks.
+    pub fn count_resident_uses(&self) -> Vec<u32> {
+        let mut counts = vec![0u32; self.values.len()];
         for block in self.blocks.iter() {
             for inst in &block.insts {
-                self.insts[*inst].kind.for_each_operand(&mut |o| {
-                    *counts.entry(o).or_insert(0) += 1;
-                });
+                self.insts[*inst].kind.for_each_operand(&mut |o| counts[o.index()] += 1);
             }
             if let Some(term) = &block.term {
-                term.for_each_operand(&mut |o| {
-                    *counts.entry(o).or_insert(0) += 1;
-                });
+                term.for_each_operand(&mut |o| counts[o.index()] += 1);
             }
         }
         counts
     }
 
+    /// Which arena entries are still listed in a block, indexed by
+    /// instruction. Cheaper than a `HashSet<Inst>` for membership tests.
+    pub fn resident_mask(&self) -> Vec<bool> {
+        let mut mask = vec![false; self.insts.len()];
+        for block in self.blocks.iter() {
+            for &inst in &block.insts {
+                mask[inst.index()] = true;
+            }
+        }
+        mask
+    }
+
     /// Replace every operand occurrence of `old` with `new`.
+    ///
+    /// Every arena entry is visited because some passes temporarily
+    /// detach a block's instruction list while rewriting it; rebuilding
+    /// an `InstKind` is avoided unless `old` is actually an operand.
     pub fn replace_uses(&mut self, old: Value, new: Value) {
         if old == new {
             return;
         }
         for inst in self.insts.iter_mut() {
-            inst.kind = remap_inst(&inst.kind, |v| if v == old { new } else { v });
+            let mut uses_old = false;
+            inst.kind.for_each_operand(&mut |v| {
+                if v == old {
+                    uses_old = true;
+                }
+            });
+            if uses_old {
+                inst.kind = remap_inst(&inst.kind, |v| if v == old { new } else { v });
+            }
         }
         for block in self.blocks.iter_mut() {
             if let Some(term) = block.term.take() {
@@ -870,18 +890,33 @@ impl Function {
         }
     }
 
-    /// Rewrite every operand through `map` in one sweep over the arena
-    /// and all terminators; values absent from the map stay unchanged.
-    /// The map is applied once, so chains (`a -> b`, `b -> c`) must be
-    /// collapsed by the caller.
+    /// Rewrite every operand through `map` in one sweep over the live
+    /// blocks and their terminators; values absent from the map stay
+    /// unchanged. The map is applied once, so chains (`a -> b`,
+    /// `b -> c`) must be collapsed by the caller.
+    ///
+    /// Callers hold all block lists attached; orphaned arena entries
+    /// cannot be used and are left alone, which keeps the sweep
+    /// proportional to live code.
     pub fn remap_operands(&mut self, map: &std::collections::HashMap<Value, Value>) {
-        let remap = |v: Value| map.get(&v).copied().unwrap_or(v);
-        for inst in self.insts.iter_mut() {
-            inst.kind = remap_inst(&inst.kind, remap);
+        if map.is_empty() {
+            return;
         }
+        let remap = |v: Value| map.get(&v).copied().unwrap_or(v);
+        let insts = &mut self.insts;
         for block in self.blocks.iter_mut() {
+            for &id in &block.insts {
+                let inst = &mut insts[id];
+                let mut hit = false;
+                inst.kind.for_each_operand(&mut |v| hit |= map.contains_key(&v));
+                if hit {
+                    inst.kind = remap_inst(&inst.kind, remap);
+                }
+            }
             if let Some(term) = block.term.take() {
-                block.term = Some(remap_term(&term, remap));
+                let mut hit = false;
+                term.for_each_operand(&mut |v| hit |= map.contains_key(&v));
+                block.term = Some(if hit { remap_term(&term, remap) } else { term });
             }
         }
     }

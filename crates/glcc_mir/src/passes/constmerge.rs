@@ -48,7 +48,7 @@ impl FunctionPass for ConstMerge {
         // Values survive rewrites in the arena, so a duplicate whose
         // uses are already gone must not report progress forever.
         let uses = func.count_resident_uses();
-        duplicates.retain(|dup, _| uses.get(dup).is_some_and(|n| *n > 0));
+        duplicates.retain(|dup, _| uses.get(dup.index()).copied().unwrap_or(0) > 0);
         if duplicates.is_empty() {
             return false;
         }

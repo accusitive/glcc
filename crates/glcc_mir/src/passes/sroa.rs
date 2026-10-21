@@ -48,10 +48,15 @@ impl FunctionPass for Sroa {
             return false;
         }
         let reachable = func.reachable_blocks();
-        let resident: HashSet<Inst> = func.blocks.iter().flat_map(|block| block.insts.iter().copied()).collect();
+        let resident = func.resident_mask();
+        if !func.insts.iter_enumerated().any(|(id, inst)| {
+            resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_aggregate())
+        }) {
+            return false;
+        }
         let mut plans = Vec::new();
         for (id, inst) in func.insts.iter_enumerated() {
-            if !resident.contains(&id) || !reachable[inst.block.index()] {
+            if !resident[id.index()] || !reachable[inst.block.index()] {
                 continue;
             }
             let InstKind::Alloca { pointee, count } = &inst.kind else {
@@ -92,7 +97,7 @@ struct Leaf {
     accesses: Vec<Inst>,
 }
 
-fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, resident: &HashSet<Inst>, reachable: &[bool]) -> Option<Plan> {
+fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, resident: &[bool], reachable: &[bool]) -> Option<Plan> {
     let mut derived: HashMap<Value, Option<u64>> = HashMap::new();
     derived.insert(root, Some(0));
     let mut derived_insts = HashSet::new();
@@ -103,7 +108,7 @@ fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, 
         let Def::Inst(id) = data.def else {
             continue;
         };
-        if !resident.contains(&id) || !reachable[func.insts[id].block.index()] {
+        if !resident[id.index()] || !reachable[func.insts[id].block.index()] {
             continue;
         }
         let Some(info) = address_info(func, value) else {
@@ -122,7 +127,7 @@ fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, 
     let total = pointee.size_bytes();
     let mut leaves: BTreeMap<u64, Leaf> = BTreeMap::new();
     for (id, inst) in func.insts.iter_enumerated() {
-        if !resident.contains(&id) || !reachable[inst.block.index()] {
+        if !resident[id.index()] || !reachable[inst.block.index()] {
             continue;
         }
         match &inst.kind {
