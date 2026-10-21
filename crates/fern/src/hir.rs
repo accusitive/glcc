@@ -46,6 +46,8 @@ pub struct HirFn {
     pub locals: Vec<HirLocal>,
     pub body: HirExpr,
     pub span: Span,
+    /// `async fun`: the body returns `ret`; calls yield `Future ret`.
+    pub is_async: bool,
 }
 
 /// A closure body. Closures are monomorphized together with their
@@ -113,6 +115,8 @@ pub enum HirExprKind {
         ok_ctor: usize,
         residual: TryResidual,
     },
+    /// `await expr`: suspend until the future completes.
+    Await(Box<HirExpr>),
     /// A globally named function or value used as a value. Lowering
     /// wraps it in a parameterless closure thunk.
     Fn(FnRef),

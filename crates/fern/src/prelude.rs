@@ -64,6 +64,11 @@ extern \"fern_pipe_nil\" pipe_nil : Int -> Pipe
 extern \"fern_pipe_cons\" pipe_cons : Argv -> Pipe -> Pipe
 extern \"fern_pipeline_status\" pipeline_status_raw : Pipe -> Int
 extern \"fern_pipeline_capture\" pipeline_capture_raw : Pipe -> String
+extern \"fern_block_on_int\" block_on_int : Future Int -> Int
+extern \"fern_block_on_float\" block_on_float : Future Float -> Float
+extern \"fern_block_on_bool\" block_on_bool : Future Bool -> Bool
+extern \"fern_block_on_string\" block_on_string : Future String -> String
+extern \"fern_block_on_unit\" block_on_unit : Future Unit -> Unit
 
 fun print(s : String) : Unit = { let _ = print_raw(s); () }
 fun println(s : String) : Unit = { let _ = print_raw(concat(s, \"\\n\")); () }

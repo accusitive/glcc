@@ -104,7 +104,9 @@ pub fn lower(defs: &Defs, program: &HirProgram) -> KResult<mir::Module> {
 pub fn lower_with_cache(defs: &Defs, program: &HirProgram) -> KResult<LowerCache> {
     let mut lw = Lowerer::new(defs, program)?;
     lw.run()?;
-    Ok(lw.into_cache())
+    let mut cache = lw.into_cache();
+    lower_coroutines(&mut cache);
+    Ok(cache)
 }
 
 /// Lower the roots in `roots` on top of a previous [`LowerCache`],
@@ -112,7 +114,17 @@ pub fn lower_with_cache(defs: &Defs, program: &HirProgram) -> KResult<LowerCache
 pub fn lower_more(defs: &Defs, program: &HirProgram, cache: LowerCache, roots: &[BodyKey]) -> KResult<LowerCache> {
     let mut lw = Lowerer::with_cache(defs, program, Some(cache))?;
     lw.run_roots(roots)?;
-    Ok(lw.into_cache())
+    let mut cache = lw.into_cache();
+    lower_coroutines(&mut cache);
+    Ok(cache)
+}
+
+/// Rewrite async bodies into start/poll pairs. Running the pass on a
+/// module with no pending coroutines is a no-op, so incremental lowers
+/// can call it unconditionally.
+fn lower_coroutines(cache: &mut LowerCache) {
+    let mut pass = mir::PassManager::new().add_module_pass(mir::coroutine::LowerCoroutines);
+    pass.run(&mut cache.module);
 }
 
 impl<'d> Lowerer<'d> {
@@ -242,7 +254,10 @@ impl<'d> Lowerer<'d> {
             ));
         }
         let sig = self.instance_sig(hir, &subst)?;
-        let (func, _) = mir::Function::new(&name, sig);
+        let (mut func, _) = mir::Function::new(&name, sig);
+        if hir.is_async {
+            func.coroutine = Some(self.types.get(&hir.ret.substitute(&subst), hir.span)?);
+        }
         let id = self.module.push_func(func);
         self.instances.insert(name.clone(), id);
         self.pending.push(Pending {
@@ -450,6 +465,7 @@ impl<'d> Lowerer<'d> {
             params.push(self.types.get(&p.ty.substitute(subst), p.span)?);
         }
         let ret = self.types.get(&hir.ret.substitute(subst), hir.span)?;
+        let ret = if hir.is_async { Types::future_handle() } else { ret };
         Ok(mir::Signature::new(params, ret))
     }
 

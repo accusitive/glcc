@@ -634,6 +634,8 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         kinds_of.insert(prim.to_string(), RawKind::Star);
         arity.insert(prim.to_string(), 0);
     }
+    kinds_of.insert("Future".to_string(), RawKind::Arrow(Box::new(RawKind::Star), Box::new(RawKind::Star)));
+    arity.insert("Future".to_string(), 1);
 
     // Register every item name so forward references resolve later, and
     // reject duplicates. Functions, values, and externs share one value
@@ -870,7 +872,8 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 let ret = ctx.resolve(&f.ret)?;
                 ctx.star_check(&ret, f.ret.span)?;
-                let fn_ty = param_tys.iter().rev().fold(ret.clone(), |acc, ty| Ty::arrow(ty.clone(), acc));
+                let call_ret = if f.is_async { Ty::future_ty(ret.clone()) } else { ret.clone() };
+                let fn_ty = param_tys.iter().rev().fold(call_ret, |acc, ty| Ty::arrow(ty.clone(), acc));
                 let def = &mut defs.fns[id.index()];
                 for (param, ty) in def.params.iter_mut().zip(param_tys) {
                     param.ty = ty;

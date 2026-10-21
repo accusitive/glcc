@@ -805,7 +805,7 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
     for item in items {
         match &item.kind {
             ast::ItemKind::Fun(fun) => {
-                hash_str(&mut hash, "fun");
+                hash_str(&mut hash, if fun.is_async { "async fun" } else { "fun" });
                 hash_str(&mut hash, &fun.name);
                 for param in &fun.params {
                     hash_str(&mut hash, &param.ty.display());

@@ -88,6 +88,8 @@ impl<'d> Types<'d> {
             "Argv" => return Ok(mir::Ty::ptr(mir::Ty::Void)),
             // Opaque pipeline stage list, built by the prelude.
             "Pipe" => return Ok(mir::Ty::ptr(mir::Ty::Void)),
+            // LP64: a future handle is `{ frame, poll }`, two words.
+            "Future" => return Ok(Self::future_handle()),
             _ => {}
         }
         if self.defs.data_by_name(name).is_none() {
@@ -102,6 +104,14 @@ impl<'d> Types<'d> {
     fn memo(&mut self, ty: &Ty, out: mir::Ty) -> mir::Ty {
         self.cache.insert(ty.mangle(), out.clone());
         out
+    }
+
+    pub(crate) fn future_handle() -> mir::Ty {
+        mir::Ty::Struct {
+            fields: vec![mir::Ty::ptr(mir::Ty::Void), mir::Ty::ptr(mir::Ty::Void)],
+            offsets: vec![0, 8],
+            size: 16,
+        }
     }
 
     /// The cell layout of the data type instance `ty` (a concrete

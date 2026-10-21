@@ -1,0 +1,11 @@
+extern "fern_io_sleep" sleep_raw : Int -> Future Unit
+extern "fern_io_read_file" read_file_raw : String -> Future String
+extern "fern_io_write_file" write_file_raw : String -> String -> Future Unit
+extern "fern_io_read_stdin" read_stdin_raw : Int -> Future String
+extern "fern_io_read_line" read_line_raw : Int -> Future String
+
+fun sleep(ms : Int) : Future Unit = sleep_raw(ms)
+fun read_file(path : String) : Future String = read_file_raw(path)
+fun write_file(path : String, contents : String) : Future Unit = write_file_raw(path, contents)
+fun read_stdin(max : Int) : Future String = read_stdin_raw(max)
+fun read_line() : Future String = read_line_raw(0)

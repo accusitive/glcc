@@ -140,6 +140,25 @@ fn maybe_with_bounds() {
 }
 
 #[test]
+fn async_lowers_to_start_and_resume() {
+    let m = lower("async fun f(x : Int) : Int = x + 1\nfun main() : Int = block_on_int(f(1))");
+    assert!(has(&m, "f"));
+    assert!(has(&m, "f$resume"));
+    assert!(has(&m, "main"));
+}
+
+#[test]
+fn await_lowers_to_getelementptr_and_result() {
+    let m = lower(
+        "async fun f(x : Int) : Int = x\n\
+         async fun g(x : Int) : Int = await f(x) + 1\n\
+         fun main() : Int = block_on_int(g(1))",
+    );
+    assert!(has(&m, "g$resume"));
+    assert!(m.externs.iter().any(|e| e.name == "__glcc_frame_alloc"));
+}
+
+#[test]
 fn polymorphic_instances_monomorphize_per_type() {
     let m = lower("fun main() : Bool = eq(1, 2) && eq([true], [false])");
     assert!(has(&m, "Int::Eq::eq"));

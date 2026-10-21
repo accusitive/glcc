@@ -158,6 +158,14 @@ fn reports_unknown_types() {
 }
 
 #[test]
+fn future_has_kind_star_to_star() {
+    let defs = collect_ok("fun f(x : Future Int) : Future Int = x");
+    assert_eq!(defs.kind_of_head("Future"), Some(&arrow(star(), star())));
+    let err = collect_err("fun f(x : Future) : Int = 1");
+    assert!(err.msg.contains("kinds do not match"), "{}", err.msg);
+}
+
+#[test]
 fn fern_prefix_is_reserved_for_the_runtime() {
     for src in ["fun fern_alloc(x : Int) : Int = x", "let fern_two = 2"] {
         let diag = collect_err(src);

@@ -18,7 +18,19 @@ unsafe extern "C" {
     fn memcpy(dst: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
     fn memset(dst: *mut core::ffi::c_void, c: i32, n: usize) -> *mut core::ffi::c_void;
     fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+    fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
     fn abort();
+    fn malloc(size: usize) -> *mut core::ffi::c_void;
+    fn realloc(p: *mut core::ffi::c_void, size: usize) -> *mut core::ffi::c_void;
+    fn free(p: *mut core::ffi::c_void);
+    fn fopen(path: *const core::ffi::c_char, mode: *const core::ffi::c_char) -> *mut core::ffi::c_void;
+    fn fread(ptr: *mut core::ffi::c_void, size: usize, count: usize, stream: *mut core::ffi::c_void) -> usize;
+    fn fwrite(ptr: *const core::ffi::c_void, size: usize, count: usize, stream: *mut core::ffi::c_void) -> usize;
+    fn fclose(stream: *mut core::ffi::c_void) -> i32;
+    fn usleep(usec: u32) -> i32;
+    fn gettimeofday(tv: *mut core::ffi::c_void, tz: *mut core::ffi::c_void) -> i32;
+    fn pthread_create(thread: *mut usize, attr: *const core::ffi::c_void, start: unsafe extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void, arg: *mut core::ffi::c_void) -> i32;
+    fn pthread_detach(thread: usize) -> i32;
 }
 
 struct Jit {
@@ -37,7 +49,19 @@ fn build(src: &str) -> Jit {
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
     builder.symbol("write", write as *const u8);
+    builder.symbol("read", read as *const u8);
     builder.symbol("abort", abort as *const u8);
+    builder.symbol("malloc", malloc as *const u8);
+    builder.symbol("realloc", realloc as *const u8);
+    builder.symbol("free", free as *const u8);
+    builder.symbol("fopen", fopen as *const u8);
+    builder.symbol("fread", fread as *const u8);
+    builder.symbol("fwrite", fwrite as *const u8);
+    builder.symbol("fclose", fclose as *const u8);
+    builder.symbol("usleep", usleep as *const u8);
+    builder.symbol("gettimeofday", gettimeofday as *const u8);
+    builder.symbol("pthread_create", pthread_create as *const u8);
+    builder.symbol("pthread_detach", pthread_detach as *const u8);
     let mut jit = JITModule::new(builder);
     // The runtime goes in first, so the program's externs for
     // `fern_enter`/`fern_pin`/`fern_leave`/`fern_alloc` bind to its
@@ -130,6 +154,27 @@ fn run_bool(src: &str) -> bool {
 
 fn run_f64(src: &str) -> f64 {
     build(src).f64("main", &[])
+}
+
+#[test]
+fn async_and_await_run_to_completion() {
+    assert_eq!(run_i64("async fun inc(x : Int) : Int = x + 1\nfun main() : Int = block_on_int(inc(41))"), 42);
+    assert_eq!(
+        run_i64(
+            "async fun inc(x : Int) : Int = x + 1\n\
+             async fun twice(x : Int) : Int = { let a = await inc(x); let b = await inc(a); b }\n\
+             fun main() : Int = block_on_int(twice(1))"
+        ),
+        3
+    );
+}
+
+#[test]
+fn async_frames_survive_collection() {
+    let src = "\
+        async fun sum(n : Int) : Int = if n == 0 then 0 else { let xs = [n]; n + await sum(n - 1) }\n\
+        fun main() : Int = block_on_int(sum(200))";
+    assert_eq!(run_i64(src), 200 * 201 / 2);
 }
 
 #[test]

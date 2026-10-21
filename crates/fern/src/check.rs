@@ -144,6 +144,8 @@ struct Check<'d> {
     /// The name and in-progress type of the item being checked, when it
     /// may refer to itself.
     self_ref: Option<SelfRef>,
+    /// Whether the body being checked is an async function body.
+    in_async: bool,
 }
 
 enum SelfRef {
@@ -215,6 +217,7 @@ impl<'d> Check<'d> {
             env: Vec::new(),
             returns: Vec::new(),
             self_ref: None,
+            in_async: false,
         }
     }
 
@@ -308,7 +311,9 @@ impl<'d> Check<'d> {
         let param_tys: Vec<Ty> = def.params.iter().map(|p| p.ty.clone()).collect();
         let ret = def.ret.clone();
         let fn_ty = declared.ty.clone();
-        let (_, hir_fn) = self.check_root(
+        let outer_async = self.in_async;
+        self.in_async = f.is_async;
+        let checked = self.check_root(
             BodyKey::Fn(id),
             name,
             span,
@@ -328,7 +333,10 @@ impl<'d> Check<'d> {
                 this.returns.pop();
                 Ok((params, ret.clone(), body?, fn_ty.clone()))
             },
-        )?;
+        );
+        self.in_async = outer_async;
+        let (_, mut hir_fn) = checked?;
+        hir_fn.is_async = f.is_async;
         self.fn_schemes[id.index()] = Some(declared);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -542,6 +550,7 @@ impl<'d> Check<'d> {
             locals,
             body,
             span,
+            is_async: false,
         };
         Ok((scheme, hir_fn))
     }
@@ -583,6 +592,7 @@ impl<'d> Check<'d> {
             ast::ExprKind::Record { ctor, fields } => self.synthesize_record(ctor, fields, span),
             ast::ExprKind::Field { base, field } => self.synthesize_field(base, field, span),
             ast::ExprKind::Try(inner) => self.synthesize_try(inner, span),
+            ast::ExprKind::Await(inner) => self.synthesize_await(inner, span),
             ast::ExprKind::ClassSel { class, method, args } => self.synthesize_class_sel(class, method, args, span),
             ast::ExprKind::Lambda { params, body } => self.synthesize_lambda(params, body, span),
             ast::ExprKind::Let { binds, body } => self.synthesize_let(binds, body, span),
@@ -1162,9 +1172,27 @@ impl<'d> Check<'d> {
         })
     }
 
+    fn synthesize_await(&mut self, inner: &ast::Expr, span: Span) -> KResult<HirExpr> {
+        if !self.in_async {
+            return Err(Diag::new("`await` is only valid inside an async function", span));
+        }
+        let value = self.synth(inner)?;
+        let value_ty = self.infer.shallow(&value.ty);
+        let Some(output) = value_ty.future_inner().cloned() else {
+            return Err(Diag::new(format!("`await` requires a `Future`, found `{value_ty}`"), span));
+        };
+        Ok(HirExpr {
+            kind: HirExprKind::Await(Box::new(value)),
+            ty: output,
+            span,
+        })
+    }
+
     fn synthesize_lambda(&mut self, params: &[ast::Pat], body: &ast::Expr, span: Span) -> KResult<HirExpr> {
         check_param_names(params, span)?;
         self.bodies.push(BodyState::new());
+        let outer_async = self.in_async;
+        self.in_async = false;
         let mut param_pats = Vec::new();
         for p in params {
             let t = self.infer.fresh();
@@ -1174,6 +1202,7 @@ impl<'d> Check<'d> {
         self.returns.push(ret.clone());
         let built = self.check_expr(body, &ret);
         self.returns.pop();
+        self.in_async = outer_async;
         let body_hir = match built {
             Ok(body_hir) => body_hir,
             Err(diag) => {
@@ -1793,6 +1822,9 @@ fn finalize_expr(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, self_
             finalize_expr(infer, ids, allowed, self_ref, generics, base)?;
         }
         HirExprKind::Try { value, .. } => {
+            finalize_expr(infer, ids, allowed, self_ref, generics, value)?;
+        }
+        HirExprKind::Await(value) => {
             finalize_expr(infer, ids, allowed, self_ref, generics, value)?;
         }
         HirExprKind::Let { binds, body } => {

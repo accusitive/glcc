@@ -261,13 +261,28 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
     // lives in memory.
     let needs = live_after_awaits(resume, &found);
     let awaited: HashSet<Value> = found.iter().filter_map(|s| s.result).collect();
+    // An await's result is normally consumed before the next suspension.
+    // When it is still live after a later await it must live in the frame
+    // too: resuming skips the block that loaded it from the child.
+    let spilled_awaits: HashSet<Value> = found
+        .iter()
+        .enumerate()
+        .filter_map(|(i, site)| {
+            let result = site.result?;
+            needs
+                .iter()
+                .enumerate()
+                .any(|(j, live)| j != i && live.contains(&result))
+                .then_some(result)
+        })
+        .collect();
     let mut spill: Vec<Value> = Vec::new();
     {
         let mut all: Vec<Value> = needs.iter().flatten().copied().collect();
         all.sort_by_key(|v| v.index());
         let mut seen = HashSet::new();
         for v in all {
-            if awaited.contains(&v) || !seen.insert(v) {
+            if (awaited.contains(&v) && !spilled_awaits.contains(&v)) || !seen.insert(v) {
                 continue;
             }
             match &resume.values[v].def {
@@ -421,13 +436,14 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
         .collect();
     resume.blocks[dispatch].term = Some(dispatch_term(&sites, state_val, old_entry));
     let mut child_frames: Vec<Value> = vec![Value::from_usize(0); sites.len()];
+    let mut await_loads: HashMap<Value, Value> = HashMap::new();
     let mut k = 0;
     while k < sites.len() {
         let mut j = k;
         while j < sites.len() && sites[j].block == sites[k].block {
             j += 1;
         }
-        split_block(resume, &sites[k..j], k, &handle_slots, state_addr, ctx, free, &mut child_frames);
+        split_block(resume, &sites[k..j], k, &handle_slots, state_addr, ctx, free, &mut child_frames, &mut await_loads);
         k = j;
     }
     // The awaits are gone and every slot got a frame home: the original
@@ -437,6 +453,14 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
         let block = Block::from_usize(bid);
         resume.blocks[block].insts.retain(|i| !alloca_set.contains(i));
     }
+    // Spilled await results are represented by the load that copies the
+    // child's result before its frame is freed.
+    for (&result, &load) in &await_loads {
+        if let Some(&addr) = spill_addr.get(&result) {
+            spill_addr.insert(load, addr);
+        }
+    }
+    spill = spill.iter().map(|v| await_loads.get(v).copied().unwrap_or(*v)).collect();
 
     // Spills: write the slot at the definition, read it before every
     // use. A single value may be stored once and re-loaded in many
@@ -535,11 +559,14 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
 /// dropped (they belong to no block afterwards). `base` is the global
 /// index of `sites[0]`.
 #[allow(clippy::too_many_arguments)]
-fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &[(Value, Value, Value)], state_addr: Value, ctx: Value, free: Extern, child_frames: &mut [Value]) {
+fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &[(Value, Value, Value)], state_addr: Value, ctx: Value, free: Extern, child_frames: &mut [Value], await_loads: &mut HashMap<Value, Value>) {
     let block = sites[0].block;
     let n = sites.len();
     let taken = std::mem::take(&mut func.blocks[block].insts);
     let saved_term = func.blocks[block].term.take();
+    // The original terminator is detached while segments are rebuilt, so
+    // result replacements have to be replayed on it when it is restored.
+    let mut await_results: Vec<(Value, Value)> = Vec::new();
 
     // Segment inst lists: segment k is everything between await k-1
     // and await k; the final segment runs to the original terminator.
@@ -616,7 +643,10 @@ fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &
                     },
                     Some(res_ty),
                 );
-                func.replace_uses(res, lv.expect("result load is typed"));
+                let lv = lv.expect("result load is typed");
+                func.replace_uses(res, lv);
+                await_results.push((res, lv));
+                await_loads.insert(res, lv);
                 list.push(ld);
             }
             let mut args = SmallVec::new();
@@ -661,7 +691,13 @@ fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &
             });
         } else {
             func.blocks[target].insts = list;
-            func.blocks[target].term = saved_term.clone();
+            let term = saved_term.clone().map(|mut term| {
+                for &(old, new) in &await_results {
+                    term = crate::ir::remap_term(&term, |v| if v == old { new } else { v });
+                }
+                term
+            });
+            func.blocks[target].term = term;
         }
     }
 }
@@ -897,6 +933,21 @@ mod tests {
         func
     }
 
+    /// `int h(void) { int a = __builtin_await(f0); int b = __builtin_await(f1); return a + b; }`:
+    /// the first result is still live after the second suspension.
+    fn two_awaits_function() -> Function {
+        let (mut func, entry) = Function::new("h", Signature::new(vec![], handle_ty()));
+        func.coroutine = Some(Ty::int(32));
+        let a = await_value(&mut func, entry);
+        let b = await_value(&mut func, entry);
+        let sum = {
+            let mut builder = FunctionBuilder::new(&mut func, entry);
+            builder.add(Ty::int(32), a, b)
+        };
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
+        func
+    }
+
     fn lowered(func: Function) -> Module {
         let mut module = Module::new();
         module.push_func(func);
@@ -1011,6 +1062,36 @@ mod tests {
     }
 
     #[test]
+    fn await_results_live_across_a_later_await_are_spilled() {
+        let module = lowered(two_awaits_function());
+        let resume = &module.funcs[resume_of(&module)];
+
+        let from_frame = |v: Value| match resume.values[v].def {
+            Def::Inst(inst) => match &resume.insts[inst].kind {
+                InstKind::Load { addr, .. } => match resume.values[*addr].def {
+                    Def::Inst(gep) => match &resume.insts[gep].kind {
+                        InstKind::GetElementPtr { base, .. } => {
+                            resume.values[*base].def == Def::Param(resume.entry, 0)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        };
+
+        let spilled = resume.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| match resume.insts[*i].kind {
+                InstKind::Add(lhs, rhs) => from_frame(lhs) || from_frame(rhs),
+                _ => false,
+            })
+        });
+        assert!(spilled, "the first await's result is reloaded from the frame for the add");
+    }
+
+    #[test]
     fn moves_stack_slots_into_the_frame() {
         let module = lowered(slot_function());
         let resume = &module.funcs[resume_of(&module)];
@@ -1067,6 +1148,34 @@ mod tests {
         assert!(matches!(resume.blocks[resume.entry].term, Some(Terminator::Br { .. })), "no states without suspensions");
         assert!(verify_func(start).is_empty());
         assert!(verify_func(resume).is_empty());
+    }
+
+    #[test]
+    fn await_result_passed_to_a_branch_is_remapped() {
+        let (mut func, entry) = Function::new("tail", Signature::new(vec![], handle_ty()));
+        func.coroutine = Some(Ty::int(32));
+        let join = func.push_block(vec![Ty::int(32)]);
+        let joined = func.blocks[join].params[0];
+        let res = await_value(&mut func, entry);
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: join,
+            args: [res].into_iter().collect(),
+        });
+        func.blocks[join].term = Some(Terminator::Return { val: Some(joined) });
+
+        let module = lowered(func);
+        let resume = &module.funcs[resume_of(&module)];
+        let passes_the_load = resume.blocks.iter().any(|b| {
+            let Some(Terminator::Br { args, .. }) = &b.term else {
+                return false;
+            };
+            args.iter().any(|&arg| match resume.values[arg].def {
+                Def::Inst(inst) => matches!(resume.insts[inst].kind, InstKind::Load { .. }),
+                _ => false,
+            })
+        });
+        assert!(passes_the_load, "the branch passes the resumed load, not the stale await value");
+        assert!(verify_func(resume).is_empty(), "{:?}", verify_func(resume));
     }
 
     #[test]

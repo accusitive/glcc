@@ -2,6 +2,7 @@
 //! links it against a small C harness, and the result runs.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -97,6 +98,15 @@ fn run_fernc_stdout(source: &str, name: &str, extra: &[&str]) -> String {
 
 /// Link the object with a C harness that calls `answer()` and prints it.
 fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
+    run_linked(dir, object, None)
+}
+
+/// Like [`link_and_run`], with `input` piped to the program's stdin.
+fn link_and_run_with_stdin(dir: &Path, object: &Path, input: &str) -> (String, i32) {
+    run_linked(dir, object, Some(input))
+}
+
+fn run_linked(dir: &Path, object: &Path, input: Option<&str>) -> (String, i32) {
     let c_path = dir.join("harness.c");
     fs::write(
         &c_path,
@@ -106,7 +116,18 @@ fn link_and_run(dir: &Path, object: &Path) -> (String, i32) {
     let exe = exe_path(dir, "program");
     let out = link_with_c(&c_path, object, &exe);
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
-    let out = Command::new(&exe).output().expect("run program");
+    let out = match input {
+        Some(input) => {
+            let mut child = Command::new(&exe)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("spawn program");
+            child.stdin.take().expect("piped stdin").write_all(input.as_bytes()).expect("write stdin");
+            child.wait_with_output().expect("run program")
+        }
+        None => Command::new(&exe).output().expect("run program"),
+    };
     let stdout = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
     (stdout, out.status.code().unwrap_or(-1))
 }
@@ -149,6 +170,59 @@ fn optimized_object_runs_the_same() {
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
     assert_eq!(stdout, "113\n");
+}
+
+#[test]
+fn async_io_round_trips_a_file() {
+    if !have_cc() {
+        return;
+    }
+    let dir = temp_dir("async-io");
+    let path = dir.join("data.txt").to_string_lossy().replace('\\', "/");
+    let src = format!(
+        "import std::io\n\
+         \n\
+         async fun roundtrip(p : String) : String = {{\n\
+         let _ = await io.write_file(p, \"hello native io\");\n\
+         await io.read_file(p)\n\
+         }}\n\
+         \n\
+         fun answer() : Int = if block_on_string(roundtrip(\"{path}\")) == \"hello native io\" then 1 else 0\n"
+    );
+    let (dir, object) = run_fernc(&src, "async-io", &[]);
+    assert!(object.exists(), "no object written");
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "1\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn async_read_line_reads_piped_stdin() {
+    if !have_cc() {
+        return;
+    }
+    let src = "import std::io\n\
+               async fun line() : String = await io.read_line()\n\
+               fun answer() : Int = if block_on_string(line()) == \"hello stdin\" then 1 else 0\n";
+    let (dir, object) = run_fernc(src, "async-stdin-line", &[]);
+    let (stdout, code) = link_and_run_with_stdin(&dir, &object, "hello stdin\n");
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "1\n");
+}
+
+#[test]
+fn async_read_stdin_reads_piped_input() {
+    if !have_cc() {
+        return;
+    }
+    let src = "import std::io\n\
+               async fun all() : String = await io.read_stdin(64)\n\
+               fun answer() : Int = if block_on_string(all()) == \"hello stdin\" then 1 else 0\n";
+    let (dir, object) = run_fernc(src, "async-stdin-all", &[]);
+    let (stdout, code) = link_and_run_with_stdin(&dir, &object, "hello stdin");
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "1\n");
 }
 
 const FIB: &str = "fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)\n";

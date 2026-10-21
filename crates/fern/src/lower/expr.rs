@@ -18,6 +18,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirExprKind::Ctor { ctor, args, .. } => self.ctor(e, *ctor, args),
             HirExprKind::Field { base, index } => self.field_expr(e, base, *index),
             HirExprKind::Try { value, ok_ctor, residual } => self.try_expr(e, value, *ok_ctor, *residual),
+            HirExprKind::Await(value) => self.await_expr(e, value),
             HirExprKind::Fn(target) => self.fn_value(target, e),
             HirExprKind::Closure { id, captures } => self.closure_value(*id, captures, e.span),
             HirExprKind::CallDirect { target, args } => self.call_direct(target, args, e),
@@ -29,6 +30,12 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirExprKind::Bin { op, lhs, rhs } => self.bin(*op, lhs, rhs, e),
             HirExprKind::Un { op, operand } => self.un(*op, operand, e),
         }
+    }
+
+    fn await_expr(&mut self, e: &HirExpr, value: &HirExpr) -> KResult<mir::Value> {
+        let fut = self.expr(value)?;
+        let ty = self.ty_of(&e.ty, e.span)?;
+        self.emit(mir::InstKind::Await { fut }, ty)
     }
 
     fn const_value(&mut self, c: &ConstValue) -> KResult<mir::Value> {

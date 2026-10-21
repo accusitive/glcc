@@ -216,7 +216,7 @@ impl Parser {
             Tok::Class => ItemKind::Class(self.class_item()?),
             Tok::Instance => ItemKind::Instance(self.instance_item()?),
             Tok::Extern => ItemKind::Extern(self.extern_item()?),
-            Tok::Fun => ItemKind::Fun(self.fun_item()?),
+            Tok::Async | Tok::Fun => ItemKind::Fun(self.fun_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
             Tok::Import => ItemKind::Import(self.import_item()?),
             Tok::Use => ItemKind::Use(self.use_item()?),
@@ -432,7 +432,8 @@ impl Parser {
 
     fn fun_item(&mut self) -> KResult<FnDecl> {
         let start = self.span();
-        self.bump();
+        let is_async = self.eat(&Tok::Async);
+        self.expect(&Tok::Fun, "`fun` after `async`")?;
         let name = self.lower("a function name")?;
         self.expect(&Tok::LParen, "`(` after the function name")?;
         let params = if self.is(&Tok::RParen) {
@@ -462,6 +463,7 @@ impl Parser {
             params,
             ret,
             body,
+            is_async,
         })
     }
 
@@ -923,6 +925,15 @@ impl Parser {
     }
 
     fn prefix(&mut self) -> KResult<Expr> {
+        if self.is(&Tok::Await) {
+            let lo = self.span();
+            self.bump();
+            let operand = self.prefix()?;
+            return Ok(Expr {
+                kind: ExprKind::Await(Box::new(operand)),
+                span: lo.to(self.prev_span()),
+            });
+        }
         if self.is(&Tok::Minus) {
             let lo = self.span();
             self.bump();
@@ -1316,6 +1327,7 @@ fn is_item_start(tok: &Tok) -> bool {
             | Tok::Class
             | Tok::Instance
             | Tok::Extern
+            | Tok::Async
             | Tok::Fun
             | Tok::Let
             | Tok::Import

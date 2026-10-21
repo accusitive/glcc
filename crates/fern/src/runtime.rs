@@ -1,8 +1,9 @@
 //! The fern runtime, compiled from C.
 //!
-//! `rt/gc.c` is the collector plus the four entry points generated code
+//! `rt/gc.c` is the collector plus the entry points generated code
 //! calls: `fern_enter`, `fern_pin`, `fern_leave`, and `fern_alloc` (the
-//! ABI they implement is declared in `lower::gc`). It is compiled here
+//! GC ABI declared in `lower::gc`), and the coroutine frame hooks plus
+//! blocking driver used by async lowering. It is compiled here
 //! with glcc's own frontend so that a driver can lower it into the *same*
 //! object file -- or JIT image -- as the program: cranelift-module merges
 //! same-name declarations, so the program's externs bind to the runtime's

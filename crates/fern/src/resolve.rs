@@ -542,6 +542,7 @@ impl Qualifier {
             }
             ExprKind::Field { .. } => self.resolve_field(module, expr, scopes)?,
             ExprKind::Try(inner) => self.expr(module, inner, scopes)?,
+            ExprKind::Await(inner) => self.expr(module, inner, scopes)?,
             ExprKind::ClassSel { class, args, .. } => {
                 let span = expr.span;
                 *class = self.class_name(module, class, span)?;

@@ -55,6 +55,25 @@ typedef struct block {
 	u64 size;
 } block;
 
+/* Coroutine frames are malloc'd, so the collector owns their lifetime
+   separately from heap cells. The payload is scanned conservatively;
+   spilled pointers survive suspension that way. */
+typedef struct frame {
+	struct frame *next;
+	void *raw;
+	void *payload;
+	u64 size;
+} frame;
+
+typedef struct {
+	void *frame;
+	int (*poll)(void *, void *);
+} fern_future;
+
+typedef struct {
+	int woken;
+} fern_ctx;
+
 static u64 fern_heap[HEAP_BYTES / 8];
 /* One start bit per 8-byte granule. */
 static u64 fern_objs[(HEAP_BYTES / 8 + 63) / 64];
@@ -63,6 +82,7 @@ static u64 fern_work[MARK_STACK];
 
 static block *fern_live;
 static block *fern_free;
+static frame *fern_frames;
 static u64 fern_depth;
 static u64 fern_bump;
 static u64 fern_threshold = INITIAL_THRESHOLD;
@@ -78,6 +98,13 @@ int _write(int fd, const void *buf, unsigned int count);
 i64 write(int fd, const void *buf, u64 count);
 #endif
 void abort(void);
+void *malloc(u64 size);
+void free(void *p);
+void *realloc(void *p, u64 size);
+void *fopen(const char *path, const char *mode);
+u64 fread(void *ptr, u64 size, u64 count, void *stream);
+u64 fwrite(const void *ptr, u64 size, u64 count, void *stream);
+int fclose(void *stream);
 
 static const char fern_oom_msg[] = "fern: heap full\n";
 static const char fern_root_msg[] = "fern: root overflow\n";
@@ -142,6 +169,20 @@ static void fern_drain(void) {
 	while (fern_work_sp > 0) fern_scan(fern_work[--fern_work_sp]);
 }
 
+static void fern_scan_frames(void) {
+	frame *f = fern_frames;
+	while (f != 0) {
+		u64 *at = (u64 *)f->payload;
+		u64 n = (f->size + 7) / 8;
+		while (n > 0) {
+			fern_try_mark(*at);
+			at++;
+			n--;
+		}
+		f = f->next;
+	}
+}
+
 /* Unlink unmarked blocks into the free list, clearing marks on the
    survivors so the next collection starts clean. */
 static void fern_sweep(void) {
@@ -169,6 +210,7 @@ static void fern_gc(void) {
 	fern_work_sp = 0;
 	fern_overflowed = 0;
 	for (i = 0; i < fern_depth; i++) fern_try_mark(fern_roots[i]);
+	fern_scan_frames();
 	fern_drain();
 	/* A full worklist left marked blocks unqueued: scan the whole live
 	   list until a pass through it marks nothing new. */
@@ -243,6 +285,91 @@ void *fern_alloc(u64 size) {
 	}
 	fern_live_bytes += total;
 	return (void *)got;
+}
+
+/* ------------------------------------------------------------------ */
+/* coroutine frames and the blocking driver                            */
+
+void *__glcc_frame_alloc(u64 size, u64 align) {
+	u64 a = align < 8 ? 8 : align;
+	u64 total = size + sizeof(frame) + a + 8;
+	char *raw = (char *)malloc(total);
+	frame *f;
+	u64 start;
+	if (raw == 0) abort();
+	f = (frame *)raw;
+	start = ((u64)raw + sizeof(frame) + a - 1) & ~(a - 1);
+	f->raw = raw;
+	f->payload = (void *)start;
+	f->size = size;
+	f->next = fern_frames;
+	fern_frames = f;
+	return f->payload;
+}
+
+void __glcc_frame_free(void *payload) {
+	frame **link = &fern_frames;
+	while (*link != 0) {
+		frame *f = *link;
+		if (f->payload == payload) {
+			*link = f->next;
+			free(f->raw);
+			return;
+		}
+		link = &f->next;
+	}
+}
+
+static void fern_idle(void);
+
+static void fern_wait(fern_future f) {
+	fern_ctx ctx;
+	int status;
+	ctx.woken = 0;
+	status = f.poll(f.frame, &ctx);
+	while (status == 0) {
+		fern_idle();
+		ctx.woken = 0;
+		status = f.poll(f.frame, &ctx);
+	}
+}
+
+i64 fern_block_on_int(fern_future f) {
+	i64 out;
+	fern_wait(f);
+	out = *(i64 *)f.frame;
+	__glcc_frame_free(f.frame);
+	return out;
+}
+
+double fern_block_on_float(fern_future f) {
+	double out;
+	fern_wait(f);
+	out = *(double *)f.frame;
+	__glcc_frame_free(f.frame);
+	return out;
+}
+
+char fern_block_on_bool(fern_future f) {
+	char out;
+	fern_wait(f);
+	out = *(char *)f.frame;
+	__glcc_frame_free(f.frame);
+	return out;
+}
+
+char *fern_block_on_string(fern_future f) {
+	char *out;
+	fern_wait(f);
+	out = *(char **)f.frame;
+	__glcc_frame_free(f.frame);
+	return out;
+}
+
+char fern_block_on_unit(fern_future f) {
+	fern_wait(f);
+	__glcc_frame_free(f.frame);
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -412,7 +539,6 @@ int _cwait(int *status, fern_intptr process, int action);
 int system(const char *command);
 void *_popen(const char *command, const char *mode);
 int _pclose(void *stream);
-u64 fread(void *ptr, u64 size, u64 count, void *stream);
 #else
 int chdir(const char *path);
 int setenv(const char *name, const char *value, int overwrite);
@@ -427,9 +553,6 @@ int pipe(int *fds);
 int dup2(int oldfd, int newfd);
 int kill(int pid, int sig);
 #endif
-
-void *malloc(u64 size);
-void free(void *p);
 
 char *fern_getenv(const char *name) {
 	char *v = getenv(name);
@@ -1030,4 +1153,262 @@ char *fern_pipeline_capture(fpipe *stages) {
 	out[0] = 0;
 	fern_pipeline_run(stages, out, cap);
 	return out;
+}
+
+/* ------------------------------------------------------------------ */
+/* async IO leaves                                                     */
+
+/* File and stdin reads run on a detached OS thread and fill a malloc'd
+   buffer; only the polling thread allocates GC strings. The leaf frame
+   is registered with the collector, so its raw path and data pointers
+   stay reachable while the worker runs. */
+
+typedef struct {
+	i64 sec;
+	i64 usec;
+} fern_timeval;
+
+#ifdef _WIN32
+u64 GetTickCount64(void);
+void Sleep(unsigned int ms);
+u64 _beginthreadex(void *security, unsigned int stack, unsigned (*start)(void *), void *arg, unsigned int flags, unsigned int *tid);
+int CloseHandle(u64 handle);
+#else
+int gettimeofday(void *tv, void *tz);
+int usleep(unsigned int usec);
+int pthread_create(u64 *thread, void *attr, void *(*start)(void *), void *arg);
+int pthread_detach(u64 thread);
+#endif
+
+static i64 fern_now_ms(void) {
+#ifdef _WIN32
+	return (i64)GetTickCount64();
+#else
+	fern_timeval tv;
+	gettimeofday(&tv, 0);
+	return tv.sec * 1000 + tv.usec / 1000;
+#endif
+}
+
+static void fern_idle(void) {
+#ifdef _WIN32
+	Sleep(1);
+#else
+	usleep(1000);
+#endif
+}
+
+typedef struct {
+	i64 deadline;
+} fern_sleep;
+
+static int fern_sleep_poll(void *frame, void *ctx) {
+	fern_sleep *s = (fern_sleep *)frame;
+	(void)ctx;
+	return fern_now_ms() >= s->deadline;
+}
+
+fern_future fern_io_sleep(i64 ms) {
+	fern_future f;
+	fern_sleep *s = (fern_sleep *)__glcc_frame_alloc(sizeof(fern_sleep), 8);
+	if (ms < 0) ms = 0;
+	s->deadline = fern_now_ms() + ms;
+	f.frame = s;
+	f.poll = fern_sleep_poll;
+	return f;
+}
+
+typedef struct {
+	char *result; /* Future String result lives at frame offset 0 */
+	i64 done;
+	i64 copied;
+	i64 mode; /* 0 read file, 1 write file, 2 stdin bytes, 3 stdin line */
+	char *path;
+	char *data;
+	char *raw;
+	u64 len;
+	i64 max;
+} fern_io;
+
+static i64 fern_io_fd_read(i64 fd, char *buf, u64 n) {
+#ifdef _WIN32
+	return (i64)_read((int)fd, buf, (unsigned int)n);
+#else
+	return read((int)fd, buf, n);
+#endif
+}
+
+static void fern_io_read_file_run(fern_io *io) {
+	void *stream = fopen(io->path, "rb");
+	u64 cap = 65536;
+	char *buf;
+	u64 len = 0;
+	if (stream == 0) return;
+	buf = (char *)malloc(cap + 1);
+	if (buf == 0) {
+		fclose(stream);
+		return;
+	}
+	for (;;) {
+		u64 got;
+		if (len == cap) {
+			char *grown = (char *)realloc(buf, cap * 2 + 1);
+			if (grown == 0) break;
+			buf = grown;
+			cap = cap * 2;
+		}
+		got = fread(buf + len, 1, cap - len, stream);
+		if (got == 0) break;
+		len += got;
+	}
+	fclose(stream);
+	buf[len] = 0;
+	io->raw = buf;
+	io->len = len;
+}
+
+static void fern_io_write_file_run(fern_io *io) {
+	void *stream = fopen(io->path, "wb");
+	u64 len = fern_strlen(io->data);
+	u64 at = 0;
+	if (stream == 0) return;
+	while (at < len) {
+		u64 put = fwrite(io->data + at, 1, len - at, stream);
+		if (put == 0) break;
+		at += put;
+	}
+	fclose(stream);
+}
+
+static void fern_io_stdin_run(fern_io *io) {
+	u64 cap = io->max > 0 ? (u64)io->max : 65536;
+	char *buf = (char *)malloc(cap + 1);
+	u64 len = 0;
+	if (buf == 0) return;
+	while (len < cap) {
+		i64 got = fern_io_fd_read(0, buf + len, cap - len);
+		if (got <= 0) break;
+		len += (u64)got;
+	}
+	buf[len] = 0;
+	io->raw = buf;
+	io->len = len;
+}
+
+static void fern_io_line_run(fern_io *io) {
+	u64 cap = 65536;
+	char *buf = (char *)malloc(cap + 1);
+	u64 len = 0;
+	if (buf == 0) return;
+	while (len < cap) {
+		char c;
+		i64 got = fern_io_fd_read(0, &c, 1);
+		if (got <= 0) break;
+		if (c == '\n') break;
+		buf[len] = c;
+		len++;
+	}
+	if (len > 0 && buf[len - 1] == '\r') len--;
+	buf[len] = 0;
+	io->raw = buf;
+	io->len = len;
+}
+
+static void fern_io_run(fern_io *io) {
+	if (io->mode == 0) fern_io_read_file_run(io);
+	else if (io->mode == 1) fern_io_write_file_run(io);
+	else if (io->mode == 2) fern_io_stdin_run(io);
+	else fern_io_line_run(io);
+	__atomic_store_n(&io->done, 1, 5);
+}
+
+#ifdef _WIN32
+static unsigned fern_io_thread(void *arg) {
+	fern_io_run((fern_io *)arg);
+	return 0;
+}
+#else
+static void *fern_io_thread(void *arg) {
+	fern_io_run((fern_io *)arg);
+	return 0;
+}
+#endif
+
+static void fern_io_start(fern_io *io) {
+#ifdef _WIN32
+	u64 handle = _beginthreadex(0, 0, fern_io_thread, io, 0, 0);
+	if (handle != 0) CloseHandle(handle);
+	else fern_io_run(io);
+#else
+	u64 thread;
+	if (pthread_create(&thread, 0, fern_io_thread, io) == 0) pthread_detach(thread);
+	else fern_io_run(io);
+#endif
+}
+
+static int fern_io_poll(void *frame, void *ctx) {
+	fern_io *io = (fern_io *)frame;
+	(void)ctx;
+	if (__atomic_load_n(&io->done, 5) == 0) return 0;
+	if (io->mode != 1 && io->copied == 0) {
+		char *out = (char *)fern_alloc(io->len + 1);
+		u64 i;
+		for (i = 0; i < io->len; i++) out[i] = io->raw[i];
+		out[io->len] = 0;
+		if (io->raw != 0) free(io->raw);
+		io->raw = 0;
+		io->result = out;
+		io->copied = 1;
+	}
+	return 1;
+}
+
+static fern_future fern_io_future(fern_io *io) {
+	fern_future f;
+	f.frame = io;
+	f.poll = fern_io_poll;
+	return f;
+}
+
+static fern_io *fern_io_new(i64 mode) {
+	fern_io *io = (fern_io *)__glcc_frame_alloc(sizeof(fern_io), 8);
+	io->result = 0;
+	io->done = 0;
+	io->copied = 0;
+	io->mode = mode;
+	io->path = 0;
+	io->data = 0;
+	io->raw = 0;
+	io->len = 0;
+	io->max = 0;
+	return io;
+}
+
+fern_future fern_io_read_file(char *path) {
+	fern_io *io = fern_io_new(0);
+	io->path = path;
+	fern_io_start(io);
+	return fern_io_future(io);
+}
+
+fern_future fern_io_write_file(char *path, char *data) {
+	fern_io *io = fern_io_new(1);
+	io->path = path;
+	io->data = data;
+	fern_io_start(io);
+	return fern_io_future(io);
+}
+
+fern_future fern_io_read_stdin(i64 max) {
+	fern_io *io = fern_io_new(2);
+	io->max = max;
+	fern_io_start(io);
+	return fern_io_future(io);
+}
+
+fern_future fern_io_read_line(i64 unused) {
+	fern_io *io = fern_io_new(3);
+	(void)unused;
+	fern_io_start(io);
+	return fern_io_future(io);
 }

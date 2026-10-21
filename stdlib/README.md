@@ -29,10 +29,22 @@ module roots, so `import std::foldable` looks for
 | `std::iter` | lazy `Iterator`/`Step`, ranges, repeats, mapping, filtering, `take`/`drop`, `collect` |
 | `std::string` | trimming, splitting, joining, replacing, repeating, indexing |
 | `std::path` | `dirname`, `basename`, `extension`, `stem`, `join`, and components |
+| `std::io` | futures for sleeping, reading/writing files, and reading stdin |
 
 `Result a e` is `Ok(a) | Err(e)`. `Iterator` values are lazy: `range`,
 `repeat`, `map`, `filter`, and the other combinators produce another
 iterator, while `collect` forces one into a `List`.
+
+`std::io` operations are futures. Await them from an `async fun`:
+
+```fern
+import std::io
+
+async fun copy(from : String, to : String) : Unit = {
+    let text = await io.read_file(from);
+    await io.write_file(to, text)
+}
+```
 
 `import` binds the module name; `use` brings an item into scope. Use the
 module qualification or an alias when two modules provide the same name:

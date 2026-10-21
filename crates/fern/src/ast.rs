@@ -140,6 +140,8 @@ pub struct FnDecl {
     pub params: Vec<FnParam>,
     pub ret: TyExpr,
     pub body: Expr,
+    /// `async fun`: calls yield a `Future` instead of running the body.
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -340,6 +342,8 @@ pub enum ExprKind {
     },
     /// `expr?`: unwrap a `Result`/`Maybe`, early-returning the residual.
     Try(Box<Expr>),
+    /// `await expr`: suspend until a `Future` completes.
+    Await(Box<Expr>),
     /// `Eq::eq(x, y)` — a class-method call.
     ClassSel {
         class: String,

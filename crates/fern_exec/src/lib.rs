@@ -19,18 +19,42 @@ use glcc_mir::ir as mir;
 unsafe extern "C" {
     fn memcpy(dst: *mut core::ffi::c_void, src: *const core::ffi::c_void, n: usize) -> *mut core::ffi::c_void;
     fn memset(dst: *mut core::ffi::c_void, c: i32, n: usize) -> *mut core::ffi::c_void;
+    fn malloc(size: usize) -> *mut core::ffi::c_void;
+    fn realloc(p: *mut core::ffi::c_void, size: usize) -> *mut core::ffi::c_void;
+    fn free(p: *mut core::ffi::c_void);
+    fn fopen(path: *const core::ffi::c_char, mode: *const core::ffi::c_char) -> *mut core::ffi::c_void;
+    fn fread(ptr: *mut core::ffi::c_void, size: usize, count: usize, stream: *mut core::ffi::c_void) -> usize;
+    fn fwrite(ptr: *const core::ffi::c_void, size: usize, count: usize, stream: *mut core::ffi::c_void) -> usize;
+    fn fclose(stream: *mut core::ffi::c_void) -> i32;
     fn abort();
 }
 
 #[cfg(unix)]
 unsafe extern "C" {
     fn write(fd: i32, buf: *const core::ffi::c_void, n: usize) -> isize;
+    fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
+    fn usleep(usec: u32) -> i32;
+    fn gettimeofday(tv: *mut core::ffi::c_void, tz: *mut core::ffi::c_void) -> i32;
+    fn pthread_create(thread: *mut usize, attr: *const core::ffi::c_void, start: unsafe extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void, arg: *mut core::ffi::c_void) -> i32;
+    fn pthread_detach(thread: usize) -> i32;
 }
 
 #[cfg(windows)]
 unsafe extern "C" {
     #[link_name = "_write"]
     fn write(fd: i32, buf: *const core::ffi::c_void, n: u32) -> i32;
+    #[link_name = "_read"]
+    fn read(fd: i32, buf: *mut core::ffi::c_void, n: u32) -> i32;
+    #[link_name = "GetFileAttributesExA"]
+    fn get_file_attributes_ex(path: *const core::ffi::c_char, level: i32, data: *mut core::ffi::c_void) -> i32;
+    #[link_name = "_beginthreadex"]
+    fn beginthreadex(security: *mut core::ffi::c_void, stack_size: u32, start: unsafe extern "C" fn(*mut core::ffi::c_void) -> u32, arg: *mut core::ffi::c_void, flags: u32, thread_id: *mut u32) -> usize;
+    #[link_name = "CloseHandle"]
+    fn close_handle(handle: usize) -> i32;
+    #[link_name = "Sleep"]
+    fn sleep(ms: u32);
+    #[link_name = "GetTickCount64"]
+    fn get_tick_count_64() -> u64;
 }
 
 /// A value returned by a JITed fern function, rendered by the REPL.
@@ -187,10 +211,39 @@ fn build_jit() -> JITModule {
     .expect("jit builder");
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
+    builder.symbol("malloc", malloc as *const u8);
+    builder.symbol("realloc", realloc as *const u8);
+    builder.symbol("free", free as *const u8);
+    builder.symbol("fopen", fopen as *const u8);
+    builder.symbol("fread", fread as *const u8);
+    builder.symbol("fwrite", fwrite as *const u8);
+    builder.symbol("fclose", fclose as *const u8);
     #[cfg(unix)]
     builder.symbol("write", write as *const u8);
+    #[cfg(unix)]
+    builder.symbol("read", read as *const u8);
+    #[cfg(unix)]
+    builder.symbol("usleep", usleep as *const u8);
+    #[cfg(unix)]
+    builder.symbol("gettimeofday", gettimeofday as *const u8);
+    #[cfg(unix)]
+    builder.symbol("pthread_create", pthread_create as *const u8);
+    #[cfg(unix)]
+    builder.symbol("pthread_detach", pthread_detach as *const u8);
     #[cfg(windows)]
     builder.symbol("_write", write as *const u8);
+    #[cfg(windows)]
+    builder.symbol("_read", read as *const u8);
+    #[cfg(windows)]
+    builder.symbol("GetFileAttributesExA", get_file_attributes_ex as *const u8);
+    #[cfg(windows)]
+    builder.symbol("_beginthreadex", beginthreadex as *const u8);
+    #[cfg(windows)]
+    builder.symbol("CloseHandle", close_handle as *const u8);
+    #[cfg(windows)]
+    builder.symbol("Sleep", sleep as *const u8);
+    #[cfg(windows)]
+    builder.symbol("GetTickCount64", get_tick_count_64 as *const u8);
     builder.symbol("abort", abort as *const u8);
     JITModule::new(builder)
 }

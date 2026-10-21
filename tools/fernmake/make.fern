@@ -11,6 +11,7 @@
 -- Build with `make`, or run `./bootstrap.sh` when GNU make is absent.
 -- Then try `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
 
+import std::io
 import std::list
 import std::path
 import std::result
@@ -79,7 +80,7 @@ fun normalize_path(s : String) : String =
 fun absolute_path(s : String) : Bool =
     starts_with("/", s) || (str_len(s) > 1 && str_slice(s, 1, 1) == ":")
 
-fun include_files(names : List String, base : String) : List String = match names {
+async fun include_files(names : List String, base : String) : List String = match names {
     case Nil => Nil
     case Cons(name, rest) => {
         let name = normalize_path(name);
@@ -89,20 +90,20 @@ fun include_files(names : List String, base : String) : List String = match name
             let _ = exit(1);
             Nil
         } else {
-            let source = read_file(path);
+            let source = await io.read_file(path);
             let lines = if str_len(source) == 0 then Nil else str_lines(source);
-            append(expand_includes(lines, dir_name(path)), include_files(rest, base))
+            append(await expand_includes(lines, dir_name(path)), await include_files(rest, base))
         }
     }
 }
 
-fun expand_includes(lines : List String, base : String) : List String = match lines {
+async fun expand_includes(lines : List String, base : String) : List String = match lines {
     case Nil => Nil
     case Cons(line, rest) => {
         let code = trim(line);
         if not(starts_with("\t", line)) && starts_with("include ", code) then
-            append(include_files(words(str_slice(code, 8, str_len(code) - 8)), base), expand_includes(rest, base))
-        else Cons(line, expand_includes(rest, base))
+            append(await include_files(words(str_slice(code, 8, str_len(code) - 8)), base), await expand_includes(rest, base))
+        else Cons(line, await expand_includes(rest, base))
     }
 }
 
@@ -360,14 +361,14 @@ fun default_var(name : String, fallback : String) : String = {
     if str_len(value) == 0 then fallback else value
 }
 
-fun parse_makefile(source : String, path : String) : Parsed = {
+async fun parse_makefile(source : String, path : String) : Parsed = {
     let path = normalize_path(path);
     let builtins = Cons(
         ("CC", default_var("CC", "cc")),
         Cons(("MAKEFILE_LIST", path), Nil)
     );
     let initial = Parsed { vars = builtins, rules = Nil, phony = Nil };
-    let lines = expand_includes(str_lines(source), dir_name(path));
+    let lines = await expand_includes(str_lines(source), dir_name(path));
     resolve_parsed(parse_lines(logical_lines(lines, Nil), initial))
 }
 
@@ -514,13 +515,16 @@ fun build(target : String, state : BuildState) : result.Result (List String) Bui
 
 -- --------------------------------------------------------------- entry --
 
-fun run_makefile(path : String, requested : String) : Int = {
-    let source = read_file(path);
+fun run_makefile(path : String, requested : String) : Int =
+    block_on_int(run_makefile_async(path, requested))
+
+async fun run_makefile_async(path : String, requested : String) : Int = {
+    let source = await io.read_file(path);
     if str_len(source) == 0 then {
         println(concat("fernmake: cannot read ", path));
         1
     } else {
-        let parsed = parse_makefile(source, path);
+        let parsed = await parse_makefile(source, path);
         let requested = trim(requested);
         let goal = if str_len(requested) > 0 then requested
                    else match default_target(parsed.rules) {

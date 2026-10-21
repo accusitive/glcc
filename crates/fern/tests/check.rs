@@ -58,6 +58,7 @@ fn refs(e: &HirExpr, out: &mut Vec<FnRef>) {
         }
         HirExprKind::Field { base, .. } => refs(base, out),
         HirExprKind::Try { value, .. } => refs(value, out),
+        HirExprKind::Await(value) => refs(value, out),
         HirExprKind::Let { binds, body } => {
             for (_, value) in binds {
                 refs(value, out);
@@ -397,6 +398,40 @@ fn generic_top_level_values_generalize() {
         .and_then(|id| defs.values[id.index()].scheme.as_ref())
         .expect("empty has a scheme");
     assert_eq!(scheme.vars.len(), 1);
+}
+
+#[test]
+fn async_calls_return_futures() {
+    let (defs, hir) = check_ok("async fun f(x : Int) : Int = x\nfun g() : Future Int = f(1)");
+    assert!(body(&hir, "f").is_async);
+    let scheme = defs.fn_by_name("f").and_then(|id| defs.fns[id.index()].scheme.as_ref()).expect("f has a scheme");
+    let Ty::Arrow(_, ret) = &scheme.ty else {
+        panic!("f should be a function");
+    };
+    assert!(ret.is_future(), "async calls must return Future: {ret:?}");
+}
+
+#[test]
+fn await_unwraps_a_future() {
+    check_ok("async fun f(x : Int) : Int = x\nasync fun g() : Int = await f(1) + 1");
+    check_ok("async fun f(x : Int) : Int = x\nfun g() : Future Int = f(1)");
+}
+
+#[test]
+fn await_rejects_non_futures_and_sync_contexts() {
+    let msg = check_err("fun f() : Int = await 1");
+    assert!(msg.contains("only valid inside an async function"), "{msg}");
+
+    let msg = check_err("async fun f() : Int = await 1");
+    assert!(msg.contains("requires a `Future`"), "{msg}");
+
+    let msg = check_err("async fun f() : Int = { let g = x -> await f(); 1 }");
+    assert!(msg.contains("only valid inside an async function"), "{msg}");
+}
+
+#[test]
+fn future_is_a_unary_type() {
+    check_ok("fun pass(f : Future Int) : Future Int = f");
 }
 
 #[test]

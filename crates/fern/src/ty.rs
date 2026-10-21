@@ -97,8 +97,23 @@ impl Ty {
     }
 
     /// Primitive type names with special lowering behavior.
-    pub fn intros() -> [&'static str; 7] {
-        ["Int", "Float", "Bool", "Unit", "String", "Argv", "Pipe"]
+    pub fn intros() -> [&'static str; 8] {
+        ["Int", "Float", "Bool", "Unit", "String", "Argv", "Pipe", "Future"]
+    }
+
+    pub fn future_ty(inner: Ty) -> Ty {
+        Ty::named("Future", vec![inner])
+    }
+
+    pub fn is_future(&self) -> bool {
+        matches!(self, Ty::Named { name, args } if name == "Future" && args.len() == 1)
+    }
+
+    pub fn future_inner(&self) -> Option<&Ty> {
+        match self {
+            Ty::Named { name, args } if name == "Future" && args.len() == 1 => Some(&args[0]),
+            _ => None,
+        }
     }
 
     pub fn int_ty() -> Ty {
