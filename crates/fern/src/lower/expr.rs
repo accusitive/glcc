@@ -12,6 +12,16 @@ use super::func::FnCtx;
 
 impl<'l, 'd> FnCtx<'l, 'd> {
     pub(super) fn expr(&mut self, e: &HirExpr) -> KResult<mir::Value> {
+        self.expr_at(e, false)
+    }
+
+    /// Lower an expression in tail position: a direct self-call may jump
+    /// back to the body's loop header instead of calling.
+    pub(super) fn tail_expr(&mut self, e: &HirExpr) -> KResult<mir::Value> {
+        self.expr_at(e, true)
+    }
+
+    fn expr_at(&mut self, e: &HirExpr, tail: bool) -> KResult<mir::Value> {
         match &e.kind {
             HirExprKind::Const(c) => self.const_value(c),
             HirExprKind::Local(id) => self.read_local(*id),
@@ -21,13 +31,13 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirExprKind::Await(value) => self.await_expr(e, value),
             HirExprKind::Fn(target) => self.fn_value(target, e),
             HirExprKind::Closure { id, captures } => self.closure_value(*id, captures, e.span),
-            HirExprKind::CallDirect { target, args } => self.call_direct(target, args, e),
+            HirExprKind::CallDirect { target, args } => self.call_direct(target, args, e, tail),
             HirExprKind::Call { callee, args } => self.call_indirect(callee, args, e),
             HirExprKind::Tuple(args) => self.tuple(e, args),
-            HirExprKind::Let { binds, body } => self.let_expr(binds, body),
-            HirExprKind::If { cond, then_body, else_body } => self.if_expr(cond, then_body, else_body, e),
-            HirExprKind::Match { scrutinee, arms } => self.match_expr(e, scrutinee, arms),
-            HirExprKind::Bin { op, lhs, rhs } => self.bin(*op, lhs, rhs, e),
+            HirExprKind::Let { binds, body } => self.let_expr(binds, body, tail),
+            HirExprKind::If { cond, then_body, else_body } => self.if_expr(cond, then_body, else_body, e, tail),
+            HirExprKind::Match { scrutinee, arms } => self.match_expr(e, scrutinee, arms, tail),
+            HirExprKind::Bin { op, lhs, rhs } => self.bin(*op, lhs, rhs, e, tail),
             HirExprKind::Un { op, operand } => self.un(*op, operand, e),
         }
     }
@@ -237,7 +247,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         self.call_alloc(bytes)
     }
 
-    fn call_direct(&mut self, target: &FnRef, args: &[HirExpr], e: &HirExpr) -> KResult<mir::Value> {
+    fn call_direct(&mut self, target: &FnRef, args: &[HirExpr], e: &HirExpr, tail: bool) -> KResult<mir::Value> {
         if let FnRef::Extern { id } = target {
             return self.call_extern(*id, args, e);
         }
@@ -251,6 +261,15 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 self.hold(value.clone())?;
             }
             values.push(value);
+        }
+        if tail && self.self_func == Some(callee) {
+            if let Some(head) = self.loop_head {
+                self.release(mark)?;
+                self.branch(head, values);
+                // The block has terminated; callers only use this value
+                // when the expression did not diverge.
+                return Ok(self.iconst(64, 0));
+            }
         }
         let ret = self.ty_of(&e.ty, e.span)?;
         let call = self.emit(mir::InstKind::Call { callee, args: values.into() }, ret);
@@ -332,16 +351,16 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         Ok(cell)
     }
 
-    fn let_expr(&mut self, binds: &[(HirPat, HirExpr)], body: &HirExpr) -> KResult<mir::Value> {
+    fn let_expr(&mut self, binds: &[(HirPat, HirExpr)], body: &HirExpr, tail: bool) -> KResult<mir::Value> {
         for (pat, value) in binds {
             let v = self.expr(value)?;
             let dead = self.dead_block();
             self.bind_pattern(pat, v, dead)?;
         }
-        self.expr(body)
+        self.expr_at(body, tail)
     }
 
-    fn if_expr(&mut self, cond: &HirExpr, then_body: &HirExpr, else_body: &HirExpr, e: &HirExpr) -> KResult<mir::Value> {
+    fn if_expr(&mut self, cond: &HirExpr, then_body: &HirExpr, else_body: &HirExpr, e: &HirExpr, tail: bool) -> KResult<mir::Value> {
         let c = self.expr(cond)?;
         let ret = self.ty_of(&e.ty, e.span)?;
         let then_block = self.new_block(Vec::new());
@@ -355,11 +374,21 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             else_args: Default::default(),
         });
         self.goto(then_block);
-        let t = self.expr(then_body)?;
-        self.branch(join, vec![t]);
+        let t = self.expr_at(then_body, tail)?;
+        let then_diverged = self.terminated;
+        if !then_diverged {
+            self.branch(join, vec![t]);
+        }
         self.goto(else_block);
-        let f = self.expr(else_body)?;
-        self.branch(join, vec![f]);
+        let f = self.expr_at(else_body, tail)?;
+        let else_diverged = self.terminated;
+        if !else_diverged {
+            self.branch(join, vec![f]);
+        }
+        if then_diverged && else_diverged {
+            self.seal_dead(join);
+            return Ok(self.iconst(64, 0));
+        }
         self.goto(join);
         Ok(self.func.blocks[join].params[0])
     }
@@ -367,7 +396,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// Arms test in order; a pattern mismatch falls through to the next
     /// arm, a failed guard does the same, and running out of arms is
     /// unreachable (the checker does not prove exhaustiveness).
-    fn match_expr(&mut self, e: &HirExpr, scrutinee: &HirExpr, arms: &[HirArm]) -> KResult<mir::Value> {
+    fn match_expr(&mut self, e: &HirExpr, scrutinee: &HirExpr, arms: &[HirArm], tail: bool) -> KResult<mir::Value> {
         let scrut = self.expr(scrutinee)?;
         let mark = self.hold(scrut.clone())?;
         let ret = self.ty_of(&e.ty, e.span)?;
@@ -375,6 +404,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let tests: Vec<mir::Block> = arms.iter().map(|_| self.new_block(Vec::new())).collect();
         let dead = self.dead_block();
         self.branch(tests[0], Vec::new());
+        let mut all_diverged = true;
         for (i, arm) in arms.iter().enumerate() {
             self.goto(tests[i]);
             let fail = if i + 1 < arms.len() { tests[i + 1] } else { dead };
@@ -391,17 +421,26 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 });
                 self.goto(body_block);
             }
-            let value = self.expr(&arm.body)?;
-            self.branch(join, vec![value]);
+            let value = self.expr_at(&arm.body, tail)?;
+            let diverged = self.terminated;
+            if !diverged {
+                self.branch(join, vec![value]);
+            }
+            all_diverged &= diverged;
+        }
+        if all_diverged {
+            self.seal_dead(join);
+            self.release(mark)?;
+            return Ok(self.iconst(64, 0));
         }
         self.goto(join);
         self.release(mark)?;
         Ok(self.func.blocks[join].params[0])
     }
 
-    fn bin(&mut self, op: BinOp, lhs: &HirExpr, rhs: &HirExpr, e: &HirExpr) -> KResult<mir::Value> {
+    fn bin(&mut self, op: BinOp, lhs: &HirExpr, rhs: &HirExpr, e: &HirExpr, tail: bool) -> KResult<mir::Value> {
         if matches!(op, BinOp::And | BinOp::Or) {
-            return self.short_circuit(op, lhs, rhs);
+            return self.short_circuit(op, lhs, rhs, tail);
         }
         let l = self.expr(lhs)?;
         let mark = self.hold(l.clone())?;
@@ -455,7 +494,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
 
     /// `&&` and `||` skip the right operand, so a diverging branch
     /// stays unevaluated.
-    fn short_circuit(&mut self, op: BinOp, lhs: &HirExpr, rhs: &HirExpr) -> KResult<mir::Value> {
+    fn short_circuit(&mut self, op: BinOp, lhs: &HirExpr, rhs: &HirExpr, tail: bool) -> KResult<mir::Value> {
         let l = self.expr(lhs)?;
         let join = self.new_block(vec![mir::Ty::Bool]);
         let rhs_block = self.new_block(Vec::new());
@@ -476,8 +515,10 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let c = self.iconst(8, i128::from(op == BinOp::Or));
         self.branch(join, vec![c]);
         self.goto(rhs_block);
-        let r = self.expr(rhs)?;
-        self.branch(join, vec![r]);
+        let r = self.expr_at(rhs, tail)?;
+        if !self.terminated {
+            self.branch(join, vec![r]);
+        }
         self.goto(join);
         Ok(self.func.blocks[join].params[0])
     }

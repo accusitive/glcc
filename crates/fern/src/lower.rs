@@ -224,7 +224,7 @@ impl<'d> Lowerer<'d> {
         let out = match item.body {
             PendingBody::Item(key) => {
                 let hir = self.bodies.get(&key).copied().expect("pending bodies have checked HIR");
-                func::lower_fn(self, &mut func, hir, &item.subst, item.span, item.name.clone())
+                func::lower_fn(self, &mut func, hir, &item.subst, item.span, item.name.clone(), item.func)
             }
             PendingBody::Closure(id) => func::lower_closure(self, &mut func, &program.closures[id as usize], &item.subst, item.span, item.name.clone()),
         };

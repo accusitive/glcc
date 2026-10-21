@@ -162,6 +162,20 @@ fn emits_an_object_that_links_and_runs() {
 }
 
 #[test]
+fn tail_calls_do_not_grow_the_native_stack() {
+    if !have_cc() {
+        return;
+    }
+    let src = "fun sum(n : Int, acc : Int) : Int = if n == 0 then acc else sum(n - 1, acc + n)\n\
+               fun answer() : Int = sum(1000000, 0)\n";
+    let (dir, object) = run_fernc(src, "tail-calls", &[]);
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "500000500000\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn optimized_object_runs_the_same() {
     if !have_cc() {
         return;

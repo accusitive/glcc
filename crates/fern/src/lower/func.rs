@@ -42,6 +42,11 @@ pub(super) struct FnCtx<'l, 'd> {
     pub(super) return_block: mir::Block,
     /// The enclosing body's return type, for `?` residual construction.
     pub(super) return_ty: Ty,
+    /// The function being lowered, when it can tail-call itself.
+    pub(super) self_func: Option<mir::Func>,
+    /// The loop header a tail self-call branches to, with one block
+    /// parameter per function parameter.
+    pub(super) loop_head: Option<mir::Block>,
 }
 
 /// Entry-block parameters for a body: one MIR parameter per HIR
@@ -72,23 +77,44 @@ fn entry_params<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, params: &[Hi
     Ok(out)
 }
 
-pub(super) fn lower_fn<'d>(lw: &mut Lowerer<'d>, func: &mut mir::Function, hir: &'d HirFn, subst: &HashMap<String, Ty>, span: Span, name: String) -> KResult<()> {
+pub(super) fn lower_fn<'d>(
+    lw: &mut Lowerer<'d>,
+    func: &mut mir::Function,
+    hir: &'d HirFn,
+    subst: &HashMap<String, Ty>,
+    span: Span,
+    name: String,
+    self_func: mir::Func,
+) -> KResult<()> {
     let params = entry_params(lw, func, &hir.params, subst, false)?;
     let ret_ty = lw.types.get(&hir.ret.substitute(subst), span)?;
     let return_block = func.push_block(vec![ret_ty]);
     let mut cx = FnCtx::new(lw, func, name, subst);
     cx.return_block = return_block;
     cx.return_ty = hir.ret.clone();
+    cx.self_func = Some(self_func);
     cx.open_frame()?;
     for local in &hir.locals {
         let ty = cx.ty_of(&local.ty, local.span)?;
         cx.declare_local(ty)?;
     }
-    for (pat, (_, value)) in hir.params.iter().zip(params) {
+    let mut bind_values: Vec<mir::Value> = params.iter().map(|(_, value)| *value).collect();
+    // A synchronous body reuses one GC frame for its whole run, so a
+    // tail self-call can jump back to a header inside that frame instead
+    // of growing the native stack. Async bodies suspend into separate
+    // poll frames, so they keep the plain call path.
+    if !hir.is_async {
+        let head = cx.new_block(params.iter().map(|(ty, _)| ty.clone()).collect());
+        cx.branch(head, bind_values);
+        cx.goto(head);
+        cx.loop_head = Some(head);
+        bind_values = cx.func.blocks[head].params.clone();
+    }
+    for (pat, value) in hir.params.iter().zip(bind_values) {
         let dead = cx.dead_block();
         cx.bind_pattern(pat, value, dead)?;
     }
-    let value = cx.expr(&hir.body)?;
+    let value = cx.tail_expr(&hir.body)?;
     if !cx.terminated {
         cx.branch(cx.return_block, vec![value]);
     }
@@ -153,6 +179,8 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             temps: 0,
             return_block: mir::Block::from_usize_unchecked(0),
             return_ty: Ty::unit_ty(),
+            self_func: None,
+            loop_head: None,
         }
     }
 
@@ -254,12 +282,17 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// mismatches that the type system does not rule out.
     pub(super) fn dead_block(&mut self) -> mir::Block {
         let dead = self.new_block(Vec::new());
-        let (cur, terminated) = (self.cur, self.terminated);
-        self.goto(dead);
-        self.terminate(mir::Terminator::Unreachable);
-        self.cur = cur;
-        self.terminated = terminated;
+        self.seal_dead(dead);
         dead
+    }
+
+    /// Terminate a block no branch reaches, without moving the cursor.
+    /// Tail calls can leave an expression's join block without any
+    /// predecessor; the verifier still wants every block terminated.
+    pub(super) fn seal_dead(&mut self, block: mir::Block) {
+        if self.func.blocks[block].term.is_none() {
+            self.func.blocks[block].term = Some(mir::Terminator::Unreachable);
+        }
     }
 
     pub(super) fn alloca(&mut self, pointee: &mir::Ty) -> KResult<mir::Value> {

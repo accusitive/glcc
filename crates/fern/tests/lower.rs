@@ -140,6 +140,16 @@ fn maybe_with_bounds() {
 }
 
 #[test]
+fn tail_self_calls_lower_to_a_loop() {
+    let m = lower(
+        "fun count(n : Int, acc : Int) : Int =\n\
+         if n == 0 then acc else if n / 2 * 2 == n then count(n - 1, acc + 1) else count(n - 1, acc + 2)\n\
+         fun main() : Int = count(1000000, 0)",
+    );
+    assert!(has(&m, "count"));
+}
+
+#[test]
 fn async_lowers_to_start_and_resume() {
     let m = lower("async fun f(x : Int) : Int = x + 1\nfun main() : Int = block_on_int(f(1))");
     assert!(has(&m, "f"));

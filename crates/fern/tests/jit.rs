@@ -208,6 +208,26 @@ fn recursion() {
 }
 
 #[test]
+fn tail_calls_do_not_grow_the_stack() {
+    assert_eq!(
+        run_i64(
+            "fun sum(n : Int, acc : Int) : Int = if n == 0 then acc else sum(n - 1, acc + n)\n\
+             fun main() : Int = sum(1000000, 0)"
+        ),
+        500000500000
+    );
+    let src = "\
+        fun count(xs : List Int, acc : Int) : Int = match xs {\n\
+            case Nil => acc\n\
+            case Cons(_, rest) => count(rest, acc + 1)\n\
+        }\n\
+        fun build(n : Int, acc : List Int) : List Int = if n == 0 then acc else build(n - 1, Cons(n, acc))\n\
+        fun done(n : Int) : Bool = n == 0 || done(n - 1)\n\
+        fun main() : Int = if done(200000) then count(build(20000, Nil), 0) else 0";
+    assert_eq!(run_i64(src), 20000);
+}
+
+#[test]
 fn lists() {
     assert_eq!(
         run_i64(
