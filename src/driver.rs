@@ -17,6 +17,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::winunwind;
 
+/// Optimization selector, re-exported from `glcc_mir` so the driver and
+/// every other consumer share one definition.
+pub use glcc_mir::OptLevel;
+
 use glcc_frontend::{
     decode_source,
     lang::{LangOpts, Std},
@@ -433,30 +437,6 @@ pub enum SaveTemps {
     Off,
     Cwd,
     Obj,
-}
-
-/// GCC-style optimization selector: only three Cranelift backends
-/// exist, so `-O1`/`-O2`/`-O3`/`-Og`/`-Ofast` all mean `speed`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OptLevel {
-    /// `-O0` (default): no optimization, best debug fidelity.
-    #[default]
-    None,
-    /// `-O1`/`-O2`/`-O3`/`-Og`/`-Ofast`/bare `-O`: optimized.
-    Speed,
-    /// `-Os`/`-Oz`: optimize for size.
-    Size,
-}
-
-impl OptLevel {
-    /// Cranelift `opt_level` setting value.
-    pub fn flag(&self) -> &'static str {
-        match self {
-            OptLevel::None => "none",
-            OptLevel::Speed => "speed",
-            OptLevel::Size => "speed_and_size",
-        }
-    }
 }
 
 /// The frontend's dialect options for one job: `-std=`/`-ansi` and the
@@ -1253,29 +1233,10 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
     glcc_mir::pass::PassManager::new()
         .add_module_pass(glcc_mir::coroutine::LowerCoroutines)
         .run(&mut mir_module);
-    // Optimization pipeline (optimized builds only): inline
-    // small callees like GCC, then promote slots, fold and
-    // simplify instructions, simplify the CFG, and sweep dead
-    // code to a fixpoint. `-O0` runs no MIR passes: lower the
-    // frontend output as-is for best debug fidelity.
-    if opt_level != OptLevel::None {
-        use glcc_mir::pass::PassManager;
-        let pm = PassManager::new().add_module_pass(glcc_mir::passes::Inline::small());
-        let mut pm = pm
-            .add_func_pass(glcc_mir::passes::Sroa)
-            .add_func_pass(glcc_mir::passes::Mem2Reg)
-            .add_func_pass(glcc_mir::passes::ConstFold)
-            .add_func_pass(glcc_mir::passes::Sccp)
-            .add_func_pass(glcc_mir::passes::ForwardAggregateCopy)
-            .add_func_pass(glcc_mir::passes::DeadStoreElim)
-            .add_func_pass(glcc_mir::passes::InstCombine)
-            .add_func_pass(glcc_mir::passes::ConstMerge)
-            .add_func_pass(glcc_mir::passes::Cse)
-            .add_func_pass(glcc_mir::passes::Licm)
-            .add_func_pass(glcc_mir::passes::SimplifyCfg)
-            .add_func_pass(glcc_mir::passes::DeadCodeElim);
-        pm.run(&mut mir_module);
-    }
+    // Optimization pipeline (optimized builds only). The pass list
+    // lives in `glcc_mir::optimize`, shared by every consumer; `-O0`
+    // runs no MIR passes for best debug fidelity.
+    glcc_mir::optimize(&mut mir_module, opt_level);
     let errors = glcc_mir::verify::verify_module(&mir_module);
     if !errors.is_empty() {
         for e in &errors {

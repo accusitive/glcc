@@ -1,18 +1,22 @@
 pub mod constmerge;
 pub mod cse;
+pub mod global;
 pub mod instcombine;
 pub mod licm;
+pub mod loadstore;
 pub mod sccp;
 pub mod sroa;
 
 pub use constmerge::ConstMerge;
 pub use cse::Cse;
+pub use global::{DeadModuleItems, GlobalConstProp};
 pub use instcombine::InstCombine;
 pub use licm::Licm;
+pub use loadstore::LoadStoreForward;
 pub use sccp::Sccp;
 pub use sroa::Sroa;
 
-use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstKind, Module, Terminator, Value};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, Module, Terminator, Value, ValueData};
 use crate::pass::{FunctionPass, ModulePass};
 use crate::ty::{FloatKind, Ty};
 
@@ -1467,6 +1471,23 @@ impl DomInfo {
 
         DomInfo { preds, idom, children, df }
     }
+
+    /// Whether `node` lies below `ancestor` in the dominator tree.
+    fn dominates(&self, ancestor: Block, node: Block, entry: Block) -> bool {
+        let mut current = node;
+        loop {
+            if current == ancestor {
+                return true;
+            }
+            if current == entry {
+                return false;
+            }
+            match self.idom[current.index()] {
+                Some(next) => current = next,
+                None => return false,
+            }
+        }
+    }
 }
 
 /// Climb two dominators until they meet (RPO indices shrink upward).
@@ -1523,6 +1544,12 @@ impl FunctionPass for SimplifyCfg {
 
     fn run(&mut self, func: &mut Function) -> bool {
         let mut changed = false;
+        changed |= fold_redundant_successors(func);
+        changed |= thread_trivial_blocks(func);
+        changed |= merge_identical_blocks(func);
+        // Threading and merging can make two arms identical; fold them in
+        // the same run instead of waiting for another pipeline turn.
+        changed |= fold_redundant_successors(func);
         let reachable = func.reachable_blocks();
         for (idx, live) in reachable.iter().enumerate() {
             if *live {
@@ -1540,6 +1567,297 @@ impl FunctionPass for SimplifyCfg {
         changed |= merge_single_pred_blocks(func);
         changed |= sink_pure_instructions(func);
         changed
+    }
+}
+
+/// A value's defining block, for dominance checks on threaded edges.
+fn value_block(func: &Function, value: Value) -> Option<Block> {
+    match func.values[value].def {
+        Def::Param(block, _) => Some(block),
+        Def::Inst(inst) => Some(func.insts[inst].block),
+        Def::Const(_) => None,
+    }
+}
+
+/// Collapse a branch whose arms end at the same block: equal arguments
+/// become one unconditional branch, differing ones become selects at the
+/// fork.
+fn fold_redundant_successors(func: &mut Function) -> bool {
+    let mut changed = false;
+    for idx in 0..func.blocks.len() {
+        let block = Block::from_usize(idx);
+        let Some(term) = func.blocks[block].term.clone() else {
+            continue;
+        };
+        let replacement = match term {
+            Terminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                then_args,
+                else_args,
+            } => {
+                if let Some((_, value)) = int_const(func, cond) {
+                    let (dest, args) = if value != 0 { (then_block, then_args) } else { (else_block, else_args) };
+                    Some(Terminator::Br { dest, args })
+                } else if then_block == else_block {
+                    fold_fork(func, block, cond, then_block, then_args, else_args)
+                } else {
+                    None
+                }
+            }
+            Terminator::Switch { cases, default, .. } => {
+                if cases.iter().all(|(_, dest)| *dest == default) {
+                    Some(Terminator::Br {
+                        dest: default,
+                        args: Default::default(),
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some(term) = replacement {
+            func.blocks[block].term = Some(term);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Turn `brif c, dest(args), dest(args')` into `dest(select c, a, a')`
+/// for every differing argument.
+fn fold_fork(
+    func: &mut Function,
+    block: Block,
+    cond: Value,
+    dest: Block,
+    then_args: smallvec::SmallVec<[Value; 4]>,
+    else_args: smallvec::SmallVec<[Value; 4]>,
+) -> Option<Terminator> {
+    if then_args.len() != else_args.len() {
+        return None;
+    }
+    if !matches!(func.values[cond].ty, Ty::Bool | Ty::Int { .. }) {
+        return None;
+    }
+    let mut args = smallvec::SmallVec::new();
+    for (then_val, else_val) in then_args.into_iter().zip(else_args) {
+        if then_val == else_val {
+            args.push(then_val);
+            continue;
+        }
+        let ty = func.values[then_val].ty.clone();
+        if !ty.is_scalar() || func.values[else_val].ty != ty {
+            return None;
+        }
+        let result = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Inst(Inst::from_usize(func.insts.len())),
+        });
+        let inst = func.insts.push(InstData {
+            block,
+            kind: InstKind::Select {
+                cond,
+                then_val,
+                else_val,
+            },
+            result: Some(result),
+            loc: None,
+        });
+        func.values[result].def = Def::Inst(inst);
+        func.blocks[block].insts.push(inst);
+        args.push(result);
+    }
+    Some(Terminator::Br { dest, args })
+}
+
+/// Thread edges through empty trampoline blocks. A branch that only
+/// forwards to another block (and whose arguments are available at the
+/// predecessor) can be bypassed, retiring a block and exposing more
+/// identical-arm folds.
+fn thread_trivial_blocks(func: &mut Function) -> bool {
+    let reachable = func.reachable_blocks();
+    let dom = DomInfo::compute(func, &reachable);
+    let entry = func.entry;
+    let mut changed = false;
+    for idx in 0..func.blocks.len() {
+        let pred = Block::from_usize(idx);
+        if !reachable[idx] {
+            continue;
+        }
+        let Some(term) = func.blocks[pred].term.clone() else {
+            continue;
+        };
+        let replacement = match term {
+            Terminator::Br { dest, .. } => match thread_edge(func, &dom, entry, pred, dest) {
+                Some((dest, args)) => Some(Terminator::Br { dest, args }),
+                None => None,
+            },
+            Terminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                then_args,
+                else_args,
+            } => {
+                let then = thread_edge(func, &dom, entry, pred, then_block);
+                let otherwise = thread_edge(func, &dom, entry, pred, else_block);
+                if then.is_none() && otherwise.is_none() {
+                    None
+                } else {
+                    let (then_block, then_args) = match then {
+                        Some((dest, args)) => (dest, args),
+                        None => (then_block, then_args),
+                    };
+                    let (else_block, else_args) = match otherwise {
+                        Some((dest, args)) => (dest, args),
+                        None => (else_block, else_args),
+                    };
+                    Some(Terminator::CondBr {
+                        cond,
+                        then_block,
+                        then_args,
+                        else_block,
+                        else_args,
+                    })
+                }
+            }
+            _ => None,
+        };
+        if let Some(term) = replacement {
+            func.blocks[pred].term = Some(term);
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn thread_edge(func: &Function, dom: &DomInfo, entry: Block, pred: Block, target: Block) -> Option<(Block, smallvec::SmallVec<[Value; 4]>)> {
+    if target == pred || target == entry {
+        return None;
+    }
+    let block = &func.blocks[target];
+    if !block.insts.is_empty() || !block.params.is_empty() {
+        return None;
+    }
+    let Some(Terminator::Br { dest, args }) = &block.term else {
+        return None;
+    };
+    if *dest == target || *dest == pred {
+        return None;
+    }
+    for &arg in args.iter() {
+        if let Some(def_block) = value_block(func, arg) {
+            if !dom.dominates(def_block, pred, entry) {
+                return None;
+            }
+        }
+    }
+    Some((*dest, args.clone()))
+}
+
+/// Merge structurally identical empty terminators (`ret 1`, `br b3`,
+/// `unreachable`, ...) so branch fans that only differ in which copy of
+/// the same tail they enter share one block.
+fn merge_identical_blocks(func: &mut Function) -> bool {
+    let reachable = func.reachable_blocks();
+    let mut keeper: Vec<Option<Block>> = vec![None; func.blocks.len()];
+    for index in 0..func.blocks.len() {
+        let block = Block::from_usize(index);
+        if block == func.entry || !reachable[index] {
+            continue;
+        }
+        let data = &func.blocks[block];
+        if !data.params.is_empty() || !data.insts.is_empty() {
+            continue;
+        }
+        let Some(term) = &data.term else {
+            continue;
+        };
+        for other in 0..index {
+            let candidate = Block::from_usize(other);
+            if candidate == func.entry || keeper[other].is_some() || !reachable[other] {
+                continue;
+            }
+            let data = &func.blocks[candidate];
+            if !data.params.is_empty() || !data.insts.is_empty() {
+                continue;
+            }
+            if data.term.as_ref().is_some_and(|other| same_terminator(term, other)) {
+                keeper[index] = Some(candidate);
+                break;
+            }
+        }
+    }
+    if keeper.iter().all(Option::is_none) {
+        return false;
+    }
+    for index in 0..func.blocks.len() {
+        let block = Block::from_usize(index);
+        let Some(term) = func.blocks[block].term.take() else {
+            continue;
+        };
+        func.blocks[block].term = Some(remap_successors(&term, |succ| keeper[succ.index()].unwrap_or(succ)));
+    }
+    true
+}
+
+fn same_terminator(a: &Terminator, b: &Terminator) -> bool {
+    match (a, b) {
+        (Terminator::Br { dest: a, args: aa }, Terminator::Br { dest: b, args: ba }) => a == b && aa == ba,
+        (
+            Terminator::CondBr {
+                cond: ac,
+                then_block: at,
+                else_block: ae,
+                then_args: ata,
+                else_args: aea,
+            },
+            Terminator::CondBr {
+                cond: bc,
+                then_block: bt,
+                else_block: be,
+                then_args: bta,
+                else_args: bea,
+            },
+        ) => ac == bc && at == bt && ae == be && ata == bta && aea == bea,
+        (Terminator::Switch { scrutinee: as_, cases: ac, default: ad }, Terminator::Switch { scrutinee: bs, cases: bc, default: bd }) => {
+            as_ == bs && ac == bc && ad == bd
+        }
+        (Terminator::Return { val: a }, Terminator::Return { val: b }) => a == b,
+        (Terminator::Unreachable, Terminator::Unreachable) => true,
+        _ => false,
+    }
+}
+
+fn remap_successors(term: &Terminator, remap: impl Fn(Block) -> Block) -> Terminator {
+    match term {
+        Terminator::Br { dest, args } => Terminator::Br {
+            dest: remap(*dest),
+            args: args.clone(),
+        },
+        Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            then_args,
+            else_args,
+        } => Terminator::CondBr {
+            cond: *cond,
+            then_block: remap(*then_block),
+            else_block: remap(*else_block),
+            then_args: then_args.clone(),
+            else_args: else_args.clone(),
+        },
+        Terminator::Switch { scrutinee, cases, default } => Terminator::Switch {
+            scrutinee: *scrutinee,
+            cases: cases.iter().map(|(value, dest)| (*value, remap(*dest))).collect(),
+            default: remap(*default),
+        },
+        Terminator::Return { val } => Terminator::Return { val: *val },
+        Terminator::Unreachable => Terminator::Unreachable,
     }
 }
 
@@ -3018,8 +3336,136 @@ mod tests {
     }
 
     #[test]
-    fn merges_single_predecessor_chain() {
-        let sig = Signature::new(vec![], Ty::int(32));
+    fn folds_identical_branch_arms() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("same-arm", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let shared = func.push_block(vec![Ty::int(32)]);
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: shared,
+            else_block: shared,
+            then_args: [one].into_iter().collect(),
+            else_args: [one].into_iter().collect(),
+        });
+        let p = func.blocks[shared].params[0];
+        func.blocks[shared].term = Some(Terminator::Return { val: Some(p) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        let Terminator::Return { val: Some(v) } = func.blocks[entry].term.clone().unwrap() else {
+            panic!("branch was not folded");
+        };
+        assert_eq!(func.const_value(v), Some(&Const::Int { bits: 32, value: 1 }));
+    }
+
+    #[test]
+    fn folds_fork_to_select() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("fork", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let shared = func.push_block(vec![Ty::int(32)]);
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: shared,
+            else_block: shared,
+            then_args: [one].into_iter().collect(),
+            else_args: [two].into_iter().collect(),
+        });
+        let p = func.blocks[shared].params[0];
+        func.blocks[shared].term = Some(Terminator::Return { val: Some(p) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        let selects: Vec<InstKind> = func.blocks[entry]
+            .insts
+            .iter()
+            .map(|i| func.insts[*i].kind.clone())
+            .filter(|k| matches!(k, InstKind::Select { .. }))
+            .collect();
+        assert_eq!(selects.len(), 1, "fork becomes one select: {selects:?}");
+        assert!(matches!(
+            func.blocks[entry].term,
+            Some(Terminator::Return { val: Some(_) })
+        ));
+    }
+
+    #[test]
+    fn threads_empty_trampoline() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("thread", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let left = func.push_block(vec![]);
+        let right = func.push_block(vec![]);
+        let join = func.push_block(vec![Ty::int(32)]);
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: left,
+            else_block: right,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[left].term = Some(Terminator::Br {
+            dest: join,
+            args: [one].into_iter().collect(),
+        });
+        func.blocks[right].term = Some(Terminator::Br {
+            dest: join,
+            args: [two].into_iter().collect(),
+        });
+        let p = func.blocks[join].params[0];
+        func.blocks[join].term = Some(Terminator::Return { val: Some(p) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(func.blocks[left].insts.is_empty());
+        assert!(func.blocks[left].params.is_empty());
+        assert!(matches!(func.blocks[left].term, Some(Terminator::Unreachable)));
+        assert!(matches!(func.blocks[right].term, Some(Terminator::Unreachable)));
+        assert!(func.blocks[entry].insts.iter().any(|i| matches!(
+            func.insts[*i].kind,
+            InstKind::Select { .. }
+        )));
+    }
+
+    #[test]
+    fn merges_identical_blocks() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("identical", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let left = func.push_block(vec![]);
+        let right = func.push_block(vec![]);
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: left,
+            else_block: right,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[left].term = Some(Terminator::Return { val: Some(one) });
+        func.blocks[right].term = Some(Terminator::Return { val: Some(one) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(matches!(func.blocks[right].term, Some(Terminator::Unreachable)));
+        let Terminator::Return { val: Some(v) } = func.blocks[entry].term.clone().unwrap() else {
+            panic!("identical arms did not fold");
+        };
+        assert_eq!(v, one);
+    }
+
+    #[test]
+    fn merges_single_predecessor_chain() {        let sig = Signature::new(vec![], Ty::int(32));
         let (mut func, entry) = Function::new("chain", sig);
         let mid = func.push_block(vec![]);
         let end = func.push_block(vec![Ty::int(32)]);
@@ -3051,7 +3497,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_shared_branch_targets() {
+    fn collapses_empty_diamond() {
         let sig = Signature::new(vec![], Ty::Void);
         let (mut func, entry) = Function::new("diamond", sig);
         let then_block = func.push_block(vec![]);
@@ -3076,19 +3522,24 @@ mod tests {
         func.blocks[merge].term = Some(Terminator::Return { val: None });
 
         let mut simp = SimplifyCfg;
-        assert!(!simp.run(&mut func));
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(matches!(func.blocks[entry].term, Some(Terminator::Return { val: None })));
+        assert!(matches!(func.blocks[then_block].term, Some(Terminator::Unreachable)));
+        assert!(matches!(func.blocks[else_block].term, Some(Terminator::Unreachable)));
+        assert!(matches!(func.blocks[merge].term, Some(Terminator::Unreachable)));
     }
 
     #[test]
     fn keeps_loop_headers_and_entries() {
         // The header has two preds, so the one-pred latch cannot sink
         // into it.
-        let sig = Signature::new(vec![], Ty::Void);
+        let sig = Signature::new(vec![Ty::Bool], Ty::Void);
         let (mut func, entry) = Function::new("loop", sig);
         let header = func.push_block(vec![]);
         let body = func.push_block(vec![]);
         let exit = func.push_block(vec![]);
-        let cond = func.push_const(Const::Int { bits: 1, value: 1 });
+        let cond = param(&mut func, entry, Ty::Bool);
         func.blocks[entry].term = Some(Terminator::Br {
             dest: header,
             args: Default::default(),
@@ -3113,11 +3564,11 @@ mod tests {
     fn keeps_entry_block() {
         // The only pred of the entry is a latch: sinking the entry into
         // it would change where execution starts.
-        let sig = Signature::new(vec![], Ty::Void);
+        let sig = Signature::new(vec![Ty::Bool], Ty::Void);
         let (mut func, entry) = Function::new("entry-loop", sig);
         let body = func.push_block(vec![]);
         let exit = func.push_block(vec![]);
-        let cond = func.push_const(Const::Int { bits: 1, value: 1 });
+        let cond = param(&mut func, entry, Ty::Bool);
         func.blocks[entry].term = Some(Terminator::CondBr {
             cond,
             then_block: body,
@@ -3218,8 +3669,13 @@ mod tests {
         func.blocks[then_block].term = Some(Terminator::Return { val: Some(neg) });
         func.blocks[else_block].term = Some(Terminator::Return { val: Some(neg) });
         let mut simp = SimplifyCfg;
-        assert!(!simp.run(&mut func));
-        assert_eq!(func.blocks[entry].insts.len(), 1);
+        assert!(simp.run(&mut func));
+        assert_eq!(func.blocks[entry].insts.len(), 1, "shared work stays in the entry");
+        let Terminator::Return { val: Some(v) } = func.blocks[entry].term.clone().unwrap() else {
+            panic!("identical arms should collapse");
+        };
+        assert_eq!(v, neg);
+        assert!(!simp.run(&mut func), "second run is a no-op");
     }
 
     #[test]

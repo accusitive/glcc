@@ -55,19 +55,6 @@ fn compile() -> mir::Module {
     let tu = parser.parse_translation_unit();
     drop(parser);
     let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
-    use glcc_mir::pass::PassManager;
-    PassManager::new()
-        .add_module_pass(glcc_mir::passes::Inline::small())
-        .add_func_pass(glcc_mir::passes::Sroa)
-        .add_func_pass(glcc_mir::passes::Mem2Reg)
-        .add_func_pass(glcc_mir::passes::ConstFold)
-        .add_func_pass(glcc_mir::passes::Sccp)
-        .add_func_pass(glcc_mir::passes::InstCombine)
-        .add_func_pass(glcc_mir::passes::ConstMerge)
-        .add_func_pass(glcc_mir::passes::Cse)
-        .add_func_pass(glcc_mir::passes::Licm)
-        .add_func_pass(glcc_mir::passes::SimplifyCfg)
-        .add_func_pass(glcc_mir::passes::DeadCodeElim)
-        .run(&mut module);
+    glcc_mir::optimize(&mut module, glcc_mir::OptLevel::Speed);
     module
 }

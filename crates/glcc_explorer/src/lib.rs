@@ -18,33 +18,9 @@ use glcc_frontend::target::Target as FrontendTarget;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-/// Optimization selector, mirroring the driver's `-O*` mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OptLevel {
-    #[default]
-    None,
-    Speed,
-    Size,
-}
-
-impl OptLevel {
-    pub fn flag(&self) -> &'static str {
-        match self {
-            OptLevel::None => "none",
-            OptLevel::Speed => "speed",
-            OptLevel::Size => "speed_and_size",
-        }
-    }
-
-    /// Parse Godbolt-ish values: `0`, `1`, `2`, `3`, `s`, `z`, `fast`.
-    pub fn from_str(s: &str) -> OptLevel {
-        match s.trim() {
-            "1" | "2" | "3" | "fast" => OptLevel::Speed,
-            "s" | "z" | "size" => OptLevel::Size,
-            _ => OptLevel::None,
-        }
-    }
-}
+/// Optimization selector, re-exported from `glcc_mir` so the explorer
+/// and every other consumer share one definition.
+pub use glcc_mir::OptLevel;
 
 /// What to compile and how.
 #[derive(Debug, Clone, Default)]
@@ -378,29 +354,11 @@ fn mir_module_verify_notes(_module: &glcc_mir::Module) -> Vec<String> {
     Vec::new()
 }
 
-/// Driver-equivalent MIR pipeline (`src/driver.rs`): inline small
-/// callees like GCC, then mem2reg, fold and simplify instructions,
-/// simplify the CFG, and eliminate dead code. `-O0` runs no passes, so
-/// the optimized view matches the raw dump, as in the driver's
-/// debug-fidelity path.
+/// Driver-equivalent MIR pipeline (`glcc_mir::optimize`), so the
+/// explorer always matches the other consumers. `-O0` runs no passes,
+/// so the optimized view matches the raw dump.
 fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
-    if opt == OptLevel::None {
-        return;
-    }
-    use glcc_mir::pass::PassManager;
-    let pm = PassManager::new().add_module_pass(glcc_mir::passes::Inline::small());
-    let mut pm = pm
-        .add_func_pass(glcc_mir::passes::Sroa)
-        .add_func_pass(glcc_mir::passes::Mem2Reg)
-        .add_func_pass(glcc_mir::passes::ConstFold)
-        .add_func_pass(glcc_mir::passes::Sccp)
-        .add_func_pass(glcc_mir::passes::InstCombine)
-        .add_func_pass(glcc_mir::passes::ConstMerge)
-        .add_func_pass(glcc_mir::passes::Cse)
-        .add_func_pass(glcc_mir::passes::Licm)
-        .add_func_pass(glcc_mir::passes::SimplifyCfg)
-        .add_func_pass(glcc_mir::passes::DeadCodeElim);
-    pm.run(module);
+    glcc_mir::optimize(module, opt);
 }
 
 fn lower_to_object(module: &glcc_mir::Module, target: FrontendTarget, opt: OptLevel) -> Result<Vec<u8>, String> {

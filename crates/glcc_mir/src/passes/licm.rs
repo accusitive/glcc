@@ -27,10 +27,10 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ir::{Block, Def, Function, Inst, Value};
+use crate::ir::{Block, Def, Function, Inst, InstKind, Value};
 use crate::pass::FunctionPass;
 
-use super::DomInfo;
+use super::{address_info, non_escaping_stack_slots, ranges_may_overlap, DomInfo, MemoryObject};
 
 /// Hoist loop-invariant pure instructions out of natural loops.
 #[derive(Default)]
@@ -55,12 +55,13 @@ impl FunctionPass for Licm {
         let mut loops: Vec<(Block, HashSet<Block>)> = loops;
         loops.sort_by_key(|(header, _)| header.index());
         let uses = func.count_resident_uses();
+        let non_escaping = non_escaping_stack_slots(func);
         let mut changed = false;
         for (header, loop_blocks) in loops {
             let Some(preheader) = preheader_of(func, &dom, header, &loop_blocks) else {
                 continue;
             };
-            changed |= hoist_loop(func, preheader, &loop_blocks, &uses);
+            changed |= hoist_loop(func, preheader, &loop_blocks, &uses, &non_escaping);
         }
         changed
     }
@@ -123,7 +124,13 @@ fn preheader_of(func: &Function, dom: &DomInfo, header: Block, loop_blocks: &Has
 /// Hoist one loop's invariants. Candidates repeat: an instruction
 /// hoisted earlier in this sweep leaves the loop blocks behind, so its
 /// own users become invariant until the sweep stops moving.
-fn hoist_loop(func: &mut Function, preheader: Block, loop_blocks: &HashSet<Block>, uses: &HashMap<Value, usize>) -> bool {
+fn hoist_loop(
+    func: &mut Function,
+    preheader: Block,
+    loop_blocks: &HashSet<Block>,
+    uses: &HashMap<Value, usize>,
+    non_escaping: &HashSet<Value>,
+) -> bool {
     let mut changed = false;
     let mut order: Vec<Block> = loop_blocks.iter().copied().collect();
     order.sort_by_key(|b| b.index());
@@ -132,7 +139,7 @@ fn hoist_loop(func: &mut Function, preheader: Block, loop_blocks: &HashSet<Block
         for &block in &order {
             for i in 0..func.blocks[block].insts.len() {
                 let inst = func.blocks[block].insts[i];
-                if should_hoist(func, inst, loop_blocks, uses) {
+                if should_hoist(func, inst, loop_blocks, uses, non_escaping) {
                     candidates.push(inst);
                 }
             }
@@ -152,18 +159,25 @@ fn hoist_loop(func: &mut Function, preheader: Block, loop_blocks: &HashSet<Block
     }
 }
 
-fn should_hoist(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, uses: &HashMap<Value, usize>) -> bool {
+fn should_hoist(
+    func: &Function,
+    inst: Inst,
+    loop_blocks: &HashSet<Block>,
+    uses: &HashMap<Value, usize>,
+    non_escaping: &HashSet<Value>,
+) -> bool {
     let Some(result) = func.insts[inst].result else {
         return false;
     };
     if uses.get(&result).copied().unwrap_or(0) == 0 {
         return false;
     }
-    if !func.insts[inst].kind.is_pure() {
+    let kind = &func.insts[inst].kind;
+    if !kind.is_pure() && !hoistable_load(func, inst, loop_blocks, non_escaping) {
         return false;
     }
     let mut invariant = true;
-    func.insts[inst].kind.for_each_operand(&mut |op| {
+    kind.for_each_operand(&mut |op| {
         if let Some(def) = def_block(func, op) {
             if loop_blocks.contains(&def) {
                 invariant = false;
@@ -171,6 +185,64 @@ fn should_hoist(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, uses:
         }
     });
     invariant
+}
+
+/// A non-volatile load from a non-escaping stack slot whose bytes no loop
+/// instruction writes. Such a load cannot fault, and no callee can reach
+/// the slot's memory.
+fn hoistable_load(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, non_escaping: &HashSet<Value>) -> bool {
+    let InstKind::Load { addr, flags } = &func.insts[inst].kind else {
+        return false;
+    };
+    if flags.volatile {
+        return false;
+    }
+    let Some(info) = address_info(func, *addr) else {
+        return false;
+    };
+    let MemoryObject::Stack(slot) = info.object else {
+        return false;
+    };
+    if !non_escaping.contains(&slot) {
+        return false;
+    }
+    let Some(result) = func.insts[inst].result else {
+        return false;
+    };
+    let len = func.values[result].ty.size_bytes();
+    if len == 0 {
+        return false;
+    }
+    for &block in loop_blocks {
+        for &other in &func.blocks[block].insts {
+            if write_may_alias(func, other, *addr, len, non_escaping) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn write_may_alias(func: &Function, inst: Inst, addr: Value, len: u64, non_escaping: &HashSet<Value>) -> bool {
+    match &func.insts[inst].kind {
+        InstKind::Store { addr: write, val, .. } => {
+            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
+        }
+        InstKind::Memcpy { dst, len: write_len, .. } | InstKind::Memset { dst, len: write_len, .. } => {
+            ranges_may_overlap(func, non_escaping, *dst, *write_len, addr, len)
+        }
+        InstKind::AtomicStore { addr: write, val } => {
+            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
+        }
+        InstKind::AtomicRmw { addr: write, val, .. } => {
+            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
+        }
+        InstKind::AtomicCas { addr: write, replacement, .. } => {
+            ranges_may_overlap(func, non_escaping, *write, func.values[*replacement].ty.size_bytes(), addr, len)
+        }
+        InstKind::InlineAsm { .. } | InstKind::VaStart { .. } | InstKind::VaArg { .. } | InstKind::VaEnd { .. } | InstKind::VaCopy { .. } => true,
+        _ => false,
+    }
 }
 
 /// The block an operand's definition lives in; constants have none.
@@ -460,6 +532,207 @@ mod tests {
     /// A self-loop (`while (1) double := x+x;`): the back edge is the
     /// header's own edge, the loop body is just the header, and the
     /// invariant leaves through the entry.
+    #[test]
+    fn hoists_a_load_from_a_nonescaping_slot() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::Void);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let slot = emit(
+            &mut func,
+            entry,
+            InstKind::Alloca {
+                pointee: Ty::int(32),
+                count: 1,
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let header = func.push_block(vec![]);
+        let latch = func.push_block(vec![]);
+        let exit = func.push_block(vec![]);
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: header,
+            args: Default::default(),
+        });
+        func.blocks[header].term = Some(Terminator::CondBr {
+            cond,
+            then_block: latch,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let read = emit(
+            &mut func,
+            latch,
+            InstKind::Load {
+                addr: slot,
+                flags: crate::ir::MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let keep_going = emit(
+            &mut func,
+            latch,
+            InstKind::Icmp {
+                pred: IcmpPred::Ne,
+                lhs: read,
+                rhs: zero,
+            },
+            Ty::Bool,
+        );
+        func.blocks[latch].term = Some(Terminator::CondBr {
+            cond: keep_going,
+            then_block: header,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[exit].term = Some(Terminator::Return { val: None });
+
+        assert!(Licm.run(&mut func));
+        assert!(verify_func(&func).is_empty());
+        let entry_kinds = kinds_in(&func, entry);
+        assert!(entry_kinds.iter().any(|k| matches!(k, InstKind::Load { .. })), "{entry_kinds:?}");
+        let latch_kinds = kinds_in(&func, latch);
+        assert!(latch_kinds.iter().all(|k| !matches!(k, InstKind::Load { .. })), "{latch_kinds:?}");
+        assert!(!Licm.run(&mut func), "second run is a no-op");
+    }
+
+    #[test]
+    fn keeps_a_load_the_loop_can_overwrite() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::Void);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let slot = emit(
+            &mut func,
+            entry,
+            InstKind::Alloca {
+                pointee: Ty::int(32),
+                count: 1,
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let header = func.push_block(vec![]);
+        let latch = func.push_block(vec![]);
+        let exit = func.push_block(vec![]);
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: header,
+            args: Default::default(),
+        });
+        func.blocks[header].term = Some(Terminator::CondBr {
+            cond,
+            then_block: latch,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let store = func.insts.push(InstData {
+            block: latch,
+            kind: InstKind::Store {
+                addr: slot,
+                val: zero,
+                flags: crate::ir::MemFlags::plain(),
+            },
+            result: None,
+            loc: None,
+        });
+        func.blocks[latch].insts.push(store);
+        let read = emit(
+            &mut func,
+            latch,
+            InstKind::Load {
+                addr: slot,
+                flags: crate::ir::MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
+        let keep_going = emit(
+            &mut func,
+            latch,
+            InstKind::Icmp {
+                pred: IcmpPred::Ne,
+                lhs: read,
+                rhs: zero,
+            },
+            Ty::Bool,
+        );
+        func.blocks[latch].term = Some(Terminator::CondBr {
+            cond: keep_going,
+            then_block: header,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[exit].term = Some(Terminator::Return { val: None });
+
+        assert!(!Licm.run(&mut func));
+        assert!(verify_func(&func).is_empty());
+        assert!(kinds_in(&func, latch).iter().any(|k| matches!(k, InstKind::Load { .. })));
+    }
+
+    #[test]
+    fn keeps_volatile_loads_in_the_loop() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::Void);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let slot = emit(
+            &mut func,
+            entry,
+            InstKind::Alloca {
+                pointee: Ty::int(32),
+                count: 1,
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let header = func.push_block(vec![]);
+        let latch = func.push_block(vec![]);
+        let exit = func.push_block(vec![]);
+        func.blocks[entry].term = Some(Terminator::Br {
+            dest: header,
+            args: Default::default(),
+        });
+        func.blocks[header].term = Some(Terminator::CondBr {
+            cond,
+            then_block: latch,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let read = emit(
+            &mut func,
+            latch,
+            InstKind::Load {
+                addr: slot,
+                flags: crate::ir::MemFlags::vol(),
+            },
+            Ty::int(32),
+        );
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        let keep_going = emit(
+            &mut func,
+            latch,
+            InstKind::Icmp {
+                pred: IcmpPred::Ne,
+                lhs: read,
+                rhs: zero,
+            },
+            Ty::Bool,
+        );
+        func.blocks[latch].term = Some(Terminator::CondBr {
+            cond: keep_going,
+            then_block: header,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[exit].term = Some(Terminator::Return { val: None });
+
+        assert!(!Licm.run(&mut func));
+        assert!(verify_func(&func).is_empty());
+        assert!(kinds_in(&func, latch).iter().any(|k| matches!(k, InstKind::Load { .. })));
+    }
+
     #[test]
     fn hoists_from_a_self_loop() {
         let sig = Signature::new(vec![Ty::int(32)], Ty::int(32));

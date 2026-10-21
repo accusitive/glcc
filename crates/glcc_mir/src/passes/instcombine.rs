@@ -13,7 +13,7 @@
 //! rewritten this way leave the block immediately; the pipeline's
 //! `DeadCodeElim` only has to sweep what the rewrite orphaned.
 
-use crate::ir::{Block, Const, Def, Function, IcmpPred, Inst, InstData, InstKind, Value, ValueData};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, Value, ValueData};
 use crate::pass::FunctionPass;
 use crate::ty::Ty;
 
@@ -68,6 +68,12 @@ enum Plan {
     Const(Const),
     /// Rebuild the instruction with fewer operands (same result type).
     Inst(InstKind),
+    /// `v << amount` with a freshly materialized integer constant.
+    ShlBy(Value, u32),
+    /// `v >> amount` (logical) with a freshly materialized integer constant.
+    LshrBy(Value, u32),
+    /// `v & mask` with a freshly materialized integer constant.
+    AndConst(Value, i128),
     /// `!v` for a `Bool`-typed `v`, as `icmp.Eq v, 0`.
     BoolNot(Value),
 }
@@ -82,6 +88,8 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
                 Some(Plan::Value(*a))
             } else if is_int_zero(func, *a) {
                 Some(Plan::Value(*b))
+            } else if a == b && int_ty_bits(result_ty).is_some() {
+                Some(Plan::ShlBy(*a, 1))
             } else {
                 None
             }
@@ -91,6 +99,8 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
                 Some(Plan::Value(*a))
             } else if a == b {
                 Some(Plan::Const(zero_const(result_ty)?))
+            } else if is_int_zero(func, *a) && int_ty_bits(result_ty).is_some() {
+                Some(Plan::Inst(InstKind::Neg(*b)))
             } else {
                 None
             }
@@ -102,6 +112,14 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
                 Some(Plan::Value(*b))
             } else if is_int_one(func, *b) {
                 Some(Plan::Value(*a))
+            } else if is_all_ones(func, *a) {
+                Some(Plan::Inst(InstKind::Neg(*b)))
+            } else if is_all_ones(func, *b) {
+                Some(Plan::Inst(InstKind::Neg(*a)))
+            } else if let Some(shift) = int_pow2(func, *b) {
+                Some(Plan::ShlBy(*a, shift))
+            } else if let Some(shift) = int_pow2(func, *a) {
+                Some(Plan::ShlBy(*b, shift))
             } else {
                 None
             }
@@ -110,8 +128,22 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
         // and the remainder is zero for every input (including the
         // minimum signed value, whose `-1` cases are the dangerous
         // ones).
-        InstKind::Udiv(a, b) | InstKind::Sdiv(a, b) if is_int_one(func, *b) => Some(Plan::Value(*a)),
-        InstKind::Urem(_, b) | InstKind::Srem(_, b) if is_int_one(func, *b) => Some(Plan::Const(zero_const(result_ty)?)),
+        InstKind::Udiv(a, b) => {
+            if is_int_one(func, *b) {
+                Some(Plan::Value(*a))
+            } else {
+                int_pow2(func, *b).map(|shift| Plan::LshrBy(*a, shift))
+            }
+        }
+        InstKind::Sdiv(a, b) if is_int_one(func, *b) => Some(Plan::Value(*a)),
+        InstKind::Urem(a, b) => {
+            if is_int_one(func, *b) {
+                Some(Plan::Const(zero_const(result_ty)?))
+            } else {
+                int_pow2(func, *b).map(|shift| Plan::AndConst(*a, mask(shift) as i128))
+            }
+        }
+        InstKind::Srem(_, b) if is_int_one(func, *b) => Some(Plan::Const(zero_const(result_ty)?)),
         InstKind::And(a, b) => {
             if is_int_zero(func, *a) || is_int_zero(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
@@ -187,11 +219,28 @@ fn plan(func: &Function, inst: Inst) -> Option<Plan> {
                 _ => None,
             }
         }
+        InstKind::PtrToInt(a) => {
+            let inner = def_inst(func, *a)?;
+            match &func.insts[inner].kind {
+                InstKind::IntToPtr(x) if func.values[*x].ty == *result_ty => Some(Plan::Value(*x)),
+                _ => None,
+            }
+        }
+        InstKind::IntToPtr(a) => {
+            let inner = def_inst(func, *a)?;
+            match &func.insts[inner].kind {
+                InstKind::PtrToInt(x) if func.values[*x].ty == *result_ty => Some(Plan::Value(*x)),
+                _ => None,
+            }
+        }
         InstKind::Icmp { pred, lhs, rhs } => {
             if lhs == rhs && !is_float(func, *lhs) {
                 let truth = matches!(pred, IcmpPred::Eq | IcmpPred::Sle | IcmpPred::Ule | IcmpPred::Sge | IcmpPred::Uge);
                 let bits = int_ty_bits(result_ty)?;
                 return Some(Plan::Const(Const::Int { bits, value: i128::from(truth) }));
+            }
+            if let Some(plan) = bool_zero_compare(func, *pred, *lhs, *rhs) {
+                return Some(plan);
             }
             let (pred, zext_side, zero_side) = (*pred, *lhs, *rhs);
             for (maybe_zext, maybe_zero) in [(zext_side, zero_side), (zero_side, zext_side)] {
@@ -240,6 +289,18 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
                 rhs: zero,
             })
         }
+        Plan::ShlBy(v, amount) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Shl(v, push_int_const(func, &ty, amount as i128)))
+        }
+        Plan::LshrBy(v, amount) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::LShr(v, push_int_const(func, &ty, amount as i128)))
+        }
+        Plan::AndConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::And(v, push_int_const(func, &ty, value)))
+        }
         other => other,
     };
     match plan {
@@ -272,7 +333,9 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
-        Plan::BoolNot(_) => unreachable!("normalized above"),
+        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) => {
+            unreachable!("normalized above")
+        }
     }
 }
 
@@ -306,6 +369,87 @@ fn zext_bool(func: &Function, v: Value) -> Option<Value> {
         InstKind::Zext(x) if func.values[*x].ty == Ty::Bool => Some(*x),
         _ => None,
     }
+}
+
+/// `(cmp == 0)` and `(cmp != 0)` for a comparison result `cmp`.
+fn bool_zero_compare(func: &Function, outer: IcmpPred, lhs: Value, rhs: Value) -> Option<Plan> {
+    if !matches!(outer, IcmpPred::Eq | IcmpPred::Ne) {
+        return None;
+    }
+    let cmp = if is_int_zero(func, rhs) {
+        lhs
+    } else if is_int_zero(func, lhs) {
+        rhs
+    } else {
+        return None;
+    };
+    if func.values[cmp].ty != Ty::Bool {
+        return None;
+    }
+    let inst = def_inst(func, cmp)?;
+    match &func.insts[inst].kind {
+        InstKind::Icmp { pred, lhs, rhs } => match outer {
+            IcmpPred::Ne => Some(Plan::Value(cmp)),
+            IcmpPred::Eq => Some(Plan::Inst(InstKind::Icmp {
+                pred: invert_icmp(*pred),
+                lhs: *lhs,
+                rhs: *rhs,
+            })),
+            _ => None,
+        },
+        InstKind::Fcmp { pred, lhs, rhs } => match outer {
+            IcmpPred::Ne => Some(Plan::Value(cmp)),
+            IcmpPred::Eq => Some(Plan::Inst(InstKind::Fcmp {
+                pred: invert_fcmp(*pred),
+                lhs: *lhs,
+                rhs: *rhs,
+            })),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn invert_icmp(pred: IcmpPred) -> IcmpPred {
+    match pred {
+        IcmpPred::Eq => IcmpPred::Ne,
+        IcmpPred::Ne => IcmpPred::Eq,
+        IcmpPred::Ult => IcmpPred::Uge,
+        IcmpPred::Ule => IcmpPred::Ugt,
+        IcmpPred::Ugt => IcmpPred::Ule,
+        IcmpPred::Uge => IcmpPred::Ult,
+        IcmpPred::Slt => IcmpPred::Sge,
+        IcmpPred::Sle => IcmpPred::Sgt,
+        IcmpPred::Sgt => IcmpPred::Sle,
+        IcmpPred::Sge => IcmpPred::Slt,
+    }
+}
+
+fn invert_fcmp(pred: FcmpPred) -> FcmpPred {
+    match pred {
+        FcmpPred::Eq => FcmpPred::Ne,
+        FcmpPred::Ne => FcmpPred::Eq,
+        FcmpPred::Lt => FcmpPred::Ge,
+        FcmpPred::Le => FcmpPred::Gt,
+        FcmpPred::Gt => FcmpPred::Le,
+        FcmpPred::Ge => FcmpPred::Lt,
+        FcmpPred::Uno => FcmpPred::Ord,
+        FcmpPred::Ord => FcmpPred::Uno,
+    }
+}
+
+/// The shift amount for a positive power-of-two constant.
+fn int_pow2(func: &Function, v: Value) -> Option<u32> {
+    let (bits, value) = int_const(func, v)?;
+    if bits == 0 || bits > 128 {
+        return None;
+    }
+    let value = wrap(bits, value);
+    if value <= 0 {
+        return None;
+    }
+    let value = value as u128;
+    value.is_power_of_two().then(|| value.trailing_zeros())
 }
 
 fn int_const(func: &Function, v: Value) -> Option<(u32, i128)> {
@@ -348,6 +492,14 @@ fn all_ones_const(ty: &Ty) -> Option<Const> {
     Some(Const::Int {
         bits: int_ty_bits(ty)?,
         value: -1,
+    })
+}
+
+fn push_int_const(func: &mut Function, ty: &Ty, value: i128) -> Value {
+    let bits = int_ty_bits(ty).expect("integer plan");
+    func.values.push(ValueData {
+        ty: ty.clone(),
+        def: Def::Const(Const::Int { bits, value }),
     })
 }
 
@@ -704,6 +856,179 @@ mod tests {
         let _ = emit(&mut func, entry, InstKind::Add(x, zero), Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: None });
         assert!(!run(&mut func));
+    }
+
+    #[test]
+    fn doubled_add_becomes_a_shift() {
+        let (mut func, entry, x) = int_func();
+        let sum = emit(&mut func, entry, InstKind::Add(x, x), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt shift");
+        match &func.insts[inst].kind {
+            InstKind::Shl(lhs, amount) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 1 }));
+            }
+            other => panic!("expected shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multiply_by_a_power_of_two_shifts() {
+        for constant_on_the_left in [false, true] {
+            let (mut func, entry, x) = int_func();
+            let eight = iconst(&mut func, 32, 8);
+            let product = if constant_on_the_left {
+                emit(&mut func, entry, InstKind::Mul(eight, x), Ty::int(32))
+            } else {
+                emit(&mut func, entry, InstKind::Mul(x, eight), Ty::int(32))
+            };
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(product) });
+            assert!(run(&mut func), "constant on left: {constant_on_the_left}");
+            let inst = def_inst(&func, returned(&func)).expect("rebuilt shift");
+            match &func.insts[inst].kind {
+                InstKind::Shl(lhs, amount) => {
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 3 }));
+                }
+                other => panic!("expected shift, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn multiply_by_minus_one_negates() {
+        let (mut func, entry, x) = int_func();
+        let minus_one = iconst(&mut func, 32, -1);
+        let product = emit(&mut func, entry, InstKind::Mul(x, minus_one), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(product) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt negation");
+        match &func.insts[inst].kind {
+            InstKind::Neg(operand) => assert_eq!(*operand, x),
+            other => panic!("expected negation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_minus_x_negates() {
+        let (mut func, entry, x) = int_func();
+        let zero = iconst(&mut func, 32, 0);
+        let difference = emit(&mut func, entry, InstKind::Sub(zero, x), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(difference) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt negation");
+        match &func.insts[inst].kind {
+            InstKind::Neg(operand) => assert_eq!(*operand, x),
+            other => panic!("expected negation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_division_by_a_power_of_two_shifts() {
+        let (mut func, entry, x) = int_func();
+        let eight = iconst(&mut func, 32, 8);
+        let quotient = emit(&mut func, entry, InstKind::Udiv(x, eight), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(quotient) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt shift");
+        match &func.insts[inst].kind {
+            InstKind::LShr(lhs, amount) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 3 }));
+            }
+            other => panic!("expected logical shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_remainder_by_a_power_of_two_masks() {
+        let (mut func, entry, x) = int_func();
+        let eight = iconst(&mut func, 32, 8);
+        let remainder = emit(&mut func, entry, InstKind::Urem(x, eight), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(remainder) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt mask");
+        match &func.insts[inst].kind {
+            InstKind::And(lhs, amount) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 7 }));
+            }
+            other => panic!("expected mask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pointer_integer_round_trips_cancel() {
+        let ptr_ty = Ty::ptr(Ty::int(8));
+        let sig = Signature::new(vec![ptr_ty.clone()], ptr_ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let p = param(&mut func, entry, ptr_ty.clone(), 0);
+        let int = emit(&mut func, entry, InstKind::PtrToInt(p), Ty::int(64));
+        let back = emit(&mut func, entry, InstKind::IntToPtr(int), ptr_ty);
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(back) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), p);
+
+        let sig = Signature::new(vec![Ty::int(64)], Ty::int(64));
+        let (mut func, entry) = Function::new("g", sig);
+        let int = param(&mut func, entry, Ty::int(64), 0);
+        let ptr_ty = Ty::ptr(Ty::int(8));
+        let p = emit(&mut func, entry, InstKind::IntToPtr(int), ptr_ty);
+        let back = emit(&mut func, entry, InstKind::PtrToInt(p), Ty::int(64));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(back) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), int);
+    }
+
+    #[test]
+    fn negated_comparison_inverts_the_predicate() {
+        let sig = Signature::new(vec![Ty::int(32), Ty::int(32)], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig.clone());
+        let a = param(&mut func, entry, Ty::int(32), 0);
+        let b = param(&mut func, entry, Ty::int(32), 1);
+        let less = emit(&mut func, entry, InstKind::Icmp { pred: IcmpPred::Slt, lhs: a, rhs: b }, Ty::Bool);
+        let zero = iconst(&mut func, 1, 0);
+        let not_less = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Eq,
+                lhs: less,
+                rhs: zero,
+            },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(not_less) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt comparison");
+        match &func.insts[inst].kind {
+            InstKind::Icmp { pred, lhs, rhs } => {
+                assert_eq!(*pred, IcmpPred::Sge);
+                assert_eq!((*lhs, *rhs), (a, b));
+            }
+            other => panic!("expected comparison, got {other:?}"),
+        }
+
+        let (mut func, entry) = Function::new("g", sig);
+        let a = param(&mut func, entry, Ty::int(32), 0);
+        let b = param(&mut func, entry, Ty::int(32), 1);
+        let less = emit(&mut func, entry, InstKind::Icmp { pred: IcmpPred::Slt, lhs: a, rhs: b }, Ty::Bool);
+        let zero = iconst(&mut func, 1, 0);
+        let truthy = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Ne,
+                lhs: less,
+                rhs: zero,
+            },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(truthy) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), less);
     }
 
     #[test]

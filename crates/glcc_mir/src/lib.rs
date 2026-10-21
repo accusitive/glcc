@@ -20,6 +20,7 @@ pub mod coroutine;
 pub mod debug;
 pub mod display;
 pub mod ir;
+pub mod optimize;
 pub mod pass;
 pub mod passes;
 pub mod ty;
@@ -31,5 +32,6 @@ pub use ir::{
     AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, FcmpPred, Func, Function, Global, GlobalData, IcmpPred, Inst, InstData,
     InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
+pub use optimize::{optimize, OptLevel};
 pub use pass::{FunctionPass, ModulePass, PassManager};
 pub use ty::{FloatKind, GepIndex, Signature, Ty, dense_field_offsets, struct_field_offsets};
