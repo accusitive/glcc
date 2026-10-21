@@ -8,8 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use glcc_mir::pass::PassManager;
-use glcc_mir::passes;
+use glcc_mir::OptLevel;
 
 const USAGE: &str = "\
 fernc — compile fern to an object file or a MIR dump
@@ -34,26 +33,6 @@ enum Emit {
     Mir,
     FullMir,
     Check,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum OptLevel {
-    #[default]
-    None,
-    Speed,
-}
-
-impl OptLevel {
-    fn flag(self) -> &'static str {
-        match self {
-            OptLevel::None => "none",
-            OptLevel::Speed => "speed",
-        }
-    }
-
-    fn optimize(self) -> bool {
-        self == OptLevel::Speed
-    }
 }
 
 struct Options {
@@ -146,22 +125,9 @@ fn run(opts: &Options) -> Result<(), String> {
         eprintln!("--- mir (frontend output) ---\n{}", glcc_mir::display::dump_module(&module));
     }
     if opts.opt.optimize() {
-        // Same pipeline the C driver runs: inline, promote slots, fold
-        // and simplify instructions, simplify the CFG, and sweep dead
-        // code to a fixpoint.
-        let mut pm = PassManager::new()
-            .add_module_pass(passes::Inline::small())
-            .add_func_pass(passes::Sroa)
-            .add_func_pass(passes::Mem2Reg)
-            .add_func_pass(passes::ConstFold)
-            .add_func_pass(passes::Sccp)
-            .add_func_pass(passes::InstCombine)
-            .add_func_pass(passes::ConstMerge)
-            .add_func_pass(passes::Cse)
-            .add_func_pass(passes::Licm)
-            .add_func_pass(passes::SimplifyCfg)
-            .add_func_pass(passes::DeadCodeElim);
-        pm.run(&mut module);
+        // The canonical pipeline shared with the C driver, explorer,
+        // and runtime; it is a no-op at `-O0`.
+        glcc_mir::optimize(&mut module, opts.opt);
     }
     if opts.debug {
         eprintln!("--- mir (after passes) ---\n{}", glcc_mir::display::dump_module(&module));

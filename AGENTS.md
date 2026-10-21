@@ -5,13 +5,12 @@
 - Tests that current fail but should work eventually are allowed and encouraged. Testing is not just for regressions, but also helps immensesly for building features.
 ## Verify constantly
 
-- Run `cargo build` after every edit and `cargo test --workspace`
-  before finishing any change. Small steps, always green. (Past mishaps
-  came from batching too many edits between compiles.)
-
-  `--workspace` is required: `cargo test` alone only tests the root
-  package, while the `glcc_frontend` suite lives in
-  `crates/glcc_frontend`.
+- Run `cargo build` after every edit and run the tests pertinent to the
+  change before finishing (the owning package, e.g. `cargo test -p
+  glcc_frontend` or `cargo test -p fern --test lower`). Small steps,
+  always green. (Past mishaps came from batching too many edits between
+  compiles.) CI runs the full workspace suite, so there is no need to
+  run it locally.
 
   Building `glcpp` (and with it EDG) is opt-in via `--features cxx`:
   `cargo build -p glcpp --features cxx` (or `cargo build --workspace

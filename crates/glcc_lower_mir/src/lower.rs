@@ -7416,23 +7416,9 @@ mod tests {
 
     use super::{lower_translation_unit, naked_asm_text};
 
-    /// The driver's optimization pipeline (`src/driver.rs`).
+    /// The driver's optimization pipeline, shared through `glcc_mir`.
     fn run_opt_pipeline(module: &mut mir::Module) {
-        let mut pm = mir::pass::PassManager::new()
-            .add_module_pass(mir::passes::Inline::small())
-            .add_func_pass(mir::passes::Sroa)
-            .add_func_pass(mir::passes::Mem2Reg)
-            .add_func_pass(mir::passes::ConstFold)
-            .add_func_pass(mir::passes::Sccp)
-            .add_func_pass(mir::passes::ForwardAggregateCopy)
-            .add_func_pass(mir::passes::DeadStoreElim)
-            .add_func_pass(mir::passes::InstCombine)
-            .add_func_pass(mir::passes::ConstMerge)
-            .add_func_pass(mir::passes::Cse)
-            .add_func_pass(mir::passes::Licm)
-            .add_func_pass(mir::passes::SimplifyCfg)
-            .add_func_pass(mir::passes::DeadCodeElim);
-        pm.run(module);
+        mir::optimize(module, mir::OptLevel::Speed);
     }
 
     /// The optimized pipeline collapses C integer-promotion round
