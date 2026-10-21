@@ -803,6 +803,16 @@ pub(crate) fn marker_flag(n: i64, display: &str, flag: u8) -> String {
     format!("# {n} \"{}\" {flag}\n", display.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Markers are only recognized at the start of a line, and the previous
+/// file may have ended in the middle of one (its trailing text can be
+/// directives that emit no newline).
+fn push_marker(out: &mut String, marker: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(marker);
+}
+
 /// Clang's `-E` output padding, reproduced so expanded text matches
 /// byte-for-byte: at a macro-expansion boundary, emit one space iff
 /// the adjoining characters are `(digit-or-dot, +, -, .)` or
@@ -868,11 +878,16 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
     let main_path = PathBuf::from(filename);
     let main_dir = main_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let main_display = interner.get_or_intern(filename.to_string());
-    // `-include` files come first, as if included at line 1.
+    // `-include` files come first, as if included at line 1. GCC looks
+    // for them in the working directory before the usual quote chain.
     for pre in opts.preincludes.clone() {
-        let (target, found) = ctx
-            .resolve_header(&pre, true, None, &main_dir, filename)
-            .map_err(|_| err(format!("{filename}: -include '{pre}' not found")))?;
+        let literal = PathBuf::from(&pre);
+        let (target, found) = if literal.is_file() {
+            (literal, FoundKind::Start)
+        } else {
+            ctx.resolve_header(&pre, true, None, &main_dir, filename)
+                .map_err(|_| err(format!("{filename}: -include '{pre}' not found")))?
+        };
         let canon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
         if ctx.once.contains(&canon) {
             continue;
@@ -896,7 +911,7 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
         r?;
     }
     if opts.linemarkers {
-        ctx.out.push_str(&marker(1, filename));
+        push_marker(&mut ctx.out, &marker(1, filename));
     }
     run_source(
         source,
@@ -988,7 +1003,7 @@ fn run_source(
     let disp_str = interner.resolve(display).unwrap_or("").to_string();
     let trees = tree::collect_trees(toks, &disp_str, interner)?;
     if entered && opts.linemarkers {
-        ctx.out.push_str(&marker_flag(1, &disp_str, 1));
+        push_marker(&mut ctx.out, &marker_flag(1, &disp_str, 1));
     }
     let mut expander = Expander {
         interner,
@@ -1244,6 +1259,52 @@ mod tests {
         assert!(linux.contains("clang-intrin"), "was: {linux}");
         let _ = std::fs::remove_dir_all(&resource);
         let _ = std::fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn preinclude_searches_working_directory_first() {
+        let rel = format!("./glcc-pp-preinclude-{}.h", std::process::id());
+        std::fs::write(&rel, "int pre = 1;\n").unwrap();
+        let dir = test_dir("preinc");
+        let main = dir.join("main.c");
+        write_file(&main, "int m = pre;\n");
+        let o = PpOptions {
+            preincludes: vec![rel.clone()],
+            ..opts()
+        };
+        let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &o).unwrap();
+        assert_eq!(got, "int pre = 1;\nint m = pre;\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&rel);
+    }
+
+    #[test]
+    fn preinclude_marker_starts_on_a_fresh_line() {
+        let rel = format!("./glcc-pp-preinclude-marker-{}.h", std::process::id());
+        std::fs::write(&rel, "};").unwrap();
+        let o = PpOptions {
+            preincludes: vec![rel.clone()],
+            linemarkers: true,
+            ..opts()
+        };
+        let got = preprocess("int m;\n", "main.c", &o).unwrap();
+        assert!(got.contains("};\n# 1 \"main.c\"\n"), "was:\n{got}");
+        let _ = std::fs::remove_file(&rel);
+    }
+
+    #[test]
+    fn include_from_function_like_macro() {
+        let dir = test_dir("inc-fn");
+        write_file(&dir.join("sub.h"), "int sub = 1;\n");
+        let main = dir.join("main.c");
+        write_file(&main, "#define HDR(x) <x.h>\n#include HDR(sub)\n");
+        let o = PpOptions {
+            include_paths: vec![dir.clone()],
+            ..opts()
+        };
+        let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &o).unwrap();
+        assert!(got.contains("int sub = 1;"), "was: {got}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

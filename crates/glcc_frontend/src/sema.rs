@@ -1091,10 +1091,16 @@ fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initiali
         | CheckedExprKind::Str(_)
         | CheckedExprKind::ConstantP(_)
         | CheckedExprKind::ClassifyType(_)
+        | CheckedExprKind::ObjectSize
         | CheckedExprKind::Offsetof { .. }
         | CheckedExprKind::SizeofTy(_)
         | CheckedExprKind::AlignofTy(_)
         | CheckedExprKind::LabelAddr(_) => {}
+        CheckedExprKind::OffsetofDynamic { terms, .. } => {
+            for (index, _) in terms {
+                remap_expr_ident(index, inits, map);
+            }
+        }
         CheckedExprKind::Unary(_, e)
         | CheckedExprKind::Await(e)
         | CheckedExprKind::Cast { expr: e, .. }

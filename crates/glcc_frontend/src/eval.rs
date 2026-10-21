@@ -785,6 +785,29 @@ pub fn align_of_expr(sema: &Sema, operand: &CheckedExpr, interner: &Interner) ->
     declared.or_else(|| align_of(sema, &operand.ty, interner))
 }
 
+/// Constant-fold the compiler builtins whose value is a pure function
+/// of constant arguments (byte swaps and the ASCII `isdigit`).
+fn eval_builtin_call(func: &CheckedExpr, args: &[CheckedExpr], sema: &Sema, interner: &Interner) -> Option<Value> {
+    let CheckedExprKind::Ident(id) = func.kind else {
+        return None;
+    };
+    let name = sema.decls[id.0 as usize].name.and_then(|n| interner.resolve(n))?;
+    let value = || {
+        let Value::Int(n) = eval_const(args.first()?, sema, interner)? else {
+            return None;
+        };
+        Some(n)
+    };
+    let folded = match name {
+        "__builtin_bswap16" => (value()? as u16).swap_bytes() as i128,
+        "__builtin_bswap32" => (value()? as u32).swap_bytes() as i128,
+        "__builtin_bswap64" => (value()? as u64).swap_bytes() as i128,
+        "__builtin_isdigit" => i128::from((b'0' as i128..=b'9' as i128).contains(&value()?)),
+        _ => return None,
+    };
+    Some(Value::Int(folded))
+}
+
 /// Fold a checked expression to a constant, or `None` when it is not a
 /// constant expression.
 pub fn eval_const(expr: &CheckedExpr, sema: &Sema, interner: &Interner) -> Option<Value> {
@@ -876,6 +899,7 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         CheckedExprKind::ConstantP(b) => Some(Value::Int(*b as i128)),
         // Folded at check time from the operand's type.
         CheckedExprKind::ClassifyType(code) => Some(Value::Int(*code as i128)),
+        CheckedExprKind::ObjectSize => Some(Value::Int(-1)),
         // Classifications fold over constant operands (integers never
         // reach here; they fold at check time).
         CheckedExprKind::FpClass { op, arg } => match eval_const(arg, sema, interner)? {
@@ -914,7 +938,8 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             };
             eval_const(&codes[index], sema, interner)
         }
-        CheckedExprKind::Call { .. }
+        CheckedExprKind::Call { func, args } => eval_builtin_call(func, args, sema, interner),
+        CheckedExprKind::OffsetofDynamic { .. }
         | CheckedExprKind::VaArg { .. }
         | CheckedExprKind::Atomic { .. }
         | CheckedExprKind::Overflow { .. }

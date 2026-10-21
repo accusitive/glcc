@@ -267,6 +267,9 @@ pub enum CheckedExprKind {
     /// for the argument's type. The argument is checked but discarded
     /// (GCC never evaluates it), so only the folded code remains.
     ClassifyType(u8),
+    /// A folded `__builtin_object_size`/`__builtin_dynamic_object_size`.
+    /// No object-size tracking exists, so it is always `(size_t)-1`.
+    ObjectSize,
     /// A floating-point classification (`__builtin_isnan`,
     /// `__builtin_isinf`, ..., `__builtin_signbit`): single evaluation,
     /// unlike an `x != x` desugaring. The operand keeps its own type;
@@ -334,6 +337,13 @@ pub enum CheckedExprKind {
     Offsetof {
         ty: Ty,
         offset: u64,
+    },
+    /// `__builtin_offsetof` with a non-constant array index (a GNU
+    /// extension used by the kernel's `container_of(..., member[idx])`):
+    /// the offset is `base + sum(index * elem_size)`.
+    OffsetofDynamic {
+        base: u64,
+        terms: Vec<(Box<CheckedExpr>, u64)>,
     },
     CompoundLiteral {
         ty: Ty,
@@ -572,6 +582,9 @@ pub enum LetterClass {
     /// A memory operand: the operand's address goes to the template in
     /// a scratch register.
     Memory,
+    /// An address operand (`"p"`): the expression already yields the
+    /// address, so it is evaluated as a value rather than as an lvalue.
+    Address,
     /// An immediate integer constant, substituted textually.
     Immediate,
     /// A letter this machine has but this frontend cannot honor; the
@@ -619,6 +632,10 @@ pub fn constraint_letter(arch: Arch, letter: &str) -> Option<LetterClass> {
         (Aarch64, "Uci" | "Ucj") => LetterClass::Register(None),
         // Memory.
         (_, "m" | "o") => LetterClass::Memory,
+        // `"p"` is an address-valued operand: the expression is already
+        // a pointer (the kernel's `percpu_stable_op` passes `&var`), so
+        // it is not an lvalue and must not be treated as `"m"`.
+        (_, "p") => LetterClass::Address,
         (Aarch64, "Q") => LetterClass::Memory,
         (Aarch64, _) if letter.starts_with('U') => LetterClass::Memory,
         (Riscv64, "A") => LetterClass::Memory,
@@ -2096,11 +2113,11 @@ impl Sema {
                 })
             }
             Expr::Offsetof { ty, designators, .. } => {
-                let offset = self.check_offsetof(ty, designators, interner, span)?;
+                let kind = self.check_offsetof(ty, designators, interner, span)?;
                 Ok(CheckedExpr {
                     ty: self.target.size_type(),
                     span,
-                    kind: CheckedExprKind::Offsetof { ty: ty.clone(), offset },
+                    kind,
                 })
             }
             Expr::StmtExpr { items, .. } => {
@@ -2752,6 +2769,9 @@ impl Sema {
                 Some("__builtin_classify_type") => return self.check_classify_type(args, interner, span),
                 Some("__builtin_choose_expr") => return self.check_choose_expr(args, interner, span),
                 Some("__builtin_prefetch") => return self.check_prefetch(args, interner, span),
+                Some("__builtin_object_size" | "__builtin_dynamic_object_size") => {
+                    return self.check_object_size(args, interner, span, "__builtin_object_size");
+                }
                 Some("alloca" | "__builtin_alloca") => {
                     return self.check_alloca(args, interner, span);
                 }
@@ -3624,6 +3644,28 @@ impl Sema {
         })
     }
 
+    /// `size_t __builtin_object_size(ptr, type)`: without an
+    /// optimization pipeline that tracks object bounds the answer is
+    /// always "unknown", `(size_t)-1`, as GCC reports at `-O0`.
+    fn check_object_size(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+        let [ptr, kind] = args else {
+            return Err(CompileError::new(format!("`{what}` takes exactly two arguments"), span));
+        };
+        let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
+        if !matches!(ptr.ty.unqualified(), Ty::Pointer { .. }) {
+            return Err(CompileError::new(format!("`{what}` needs a pointer argument"), ptr.span));
+        }
+        let kind = self.check_expr(kind, interner)?;
+        if !is_integer(&kind.ty) {
+            return Err(CompileError::new(format!("`{what}` needs an integer second argument"), kind.span));
+        }
+        Ok(CheckedExpr {
+            ty: self.target.size_type(),
+            span,
+            kind: CheckedExprKind::ObjectSize,
+        })
+    }
+
     /// `void __builtin_prefetch(addr[, rw[, locality]])`: a hint, so
     /// only the address is kept (evaluated and dropped through a
     /// `void` cast); the access/locality arguments are checked and
@@ -3999,12 +4041,13 @@ impl Sema {
         })
     }
 
-    /// Byte offset of a `__builtin_offsetof(TYPE, .a.b[i])` designator
+    /// Offset of a `__builtin_offsetof(TYPE, .a.b[i])` designator
     /// (GCC's `offsetof`): each `.field` descends through the current
-    /// struct or union (anonymous members included), each `[i]` needs
-    /// an integer constant index into a member array. Bit-fields have
-    /// no addressable offset and are rejected, like GCC.
-    fn check_offsetof(&self, ty: &Ty, designators: &[Designator], interner: &Interner, span: Span) -> Result<u64, CompileError> {
+    /// struct or union (anonymous members included). Constant indices
+    /// fold into the returned offset; a non-constant index (a GNU
+    /// extension) leaves a runtime `index * sizeof(element)` term.
+    /// Bit-fields have no addressable offset and are rejected, like GCC.
+    fn check_offsetof(&self, ty: &Ty, designators: &[Designator], interner: &Interner, span: Span) -> Result<CheckedExprKind, CompileError> {
         let Ty::Struct(_) = ty.unqualified() else {
             return Err(CompileError::new("`offsetof` needs a struct or union type", span));
         };
@@ -4013,6 +4056,7 @@ impl Sema {
         }
         let mut cur = ty.clone();
         let mut offset: u64 = 0;
+        let mut terms: Vec<(Box<CheckedExpr>, u64)> = Vec::new();
         let mut visiting = Vec::new();
         for designator in designators {
             match designator {
@@ -4065,18 +4109,22 @@ impl Sema {
                     if !is_integer(&index.ty) {
                         return Err(CompileError::new("array designator must have integer type", *span));
                     }
-                    let n = match crate::eval::eval_const(index, self, interner) {
-                        Some(crate::eval::Value::Int(n)) if n >= 0 => n as u64,
-                        _ => {
-                            return Err(CompileError::new("offsetof index is not an integer constant expression", *span));
-                        }
-                    };
                     let elem_size = self
                         .type_size(elem, interner)
                         .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
-                    offset = offset
-                        .checked_add(n.checked_mul(elem_size).ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?)
-                        .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
+                    match crate::eval::eval_const(index, self, interner) {
+                        Some(crate::eval::Value::Int(n)) if n >= 0 => {
+                            offset = offset
+                                .checked_add((n as u64).checked_mul(elem_size).ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?)
+                                .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
+                        }
+                        // GCC accepts a runtime index here, computing
+                        // `i * sizeof(elem)` wherever the offset is used.
+                        _ => {
+                            let index = self.convert(index.clone(), self.target.size_type());
+                            terms.push((Box::new(index), elem_size));
+                        }
+                    }
                     cur = elem.as_ref().clone();
                 }
                 Designator::AnonField { span, .. } => {
@@ -4084,7 +4132,11 @@ impl Sema {
                 }
             }
         }
-        Ok(offset)
+        if terms.is_empty() {
+            Ok(CheckedExprKind::Offsetof { ty: ty.clone(), offset })
+        } else {
+            Ok(CheckedExprKind::OffsetofDynamic { base: offset, terms })
+        }
     }
 
     fn check_cast(&self, ty: &Ty, operand: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {

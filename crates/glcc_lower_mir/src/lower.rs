@@ -88,6 +88,7 @@ enum ScalarBuiltin {
     Popcnt,
     Copysign,
     Bswap,
+    IsDigit,
     Ceil,
     Floor,
     Trap,
@@ -3312,6 +3313,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
             fe::check::CheckedExprKind::Offsetof { offset, .. } => self.iconst(func, int_bits(&mir_ty), *offset as i128),
+            fe::check::CheckedExprKind::OffsetofDynamic { base, terms } => {
+                let bits = int_bits(&mir_ty);
+                let mut acc = self.iconst(func, bits, *base as i128);
+                for (index, elem_size) in terms {
+                    let value = self.expr_value(module, func, frame, funcs, externs, globals, index);
+                    let size = self.iconst(func, bits, *elem_size as i128);
+                    let product = self.emit(func, frame, mir::InstKind::Mul(value, size), mir_ty.clone());
+                    acc = self.emit(func, frame, mir::InstKind::Add(acc, product), mir_ty.clone());
+                }
+                acc
+            }
             fe::check::CheckedExprKind::Generic { index, assocs, .. } => {
                 let Some((_, chosen)) = assocs.get(*index) else {
                     panic!("generic association index out of range");
@@ -3320,6 +3332,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             }
             fe::check::CheckedExprKind::ConstantP(b) => self.iconst(func, int_bits(&mir_ty), i128::from(*b)),
             fe::check::CheckedExprKind::ClassifyType(code) => self.iconst(func, int_bits(&mir_ty), i128::from(*code)),
+            fe::check::CheckedExprKind::ObjectSize => self.iconst(func, int_bits(&mir_ty), -1),
             fe::check::CheckedExprKind::FpClass { op, arg } => {
                 return self.lower_fp_class(module, func, frame, funcs, externs, globals, op, arg, &mir_ty);
             }
@@ -4729,6 +4742,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             },
             Some("__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll") => Some(ScalarBuiltin::Popcnt),
             Some("__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64") => Some(ScalarBuiltin::Bswap),
+            Some("__builtin_isdigit") => Some(ScalarBuiltin::IsDigit),
             // MSVC's `<intrin.h>` spellings of the same byte swaps.
             Some("_byteswap_ushort" | "_byteswap_ulong" | "_byteswap_uint64") => Some(ScalarBuiltin::Bswap),
             Some("__builtin_ceil" | "__builtin_ceill") => Some(ScalarBuiltin::Ceil),
@@ -4910,6 +4924,27 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let raw = self.emit(func, frame, mir::InstKind::Bitcast(combined), operand_mir.clone());
             return self.convert(func, frame, raw, &x.ty, fe_ty);
         }
+        // `isdigit(c)`: ASCII `'0'..='9'`, so `(unsigned)(c - '0') <= 9`.
+        if matches!(builtin, ScalarBuiltin::IsDigit) {
+            let arg = &args[0];
+            let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
+            let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+            let bits = int_bits(&operand_mir);
+            let zero_char = self.iconst(func, bits, i128::from(b'0'));
+            let shifted = self.emit(func, frame, mir::InstKind::Sub(value, zero_char), operand_mir.clone());
+            let nine = self.iconst(func, bits, 9);
+            let raw = self.emit(
+                func,
+                frame,
+                mir::InstKind::Icmp {
+                    pred: mir::IcmpPred::Ule,
+                    lhs: shifted,
+                    rhs: nine,
+                },
+                mir::Ty::Bool,
+            );
+            return self.convert(func, frame, raw, &arg.ty, fe_ty);
+        }
         let arg = &args[0];
         let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
         let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
@@ -4920,7 +4955,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             ScalarBuiltin::Bswap => mir::InstKind::Bswap(value),
             ScalarBuiltin::Ceil => mir::InstKind::Ceil(value),
             ScalarBuiltin::Floor => mir::InstKind::Floor(value),
-            ScalarBuiltin::Trap | ScalarBuiltin::Sync | ScalarBuiltin::Abs | ScalarBuiltin::Clrsb | ScalarBuiltin::Parity | ScalarBuiltin::Copysign => {
+            ScalarBuiltin::Trap
+            | ScalarBuiltin::Sync
+            | ScalarBuiltin::Abs
+            | ScalarBuiltin::Clrsb
+            | ScalarBuiltin::Parity
+            | ScalarBuiltin::Copysign
+            | ScalarBuiltin::IsDigit => {
                 unreachable!("handled above")
             }
         };
@@ -9930,6 +9971,36 @@ mod tests {
             Some(mir::Const::Int { bits: 32, value: 5 })
         );
         assert_eq!(operand_value("int main(){int y, x; asm(\"add %1, %0\" : \"+r\"(y) : \"Ir\"(x)); return y;}"), None);
+    }
+
+    #[test]
+    fn unused_static_inline_asm_bodies_are_dropped() {
+        // The kernel's `static inline` helpers use `"i"` operands that
+        // are only constant at inlined call sites. A body with no
+        // callers must not be lowered (GCC drops it too).
+        assert_eq!(
+            run_main(
+                "static inline int needs_constant(long n) {\n\
+                 \x20   int x;\n\
+                 \x20   __asm__(\"testb %2,%1\" : \"=qm\"(x) : \"m\"(*(volatile char *)0), \"i\"(1 << (n & 7)) : \"memory\");\n\
+                 \x20   return x;\n\
+                 }\n\
+                 int main(void) { return 7; }"
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn offsetof_with_a_runtime_index_computes_at_runtime() {
+        assert_eq!(
+            run_main(
+                "struct S { int x; int a[4]; };\n\
+                 int f(int i) { return (int)__builtin_offsetof(struct S, a[i]); }\n\
+                 int main(void) { return f(2); }"
+            ),
+            12
+        );
     }
 
     #[test]

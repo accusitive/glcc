@@ -189,7 +189,7 @@ impl State {
                 let mut expected = Lat::Unknown;
                 for from_idx in 0..func.blocks.len() {
                     let from = Block::from_usize(from_idx);
-                    if !self.executable[from_idx] {
+                    if !self.executable[from_idx] || !self.proven_successors(func, from).contains(&block) {
                         continue;
                     }
                     let Some(arg) = edge_arg(func, from, block, i) else {
@@ -256,32 +256,48 @@ impl State {
         for i in 0..func.blocks[block].insts.len() {
             self.eval_inst(func, func.blocks[block].insts[i]);
         }
-        let Some(term) = func.blocks[block].term.clone() else {
-            return;
+        for dest in self.proven_successors(func, block) {
+            self.mark_edge(block, dest);
+        }
+    }
+
+    /// The successors a proven edge reaches: the branch arm the solved
+    /// condition picks, the resolved switch arm, or the destination of
+    /// an unconditional branch. An unknown condition or a return
+    /// reaches none. Both the solve and the fixpoint checker read
+    /// edges through here, so an untaken arm's arguments can never
+    /// inflate the checker's expected join.
+    fn proven_successors(&self, func: &Function, block: Block) -> Vec<Block> {
+        let Some(term) = func.blocks[block].term.as_ref() else {
+            return Vec::new();
         };
         match term {
-            Terminator::Br { dest, .. } => self.mark_edge(block, dest),
-            Terminator::CondBr { cond, then_block, else_block, .. } => match branch_targets(&self.lattice[cond.index()], then_block, else_block) {
-                EdgeSet::None => {}
-                EdgeSet::Only(dest) => self.mark_edge(block, dest),
-                EdgeSet::Both => {
-                    self.mark_edge(block, then_block);
-                    self.mark_edge(block, else_block);
-                }
+            Terminator::Br { dest, .. } => vec![*dest],
+            Terminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => match branch_targets(&self.lattice[cond.index()], *then_block, *else_block) {
+                EdgeSet::None => Vec::new(),
+                EdgeSet::Only(dest) => vec![dest],
+                EdgeSet::Both => vec![*then_block, *else_block],
             },
-            Terminator::Switch { scrutinee, cases, default } => match &self.lattice[scrutinee.index()] {
-                Lat::Unknown => {}
-                Lat::Const(_) => {
-                    self.mark_edge(block, switch_take(&self.lattice[scrutinee.index()], &cases, default));
-                }
+            Terminator::Switch {
+                scrutinee,
+                cases,
+                default,
+            } => match &self.lattice[scrutinee.index()] {
+                Lat::Unknown => Vec::new(),
+                Lat::Const(_) => vec![switch_take(&self.lattice[scrutinee.index()], cases, *default)],
                 _ => {
-                    self.mark_edge(block, default);
-                    for (_, dest) in cases {
-                        self.mark_edge(block, dest);
-                    }
+                    let mut dests = Vec::with_capacity(cases.len() + 1);
+                    dests.push(*default);
+                    dests.extend(cases.iter().map(|(_, dest)| *dest));
+                    dests
                 }
             },
-            Terminator::Return { .. } | Terminator::Unreachable => {}
+            Terminator::Return { .. } | Terminator::Unreachable => Vec::new(),
         }
     }
 
@@ -919,6 +935,42 @@ mod tests {
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(errors[0].contains(&format!("%{}", scenario.j.index())), "{}", errors[0]);
         assert!(errors[0].contains("Over"), "{}", errors[0]);
+    }
+
+    /// The checker counts only edges the branch takes: an untaken
+    /// `CondBr` arm's argument must not widen the merge it names. This
+    /// is the false positive that killed `rcu_read_lock` in the kernel,
+    /// where a constant condition left one arm carrying an
+    /// overdefined value while the taken path joined `Undef`.
+    #[test]
+    fn fixpoint_ignores_untaken_branch_arguments() {
+        let sig = Signature::new(vec![Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let over = param(&mut func, entry, Ty::int(32), 0);
+        let one = func.push_const(Const::Int { bits: 1, value: 1 });
+        let undef = func.push_const(Const::Undef);
+        let taken = func.push_block(vec![]);
+        let merge = func.push_block(vec![Ty::int(32)]);
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond: one,
+            then_block: taken,
+            else_block: merge,
+            then_args: Default::default(),
+            else_args: [over].into_iter().collect(),
+        });
+        func.blocks[taken].term = Some(Terminator::Br {
+            dest: merge,
+            args: [undef].into_iter().collect(),
+        });
+        let merged = func.blocks[merge].params[0];
+        func.blocks[merge].term = Some(Terminator::Return { val: Some(merged) });
+
+        let mut state = State::new(&func);
+        state.solve(&func);
+        assert!(state.executable[merge.index()]);
+        assert_eq!(state.lattice[merged.index()], Lat::Const(Const::Undef));
+        let errors = state.fixpoint_errors(&func);
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

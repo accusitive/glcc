@@ -5676,6 +5676,23 @@ fn builtin_offsetof_folds() {
 }
 
 #[test]
+fn builtin_offsetof_accepts_a_runtime_index() {
+    // GCC allows a non-constant array index in `offsetof` (the kernel's
+    // `container_of(..., member[idx])` depends on it), leaving a runtime
+    // `index * sizeof(element)` term.
+    let checked = check_with(
+        &["struct S { int x; int a[4]; };", "int i;"],
+        "__builtin_offsetof(struct S, a[i])",
+    );
+    assert_eq!(checked.ty, Ty::UnsignedLong);
+    assert!(
+        matches!(&checked.kind, CheckedExprKind::OffsetofDynamic { base: 4, terms } if terms.len() == 1 && terms[0].1 == 4),
+        "{:?}",
+        checked.kind
+    );
+}
+
+#[test]
 fn offsetof_bit_field_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -9081,6 +9098,11 @@ fn asm_memory_letters_follow_the_target() {
     assert!(!memory_only_constraint("Uci", Arch::Aarch64));
     // RISC-V: `"A"` is an address held in a general-purpose register.
     assert!(memory_only_constraint("A", Arch::Riscv64));
+    // `"p"` is an address-valued input, not an lvalue memory operand.
+    assert!(!memory_only_constraint("p", Arch::X86_64));
+    // The kernel's `percpu_stable_op` passes `&var`; an rvalue address
+    // must be accepted.
+    body_of_f("void f(int x){ asm(\"\" : : \"p\"(&x)); }");
     // A `U` token keeps its lowercase suffix.
     assert_eq!(constraint_letters("UmpQr"), ["Ump", "Q", "r"]);
     // The same letter means memory on one target and a register on
@@ -9157,6 +9179,29 @@ fn section_attribute_recorded() {
     let sid = parser.sema.lookup_symbol(scratch).expect("scratch declared");
     let noinit = parser.intern.get_or_intern(".noinit");
     assert_eq!(parser.sema.decls[sid.0 as usize].section, Some(noinit));
+}
+
+#[test]
+fn extern_void_object_is_a_linker_symbol() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("extern const void __nosave_begin, __nosave_end;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let begin = parser.intern.get_or_intern("__nosave_begin");
+    let id = parser.sema.lookup_symbol(begin).expect("__nosave_begin declared");
+    assert_eq!(parser.sema.decls[id.0 as usize].ty.unqualified(), &crate::parse::Ty::Void);
+}
+
+#[test]
+fn section_attribute_concatenates_adjacent_strings() {
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int hot __attribute__((section(\".data\" \"..read_mostly\")));", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let hot = parser.intern.get_or_intern("hot");
+    let id = parser.sema.lookup_symbol(hot).expect("hot declared");
+    let section = parser.intern.get_or_intern(".data..read_mostly");
+    assert_eq!(parser.sema.decls[id.0 as usize].section, Some(section));
 }
 
 #[test]

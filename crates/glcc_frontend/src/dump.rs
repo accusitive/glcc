@@ -273,6 +273,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         }
         CheckedExprKind::ConstantP(b) => format!("(constant-p {} :{})", i32::from(*b), t),
         CheckedExprKind::ClassifyType(code) => format!("(classify-type {} :{})", code, t),
+        CheckedExprKind::ObjectSize => format!("(object-size -1 :{})", t),
         CheckedExprKind::FpClass { op, arg } => {
             let what = match op {
                 crate::check::FpPredicate::IsNan => "isnan",
@@ -351,6 +352,13 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         }
         CheckedExprKind::Offsetof { ty, offset } => {
             format!("(offsetof {} {} :{})", dump_ty(ty, sema, interner), offset, t)
+        }
+        CheckedExprKind::OffsetofDynamic { base, terms } => {
+            let terms: Vec<String> = terms
+                .iter()
+                .map(|(index, size)| format!("(* {} {})", dump_ex(index, sema, interner), size))
+                .collect();
+            format!("(offsetof-dynamic {} {} :{})", base, terms.join(" "), t)
         }
         CheckedExprKind::CompoundLiteral { ty, init } => format!("(compound {} {} :{})", dump_ty(ty, sema, interner), dump_init(init, sema, interner), t),
         CheckedExprKind::Convert { expr, ty } => format!("(convert {} {} :{})", dump_ty(ty, sema, interner), dump_ex(expr, sema, interner), t),

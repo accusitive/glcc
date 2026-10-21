@@ -2539,9 +2539,15 @@ impl<'a> Parser<'a> {
             | CheckedExprKind::Str(_)
             | CheckedExprKind::ConstantP(_)
             | CheckedExprKind::ClassifyType(_)
+            | CheckedExprKind::ObjectSize
             | CheckedExprKind::Offsetof { .. }
             | CheckedExprKind::SizeofTy(_)
             | CheckedExprKind::AlignofTy(_) => {}
+            CheckedExprKind::OffsetofDynamic { terms, .. } => {
+                for (index, _) in terms {
+                    self.check_flow_expr(index, labels, gotos, scope, fv);
+                }
+            }
             // Taking a label's address is a use of it, checked exactly
             // like a `goto`: the label must exist in this function.
             CheckedExprKind::LabelAddr(name) => gotos.push((*name, expr.span)),
@@ -2903,6 +2909,7 @@ impl<'a> Parser<'a> {
             Some("__builtin_floorf" | "__builtin_ceilf") => (Ty::Float, vec![Ty::Float], false),
             Some("__builtin_floorl" | "__builtin_ceill") => (Ty::LongDouble, vec![Ty::LongDouble], false),
             Some("__builtin_abs") => (Ty::Int, vec![Ty::Int], false),
+            Some("__builtin_isdigit") => (Ty::Int, vec![Ty::Int], false),
             Some("__builtin_labs") => (Ty::Long, vec![Ty::Long], false),
             Some("__builtin_llabs") => (Ty::LongLong, vec![Ty::LongLong], false),
             Some("__builtin_fabs") => (Ty::Double, vec![Ty::Double], false),
@@ -3472,7 +3479,13 @@ impl<'a> Parser<'a> {
             return self.fail(span, "parameter list without types is only allowed in a function definition");
         }
         if kind == BindingKind::Var && ty.unqualified() == &Ty::Void {
-            return self.fail(span, "declaration of `void` object");
+            // GCC accepts `extern const void sym;` as a linker-symbol
+            // declaration (the kernel's __nosave_begin/end): there is
+            // no storage to size, only an address to take.
+            let linker_symbol = self.sema.is_file_scope() && specifiers.is_extern() && !has_init;
+            if !linker_symbol {
+                return self.fail(span, "declaration of `void` object");
+            }
         }
         // Constructor/destructor attributes only mean anything on
         // functions (like GCC, warn and ignore elsewhere).
@@ -5032,13 +5045,7 @@ impl<'a> Parser<'a> {
                     // `alias("name")`: the target spelling is resolved
                     // to a declaration when this declaration registers.
                     self.tokens.advance();
-                    let body = match self.tokens.advance().map(|located| located.val) {
-                        Some(Token::StringLiteral(lit)) => self.string_literal_body(lit),
-                        other => {
-                            let span = self.peek_span();
-                            return self.fail(span, format!("attribute `alias` needs a string literal, got {other:?}"));
-                        }
-                    };
+                    let body = self.parse_attribute_string("alias");
                     let target = self.intern.get_or_intern(&body);
                     out.alias = out.alias.or(Some(target));
                     self.expect_punct(Punctuator::RParen);
@@ -5046,13 +5053,7 @@ impl<'a> Parser<'a> {
                     // `section("name")`: the object lands in that
                     // section (bare-metal vector tables, `.noinit`, ...).
                     self.tokens.advance();
-                    let body = match self.tokens.advance().map(|located| located.val) {
-                        Some(Token::StringLiteral(lit)) => self.string_literal_body(lit),
-                        other => {
-                            let span = self.peek_span();
-                            return self.fail(span, format!("attribute `section` needs a string literal, got {other:?}"));
-                        }
-                    };
+                    let body = self.parse_attribute_string("section");
                     let name = self.intern.get_or_intern(&body);
                     out.section = out.section.or(Some(name));
                     self.expect_punct(Punctuator::RParen);
@@ -5144,6 +5145,25 @@ impl<'a> Parser<'a> {
             self.expect_punct(Punctuator::RParen);
         }
         out
+    }
+
+    /// A string-literal attribute argument. Adjacent literals are
+    /// concatenated, as they are in any expression (`section(".data"
+    /// "..read_mostly")` after macro expansion).
+    fn parse_attribute_string(&mut self, attr: &str) -> String {
+        let span = self.peek_span();
+        let mut body = String::new();
+        let mut found = false;
+        while let Some(Token::StringLiteral(lit)) = self.tokens.peek_val() {
+            let lit = *lit;
+            self.tokens.advance();
+            body.push_str(&self.string_literal_body(lit));
+            found = true;
+        }
+        if !found {
+            return self.fail(span, format!("attribute `{attr}` needs a string literal"));
+        }
+        body
     }
 
     /// Body of a string literal token, escapes left raw: attributes

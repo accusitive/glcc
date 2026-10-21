@@ -108,6 +108,52 @@ pub fn lower_module_with_debug<M: Module>(
     (ids, debug, narrow)
 }
 
+/// Functions the object actually defines: externally visible ones, ones
+/// named by a global initializer, and everything they reach. Unreferenced
+/// `static inline` bodies left behind by inlining are dropped, as GCC
+/// does; their asm can require constant operands that only a call site
+/// supplies.
+fn live_functions(module: &mir::Module) -> Vec<bool> {
+    fn mark(id: mir::Func, live: &mut [bool], work: &mut Vec<mir::Func>) {
+        if !live[id.index()] {
+            live[id.index()] = true;
+            work.push(id);
+        }
+    }
+    let mut live = vec![false; module.funcs.len()];
+    let mut work = Vec::new();
+    for (id, func) in module.funcs.iter_enumerated() {
+        if !func.local {
+            mark(id, &mut live, &mut work);
+        }
+    }
+    for global in module.globals.iter() {
+        for (_, reloc) in global.relocs.iter().chain(&global.relocs32) {
+            if let mir::DataReloc::Func { target } = reloc {
+                mark(*target, &mut live, &mut work);
+            }
+        }
+    }
+    while let Some(id) = work.pop() {
+        let func = &module.funcs[id];
+        let reachable = func.reachable_blocks();
+        for (b, block) in func.blocks.iter_enumerated() {
+            if !reachable[b.index()] {
+                continue;
+            }
+            for inst in &block.insts {
+                let callee = match &func.insts[*inst].kind {
+                    mir::InstKind::Call { callee, .. } => *callee,
+                    mir::InstKind::FuncAddr { func } => *func,
+                    _ => continue,
+                };
+                mark(callee, &mut live, &mut work);
+            }
+        }
+    }
+    live
+}
+
 fn lower_module_impl<M: Module>(
     mir_module: &mir::Module,
     clif: &mut M,
@@ -123,8 +169,12 @@ fn lower_module_impl<M: Module>(
     for (id, func) in mir_module.funcs.iter_enumerated() {
         layouts.insert(id, abi::layout_sig(target, &func.sig.params, &func.sig.ret, func.sig.variadic));
     }
+    let live = live_functions(mir_module);
     let mut ids = HashMap::new();
     for (id, func) in mir_module.funcs.iter_enumerated() {
+        if !live[id.index()] {
+            continue;
+        }
         let sig = abi::clif_signature(&layouts[&id], target.call_conv());
         let linkage = definition_linkage(func.local, func.weak);
         let clif_id = clif.declare_function(&func.name, linkage, &sig).unwrap_or_else(|_| panic!("cannot declare {}", func.name));
@@ -141,7 +191,10 @@ fn lower_module_impl<M: Module>(
     // behind, and MSVC's linker rejects undefined COFF symbols outright.
     let mut used_externs = std::collections::HashSet::new();
     let mut used_globals = std::collections::HashSet::new();
-    for func in mir_module.funcs.iter() {
+    for (id, func) in mir_module.funcs.iter_enumerated() {
+        if !live[id.index()] {
+            continue;
+        }
         for inst in &func.insts {
             match &inst.kind {
                 mir::InstKind::CallExtern { target, .. } => {
@@ -217,11 +270,11 @@ fn lower_module_impl<M: Module>(
     }
     // x86-64 foreign variadic calls route through the runtime
     // trampoline; declare its symbols only when such a call exists.
-    let rt = Rt::declare_if_needed(mir_module, target, clif);
+    let rt = Rt::declare_if_needed(mir_module, &live, target, clif);
     let memcpy_id = mir_module
         .funcs
-        .iter()
-        .any(needs_libc_memcpy)
+        .iter_enumerated()
+        .any(|(id, func)| live[id.index()] && needs_libc_memcpy(func))
         .then(|| {
             // A user prototype may describe a different signature. In that
             // case fall back to the inline copy rather than conflicting
@@ -231,12 +284,13 @@ fn lower_module_impl<M: Module>(
         })
         .flatten();
     for (id, func) in mir_module.funcs.iter_enumerated() {
-        if !define_func(&func.name) {
+        if !live[id.index()] || !define_func(&func.name) {
             continue;
         }
         lower_function(
             id,
             func,
+            mir_module.globals.as_raw_slice(),
             target,
             &layouts,
             &extern_layouts,
@@ -415,10 +469,10 @@ fn rt_sig(target: Target, params: Vec<Type>, returns: Vec<Type>) -> Signature {
 }
 
 impl Rt {
-    fn declare_if_needed<M: Module>(mir_module: &mir::Module, target: Target, clif: &mut M) -> Rt {
+    fn declare_if_needed<M: Module>(mir_module: &mir::Module, live: &[bool], target: Target, clif: &mut M) -> Rt {
         let mut rt = Rt::default();
         if target.arch != Arch::X86_64 {
-            if uses_f128(mir_module) {
+            if uses_f128(mir_module, live) {
                 let mut import = |name: &str| {
                     clif.declare_function(name, Linkage::Import, &rt_sig(target, vec![types::I64, types::I64, types::I64], vec![]))
                         .unwrap_or_else(|_| panic!("cannot declare {name}"))
@@ -438,8 +492,8 @@ impl Rt {
         // The `%al` trampoline is a SysV x86-64 device: Win64 passes
         // variadics natively and needs no runtime support.
         let foreign_variadic = target.os != Os::Windows
-            && mir_module.funcs.iter().any(|func| {
-                func.insts.iter().any(|inst| match &inst.kind {
+            && mir_module.funcs.iter_enumerated().any(|(id, func)| {
+                live[id.index()] && func.insts.iter().any(|inst| match &inst.kind {
                     mir::InstKind::CallExtern { target, .. } => mir_module.externs[*target].sig.variadic,
                     // An indirect variadic call needs the trampoline too.
                     mir::InstKind::CallIndirect { sig, .. } => sig.variadic,
@@ -454,7 +508,7 @@ impl Rt {
             rt.va_target = Some(va_target);
             rt.jmp_va = Some(jmp_va);
         }
-        if uses_f128(mir_module) {
+        if uses_f128(mir_module, live) {
             let mut import = |name: &str| {
                 clif.declare_function(name, Linkage::Import, &rt_sig(target, vec![types::F128, types::F128], vec![types::F128]))
                     .unwrap_or_else(|_| panic!("cannot declare {name}"))
@@ -466,7 +520,7 @@ impl Rt {
                 div: import("__glcc_divtf3"),
             });
         }
-        if uses_f80(mir_module) {
+        if uses_f80(mir_module, live) {
             let mut import = |name: &str, params: Vec<Type>, returns: Vec<Type>| {
                 clif.declare_function(name, Linkage::Import, &rt_sig(target, params, returns))
                     .unwrap_or_else(|_| panic!("cannot declare {name}"))
@@ -592,7 +646,7 @@ impl Rt {
 /// values, allocation points, and global storage. Over-approximating
 /// is harmless (unused imports emit no relocations), under-
 /// approximating would leave helper calls undeclared.
-fn uses_f80(mir_module: &mir::Module) -> bool {
+fn uses_f80(mir_module: &mir::Module, live: &[bool]) -> bool {
     fn ty_uses(ty: &mir::Ty) -> bool {
         match ty {
             mir::Ty::Float(mir::FloatKind::F80) => true,
@@ -603,16 +657,16 @@ fn uses_f80(mir_module: &mir::Module) -> bool {
         }
     }
     mir_module.globals.iter().any(|g| ty_uses(&g.ty))
-        || mir_module
-            .funcs
-            .iter()
-            .any(|f| f.sig.params.iter().any(ty_uses) || ty_uses(&f.sig.ret) || f.values.iter().any(|v| ty_uses(&v.ty)))
+        || mir_module.funcs.iter_enumerated().any(|(id, f)| {
+            live[id.index()]
+                && (f.sig.params.iter().any(ty_uses) || ty_uses(&f.sig.ret) || f.values.iter().any(|v| ty_uses(&v.ty)))
+        })
 }
 
 /// Whether any `F128` value flows through the module (same shapes as
 /// [`uses_f80`]): gates the quad-trampoline imports on non-x86-64
 /// targets, whose `long double` lowers to `F128`.
-fn uses_f128(mir_module: &mir::Module) -> bool {
+fn uses_f128(mir_module: &mir::Module, live: &[bool]) -> bool {
     fn ty_uses(ty: &mir::Ty) -> bool {
         match ty {
             mir::Ty::Float(mir::FloatKind::F128) => true,
@@ -623,10 +677,10 @@ fn uses_f128(mir_module: &mir::Module) -> bool {
         }
     }
     mir_module.globals.iter().any(|g| ty_uses(&g.ty))
-        || mir_module
-            .funcs
-            .iter()
-            .any(|f| f.sig.params.iter().any(ty_uses) || ty_uses(&f.sig.ret) || f.values.iter().any(|v| ty_uses(&v.ty)))
+        || mir_module.funcs.iter_enumerated().any(|(id, f)| {
+            live[id.index()]
+                && (f.sig.params.iter().any(ty_uses) || ty_uses(&f.sig.ret) || f.values.iter().any(|v| ty_uses(&v.ty)))
+        })
 }
 
 fn declare_global<M: Module>(global: &mir::GlobalData, clif: &mut M) -> cranelift_module::DataId {
@@ -745,6 +799,7 @@ fn write_const(bytes: &mut [u8], off: usize, c: &mir::Const) {
 
 struct Body<'m> {
     func: &'m mir::Function,
+    globals: &'m [mir::GlobalData],
     target: Target,
     layout: SigLayout,
     /// Every non-constant MIR value, resolved: scalars to Clif values,
@@ -776,6 +831,7 @@ struct Body<'m> {
 fn lower_function<M: Module>(
     id: mir::Func,
     mir_func: &mir::Function,
+    globals: &[mir::GlobalData],
     target: Target,
     layouts: &HashMap<mir::Func, SigLayout>,
     extern_layouts: &HashMap<mir::Extern, SigLayout>,
@@ -799,6 +855,7 @@ fn lower_function<M: Module>(
 
     let mut body = Body {
         func: mir_func,
+        globals,
         target,
         layout,
         values: HashMap::new(),
@@ -2479,7 +2536,7 @@ fn emit_inst<M: Module>(
 /// [`crate::asm`]. An `asm goto` block's result is the label selector
 /// (0 = fallthrough), which the MIR terminator dispatches on.
 fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, clif: &mut M, block: &mir::AsmBlock, wrappers: &mut Wrappers) -> Option<ClifValue> {
-    let site = crate::asm::build(block, body.func, body.target);
+    let site = crate::asm::build_with_globals(block, body.func, body.globals, body.target);
     let is_goto = !block.labels.is_empty();
     let sig = crate::asm::wrapper_sig(body.target, is_goto);
     let wrapper = clif

@@ -770,6 +770,12 @@ pub fn wrapper_sig(target: Target, is_goto: bool) -> Signature {
 }
 
 /// One operand as the wrapper sees it.
+#[derive(Debug, Clone)]
+enum Imm {
+    Int(i128),
+    Sym { name: String, offset: i128 },
+}
+
 struct Operand {
     kind: Kind,
     /// Pinned register for a named constraint.
@@ -783,8 +789,9 @@ struct Operand {
     size: u64,
     /// Area slot; `None` for immediates and tied inputs.
     slot: Option<Slot>,
-    /// Immediate value for `"i"`/`"n"` operands.
-    imm: Option<i128>,
+    /// Immediate value for `"i"`/`"n"` operands: an integer or a
+    /// symbol plus displacement (GCC accepts `"i" (&sym[k])`).
+    imm: Option<Imm>,
     /// Constraint has `+`: the output is also read.
     inout: bool,
     /// Output with a tied input: the register starts from the input
@@ -853,6 +860,10 @@ fn letter_class(arch: Arch, letter: &str) -> Option<LetterClass> {
         (Aarch64, "Uci" | "Ucj") => LetterClass::Reg(None),
         // Memory.
         (_, "m" | "o") => LetterClass::Mem,
+        // An address-valued input: MIR evaluates it to a pointer and the
+        // wrapper loads that address into the template's scratch register,
+        // exactly like a memory operand's address.
+        (_, "p") => LetterClass::Mem,
         (Aarch64, "Q") => LetterClass::Mem,
         (Aarch64, _) if letter.starts_with('U') => LetterClass::Mem,
         (Riscv64, "A") => LetterClass::Mem,
@@ -976,17 +987,83 @@ fn ty_size(ty: &mir::Ty) -> u64 {
 }
 
 /// Integer value of an immediate operand's MIR value.
-fn const_int(func: &mir::Function, value: mir::Value) -> i128 {
+fn const_int(func: &mir::Function, value: mir::Value) -> Option<i128> {
     match &func.values[value].def {
-        mir::Def::Const(mir::Const::Int { value, .. }) => *value,
-        _ => panic!("asm operand constraint requires an integer constant"),
+        mir::Def::Const(mir::Const::Int { value, .. }) => Some(*value),
+        _ => None,
     }
 }
 
-/// Whether the MIR value is an integer constant, i.e. usable as an
-/// immediate operand.
-fn is_int_const(func: &mir::Function, value: mir::Value) -> bool {
-    matches!(&func.values[value].def, mir::Def::Const(mir::Const::Int { .. }))
+/// The address of a module global plus a constant displacement, through
+/// casts, additions, and constant-index GEPs. GCC accepts such a value
+/// for an `"i"` operand (`&boot_cpu_data.x86_capability[bit >> 3]`) and
+/// prints the symbol.
+fn symbol_address(func: &mir::Function, value: mir::Value, globals: &[mir::GlobalData]) -> Option<(String, i128)> {
+    let mir::Def::Inst(inst) = func.values[value].def else {
+        return None;
+    };
+    match &func.insts[inst].kind {
+        mir::InstKind::GlobalAddr { global } => {
+            Some((globals.get(global.index())?.name.clone(), 0))
+        }
+        mir::InstKind::Bitcast(v) | mir::InstKind::PtrToInt(v) | mir::InstKind::IntToPtr(v) => {
+            symbol_address(func, *v, globals)
+        }
+        mir::InstKind::Add(a, b) => {
+            if let Some((name, offset)) = symbol_address(func, *a, globals) {
+                return Some((name, offset + const_int(func, *b)?));
+            }
+            let (name, offset) = symbol_address(func, *b, globals)?;
+            Some((name, offset + const_int(func, *a)?))
+        }
+        mir::InstKind::Sub(a, b) => {
+            let (name, offset) = symbol_address(func, *a, globals)?;
+            Some((name, offset - const_int(func, *b)?))
+        }
+        mir::InstKind::GetElementPtr { base, indices } => {
+            let (name, offset) = symbol_address(func, *base, globals)?;
+            let mir::Ty::Ptr { pointee, .. } = &func.values[*base].ty else {
+                return None;
+            };
+            Some((name, offset + gep_const_offset(pointee, indices)?))
+        }
+        _ => None,
+    }
+}
+
+/// Constant byte displacement of a GEP over `ty`; `None` when an index
+/// is dynamic.
+fn gep_const_offset(ty: &mir::Ty, indices: &[mir::GepIndex]) -> Option<i128> {
+    let mut ty = ty.clone();
+    let mut offset = 0i128;
+    for index in indices {
+        match index {
+            mir::GepIndex::Field(i) => {
+                let mir::Ty::Struct { fields, .. } = &ty else {
+                    return None;
+                };
+                offset += *mir::struct_field_offsets(&ty).get(*i as usize)? as i128;
+                ty = fields.get(*i as usize)?.clone();
+            }
+            mir::GepIndex::ConstIndex(k) => {
+                offset += (*k as i128) * ty.size_bytes() as i128;
+                ty = match &ty {
+                    mir::Ty::Array { elem, .. } => elem.as_ref().clone(),
+                    mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } => ty.clone(),
+                    _ => return None,
+                };
+            }
+            mir::GepIndex::Index(_) => return None,
+        }
+    }
+    Some(offset)
+}
+
+fn immediate_value(func: &mir::Function, value: mir::Value, globals: &[mir::GlobalData]) -> Option<Imm> {
+    if let Some(value) = const_int(func, value) {
+        return Some(Imm::Int(value));
+    }
+    symbol_address(func, value, globals).map(|(name, offset)| Imm::Sym { name, offset })
 }
 
 /// Clobber names that name a register this target can allocate or save;
@@ -1039,8 +1116,12 @@ fn template_mentions(table: &Table, template: &str, reg: &RegInfo) -> bool {
     false
 }
 
-/// The whole plan for one asm site.
+/// The whole plan for one asm site (no globals to name: tests only).
 pub fn build(block: &mir::AsmBlock, func: &mir::Function, target: Target) -> Site {
+    build_with_globals(block, func, &[], target)
+}
+
+pub fn build_with_globals(block: &mir::AsmBlock, func: &mir::Function, globals: &[mir::GlobalData], target: Target) -> Site {
     let table = table(target.arch);
     let arch = target.arch;
     let clobbers = parse_clobbers(table, &block.clobbers);
@@ -1062,14 +1143,21 @@ pub fn build(block: &mir::AsmBlock, func: &mir::Function, target: Target) -> Sit
         // register (or memory) alternative carries it.
         let mut kind = constraint.kind;
         let imm = match kind {
-            Kind::Imm if is_int_const(func, operand.value) => Some(const_int(func, operand.value)),
+            Kind::Imm if immediate_value(func, operand.value, globals).is_some() => {
+                immediate_value(func, operand.value, globals)
+            }
             Kind::Imm => {
                 if constraint.reg_alt {
                     kind = Kind::Reg;
                 } else if constraint.mem_alt {
                     kind = Kind::Mem;
                 } else {
-                    panic!("asm operand constraint requires an integer constant");
+                    // GCC warns ("asm operand N probably does not match
+                    // constraints") and reloads the value into a
+                    // register; do the same rather than abort. Kernel
+                    // `static inline` bodies use `"i"` with arguments
+                    // that are constant only after inlining.
+                    kind = Kind::Reg;
                 }
                 None
             }
@@ -1250,8 +1338,19 @@ fn wrapper_name(block: &mir::AsmBlock, operands: &[Operand], arch: Arch) -> (Str
         if let Some(tie) = operand.tie {
             eat(&tie.to_le_bytes());
         }
-        if let Some(imm) = operand.imm {
-            eat(&imm.to_le_bytes());
+        if let Some(imm) = &operand.imm {
+            match imm {
+                Imm::Int(value) => {
+                    eat(b"i");
+                    eat(&value.to_le_bytes());
+                }
+                Imm::Sym { name, offset } => {
+                    eat(b"s");
+                    eat(name.as_bytes());
+                    eat(&[0]);
+                    eat(&offset.to_le_bytes());
+                }
+            }
         }
     }
     (format!("__glcc_asm_{hash:016x}"), hash)
@@ -1523,21 +1622,39 @@ fn substitute(template: &str, operands: &[Operand], table: &Table, arch: Arch, u
                 out.push_str(unique);
             }
             Some('l') => {
-                // `%l[name]`: the wrapper-local label the stub for
-                // `labels[name]` is defined at.
+                // `%l[name]` names a goto label directly; `%lN` numbers
+                // it after the outputs and inputs, as GCC does.
                 chars.next();
-                if chars.next() != Some('[') {
-                    panic!("expected '[' after %l in asm template");
-                }
-                let mut name = String::new();
-                for c in chars.by_ref() {
-                    if c == ']' {
-                        break;
+                let index = if chars.peek() == Some(&'[') {
+                    chars.next();
+                    let mut name = String::new();
+                    for c in chars.by_ref() {
+                        if c == ']' {
+                            break;
+                        }
+                        name.push(c);
                     }
-                    name.push(c);
-                }
-                let Some(index) = labels.iter().position(|label| *label == name) else {
-                    panic!("asm template references unknown label [{name}]");
+                    match labels.iter().position(|label| *label == name) {
+                        Some(index) => index,
+                        None => panic!("asm template references unknown label [{name}]"),
+                    }
+                } else {
+                    let mut digits = String::new();
+                    while let Some(c) = chars.peek() {
+                        if c.is_ascii_digit() {
+                            digits.push(*c);
+                            chars.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    let Some(n) = digits.parse::<usize>().ok().and_then(|n| n.checked_sub(operands.len())) else {
+                        panic!("bad `%l` in asm template {template:?}");
+                    };
+                    if n >= labels.len() {
+                        panic!("asm template references label {n} which does not exist");
+                    }
+                    n
                 };
                 out.push_str(&format!(".Lasm{unique}_{index}"));
             }
@@ -1553,7 +1670,7 @@ fn substitute(template: &str, operands: &[Operand], table: &Table, arch: Arch, u
                 let Some(index) = operands.iter().position(|op| op.name.as_deref() == Some(&name)) else {
                     panic!("asm template references unknown operand name [{name}]");
                 };
-                out.push_str(&expand(&operands[index], None, table, arch));
+                out.push_str(&expand(&operands[index], None, table, arch, template));
             }
             _ => {
                 let modifier = match chars.peek() {
@@ -1564,6 +1681,22 @@ fn substitute(template: &str, operands: &[Operand], table: &Table, arch: Arch, u
                     }
                     _ => None,
                 };
+                // A modifier also applies to a named operand: `%P[var]`.
+                if matches!(chars.peek(), Some('[')) {
+                    chars.next();
+                    let mut name = String::new();
+                    for c in chars.by_ref() {
+                        if c == ']' {
+                            break;
+                        }
+                        name.push(c);
+                    }
+                    let Some(index) = operands.iter().position(|op| op.name.as_deref() == Some(&name)) else {
+                        panic!("asm template references unknown operand name [{name}]");
+                    };
+                    out.push_str(&expand(&operands[index], modifier, table, arch, template));
+                    continue;
+                }
                 let mut digits = String::new();
                 while let Some(c) = chars.peek() {
                     if c.is_ascii_digit() {
@@ -1574,60 +1707,78 @@ fn substitute(template: &str, operands: &[Operand], table: &Table, arch: Arch, u
                     }
                 }
                 let Some(index) = digits.parse::<usize>().ok() else {
-                    panic!("bad `%` in asm template");
+                    panic!("bad `%` in asm template {template:?}");
                 };
                 let Some(operand) = operands.get(index) else {
                     panic!("asm template references operand {index} which does not exist");
                 };
-                out.push_str(&expand(operand, modifier, table, arch));
+                out.push_str(&expand(operand, modifier, table, arch, template));
             }
         }
     }
     out
 }
 
-fn expand(operand: &Operand, modifier: Option<char>, table: &Table, arch: Arch) -> String {
+fn expand(operand: &Operand, modifier: Option<char>, table: &Table, arch: Arch, template: &str) -> String {
     match operand.kind {
         Kind::Imm => {
-            let value = operand.imm.expect("immediate operand without a value");
+            let value = operand.imm.as_ref().expect("immediate operand without a value");
             // GCC prints `%N` with the target's immediate syntax (`$5`,
-            // `#5`, `5`) and `%cN`/`%nN` without it.
+            // `#5`, `5`) and `%cN`/`%PN` without it.
             let prefix = match arch {
                 Arch::X86_64 => "$",
                 Arch::Aarch64 => "#",
                 Arch::Riscv64 => "",
             };
-            match modifier {
-                Some('n') => format!("{}", -value),
-                Some('c') => format!("{value}"),
-                Some('b' | 'w' | 'k' | 'q') | None => format!("{prefix}{value}"),
-                Some(other) => panic!("unsupported asm modifier %{other} on an immediate"),
+            match value {
+                Imm::Int(value) => match modifier {
+                    Some('n') => format!("{}", -value),
+                    Some('c' | 'P') => format!("{value}"),
+                    Some('b' | 'w' | 'k' | 'q') | None => format!("{prefix}{value}"),
+                    Some(other) => panic!("unsupported asm modifier %{other} on an immediate in {template:?}"),
+                },
+                Imm::Sym { name, offset } => {
+                    let text = if *offset == 0 {
+                        name.clone()
+                    } else if *offset > 0 {
+                        format!("{name}+{offset}")
+                    } else {
+                        format!("{name}{offset}")
+                    };
+                    match modifier {
+                        Some('n') => panic!("cannot negate a symbolic address in {template:?}"),
+                        Some('c' | 'P') => text,
+                        Some('b' | 'w' | 'k' | 'q') | None => format!("{prefix}{text}"),
+                        Some(other) => panic!("unsupported asm modifier %{other} on an immediate in {template:?}"),
+                    }
+                }
             }
         }
         Kind::Mem => {
             let reg = operand.reg.expect("memory operand without an address register");
             match modifier {
                 // RISC-V's assembler spells a memory operand
-                // `offset(reg)`; AArch64's brackets it.
-                None => match arch {
+                // `offset(reg)`; AArch64's brackets it. `%P` asks for
+                // the address form, which is the same spelling.
+                None | Some('P') => match arch {
                     Arch::Aarch64 => format!("[{}]", sigil(table, reg)),
                     _ => format!("({})", sigil(table, reg)),
                 },
-                Some(other) => panic!("unsupported asm modifier %{other} on a memory operand"),
+                Some(other) => panic!("unsupported asm modifier %{other} on a memory operand in {template:?}"),
             }
         }
         Kind::Reg => {
             let reg = operand.reg.expect("register operand without a register");
             let info = find_reg(table, reg).expect("allocated register is known");
             let name = match modifier {
-                None => mode_name(info, operand.size, arch),
+                None | Some('P') => mode_name(info, operand.size, arch),
                 Some('b') => info.b,
                 Some('w') => info.w,
                 Some('k') => info.k,
                 Some('q') => info.q,
                 Some('h') => info.h,
-                Some('c') => panic!("unsupported asm modifier %c on a register operand"),
-                Some(other) => panic!("unsupported asm modifier %{other}"),
+                Some('c') => panic!("unsupported asm modifier %c on a register operand in {template:?}"),
+                Some(other) => panic!("unsupported asm modifier %{other} in {template:?}"),
             };
             if name.is_empty() {
                 panic!("register {reg} has no such sub-register");
@@ -1704,6 +1855,14 @@ mod tests {
     }
 
     #[test]
+    fn goto_label_numbers_count_operands() {
+        // `%l2` in the kernel's uaccess asm names the first label after
+        // two inputs.
+        let site = build_goto_site(Arch::X86_64, "testl %0, %0; jnz %l2", 0, &[("r", None), ("r", None)], &["lab"]);
+        assert!(site.text.contains("jnz .Lasm"), "{}", site.text);
+    }
+
+    #[test]
     fn x86_goto_wrapper_returns_a_selector() {
         // Operand 0 lands in rax, so the selector takes the next free
         // pool register and moves to the return register after the
@@ -1755,6 +1914,48 @@ mod tests {
         // `"A"` pins rax on x86-64 (printed at the operand's own width).
         let site = build_site(Arch::X86_64, "movq %1, %0", 1, &[("=A", None), ("r", None)], &[]);
         assert!(site.text.contains("movq %ecx, %eax"), "{}", site.text);
+    }
+
+    #[test]
+    fn immediate_constraint_with_runtime_value_reloads_a_register() {
+        // An `"i"` operand with no register/memory alternative still
+        // takes a register when the value is not constant, matching
+        // GCC's "probably does not match constraints" warning. Kernel
+        // `static inline` bodies need this: their `"i"` arguments only
+        // become constant once inlined.
+        let (mut func, entry) = Function::new("f", Signature::new(Vec::new(), Ty::Void));
+        let runtime = func.values.push(mir::ValueData {
+            ty: Ty::int(32),
+            def: mir::Def::Param(entry, 0),
+        });
+        func.blocks[entry].params.push(runtime);
+        let out = func.push_const(Const::Int { bits: 64, value: 0 });
+        let block = mir::AsmBlock {
+            template: "movl %1, %0".to_string(),
+            operands: vec![
+                mir::AsmOperand {
+                    value: out,
+                    constraint: "=r".to_string(),
+                    ty: Ty::int(32),
+                    tie: None,
+                    name: None,
+                },
+                mir::AsmOperand {
+                    value: runtime,
+                    constraint: "i".to_string(),
+                    ty: Ty::int(32),
+                    tie: None,
+                    name: None,
+                },
+            ],
+            outputs: 1,
+            clobbers: Vec::new(),
+            labels: Vec::new(),
+            is_volatile: false,
+            is_basic: false,
+        };
+        let site = build(&block, &func, target(Arch::X86_64));
+        assert!(site.text.contains("movl %ecx, %eax"), "{}", site.text);
     }
 
     #[test]
@@ -1821,6 +2022,56 @@ mod tests {
         assert!(site.text.contains("addl $1, %eax"), "{}", site.text);
         assert!(site.text.contains("movl 0(%rbx), %eax"), "{}", site.text);
         assert!(site.text.contains("movl %eax, 0(%rbx)"), "{}", site.text);
+    }
+
+    #[test]
+    fn named_operand_accepts_a_modifier() {
+        // GCC lets a modifier precede a named operand: the kernel's
+        // per-cpu ops spell `%%gs:%P[var]`.
+        let (mut func, _) = Function::new("f", Signature::new(Vec::new(), Ty::Void));
+        let out = func.push_const(Const::Int { bits: 64, value: 0 });
+        let addr = func.push_const(Const::Int { bits: 64, value: 1 });
+        let block = mir::AsmBlock {
+            template: "add %%gs:%P[var], %[val]".to_string(),
+            operands: vec![
+                mir::AsmOperand {
+                    value: out,
+                    constraint: "=r".to_string(),
+                    ty: Ty::int(32),
+                    tie: None,
+                    name: Some("val".to_string()),
+                },
+                mir::AsmOperand {
+                    value: addr,
+                    constraint: "p".to_string(),
+                    ty: Ty::int(32),
+                    tie: None,
+                    name: Some("var".to_string()),
+                },
+            ],
+            outputs: 1,
+            clobbers: Vec::new(),
+            labels: Vec::new(),
+            is_volatile: false,
+            is_basic: false,
+        };
+        let site = build(&block, &func, target(Arch::X86_64));
+        assert!(site.text.contains("add %gs:(%"), "{}", site.text);
+    }
+
+    #[test]
+    fn address_constraint_is_a_memory_operand() {
+        // `"p"(&var)` evaluates to the address; the wrapper loads it and
+        // `%P` names it as a memory operand.
+        let site = build_site(
+            Arch::X86_64,
+            "add %%gs:%P1, %0",
+            1,
+            &[("=r", None), ("p", None)],
+            &[],
+        );
+        assert!(site.slots[1].is_some_and(|slot| slot.addr));
+        assert!(site.text.contains("add %gs:(%"), "{}", site.text);
     }
 
     #[test]
