@@ -2869,7 +2869,7 @@ impl<'a> Parser<'a> {
             return;
         };
         let (ret, params, variadic) = match self.intern.resolve(*name) {
-            Some("__builtin_va_start") => (Ty::Void, vec![Ty::BuiltinVaList], true),
+            Some("__builtin_va_start" | "__builtin_c23_va_start") => (Ty::Void, vec![Ty::BuiltinVaList], true),
             Some("__builtin_va_end") => (Ty::Void, vec![Ty::BuiltinVaList], false),
             Some("__builtin_va_copy") => (Ty::Void, vec![Ty::BuiltinVaList, Ty::BuiltinVaList], false),
             Some("__sync_synchronize") => (Ty::Void, vec![], false),

@@ -4707,7 +4707,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             return None;
         }
         match binding.name.and_then(|n| self.interner.resolve(n)) {
-            Some("__builtin_va_start") => Some(VaBuiltin::Start),
+            Some("__builtin_va_start" | "__builtin_c23_va_start") => Some(VaBuiltin::Start),
             Some("__builtin_va_end") => Some(VaBuiltin::End),
             Some("__builtin_va_copy") => Some(VaBuiltin::Copy),
             _ => None,
@@ -9964,6 +9964,21 @@ mod tests {
                 int main(){return sum(4, 10, 20, 30, 40);}"
             ),
             100
+        );
+    }
+
+    #[test]
+    fn c23_va_start_takes_one_argument() {
+        // C23's `va_start` spelling passes only the list; clang's header
+        // expands it to `__builtin_c23_va_start(ap)`.
+        assert_eq!(
+            run_main(
+                "int sum(int n, ...){__builtin_va_list ap; __builtin_c23_va_start(ap);\
+                int s = 0; for (int i = 0; i < n; i++) s += __builtin_va_arg(ap, int);\
+                __builtin_va_end(ap); return s;}\
+                int main(){return sum(3, 4, 5, 6);}"
+            ),
+            15
         );
     }
 
