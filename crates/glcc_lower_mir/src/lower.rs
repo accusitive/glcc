@@ -7868,6 +7868,32 @@ mod tests {
         assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
     }
 
+    /// Literal floating-point expressions fold before codegen, so
+    /// subsequent conversions see a single constant.
+    #[test]
+    fn optimized_pipeline_folds_constant_float_arithmetic() {
+        let src = "double f(void) { return 1.5 + 2.25 * 4.0; }\n\
+                   float g(void) { return 1.5f / 2.0f; }\n\
+                   int main(void) { return (int)f() + (int)g(); }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["f", "g"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let arithmetic = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+                matches!(
+                    func.insts[*inst].kind,
+                    mir::InstKind::FAdd(..)
+                        | mir::InstKind::FSub(..)
+                        | mir::InstKind::FMul(..)
+                        | mir::InstKind::FDiv(..)
+                )
+            });
+            assert!(!arithmetic, "{name} kept literal float arithmetic:\n{dump}");
+        }
+        assert_eq!(jit_run_main(module), 10);
+    }
+
     /// Constant float-to-integer conversions are exact within the
     /// target range, so an aggregate field assigned a literal does not
     /// need a runtime conversion when it is read back as an integer.

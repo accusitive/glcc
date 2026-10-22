@@ -263,9 +263,8 @@ fn fold_fcmp_bits(pred: FcmpPred, l: f64, r: f64) -> bool {
 ///
 /// Division/modulo by zero and oversized shifts never fold: both trap
 /// (or are backend-defined) at runtime, and folding them away would
-/// delete the trap. Float arithmetic stays unfolded — Cranelift folds
-/// it during codegen — except exact bitwise negation and conversions
-/// whose result is fully determined by the constant.
+/// delete the trap. `f32`/`f64` arithmetic folds when both operands are
+/// constants; the wider carriers stay for codegen.
 #[derive(Default)]
 pub struct ConstFold;
 
@@ -329,6 +328,10 @@ impl FunctionPass for ConstFold {
                     }
                     _ => None,
                 },
+                InstKind::FAdd(a, b) => fold_float2(func, *a, *b, FloatOp::Add),
+                InstKind::FSub(a, b) => fold_float2(func, *a, *b, FloatOp::Sub),
+                InstKind::FMul(a, b) => fold_float2(func, *a, *b, FloatOp::Mul),
+                InstKind::FDiv(a, b) => fold_float2(func, *a, *b, FloatOp::Div),
                 InstKind::Fcmp { pred, lhs, rhs } => fold_fcmp(func, *pred, *lhs, *rhs),
                 InstKind::SItoF(a) => fold_int_to_float(func, *a, result_ty.as_ref(), false),
                 InstKind::UItoF(a) => fold_int_to_float(func, *a, result_ty.as_ref(), true),
@@ -510,6 +513,57 @@ fn fold_conv(func: &Function, a: Value, result_ty: Option<&Ty>, f: impl Fn(i128,
         return None;
     }
     Some(c)
+}
+
+#[derive(Clone, Copy)]
+enum FloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// Fold `f32`/`f64` arithmetic over two constants. Host arithmetic is
+/// IEEE-754 round-to-nearest for both widths, matching the targets.
+fn fold_float2(func: &Function, a: Value, b: Value, op: FloatOp) -> Option<Const> {
+    let (kind, l, r) = match (func.const_value(a)?, func.const_value(b)?) {
+        (
+            Const::Float { kind: kind @ FloatKind::F32, bits: l },
+            Const::Float { kind: FloatKind::F32, bits: r },
+        ) => (
+            *kind,
+            f32::from_bits(*l as u32) as f64,
+            f32::from_bits(*r as u32) as f64,
+        ),
+        (
+            Const::Float { kind: kind @ FloatKind::F64, bits: l },
+            Const::Float { kind: FloatKind::F64, bits: r },
+        ) => (*kind, f64::from_bits(*l as u64), f64::from_bits(*r as u64)),
+        _ => return None,
+    };
+    let bits = match kind {
+        FloatKind::F32 => {
+            let (l, r) = (l as f32, r as f32);
+            let value = match op {
+                FloatOp::Add => l + r,
+                FloatOp::Sub => l - r,
+                FloatOp::Mul => l * r,
+                FloatOp::Div => l / r,
+            };
+            value.to_bits() as u128
+        }
+        FloatKind::F64 => {
+            let value = match op {
+                FloatOp::Add => l + r,
+                FloatOp::Sub => l - r,
+                FloatOp::Mul => l * r,
+                FloatOp::Div => l / r,
+            };
+            value.to_bits() as u128
+        }
+        _ => return None,
+    };
+    Some(Const::Float { kind, bits })
 }
 
 /// Convert an integer constant to `f32`/`f64`. Wider float carriers stay
@@ -6187,6 +6241,47 @@ mod tests {
             let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
                 unreachable!()
             };
+            assert_eq!(func.const_value(val.unwrap()), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn folds_float_arithmetic() {
+        use crate::ty::FloatKind;
+        #[derive(Clone, Copy)]
+        enum Arith {
+            Add,
+            Sub,
+            Mul,
+            Div,
+        }
+        let cases = [
+            (FloatKind::F64, 1.5f64.to_bits() as u128, 2.25f64.to_bits() as u128, Arith::Add, 3.75f64.to_bits() as u128),
+            (FloatKind::F64, 5.0f64.to_bits() as u128, 1.25f64.to_bits() as u128, Arith::Sub, 3.75f64.to_bits() as u128),
+            (FloatKind::F64, 1.5f64.to_bits() as u128, 4.0f64.to_bits() as u128, Arith::Mul, 6.0f64.to_bits() as u128),
+            (FloatKind::F64, 1.5f64.to_bits() as u128, 2.0f64.to_bits() as u128, Arith::Div, 0.75f64.to_bits() as u128),
+            (FloatKind::F32, 1.5f32.to_bits() as u128, 2.25f32.to_bits() as u128, Arith::Add, 3.75f32.to_bits() as u128),
+            (FloatKind::F32, 1.0f32.to_bits() as u128, 0.0f32.to_bits() as u128, Arith::Div, f32::INFINITY.to_bits() as u128),
+        ];
+        for (kind, left, right, op, expected) in cases {
+            let ty = Ty::Float(kind);
+            let (mut func, entry) = Function::new("float", Signature::new(vec![], ty.clone()));
+            let l = func.push_const(Const::Float { kind, bits: left });
+            let r = func.push_const(Const::Float { kind, bits: right });
+            let arith = match op {
+                Arith::Add => InstKind::FAdd(l, r),
+                Arith::Sub => InstKind::FSub(l, r),
+                Arith::Mul => InstKind::FMul(l, r),
+                Arith::Div => InstKind::FDiv(l, r),
+            };
+            let result = emit_bin(&mut func, entry, arith, ty);
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(result) });
+            let mut fold = ConstFold;
+            assert!(fold.run(&mut func), "float arithmetic did not fold");
+            let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
+                unreachable!()
+            };
+            let expected = Const::Float { kind, bits: expected };
             assert_eq!(func.const_value(val.unwrap()), Some(&expected));
         }
     }
