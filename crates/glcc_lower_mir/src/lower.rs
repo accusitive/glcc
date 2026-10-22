@@ -7868,6 +7868,31 @@ mod tests {
         assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
     }
 
+    /// Constant float-to-integer conversions are exact within the
+    /// target range, so an aggregate field assigned a literal does not
+    /// need a runtime conversion when it is read back as an integer.
+    #[test]
+    fn optimized_pipeline_folds_constant_float_conversions() {
+        let src = "struct P { int x; double y; };\n\
+                   __attribute__((noinline)) int f(int x) { struct P p = {0}; p.x = x; p.y = 2.0; return p.x + (int)p.y; }\n\
+                   int main() { return f(5); }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let func = module.funcs.iter().find(|f| f.name == "f").expect("function lowered");
+        let converted = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+            matches!(
+                func.insts[*inst].kind,
+                mir::InstKind::SFtoI(..)
+                    | mir::InstKind::UFtoI(..)
+                    | mir::InstKind::Fptrunc(..)
+                    | mir::InstKind::Fpext(..)
+            )
+        });
+        assert!(!converted, "literal conversion stayed in f:\n{dump}");
+        assert_eq!(jit_run_main(module), 7);
+    }
+
     /// Returning an aggregate parameter lowers to extracting every
     /// field and rebuilding the aggregate. Filling all fields from one
     /// source is the source itself, so the identity survives.

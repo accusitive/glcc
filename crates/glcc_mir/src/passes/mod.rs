@@ -264,7 +264,8 @@ fn fold_fcmp_bits(pred: FcmpPred, l: f64, r: f64) -> bool {
 /// Division/modulo by zero and oversized shifts never fold: both trap
 /// (or are backend-defined) at runtime, and folding them away would
 /// delete the trap. Float arithmetic stays unfolded — Cranelift folds
-/// it during codegen — except exact bitwise negation.
+/// it during codegen — except exact bitwise negation and conversions
+/// whose result is fully determined by the constant.
 #[derive(Default)]
 pub struct ConstFold;
 
@@ -329,6 +330,12 @@ impl FunctionPass for ConstFold {
                     _ => None,
                 },
                 InstKind::Fcmp { pred, lhs, rhs } => fold_fcmp(func, *pred, *lhs, *rhs),
+                InstKind::SItoF(a) => fold_int_to_float(func, *a, result_ty.as_ref(), false),
+                InstKind::UItoF(a) => fold_int_to_float(func, *a, result_ty.as_ref(), true),
+                InstKind::SFtoI(a) => fold_float_to_int(func, *a, result_ty.as_ref(), false),
+                InstKind::UFtoI(a) => fold_float_to_int(func, *a, result_ty.as_ref(), true),
+                InstKind::Fptrunc(a) => fold_float_width(func, *a, result_ty.as_ref(), false),
+                InstKind::Fpext(a) => fold_float_width(func, *a, result_ty.as_ref(), true),
                 InstKind::Icmp { pred, lhs, rhs } => {
                     if let (Some((bits, l)), Some((_, r))) = (int_const(func, *lhs), int_const(func, *rhs)) {
                         let b = eval_icmp(*pred, bits, l, r);
@@ -503,6 +510,86 @@ fn fold_conv(func: &Function, a: Value, result_ty: Option<&Ty>, f: impl Fn(i128,
         return None;
     }
     Some(c)
+}
+
+/// Convert an integer constant to `f32`/`f64`. Wider float carriers stay
+/// unfolded because they need target-specific helpers.
+fn fold_int_to_float(func: &Function, a: Value, result_ty: Option<&Ty>, unsigned: bool) -> Option<Const> {
+    let (bits, value) = int_const(func, a)?;
+    let kind = match result_ty? {
+        Ty::Float(kind @ (FloatKind::F32 | FloatKind::F64)) => *kind,
+        _ => return None,
+    };
+    let magnitude = (value as u128) & mask(bits);
+    let bits = match (kind, unsigned) {
+        (FloatKind::F32, false) => (value as f32).to_bits() as u128,
+        (FloatKind::F64, false) => (value as f64).to_bits() as u128,
+        (FloatKind::F32, true) => (magnitude as f32).to_bits() as u128,
+        (FloatKind::F64, true) => (magnitude as f64).to_bits() as u128,
+        _ => return None,
+    };
+    Some(Const::Float { kind, bits })
+}
+
+/// Convert an `f32`/`f64` constant to an integer. Values outside the
+/// target range and non-finite inputs stay unfolded: C leaves those
+/// conversions undefined, so the backend keeps its current behavior.
+fn fold_float_to_int(func: &Function, a: Value, result_ty: Option<&Ty>, unsigned: bool) -> Option<Const> {
+    let value = match func.const_value(a)? {
+        Const::Float { kind: FloatKind::F32, bits } => f32::from_bits(*bits as u32) as f64,
+        Const::Float { kind: FloatKind::F64, bits } => f64::from_bits(*bits as u64),
+        _ => return None,
+    };
+    let bits = match result_ty? {
+        Ty::Int { bits } => *bits,
+        _ => return None,
+    };
+    if bits == 0 || bits > 128 || !value.is_finite() {
+        return None;
+    }
+    let truncated = value.trunc();
+    let value = if unsigned {
+        if truncated < 0.0 {
+            return None;
+        }
+        if bits == 128 {
+            if truncated >= 2f64.powi(128) {
+                return None;
+            }
+        } else if truncated >= 2f64.powi(bits as i32) {
+            return None;
+        }
+        (truncated as u128) as i128
+    } else {
+        let limit = if bits == 128 {
+            2f64.powi(127)
+        } else {
+            2f64.powi(bits as i32 - 1)
+        };
+        if truncated < -limit || truncated >= limit {
+            return None;
+        }
+        truncated as i128
+    };
+    Some(Const::Int { bits, value: wrap(bits, value) })
+}
+
+/// Widen or narrow a floating-point constant. The opposite direction is
+/// a separate instruction, so only one conversion applies here.
+fn fold_float_width(func: &Function, a: Value, result_ty: Option<&Ty>, extend: bool) -> Option<Const> {
+    let value = match (func.const_value(a)?, result_ty?) {
+        (Const::Float { kind: FloatKind::F32, bits }, Ty::Float(FloatKind::F64)) if extend => {
+            (f32::from_bits(*bits as u32) as f64).to_bits()
+        }
+        (Const::Float { kind: FloatKind::F64, bits }, Ty::Float(FloatKind::F32)) if !extend => {
+            (f64::from_bits(*bits as u64) as f32).to_bits() as u64
+        }
+        _ => return None,
+    };
+    Some(Const::Float {
+        kind: if extend { FloatKind::F64 } else { FloatKind::F32 },
+        bits: value as u128,
+    })
 }
 
 /// Fold an `Fcmp` over `f32`/`f64` constants with IEEE NaN semantics.
@@ -6024,6 +6111,109 @@ mod tests {
             func.blocks[entry].term,
             Some(Terminator::Br { dest, .. }) if dest == b1
         ));
+    }
+
+    #[test]
+    fn folds_float_conversions() {
+        use crate::ty::FloatKind;
+        #[derive(Clone, Copy)]
+        enum Conv {
+            SItoF,
+            UItoF,
+            SFtoI,
+            UFtoI,
+            Fptrunc,
+            Fpext,
+        }
+        let cases = [
+            (
+                Const::Int { bits: 32, value: -3 },
+                Conv::SItoF,
+                Ty::Float(FloatKind::F64),
+                Const::Float { kind: FloatKind::F64, bits: (-3.0f64).to_bits() as u128 },
+            ),
+            (
+                Const::Int { bits: 32, value: -1 },
+                Conv::UItoF,
+                Ty::Float(FloatKind::F64),
+                Const::Float { kind: FloatKind::F64, bits: (u32::MAX as f64).to_bits() as u128 },
+            ),
+            (
+                Const::Float { kind: FloatKind::F64, bits: 2.9f64.to_bits() as u128 },
+                Conv::SFtoI,
+                Ty::int(32),
+                Const::Int { bits: 32, value: 2 },
+            ),
+            (
+                Const::Float { kind: FloatKind::F64, bits: (-2.9f64).to_bits() as u128 },
+                Conv::SFtoI,
+                Ty::int(32),
+                Const::Int { bits: 32, value: -2 },
+            ),
+            (
+                Const::Float { kind: FloatKind::F64, bits: 3.9f64.to_bits() as u128 },
+                Conv::UFtoI,
+                Ty::int(32),
+                Const::Int { bits: 32, value: 3 },
+            ),
+            (
+                Const::Float { kind: FloatKind::F64, bits: 1.5f64.to_bits() as u128 },
+                Conv::Fptrunc,
+                Ty::Float(FloatKind::F32),
+                Const::Float { kind: FloatKind::F32, bits: 1.5f32.to_bits() as u128 },
+            ),
+            (
+                Const::Float { kind: FloatKind::F32, bits: (-1.5f32).to_bits() as u128 },
+                Conv::Fpext,
+                Ty::Float(FloatKind::F64),
+                Const::Float { kind: FloatKind::F64, bits: (-1.5f64).to_bits() as u128 },
+            ),
+        ];
+        for (input, conv, result_ty, expected) in cases {
+            let (mut func, entry) = Function::new("conv", Signature::new(vec![], result_ty.clone()));
+            let input = func.push_const(input);
+            let kind = match conv {
+                Conv::SItoF => InstKind::SItoF(input),
+                Conv::UItoF => InstKind::UItoF(input),
+                Conv::SFtoI => InstKind::SFtoI(input),
+                Conv::UFtoI => InstKind::UFtoI(input),
+                Conv::Fptrunc => InstKind::Fptrunc(input),
+                Conv::Fpext => InstKind::Fpext(input),
+            };
+            let result = emit_bin(&mut func, entry, kind, result_ty);
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(result) });
+            let mut fold = ConstFold;
+            assert!(fold.run(&mut func), "conversion did not fold");
+            let Terminator::Return { val } = func.blocks[entry].term.clone().unwrap() else {
+                unreachable!()
+            };
+            assert_eq!(func.const_value(val.unwrap()), Some(&expected));
+        }
+    }
+
+    #[test]
+    fn keeps_undefined_float_to_int_conversions() {
+        use crate::ty::FloatKind;
+        let cases = [
+            (f64::NAN, false, Ty::int(32)),
+            (f64::INFINITY, false, Ty::int(32)),
+            (1e300, false, Ty::int(32)),
+            (-1.0, true, Ty::int(32)),
+            (4294967296.0, true, Ty::int(32)),
+        ];
+        for (value, unsigned, result_ty) in cases {
+            let (mut func, entry) = Function::new("conv", Signature::new(vec![], result_ty.clone()));
+            let input = func.push_const(Const::Float {
+                kind: FloatKind::F64,
+                bits: value.to_bits() as u128,
+            });
+            let kind = if unsigned { InstKind::UFtoI(input) } else { InstKind::SFtoI(input) };
+            let result = emit_bin(&mut func, entry, kind, result_ty);
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(result) });
+            let mut fold = ConstFold;
+            assert!(!fold.run(&mut func), "undefined conversion {value} was folded");
+            assert_eq!(func.const_value(result), None);
+        }
     }
 
     #[test]
