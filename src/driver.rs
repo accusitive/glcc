@@ -1150,7 +1150,7 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         // native preprocessor with exactly what `clang -E` predefines.
         if !job.cpp.iter().any(|a| a == "-undef") {
             let std = pp_std_flag(job);
-            let mut predefined = glcc_pp::native_predefines(Some(job.target.triple()), std.as_deref());
+            let mut predefined = glcc_pp::predefines(Some(job.target.triple()), std.as_deref());
             if !job.pic {
                 predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
             }

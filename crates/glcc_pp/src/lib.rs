@@ -142,6 +142,25 @@ pub fn native_predefines(triple: Option<&str>, std_flag: Option<&str>) -> Vec<(S
     seed(triple, std_flag).predefined
 }
 
+/// Predefined macros glcc compiles against: the native seed with a GNU
+/// version matching the features glcc implements.
+///
+/// Clang reports GNU 4.2.1 for compatibility, which sits just below the
+/// 4.3/4.8 thresholds many libraries use to select `__builtin_bswap{64,16}`
+/// paths. Reporting 4.8 unlocks those while staying below 5.4, whose
+/// overflow builtins glcc lowers conservatively. Users can still override
+/// the version with `-D`.
+pub fn predefines(triple: Option<&str>, std_flag: Option<&str>) -> Vec<(String, String)> {
+    let mut pre = native_predefines(triple, std_flag);
+    for (name, value) in [("__GNUC__", "4"), ("__GNUC_MINOR__", "8"), ("__GNUC_PATCHLEVEL__", "0")] {
+        match pre.iter_mut().find(|(existing, _)| existing == name) {
+            Some(slot) => slot.1 = value.to_string(),
+            None => pre.push((name.to_string(), value.to_string())),
+        }
+    }
+    pre
+}
+
 /// Default system include directories for `triple`/`std_flag`: clang's
 /// `#include <...>` search list, without the user's `-I` directories
 /// (callers prepend those themselves). Callers must skip this under
@@ -1291,6 +1310,19 @@ mod tests {
         assert_eq!(get("__x86_64__").as_deref(), Some("1"));
         // Function-like builtins keep their parameter lists.
         assert!(defs.iter().any(|(k, _)| k == "__INTMAX_C(c)"), "has INTMAX_C");
+    }
+
+    #[test]
+    fn predefines_report_the_gnu_version_glcc_targets() {
+        let pre = predefines(None, None);
+        let get = |name: &str| {
+            pre.iter()
+                .find(|(existing, _)| existing == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(get("__GNUC__"), Some("4"));
+        assert_eq!(get("__GNUC_MINOR__"), Some("8"));
+        assert_eq!(get("__GNUC_PATCHLEVEL__"), Some("0"));
     }
 
     #[test]

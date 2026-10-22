@@ -2691,6 +2691,14 @@ fn field_offset(ty: &mir::Ty, index: u32) -> (u64, mir::Ty) {
     }
 }
 
+/// Whether a switch table is dense enough that filling its holes with
+/// the default target is cheaper than letting the switch helper split
+/// it into one table per contiguous run.
+fn dense_switch_span(base: i128, max: i128, count: usize) -> bool {
+    let span = (max - base) as u128 + 1;
+    span <= 4096 && span <= (count as u128).saturating_mul(2) + 8
+}
+
 fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminator) {
     match term {
         mir::Terminator::Br { dest, args } => {
@@ -2745,12 +2753,11 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                 let max = cases.iter().map(|(value, _)| *value).max().expect("non-empty cases");
                 let mut entries: Vec<(i128, ClifBlock)> = cases.iter().map(|(value, dest)| (*value, body.blocks[dest])).collect();
                 entries.sort_by_key(|(value, _)| *value);
-                let span = (max - base) as u128 + 1;
                 // Cranelift's Switch splits the table at holes. When the
                 // cases cover nearly the whole span, filling the holes
                 // with the default keeps the dispatch to one range check
                 // and one table lookup.
-                let dense = span <= 4096 && span <= (entries.len() as u128).saturating_mul(2) + 8;
+                let dense = dense_switch_span(base, max, entries.len());
                 let mut switch = Switch::new();
                 if dense {
                     let mut next = base;
@@ -2888,7 +2895,15 @@ mod tests {
 
     use glcc_mir as mir;
 
-    use super::lower_module;
+    use super::{dense_switch_span, lower_module};
+
+    #[test]
+    fn dense_switch_span_fills_small_gaps() {
+        assert!(dense_switch_span(0, 185, 184));
+        assert!(dense_switch_span(0, 9, 3));
+        assert!(!dense_switch_span(0, 1000, 2));
+        assert!(!dense_switch_span(0, 4096, 1));
+    }
 
     fn param(mir_func: &mut mir::Function, block: mir::Block, ty: mir::Ty, index: u32) -> mir::Value {
         let v = mir_func.values.push(mir::ValueData {

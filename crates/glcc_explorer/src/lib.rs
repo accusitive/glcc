@@ -267,7 +267,7 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
         let mut popts = glcc_pp::cpp_flags_to_opts(&cpp, "input.c");
         popts.linemarkers = true;
         popts.target = Some(target);
-        popts.predefined = glcc_pp::native_predefines(Some(target.triple()), None);
+        popts.predefined = glcc_pp::predefines(Some(target.triple()), None);
         if !popts.no_std_includes {
             popts.include_paths.extend(glcc_pp::native_include_paths(Some(target.triple()), None));
         }

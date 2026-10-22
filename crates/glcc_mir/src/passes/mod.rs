@@ -4,6 +4,7 @@ pub mod global;
 pub mod instcombine;
 pub mod licm;
 pub mod loadstore;
+pub mod mem;
 pub mod sccp;
 pub mod sroa;
 
@@ -13,6 +14,7 @@ pub use global::{DeadModuleItems, GlobalConstProp, MergeReadOnlyGlobals};
 pub use instcombine::InstCombine;
 pub use licm::Licm;
 pub use loadstore::LoadStoreForward;
+pub use mem::LowerLibcMemory;
 pub use sccp::Sccp;
 pub use sroa::Sroa;
 
@@ -723,6 +725,7 @@ impl FunctionPass for ForwardAggregateCopy {
         let non_escaping = non_escaping_stack_slots(func);
         changed |= expand_local_zero_memsets(func, &non_escaping);
         changed |= expand_local_aggregate_copies(func, &non_escaping);
+        changed |= expand_local_scalar_copies(func, &non_escaping);
         changed |= expand_local_aggregate_stores(func, &non_escaping);
         changed |= expand_returned_aggregate_loads(func, &non_escaping);
         changed |= expand_aggregate_load_extracts(func, &non_escaping);
@@ -810,6 +813,86 @@ fn zero_const_for(ty: &Ty) -> Const {
         Ty::Ptr { .. } => Const::Null,
         _ => unreachable!("aggregate leaves are scalar"),
     }
+}
+
+/// Follow pointer-to-pointer bitcasts to the address they alias.
+fn strip_pointer_bitcasts(func: &Function, mut value: Value) -> Value {
+    while let Def::Inst(inst) = func.values[value].def {
+        let InstKind::Bitcast(inner) = func.insts[inst].kind else {
+            break;
+        };
+        if !matches!(func.values[value].ty, Ty::Ptr { .. }) || !matches!(func.values[inner].ty, Ty::Ptr { .. }) {
+            break;
+        }
+        value = inner;
+    }
+    value
+}
+
+/// Turn `memcpy(&x, p, sizeof x)` for a scalar local into a load and
+/// store. The copy is what keeps `x` address-taken: expanding it lets
+/// `Sroa`/`Mem2Reg` promote the slot, and the load can then fold into
+/// its single use.
+fn expand_local_scalar_copies(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
+    let mut changed = false;
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let insts = func.blocks[block].insts.clone();
+        let mut expanded = false;
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            let copy = match &func.insts[inst].kind {
+                InstKind::Memcpy { dst, src, len } => Some((*dst, *src, *len)),
+                _ => None,
+            };
+            let Some((dst, src, len)) = copy else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let dst = strip_pointer_bitcasts(func, dst);
+            let Ty::Ptr { pointee, .. } = &func.values[dst].ty else {
+                rebuilt.push(inst);
+                continue;
+            };
+            if !pointee.is_scalar() || pointee.size_bytes() != len {
+                rebuilt.push(inst);
+                continue;
+            }
+            if !matches!(
+                address_info(func, dst).map(|info| info.object),
+                Some(MemoryObject::Stack(root)) if non_escaping.contains(&root)
+            ) {
+                rebuilt.push(inst);
+                continue;
+            }
+            let ty = (**pointee).clone();
+            let (val, load) = make_value(
+                func,
+                block,
+                InstKind::Load {
+                    addr: src,
+                    flags: MemFlags::plain(),
+                },
+                ty,
+            );
+            rebuilt.push(load);
+            rebuilt.push(make_unit(
+                func,
+                block,
+                InstKind::Store {
+                    addr: dst,
+                    val,
+                    flags: MemFlags::plain(),
+                },
+            ));
+            expanded = true;
+            changed = true;
+        }
+        if expanded {
+            func.blocks[block].insts = rebuilt;
+        }
+    }
+    changed
 }
 
 /// Rewrite a whole-aggregate copy between two disjoint local slots into
@@ -1423,6 +1506,12 @@ pub(crate) fn address_info(func: &Function, value: Value) -> Option<AddressInfo>
             object: MemoryObject::Stack(value),
             offset: Some(0),
         }),
+        InstKind::Bitcast(inner)
+            if matches!(func.values[value].ty, Ty::Ptr { .. })
+                && matches!(func.values[*inner].ty, Ty::Ptr { .. }) =>
+        {
+            address_info(func, *inner)
+        }
         InstKind::GlobalAddr { .. } => Some(AddressInfo {
             object: MemoryObject::Global(value),
             offset: Some(0),
@@ -1942,10 +2031,6 @@ struct SlotSites {
 }
 
 fn promote_slots(func: &mut Function) -> bool {
-    let phi_budget: usize = std::env::var("GLCC_PHI_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(usize::MAX);
     // A `setjmp` call site can be re-entered by `longjmp` with the
     // registers of the first return: any slot written between the two
     // would read stale. Leave every slot in memory.
@@ -2043,12 +2128,14 @@ fn promote_slots(func: &mut Function) -> bool {
     let mut dead: std::collections::HashSet<Inst> = std::collections::HashSet::new();
     let mut changed = false;
     if !promotable.is_empty() {
+        // Promote busy slots first: the order is otherwise arbitrary,
+        // and hot slots first measured slightly better.
         promotable.sort_by_key(|slot| (std::cmp::Reverse(slot.loads.len() + slot.stores.len()), slot.alloca.index()));
         let dom = DomInfo::compute(func, &reachable);
         let switch_targets = switch_targets(func);
         let mut undef_cache: Vec<(Ty, Value)> = Vec::new();
         for slot in &promotable {
-            changed |= promote_slot(func, &dom, &switch_targets, slot, &mut replace, &mut dead, &mut undef_cache, phi_budget);
+            changed |= promote_slot(func, &dom, &switch_targets, slot, &mut replace, &mut dead, &mut undef_cache);
         }
     }
 
@@ -2077,7 +2164,6 @@ fn promote_slot(
     replace: &mut std::collections::HashMap<Value, Value>,
     dead: &mut std::collections::HashSet<Inst>,
     undef_cache: &mut Vec<(Ty, Value)>,
-    phi_budget: usize,
 ) -> bool {
     let mut store_blocks: Vec<Block> = slot.stores.iter().map(|store| store.block).collect();
     store_blocks.sort_by_key(|block| block.index());
@@ -2085,10 +2171,6 @@ fn promote_slot(
     let Some(phi_blocks) = place_phis(func, dom, &store_blocks, switch_targets, slot) else {
         return false;
     };
-    if phi_blocks.iter().any(|block| func.blocks[*block].params.len() >= phi_budget) {
-        return false;
-    }
-
     let undef = undef_value(func, &slot.pointee, undef_cache);
     let mut phi_index: std::collections::HashMap<Block, usize> = std::collections::HashMap::new();
     for &block in &phi_blocks {
@@ -2113,10 +2195,10 @@ fn promote_slot(
     true
 }
 
-/// Cytron's iterated dominance frontier: every block that merges two
-/// definitions of the slot gets one phi. Returns `None` when a phi
-/// would land somewhere unsupported (the entry block or a `Switch`
-/// target), leaving the caller to keep the slot in memory.
+/// Cytron's iterated dominance frontier: a block that merges definitions
+/// of the slot gets a phi only when the slot is live-in there. Returns
+/// `None` when a phi would land somewhere unsupported (the entry block
+/// or a `Switch` target), leaving the caller to keep the slot in memory.
 fn place_phis(
     func: &Function,
     dom: &DomInfo,
@@ -3222,8 +3304,9 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
 ///
 /// - Heuristic: small callees up to `max_insts` inline whether or not
 ///   they are marked `inline`. Calls inside a natural loop get the
-///   larger `max_hot_insts` budget because loop bodies run many times
-///   and a call there costs more than its code size suggests.
+///   larger `max_hot_insts` budget, and a callee with a single call
+///   site gets `max_single_insts`: neither duplicates code, so the
+///   usual size limit would under-inline them.
 /// - Keyword: callees with `Function::inline` (the C `inline` hint
 ///   from the frontend) inline up to `max_inline_insts`, including
 ///   multi-block bodies via return-block rewiring through block
@@ -3235,6 +3318,7 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
 pub struct Inline {
     pub max_insts: usize,
     pub max_hot_insts: usize,
+    pub max_single_insts: usize,
     pub max_inline_insts: usize,
 }
 
@@ -3247,8 +3331,9 @@ impl Default for Inline {
 impl Inline {
     pub fn small() -> Self {
         Inline {
-            max_insts: 24,
+            max_insts: 64,
             max_hot_insts: 96,
+            max_single_insts: 192,
             max_inline_insts: 256,
         }
     }
@@ -3260,6 +3345,7 @@ impl Inline {
         Inline {
             max_insts: 0,
             max_hot_insts: 0,
+            max_single_insts: 0,
             max_inline_insts: 256,
         }
     }
@@ -3272,6 +3358,16 @@ impl ModulePass for Inline {
 
     fn run(&mut self, module: &mut Module) -> bool {
         let mut changed = false;
+        let mut call_counts = vec![0usize; module.funcs.len()];
+        for func in module.funcs.iter() {
+            for block in func.blocks.iter() {
+                for inst in &block.insts {
+                    if let InstKind::Call { callee, .. } = &func.insts[*inst].kind {
+                        call_counts[callee.index()] += 1;
+                    }
+                }
+            }
+        }
         let func_ids: Vec<_> = (0..module.funcs.len()).map(crate::ir::Func::from_usize).collect();
         for caller_id in func_ids {
             // Collect call sites up front, then re-derive each site's
@@ -3325,6 +3421,8 @@ impl ModulePass for Inline {
                 let total: usize = module.funcs[callee].blocks.iter().map(|b| b.insts.len()).sum();
                 let limit = if marked {
                     self.max_inline_insts
+                } else if call_counts[callee.index()] == 1 {
+                    self.max_single_insts
                 } else if hot_blocks.contains(&block) {
                     self.max_hot_insts
                 } else {
@@ -4207,6 +4305,44 @@ mod tests {
         assert!(!func.blocks[func.entry].insts.contains(&store));
         assert!(crate::verify::verify_func(&func).is_empty());
         assert!(!pass.run(&mut func), "second run is a no-op");
+    }
+
+    #[test]
+    fn expands_local_scalar_memcpy_for_sroa() {
+        let sig = Signature::new(vec![Ty::ptr(Ty::int(8))], Ty::int(64));
+        let (mut func, entry) = Function::new("scalar-copy", sig);
+        let src = entry_param(&mut func, entry, Ty::ptr(Ty::int(8)), 0);
+        let slot = stack_slot(&mut func, entry, Ty::int(64));
+        let void_ptr = push_value(&mut func, entry, InstKind::Bitcast(slot), Ty::ptr(Ty::Void));
+        let copy = push_unit(
+            &mut func,
+            entry,
+            InstKind::Memcpy {
+                dst: void_ptr,
+                src,
+                len: 8,
+            },
+        );
+        let loaded = push_scalar_load(&mut func, entry, slot, Ty::int(64));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&copy));
+        assert!(!resident_kinds(&func)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Memcpy { .. })));
+
+        let mut dce = DeadCodeElim;
+        dce.run(&mut func);
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        sroa.run(&mut func);
+        mem2reg.run(&mut func);
+        assert!(!resident_kinds(&func)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Store { .. })));
+        assert!(crate::verify::verify_func(&func).is_empty());
     }
 
     #[test]
@@ -5789,8 +5925,77 @@ mod tests {
         let caller = crate::ir::Func::from_usize(1);
         let mut inline = Inline::small();
         inline.max_insts = 0;
+        inline.max_hot_insts = 0;
+        inline.max_single_insts = 0;
         assert!(!inline.run(&mut module));
         assert!(caller_still_calls(&module, caller));
+    }
+
+    #[test]
+    fn inlines_hot_multi_block_callee() {
+        let (mut module, _) = branchy_callee(false);
+        let caller = crate::ir::Func::from_usize(1);
+        let entry = module.funcs[caller].entry;
+        let call = module.funcs[caller].blocks[entry]
+            .insts
+            .iter()
+            .copied()
+            .find(|inst| matches!(module.funcs[caller].insts[*inst].kind, InstKind::Call { .. }))
+            .expect("call site");
+        let result = module.funcs[caller].insts[call].result.expect("call result");
+        let (callee, args) = match &module.funcs[caller].insts[call].kind {
+            InstKind::Call { callee, args } => (*callee, args.clone()),
+            _ => unreachable!("found a call"),
+        };
+        // A second call site keeps `call_counts` above one, so the
+        // single-call budget cannot mask the hot-call budget.
+        let body = module.funcs[caller].push_block(vec![]);
+        let exit = module.funcs[caller].push_block(vec![]);
+        let cond = module.funcs[caller].push_const(Const::Int { bits: 1, value: 1 });
+        module.funcs[caller].blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: body,
+            else_block: exit,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        let next_inst = crate::ir::Inst::from_usize(module.funcs[caller].insts.len());
+        let second = module.funcs[caller].values.push(crate::ir::ValueData {
+            ty: Ty::int(32),
+            def: Def::Inst(next_inst),
+        });
+        let extra = module.funcs[caller].insts.push(crate::ir::InstData {
+            block: body,
+            kind: InstKind::Call { callee, args },
+            result: Some(second),
+            loc: None,
+        });
+        module.funcs[caller].values[second].def = Def::Inst(extra);
+        module.funcs[caller].blocks[body].insts.push(extra);
+        module.funcs[caller].blocks[body].term = Some(Terminator::Br {
+            dest: entry,
+            args: Default::default(),
+        });
+        module.funcs[caller].blocks[exit].term = Some(Terminator::Return { val: Some(result) });
+
+        let mut inline = Inline::small();
+        inline.max_insts = 0;
+        inline.max_single_insts = 0;
+        assert!(inline.run(&mut module));
+        assert!(!caller_still_calls(&module, caller));
+        assert!(crate::verify::verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn inlines_single_call_callee_on_the_larger_budget() {
+        let (mut module, _) = branchy_callee(false);
+        let caller = crate::ir::Func::from_usize(1);
+        let mut inline = Inline::small();
+        inline.max_insts = 0;
+        inline.max_hot_insts = 0;
+        assert!(inline.run(&mut module));
+        assert!(!caller_still_calls(&module, caller));
+        assert!(crate::verify::verify_module(&module).is_empty());
     }
 
     #[test]
@@ -5855,7 +6060,7 @@ mod tests {
 
     #[test]
     fn marked_callee_gets_larger_budget() {
-        // 30 chained adds: over the 24-inst heuristic budget but under
+        // 30 chained adds: over the lowered heuristic budgets but under
         // the 256-inst keyword budget.
         for marked in [false, true] {
             let mut module = Module::new();
@@ -5907,6 +6112,9 @@ mod tests {
             caller.blocks[entry].term = Some(Terminator::Return { val: Some(rv) });
             module.push_func(caller);
             let mut inline = Inline::small();
+            inline.max_insts = 24;
+            inline.max_hot_insts = 24;
+            inline.max_single_insts = 0;
             assert_eq!(inline.run(&mut module), marked, "marked={marked} should control the larger budget");
             assert_eq!(caller_still_calls(&module, crate::ir::Func::from_usize(1)), !marked);
         }

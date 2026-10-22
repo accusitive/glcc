@@ -366,6 +366,9 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             if let Some(plan) = unsigned_zero_bound(func, *pred, *lhs, *rhs) {
                 return Some(plan);
             }
+            if let Some(plan) = ascii_after_sub_one(func, *pred, *lhs, *rhs) {
+                return Some(plan);
+            }
             if let Some(plan) = narrow_widened_compare(func, *pred, *lhs, *rhs) {
                 return Some(plan);
             }
@@ -988,6 +991,45 @@ fn unsigned_zero_bound(func: &Function, pred: IcmpPred, lhs: Value, rhs: Value) 
         (IcmpPred::Ult, false) => compare_zero(rhs, false),
         _ => None,
     }
+}
+
+/// `(u8)(x - 1) < 0x7f` is exactly `(i8)x > 0`. SQLite's UTF-8
+/// scanners spell it this way because it steers gcc to a single memory
+/// compare; without this fold the subtraction and two extensions stay in
+/// the loop.
+fn ascii_after_sub_one(func: &Function, pred: IcmpPred, lhs: Value, rhs: Value) -> Option<Plan> {
+    if pred != IcmpPred::Ult {
+        return None;
+    }
+    let (_, limit) = int_const(func, rhs)?;
+    if limit != 127 {
+        return None;
+    }
+    let trunc = def_inst(func, lhs)?;
+    let InstKind::Trunc(sub) = func.insts[trunc].kind else {
+        return None;
+    };
+    let sub_inst = def_inst(func, sub)?;
+    let InstKind::Sub(wide, one) = func.insts[sub_inst].kind else {
+        return None;
+    };
+    let (_, one) = int_const(func, one)?;
+    if one != 1 {
+        return None;
+    }
+    let (narrow, Widening::Zero) = widening_source(func, wide)? else {
+        return None;
+    };
+    let ty = func.values[narrow].ty.clone();
+    if !matches!(ty, Ty::Int { bits: 8 }) || func.values[lhs].ty != ty {
+        return None;
+    }
+    Some(Plan::NarrowCompare {
+        value: narrow,
+        pred: IcmpPred::Sgt,
+        ty,
+        constant: 0,
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -3088,6 +3130,39 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(truthy) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), less);
+    }
+
+    #[test]
+    fn utf8_ascii_bound_folds_to_signed_positive() {
+        let sig = Signature::new(vec![Ty::int(8)], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let x = param(&mut func, entry, Ty::int(8), 0);
+        let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+        let one = iconst(&mut func, 32, 1);
+        let sub = emit(&mut func, entry, InstKind::Sub(wide, one), Ty::int(32));
+        let narrow = emit(&mut func, entry, InstKind::Trunc(sub), Ty::int(8));
+        let limit = iconst(&mut func, 8, 127);
+        let cmp = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Ult,
+                lhs: narrow,
+                rhs: limit,
+            },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt comparison");
+        match &func.insts[inst].kind {
+            InstKind::Icmp { pred, lhs, rhs } => {
+                assert_eq!(*pred, IcmpPred::Sgt);
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 8, value: 0 }));
+            }
+            other => panic!("expected comparison, got {other:?}"),
+        }
     }
 
     #[test]
