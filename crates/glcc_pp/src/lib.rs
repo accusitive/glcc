@@ -736,6 +736,25 @@ impl fmt::Display for PpError {
 
 impl std::error::Error for PpError {}
 
+/// A `#warning` diagnostic collected during preprocessing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PpWarning {
+    /// `file:line` where the directive appeared.
+    pub loc: String,
+    /// The directive's message text, without the `#warning` keyword.
+    pub message: String,
+}
+
+impl fmt::Display for PpWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.message.is_empty() {
+            write!(f, "{}: warning: #warning", self.loc)
+        } else {
+            write!(f, "{}: warning: #warning {}", self.loc, self.message)
+        }
+    }
+}
+
 pub(crate) fn err(msg: impl Into<String>) -> PpError {
     PpError(format!("native pp: {}", msg.into()))
 }
@@ -759,6 +778,7 @@ pub(crate) struct Ctx {
     pub out: String,
     pub once: HashSet<PathBuf>,
     pub depth: u32,
+    pub warnings: Vec<PpWarning>,
 }
 
 impl Ctx {
@@ -860,12 +880,19 @@ fn is_ident(s: &str) -> bool {
 /// Anything else outside scope is an `Err` naming the gap, never a
 /// silent pass-through.
 pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<String, PpError> {
+    preprocess_with_warnings(source, filename, opts).map(|(text, _)| text)
+}
+
+/// [`preprocess`], also returning the `#warning` diagnostics it emitted
+/// (including from included files).
+pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) -> Result<(String, Vec<PpWarning>), PpError> {
     let mut interner = Interner::new();
     let mut ctx = Ctx {
         opts: opts.clone(),
         out: String::new(),
         once: HashSet::new(),
         depth: 0,
+        warnings: Vec::new(),
     };
     let mut macros: HashMap<SymbolU32, MacroDef> = HashMap::new();
     seed_macros(&opts.predefined, filename, &mut interner, &mut macros)?;
@@ -936,7 +963,7 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
     } else if !ctx.out.ends_with('\n') {
         ctx.out.push('\n');
     }
-    Ok(ctx.out)
+    Ok((ctx.out, ctx.warnings))
 }
 
 /// Seed the macro table from `(name, replacement)` pairs (predefined
@@ -1063,6 +1090,17 @@ mod tests {
 
     fn pp(src: &str) -> Result<String, PpError> {
         preprocess(src, "t.c", &opts())
+    }
+
+    #[test]
+    fn warning_directive_is_reported_only_when_active() {
+        let (text, warnings) =
+            preprocess_with_warnings("#if 0\n#warning no\n#endif\n#warning \"yes\"\n", "t.c", &opts()).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(warnings[0].loc, "t.c:4");
+        assert_eq!(warnings[0].message, "\"yes\"");
+        assert!(warnings[0].to_string().contains("warning: #warning \"yes\""));
+        assert!(!text.contains("warning"));
     }
 
     #[test]

@@ -48,7 +48,7 @@ pub enum ControlLine {
         next: bool,
     },
     Error(Vec<Tok>),
-    Warning,
+    Warning(Vec<Tok>),
     PragmaOnce,
     /// Any other `#pragma`: the tokens after the directive keyword
     /// (whitespace dropped, `space` flags kept) and the directive line.
@@ -153,7 +153,7 @@ impl IntoTokenTree {
             ControlLine::DefineObject { .. }
             | ControlLine::DefineFunction { .. }
             | ControlLine::Error(..)
-            | ControlLine::Warning
+            | ControlLine::Warning(..)
             | ControlLine::Undefine(..)
             | ControlLine::Include { .. }
             | ControlLine::PragmaOnce
@@ -399,7 +399,7 @@ pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Intern
             Ok(ControlLine::Undefine(n.to_string()))
         }
         "error" => Ok(ControlLine::Error(tail.to_vec())),
-        "warning" => Ok(ControlLine::Warning),
+        "warning" => Ok(ControlLine::Warning(tail.to_vec())),
         "pragma" => {
             if tail_args.len() == 1 {
                 if let Some(n) = ident_name(tail_args[0], interner) {

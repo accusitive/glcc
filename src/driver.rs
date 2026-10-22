@@ -1166,9 +1166,12 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
             }
             opts.include_paths.extend(native);
         }
-        return glcc_pp::preprocess(&text, &input.to_string_lossy(), &opts)
-            .map(String::into_bytes)
-            .map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())));
+        let (text, warnings) = glcc_pp::preprocess_with_warnings(&text, &input.to_string_lossy(), &opts)
+            .map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())))?;
+        for warning in warnings {
+            eprintln!("{warning}");
+        }
+        return Ok(text.into_bytes());
     }
     let (prog, args) = preprocess_cmd(job, input);
     let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run preprocessor '{}': {e}", prog.to_string_lossy())))?;

@@ -1665,7 +1665,14 @@ impl<'a, 'b> Expander<'a, 'b> {
                 let line = message.first().map(|t| self.eff_raw(t.line)).unwrap_or(0);
                 return Err(err(format!("{}: #error{}", self.loc(line), text.trim())));
             }
-            ControlLine::Warning => {}
+            ControlLine::Warning(message) => {
+                let text = message.iter().map(|t| show_tok(t, self.interner)).collect::<Vec<_>>().join("");
+                let line = message.first().map(|t| self.eff_raw(t.line)).unwrap_or(0);
+                self.files.warnings.push(crate::PpWarning {
+                    loc: self.loc(line),
+                    message: text.trim().to_string(),
+                });
+            }
             ControlLine::PragmaOnce => {
                 self.files.record_once(&self.file_path);
             }
