@@ -3372,6 +3372,31 @@ mod tests {
     }
 
     #[test]
+    fn string_literals_are_emitted_read_only() {
+        use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+
+        let src = "int main(void) { char *p = \"abc\"; char *e = \"\"; return p[0] + e[0]; }";
+        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+            .expect("compiles")
+            .0;
+        let obj = object::File::parse(&bytes[..]).expect("object parses");
+        let rodata = obj.section_by_name(".rodata").expect(".rodata section");
+        let literals: Vec<_> = obj
+            .symbols()
+            .filter(|symbol| symbol.name().is_ok_and(|name| name.starts_with("__str.")))
+            .collect();
+        assert_eq!(literals.len(), 2, "both literals are materialized");
+        for symbol in literals {
+            assert_eq!(
+                symbol.section(),
+                object::SymbolSection::Section(rodata.index()),
+                "{} must be read-only",
+                symbol.name().unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn non_pic_globals_avoid_the_got() {
         let reloc_kinds = |pic| {
             use object::{Object as _, ObjectSection as _};

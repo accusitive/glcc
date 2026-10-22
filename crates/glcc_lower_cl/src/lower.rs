@@ -637,7 +637,7 @@ fn declare_global<M: Module>(global: &mir::GlobalData, clif: &mut M) -> cranelif
             .unwrap_or_else(|_| panic!("cannot declare extern data {}", global.name));
     }
     let linkage = definition_linkage(global.local, global.weak);
-    clif.declare_data(&global.name, linkage, true, global.tls)
+    clif.declare_data(&global.name, linkage, global.writable, global.tls)
         .unwrap_or_else(|_| panic!("cannot declare data {}", global.name))
 }
 
@@ -668,8 +668,10 @@ fn define_global<M: Module>(
     let mut desc = DataDescription::new();
     // An all-zero object with no custom section is uninitialized storage:
     // defining it as such keeps it out of the object file. (`.init_array`
-    // and friends must stay PROGBITS even when empty.)
-    if global.section.is_none() && global.relocs.is_empty() && global.relocs32.is_empty() && bytes.iter().all(|b| *b == 0) {
+    // and friends must stay PROGBITS even when empty.) Read-only objects
+    // never take the zero-init path: `.bss` is writable, so an all-zero
+    // literal like `""` would otherwise stay mutable.
+    if global.writable && global.section.is_none() && global.relocs.is_empty() && global.relocs32.is_empty() && bytes.iter().all(|b| *b == 0) {
         desc.define_zeroinit(bytes.len());
     } else {
         desc.define(bytes.into_boxed_slice());
@@ -5036,6 +5038,35 @@ mod tests {
         let object = emit_object(&module);
         let (kind, _, _) = symbol_info(&object, "tls_counter");
         assert_eq!(kind, object::SymbolKind::Tls, "STT_TLS symbol");
+    }
+
+    #[test]
+    fn read_only_globals_land_in_rodata() {
+        use object::read::{Object, ObjectSection, ObjectSymbol};
+
+        let mut module = mir::Module::new();
+        let g = module.push_global(
+            "literal",
+            mir::Ty::Array {
+                elem: Box::new(mir::Ty::int(8)),
+                len: 1,
+            },
+            Some(mir::Const::Bytes(vec![0])),
+        );
+        let global = &mut module.globals[g];
+        global.local = true;
+        global.writable = false;
+        global.align = Some(1);
+
+        let object = emit_object(&module);
+        let file = object::File::parse(&*object).expect("parse object");
+        let symbol = file.symbol_by_name("literal").expect("literal symbol");
+        let object::SymbolSection::Section(index) = symbol.section() else {
+            panic!("literal has no section");
+        };
+        let section = file.section_by_index(index).expect("literal section");
+        assert_eq!(section.name().unwrap(), ".rodata");
+        assert_eq!(section.data().expect("literal data"), &[0], "an all-zero literal stays in .rodata, not .bss");
     }
 
     #[test]

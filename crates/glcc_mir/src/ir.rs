@@ -1138,6 +1138,8 @@ pub enum DataReloc {
 /// the object's required alignment (`type_align`), the `set_align`
 /// every definition needs. `section` overrides the default section
 /// for linker-collected data (`.init_array`/`.fini_array`).
+/// `writable` is false for objects the program must never modify
+/// (string literals): the backend places them in read-only storage.
 #[derive(Debug, Clone)]
 pub struct GlobalData {
     pub name: String,
@@ -1147,6 +1149,7 @@ pub struct GlobalData {
     pub local: bool,
     pub weak: bool,
     pub tls: bool,
+    pub writable: bool,
     pub align: Option<u64>,
     pub section: Option<String>,
     /// Link-time patches over the image (`Const::Bytes` only), at
@@ -1204,6 +1207,7 @@ impl Module {
             local: false,
             weak: false,
             tls: false,
+            writable: true,
             align: None,
             section: None,
             relocs: Vec::new(),
@@ -1222,6 +1226,7 @@ impl Module {
             local: false,
             weak: false,
             tls: false,
+            writable: true,
             align: None,
             section: None,
             relocs: Vec::new(),

@@ -5857,9 +5857,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         )
     }
 
-    /// Emit a string literal into a fresh anonymous global, returning
-    /// it with its element type and element count for an address reloc
-    /// or a `GlobalAddr`.
+    /// Emit a string literal into a fresh read-only anonymous global,
+    /// returning it with its element type and element count for an
+    /// address reloc or a `GlobalAddr`.
     fn materialize_string_global(&self, module: &mut mir::ModuleBuilder, parts: &[fe::lexer::StringLiteral]) -> (mir::Global, mir::Ty, u64) {
         let elem = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()).expect("checked literal has one prefix kind");
         let elem_mir = lower_ty(&elem, self.sema, self.interner);
@@ -5879,6 +5879,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         );
         let data = &mut module.module.globals[global];
         data.local = true;
+        data.writable = false;
         data.align = Some(width.max(1));
         (global, elem_mir, len)
     }
@@ -10044,6 +10045,26 @@ mod tests {
         );
         assert_eq!(run_main("int main(){char s[] = \"abc\"; return s[0]+s[1]+s[2];}"), 294);
         assert_eq!(run_main("char g[] = \"hi\"; int main(){return g[0]+g[1];}"), 209);
+    }
+
+    #[test]
+    fn string_literals_are_read_only() {
+        let module = lower_module("int main(void) { char *p = \"hi\"; char *e = \"\"; return p[0] + e[0]; }");
+        let literals: Vec<_> = module.globals.iter().filter(|g| g.name.starts_with("__str.")).collect();
+        assert_eq!(literals.len(), 2);
+        assert!(literals.iter().all(|g| !g.writable));
+        assert!(
+            literals
+                .iter()
+                .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"hi\0")),
+            "the literal keeps its bytes"
+        );
+        assert!(
+            literals
+                .iter()
+                .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
+            "the empty literal keeps its terminator"
+        );
     }
 
     #[test]
