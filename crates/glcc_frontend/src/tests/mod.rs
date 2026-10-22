@@ -338,6 +338,14 @@ fn dots_are_not_swallowed() {
 }
 
 #[test]
+fn c23_binary_literals_and_digit_separators() {
+    assert_eq!(
+        lex_raw("0b1010 0B11 1'000'000 0xDEAD'BEEF 0b1010'1010"),
+        ["i:0b1010", "i:0B11", "i:1000000", "i:0xDEADBEEF", "i:0b10101010"]
+    );
+}
+
+#[test]
 fn literal_metadata() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -3436,6 +3444,8 @@ fn int_literal_values() {
     assert_eq!(lit("3000000000", Radix::Dec, IntSuffix::None), Some((Long, 3_000_000_000)));
     assert_eq!(lit("0xFFFFFFFF", Radix::Hex, IntSuffix::None), Some((UnsignedInt, 0xFFFF_FFFF)));
     assert_eq!(lit("010", Radix::Oct, IntSuffix::None), Some((Int, 8)));
+    assert_eq!(lit("0b1010", Radix::Bin, IntSuffix::None), Some((Int, 10)));
+    assert_eq!(lit("0B11111111", Radix::Bin, IntSuffix::None), Some((Int, 255)));
     assert_eq!(lit("1ull", Radix::Dec, IntSuffix::ULL), Some((UnsignedLongLong, 1)));
     assert_eq!(lit("0xFFFFFFFFFFFFFFFF", Radix::Hex, IntSuffix::None), Some((UnsignedLong, u64::MAX as i128)));
     assert_eq!(lit("0x10000000000000000", Radix::Hex, IntSuffix::None), None);

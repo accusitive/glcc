@@ -681,6 +681,7 @@ pub enum Radix {
     Oct,
     Dec,
     Hex,
+    Bin,
 }
 /// `u`/`U` and/or `l`/`L`/`ll`/`LL` suffix of an integer constant, plus
 /// MSVC's fixed-width `__intN` suffixes (`i8`..`i64`, `ui8`..`ui64`).
@@ -1187,11 +1188,29 @@ impl<'a> Lexer<'a> {
 
     /// Consume a run of digits (hex digits if `hex`) into `buf`.
     fn lex_digits(&mut self, buf: &mut String, hex: bool) {
-        let is_digit = |d: char| {
-            if hex { d.is_ascii_hexdigit() } else { d.is_ascii_digit() }
-        };
-        while matches!(self.peek_char(0), Some(d) if is_digit(d)) {
-            self.bump_into(buf);
+        self.lex_digit_run(buf, |d| if hex { d.is_ascii_hexdigit() } else { d.is_ascii_digit() });
+    }
+
+    /// Digits with C23 digit separators. A `'` is consumed (and left out
+    /// of the spelling) only between two digits, so `1'000` is one
+    /// constant while `1'` still starts a character constant.
+    fn lex_digit_run(&mut self, buf: &mut String, is_digit: impl Fn(char) -> bool) {
+        let mut after_sep = false;
+        loop {
+            let Some(c) = self.peek_char(0) else { break };
+            if is_digit(c) {
+                self.bump_into(buf);
+                after_sep = false;
+            } else if c == '\''
+                && !after_sep
+                && buf.chars().last().is_some_and(&is_digit)
+                && matches!(self.peek_char(1), Some(next) if is_digit(next))
+            {
+                self.bump();
+                after_sep = true;
+            } else {
+                break;
+            }
         }
     }
 
@@ -1351,6 +1370,27 @@ impl<'a> Lexer<'a> {
                 val: Token::Constant(Constant::Float(FloatLiteral {
                     spelling: self.intern.get_or_intern(buf),
                     radix: Radix::Dec,
+                    suffix,
+                    imag,
+                })),
+            };
+        }
+
+        // C23 binary integer (`0b1010`); no binary floating form.
+        if first == '0' && matches!(self.peek_char(0), Some('b') | Some('B')) {
+            self.bump_into(&mut buf);
+            self.lex_digit_run(&mut buf, |d| matches!(d, '0' | '1'));
+            let mut suffix = self.lex_int_suffix(&mut buf);
+            let imag = self.lex_imaginary_suffix();
+            if imag && suffix == IntSuffix::None {
+                suffix = self.lex_int_suffix(&mut buf);
+            }
+            return Located {
+                loc: start,
+                end: self.loc,
+                val: Token::Constant(Constant::Int(IntLiteral {
+                    spelling: self.intern.get_or_intern(buf),
+                    radix: Radix::Bin,
                     suffix,
                     imag,
                 })),
