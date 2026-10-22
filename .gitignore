@@ -9,3 +9,4 @@
 /crates/glcc_explorer/glcc-explorer.wasm
 /tests/sqlite/sqlite-amalgamation-3540100
 /tests/sqlite/sqlite-src-3540100
+/.vscode
