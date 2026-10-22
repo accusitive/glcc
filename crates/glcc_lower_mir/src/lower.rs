@@ -7486,6 +7486,43 @@ mod tests {
         assert_eq!(jit_run_main(module), 2);
     }
 
+    /// A ternary producing only 0 and 1 is a boolean extension. The
+    /// inverted arm must negate with a comparison, not a bitwise `not`,
+    /// because `Bool` is byte-carried rather than a one-bit integer.
+    #[test]
+    fn optimized_pipeline_turns_boolean_ternaries_into_extensions() {
+        let src = "__attribute__((noinline)) int yes(int x) { return (x > 0) ? 1 : 0; }\n\
+                   __attribute__((noinline)) int no(int x) { return (x > 0) ? 0 : 1; }\n\
+                   int main() {\n\
+                       return yes(5) + yes(-1) * 2 + no(5) * 4 + no(-1) * 8;\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["yes", "no"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let kinds: Vec<&mir::InstKind> = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .map(|inst| &func.insts[*inst].kind)
+                .collect();
+            assert!(
+                kinds.iter().any(|kind| matches!(kind, mir::InstKind::Zext(..))),
+                "{name} did not become an extension:\n{dump}"
+            );
+            assert!(
+                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
+                "{name} kept a select:\n{dump}"
+            );
+            assert!(
+                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Not(..))),
+                "{name} negated a byte-carried bool bitwise:\n{dump}"
+            );
+        }
+        assert_eq!(jit_run_main(module), 9);
+    }
+
     /// Comparisons against a constant narrow to the source width with
     /// the right signedness, and constants outside the source range
     /// collapse to a fixed truth value.

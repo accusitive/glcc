@@ -120,6 +120,13 @@ enum Plan {
         ty: Ty,
         constant: i128,
     },
+    /// Extend a boolean (optionally negated) to an integer result.
+    BoolCast {
+        value: Value,
+        ty: Ty,
+        signed: bool,
+        invert: bool,
+    },
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
@@ -332,7 +339,8 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             match int_const(func, *cond) {
                 Some((_, 0)) => Some(Plan::Value(*else_val)),
                 Some(_) => Some(Plan::Value(*then_val)),
-                None => select_boolean_arm(func, *cond, *then_val, *else_val),
+                None => select_bool_constant(func, result_ty, *cond, *then_val, *else_val)
+                    .or_else(|| select_boolean_arm(func, *cond, *then_val, *else_val)),
             }
         }
         InstKind::GetElementPtr { base, indices } if indices.is_empty() && func.values[*base].ty == *result_ty => Some(Plan::Value(*base)),
@@ -487,6 +495,28 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
+        Plan::BoolCast { value, ty, signed, invert } => {
+            let loc = func.insts[inst].loc.clone();
+            let cond = if invert {
+                let zero = push_int_const(func, &Ty::Bool, 0);
+                push_temp(
+                    func,
+                    block,
+                    InstKind::Icmp {
+                        pred: IcmpPred::Eq,
+                        lhs: value,
+                        rhs: zero,
+                    },
+                    Ty::Bool,
+                    loc.clone(),
+                    out,
+                )
+            } else {
+                value
+            };
+            let kind = if signed { InstKind::Sext(cond) } else { InstKind::Zext(cond) };
+            push_temp(func, block, kind, ty, loc, out)
+        }
         Plan::SignedPow2 { value, shift, remainder } => {
             let ty = func.values[result].ty.clone();
             let bits = int_ty_bits(&ty).expect("signed integer division");
@@ -553,6 +583,41 @@ fn zext_bool(func: &Function, v: Value) -> Option<Value> {
         InstKind::Zext(x) if func.values[*x].ty == Ty::Bool => Some(*x),
         _ => None,
     }
+}
+
+/// `select c, 1, 0` is a canonical boolean extension; the inverse and
+/// all-ones forms negate first.
+fn select_bool_constant(
+    func: &Function,
+    result_ty: &Ty,
+    cond: Value,
+    then_val: Value,
+    else_val: Value,
+) -> Option<Plan> {
+    if func.values[cond].ty != Ty::Bool {
+        return None;
+    }
+    let (_, then_value) = int_const(func, then_val)?;
+    let (_, else_value) = int_const(func, else_val)?;
+    let (signed, invert) = match (then_value, else_value) {
+        (1, 0) => (false, false),
+        (0, 1) => (false, true),
+        (-1, 0) => (true, false),
+        (0, -1) => (true, true),
+        _ => return None,
+    };
+    if *result_ty == Ty::Bool {
+        return Some(if invert { Plan::BoolNot(cond) } else { Plan::Value(cond) });
+    }
+    if int_ty_bits(result_ty)? < 2 {
+        return None;
+    }
+    Some(Plan::BoolCast {
+        value: cond,
+        ty: result_ty.clone(),
+        signed,
+        invert,
+    })
 }
 
 /// A value that is `cond` itself or its zero extension.
@@ -726,8 +791,11 @@ fn narrow_widened_const_compare(
         return None;
     };
     let (narrow, widening) = widening_source(func, wide)?;
-    let Ty::Int { bits: source_bits } = func.values[narrow].ty else {
-        return None;
+    let narrow_ty = func.values[narrow].ty.clone();
+    let (source_bits, bool_source) = match narrow_ty {
+        Ty::Int { bits } => (bits, false),
+        Ty::Bool => (1, true),
+        _ => return None,
     };
     let wide_bits = int_ty_bits(&func.values[wide].ty)?;
     if source_bits == 0 || source_bits >= wide_bits {
@@ -742,6 +810,17 @@ fn narrow_widened_const_compare(
             if (constant as u128) & mask(wide_bits) > maximum {
                 return truth(eval_icmp(pred, wide_bits, 0, constant));
             }
+            if bool_source {
+                if !matches!(pred, IcmpPred::Eq | IcmpPred::Ne) {
+                    return None;
+                }
+                let is_one = (constant as u128) & mask(source_bits) != 0;
+                return Some(match (pred, is_one) {
+                    (IcmpPred::Eq, true) | (IcmpPred::Ne, false) => Plan::Value(narrow),
+                    (IcmpPred::Eq, false) | (IcmpPred::Ne, true) => Plan::BoolNot(narrow),
+                    _ => unreachable!("boolean comparison is Eq or Ne"),
+                });
+            }
             let pred = zext_predicate(pred);
             Some(Plan::NarrowCompare {
                 value: narrow,
@@ -751,7 +830,7 @@ fn narrow_widened_const_compare(
             })
         }
         Widening::Sign => {
-            if !matches!(
+            if bool_source || !matches!(
                 pred,
                 IcmpPred::Eq | IcmpPred::Ne | IcmpPred::Slt | IcmpPred::Sle | IcmpPred::Sgt | IcmpPred::Sge
             ) {
@@ -2009,6 +2088,144 @@ mod tests {
                 assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 8, value: -56 }));
             }
             other => panic!("expected comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_extended_boolean_comparisons_fold() {
+        for (pred, constant, expect_value) in [
+            (IcmpPred::Eq, 1, true),
+            (IcmpPred::Ne, 1, false),
+            (IcmpPred::Eq, 0, false),
+            (IcmpPred::Ne, 0, true),
+        ] {
+            let sig = Signature::new(vec![Ty::Bool], Ty::Bool);
+            let (mut func, entry) = Function::new("f", sig);
+            let x = param(&mut func, entry, Ty::Bool, 0);
+            let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+            let constant = iconst(&mut func, 32, constant);
+            let cmp = emit(
+                &mut func,
+                entry,
+                InstKind::Icmp { pred, lhs: wide, rhs: constant },
+                Ty::Bool,
+            );
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+            assert!(run(&mut func), "{pred:?}");
+            if expect_value {
+                assert_eq!(returned(&func), x, "{pred:?}");
+            } else {
+                let inst = def_inst(&func, returned(&func)).expect("negated boolean");
+                match &func.insts[inst].kind {
+                    InstKind::Icmp { pred: IcmpPred::Eq, lhs, rhs } => {
+                        assert_eq!(*lhs, x);
+                        assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 1, value: 0 }));
+                    }
+                    other => panic!("expected negated boolean, got {other:?}"),
+                }
+            }
+        }
+
+        for (pred, truth) in [(IcmpPred::Eq, false), (IcmpPred::Ne, true)] {
+            let sig = Signature::new(vec![Ty::Bool], Ty::Bool);
+            let (mut func, entry) = Function::new("f", sig);
+            let x = param(&mut func, entry, Ty::Bool, 0);
+            let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+            let constant = iconst(&mut func, 32, 2);
+            let cmp = emit(
+                &mut func,
+                entry,
+                InstKind::Icmp { pred, lhs: wide, rhs: constant },
+                Ty::Bool,
+            );
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+            assert!(run(&mut func));
+            assert_eq!(
+                func.const_value(returned(&func)),
+                Some(&Const::Int { bits: 1, value: i128::from(truth) })
+            );
+        }
+    }
+
+    #[test]
+    fn select_of_boolean_constants_becomes_an_extension() {
+        for (then_value, else_value, signed, invert) in [
+            (1, 0, false, false),
+            (0, 1, false, true),
+            (-1, 0, true, false),
+            (0, -1, true, true),
+        ] {
+            let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
+            let (mut func, entry) = Function::new("f", sig);
+            let cond = param(&mut func, entry, Ty::Bool, 0);
+            let then_val = iconst(&mut func, 32, then_value);
+            let else_val = iconst(&mut func, 32, else_value);
+            let sel = emit(
+                &mut func,
+                entry,
+                InstKind::Select { cond, then_val, else_val },
+                Ty::int(32),
+            );
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+            assert!(run(&mut func), "select {then_value}/{else_value}");
+            let outer = def_inst(&func, returned(&func)).expect("extension");
+            let inner = match &func.insts[outer].kind {
+                InstKind::Zext(inner) | InstKind::Sext(inner) => *inner,
+                other => panic!("expected extension, got {other:?}"),
+            };
+            assert_eq!(matches!(func.insts[outer].kind, InstKind::Sext(_)), signed);
+            if invert {
+                let inner = def_inst(&func, inner).expect("negated condition");
+                match &func.insts[inner].kind {
+                    InstKind::Icmp { pred: IcmpPred::Eq, lhs, rhs } => {
+                        assert_eq!(*lhs, cond);
+                        assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 1, value: 0 }));
+                    }
+                    other => panic!("expected negated condition, got {other:?}"),
+                }
+            } else {
+                assert_eq!(inner, cond);
+            }
+        }
+    }
+
+    #[test]
+    fn select_of_boolean_constants_stays_boolean() {
+        let sig = Signature::new(vec![Ty::Bool], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let then_val = func.push_const(Const::Int { bits: 1, value: 1 });
+        let else_val = func.push_const(Const::Int { bits: 1, value: 0 });
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val, else_val },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), cond);
+
+        let sig = Signature::new(vec![Ty::Bool], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let then_val = func.push_const(Const::Int { bits: 1, value: 0 });
+        let else_val = func.push_const(Const::Int { bits: 1, value: 1 });
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val, else_val },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("negated boolean");
+        match &func.insts[inst].kind {
+            InstKind::Icmp { pred: IcmpPred::Eq, lhs, rhs } => {
+                assert_eq!(*lhs, cond);
+                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 1, value: 0 }));
+            }
+            other => panic!("expected negated boolean, got {other:?}"),
         }
     }
 
