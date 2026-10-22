@@ -5003,6 +5003,25 @@ fn alignof_folds() {
 }
 
 #[test]
+fn c23_bool_true_false() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "_Static_assert(sizeof(bool) == 1, \"bool\");\n\
+         _Static_assert(sizeof(true) == 1, \"true\");\n\
+         _Static_assert(_Generic(true, bool: 1, default: 0), \"type\");\n\
+         bool b = true; int main(void) { return false; }",
+        c23
+    )
+    .is_empty());
+    assert!(tu_diagnostics("int bool = 1;").is_empty());
+}
+
+#[test]
 fn c23_bare_alignof() {
     let c23 = LangOpts {
         std: Std::C23,

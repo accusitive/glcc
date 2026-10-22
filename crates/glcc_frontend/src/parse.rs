@@ -2702,6 +2702,7 @@ impl<'a> Parser<'a> {
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
                     || self.peek_c23_keyword("typeof_unqual")
+                    || self.peek_c23_keyword("bool")
                     || self.peek_alternate_inline()
                     || self.peek_gnu_qualifier().is_some()
                     // MSVC declaration prefixes (`__declspec(noreturn)
@@ -2747,11 +2748,15 @@ impl<'a> Parser<'a> {
     /// became keywords in C23 stay identifiers here and are gated at the
     /// parse site.
     fn peek_c23_keyword(&self, word: &str) -> bool {
-        self.sema.lang.standard_includes(Std::C23)
-            && matches!(
-                self.tokens.peek_val(),
-                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some(word)
-            )
+        match self.tokens.peek_val() {
+            Some(Token::Identifier(sym)) => self.is_c23_keyword(*sym, word),
+            _ => false,
+        }
+    }
+    /// Whether `sym` spells the C23 keyword `word` under the selected
+    /// dialect. Lookahead callers pass a symbol they already hold.
+    fn is_c23_keyword(&self, sym: SymbolU32, word: &str) -> bool {
+        self.sema.lang.standard_includes(Std::C23) && self.intern.resolve(sym) == Some(word)
     }
     /// A GNU alternate qualifier spelling (`__restrict__`, `__const`,
     /// ...), accepted everywhere the standard spelling is. System
@@ -4666,6 +4671,11 @@ impl<'a> Parser<'a> {
                 // second specifier.
                 Some(Token::Identifier(sym)) if ds.type_specifier.is_empty() => {
                     let sym = *sym;
+                    if self.sema.lang.standard_includes(Std::C23) && self.intern.resolve(sym) == Some("bool") {
+                        self.tokens.advance();
+                        ds.type_specifier.push(TypeSpecifier::_Bool);
+                        continue;
+                    }
                     if self.is_future_specifier(sym) {
                         ds.type_specifier.push(self.parse_future_specifier());
                         continue;
@@ -5833,7 +5843,8 @@ impl<'a> Parser<'a> {
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
                     || self.is_future_specifier(*sym)
-                    || self.peek_c23_keyword("typeof_unqual")
+                    || self.is_c23_keyword(*sym, "typeof_unqual")
+                    || self.is_c23_keyword(*sym, "bool")
             }
             _ => false,
         }
@@ -6303,6 +6314,30 @@ impl<'a> Parser<'a> {
         // before the identifier arm below.
         if matches!(self.tokens.peek_val(), Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("_Generic")) {
             return self.parse_generic_selection();
+        }
+        // C23 `true`/`false` have type `bool`; spelling them as a cast
+        // keeps `sizeof(true) == 1` and `_Generic` selecting `bool`.
+        let bool_value = if self.peek_c23_keyword("true") {
+            Some(true)
+        } else if self.peek_c23_keyword("false") {
+            Some(false)
+        } else {
+            None
+        };
+        if let Some(value) = bool_value {
+            self.tokens.advance();
+            let lit = IntLiteral {
+                spelling: self.intern.get_or_intern(if value { "1" } else { "0" }),
+                radix: Radix::Dec,
+                suffix: IntSuffix::None,
+                imag: false,
+            };
+            let span = self.span_since(start);
+            return Expr::Cast {
+                ty: Ty::Bool,
+                expr: Box::new(Expr::Int { lit, span }),
+                span,
+            };
         }
         // `__func__`, `__FUNCTION__`, and (in C) `__PRETTY_FUNCTION__`
         // expand to the enclosing function's name as a string literal;
