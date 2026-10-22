@@ -476,10 +476,11 @@ impl FunctionPass for ForwardAggregateCopy {
                 func.blocks[block].insts.retain(|inst| !removed.contains(inst));
             }
         }
-        changed |= expand_local_aggregate_copies(func);
-        changed |= expand_local_aggregate_stores(func);
-        changed |= expand_returned_aggregate_loads(func);
-        changed |= expand_aggregate_load_extracts(func);
+        let non_escaping = non_escaping_stack_slots(func);
+        changed |= expand_local_aggregate_copies(func, &non_escaping);
+        changed |= expand_local_aggregate_stores(func, &non_escaping);
+        changed |= expand_returned_aggregate_loads(func, &non_escaping);
+        changed |= expand_aggregate_load_extracts(func, &non_escaping);
         changed
     }
 }
@@ -487,7 +488,7 @@ impl FunctionPass for ForwardAggregateCopy {
 /// Rewrite a whole-aggregate copy between two disjoint local slots into
 /// scalar field copies, exposing the copy to `Sroa` on the next pipeline
 /// turn.
-fn expand_local_aggregate_copies(func: &mut Function) -> bool {
+fn expand_local_aggregate_copies(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
     let mut changed = false;
     for block_idx in 0..func.blocks.len() {
         let block = Block::from_usize(block_idx);
@@ -503,7 +504,7 @@ fn expand_local_aggregate_copies(func: &mut Function) -> bool {
                 rebuilt.push(inst);
                 continue;
             };
-            let Some(leaves) = local_aggregate_copy_leaves(func, dst, src, len) else {
+            let Some(leaves) = local_aggregate_copy_leaves(func, dst, src, len, non_escaping) else {
                 rebuilt.push(inst);
                 continue;
             };
@@ -561,7 +562,13 @@ fn expand_local_aggregate_copies(func: &mut Function) -> bool {
     changed
 }
 
-fn local_aggregate_copy_leaves(func: &Function, dst: Value, src: Value, len: u64) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
+fn local_aggregate_copy_leaves(
+    func: &Function,
+    dst: Value,
+    src: Value,
+    len: u64,
+    non_escaping: &std::collections::HashSet<Value>,
+) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
     let Ty::Ptr { pointee, .. } = &func.values[dst].ty else {
         return None;
     };
@@ -571,7 +578,7 @@ fn local_aggregate_copy_leaves(func: &Function, dst: Value, src: Value, len: u64
     let (MemoryObject::Stack(dst_root), MemoryObject::Stack(src_root)) = (address_info(func, dst)?.object, address_info(func, src)?.object) else {
         return None;
     };
-    if dst_root == src_root {
+    if dst_root == src_root || !non_escaping.contains(&dst_root) || !non_escaping.contains(&src_root) {
         return None;
     }
     let mut leaves = Vec::new();
@@ -646,7 +653,7 @@ fn make_unit(func: &mut Function, block: Block, kind: InstKind) -> Inst {
 /// Split an aggregate store into its scalar fields. The source aggregate
 /// value is read with `ExtractValue`, so a following `Sroa` sees only the
 /// individual field stores.
-fn expand_local_aggregate_stores(func: &mut Function) -> bool {
+fn expand_local_aggregate_stores(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
     let mut changed = false;
     for block_idx in 0..func.blocks.len() {
         let block = Block::from_usize(block_idx);
@@ -670,7 +677,10 @@ fn expand_local_aggregate_stores(func: &mut Function) -> bool {
                 rebuilt.push(inst);
                 continue;
             }
-            if !matches!(address_info(func, addr).map(|info| info.object), Some(MemoryObject::Stack(_))) {
+            if !matches!(
+                address_info(func, addr).map(|info| info.object),
+                Some(MemoryObject::Stack(root)) if non_escaping.contains(&root)
+            ) {
                 rebuilt.push(inst);
                 continue;
             }
@@ -730,7 +740,7 @@ fn extract_value_path(func: &mut Function, block: Block, aggregate: Value, path:
 /// Replace an aggregate load whose only use is the function's return with a
 /// field-wise load and `InsertValue` chain. This lets `Sroa` scalarize the
 /// source slot while still returning a value of the aggregate type.
-fn expand_returned_aggregate_loads(func: &mut Function) -> bool {
+fn expand_returned_aggregate_loads(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
     let counts = func.count_resident_uses();
     let mut changed = false;
     for block_idx in 0..func.blocks.len() {
@@ -759,7 +769,10 @@ fn expand_returned_aggregate_loads(func: &mut Function) -> bool {
                 rebuilt.push(inst);
                 continue;
             }
-            if !matches!(address_info(func, addr).map(|info| info.object), Some(MemoryObject::Stack(_))) {
+            if !matches!(
+                address_info(func, addr).map(|info| info.object),
+                Some(MemoryObject::Stack(root)) if non_escaping.contains(&root)
+            ) {
                 rebuilt.push(inst);
                 continue;
             }
@@ -891,7 +904,7 @@ fn extract_step(ty: &Ty, index: u32) -> Option<(GepIndex, Ty)> {
 /// Replace an aggregate load consumed only by scalar `ExtractValue`s with
 /// scalar loads at the same point, removing both the aggregate load and the
 /// extraction. The source slot is then visible to `Sroa`.
-fn expand_aggregate_load_extracts(func: &mut Function) -> bool {
+fn expand_aggregate_load_extracts(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
     use std::collections::{HashMap, HashSet};
 
     let resident = func.resident_mask();
@@ -930,6 +943,12 @@ fn expand_aggregate_load_extracts(func: &mut Function) -> bool {
             continue;
         };
         if flags.volatile {
+            continue;
+        }
+        let Some(MemoryObject::Stack(root)) = address_info(func, *addr).map(|info| info.object) else {
+            continue;
+        };
+        if !non_escaping.contains(&root) {
             continue;
         }
         let Some(result) = inst.result else { continue };
@@ -3641,6 +3660,25 @@ mod tests {
         assert!(sroa.run(&mut func));
         assert!(mem2reg.run(&mut func));
         assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn keeps_aggregate_copies_when_a_slot_escapes() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("escape", Signature::new(vec![], Ty::ptr(ty.clone())));
+        let dst = stack_slot(&mut func, entry, ty.clone());
+        let src = stack_slot(&mut func, entry, ty);
+        let copy = push_unit(&mut func, entry, InstKind::Memcpy { dst, src, len: 8 });
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(dst) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(!forward.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&copy));
         assert!(crate::verify::verify_func(&func).is_empty());
     }
 
