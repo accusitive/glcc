@@ -1439,6 +1439,20 @@ mod tests {
     }
 
     #[test]
+    fn tgmath_header_dispatches_by_type() {
+        let header_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../include");
+        let mut o = opts();
+        o.include_paths.push(header_dir);
+        o.include_paths.extend(native_include_paths(None, Some("-std=c17")));
+        let src = "#include <tgmath.h>\ndouble f(float x, long double y) { return sqrt(x) + sqrt(y); }\n";
+        let got = preprocess(src, "t.c", &o).unwrap();
+        assert!(got.contains("sqrtf"), "was: {got}");
+        assert!(got.contains("sqrtl"), "was: {got}");
+        assert!(got.contains("csqrtf"), "was: {got}");
+        assert!(got.contains("csqrtl"), "was: {got}");
+    }
+
+    #[test]
     fn trigraphs_translate_before_c23() {
         assert_eq!(
             translate_trigraphs("??=??/??'??(??)??!??<??>??-").as_ref(),

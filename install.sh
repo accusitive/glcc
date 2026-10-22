@@ -30,6 +30,11 @@ if [ -z "${GLCC:-}" ]; then
   exit 1
 fi
 
+# glcc-owned standard headers, found before the toolchain's resource and
+# libc headers by the driver's include search.
+mkdir -p "$LIB/include"
+cp "$ROOT"/include/*.h "$LIB/include/"
+
 # One runtime source for every host: hand-written asm blocks behind
 # target guards, so no per-architecture file juggling.
 "$GLCC" -c -Os -fPIC -ftls-model=initial-exec \

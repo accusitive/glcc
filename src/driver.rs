@@ -239,6 +239,28 @@ fn glcc_runtime_candidates(name: &str) -> Vec<PathBuf> {
     out
 }
 
+/// Directories holding glcc-owned standard headers. `$GLCC_INCLUDE`
+/// names one directly; otherwise the staged runtime directory and the
+/// system install location are tried.
+fn glcc_include_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = std::env::var_os("GLCC_INCLUDE") {
+        if !dir.is_empty() {
+            out.push(PathBuf::from(dir));
+        }
+    }
+    if let Some(home) = home_dir() {
+        out.push(home.join(".local/lib/glcc/include"));
+    }
+    out.push(PathBuf::from("/usr/lib/glcc/include"));
+    out
+}
+
+/// First staged header directory containing glcc's `tgmath.h`.
+fn find_glcc_include_dir() -> Option<PathBuf> {
+    glcc_include_candidates().into_iter().find(|dir| dir.join("tgmath.h").is_file())
+}
+
 /// The user's home directory: `HOME`, then `USERPROFILE` (Windows), so
 /// the staged runtime is found on every host.
 fn home_dir() -> Option<PathBuf> {
@@ -1119,6 +1141,10 @@ fn preprocess_cmd(job: &Job, input: &OsStr) -> (OsString, Vec<OsString>) {
     let mut args = vec![OsString::from("-E")];
     args.extend(job.target_args());
     args.extend(job.cpp.iter().cloned());
+    if let Some(dir) = find_glcc_include_dir() {
+        args.push(OsString::from("-I"));
+        args.push(dir.into_os_string());
+    }
     args.push(input.to_os_string());
     (preprocessor(), args)
 }
@@ -1163,6 +1189,9 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
             let native = glcc_pp::native_include_paths(Some(job.target.triple()), opts.std.as_deref());
             if job.target.os == Os::Windows {
                 opts.clang_resource_dir = glcc_pp::clang_resource_dir(&native);
+            }
+            if let Some(dir) = find_glcc_include_dir() {
+                opts.include_paths.push(dir);
             }
             opts.include_paths.extend(native);
         }
@@ -3443,7 +3472,12 @@ mod tests {
         assert_eq!(parse(&[flag.as_str(), "a.c"]).target_args(), [expected.as_str()]);
         let (_, pp) = preprocess_cmd(&parse(&[flag.as_str(), "a.c"]), OsStr::new("a.c"));
         let s: Vec<String> = pp.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["-E", expected.as_str(), "a.c"]);
+        assert_eq!(&s[..2], ["-E", expected.as_str()]);
+        assert_eq!(s.last().map(String::as_str), Some("a.c"));
+        if let Some(dir) = find_glcc_include_dir() {
+            let dir = dir.to_string_lossy();
+            assert!(s.windows(2).any(|w| w[0] == "-I" && w[1] == dir), "was: {s:?}");
+        }
     }
 
     #[test]
@@ -3678,6 +3712,12 @@ mod tests {
         let win = glcc_runtime_candidates("glccrt-win64.lib");
         assert_eq!(win.last().unwrap(), &PathBuf::from("/usr/lib/glcc/glccrt-win64.lib"));
         assert!(win.iter().any(|p| p.ends_with(".local/lib/glcc/glccrt-win64.lib")));
+    }
+
+    #[test]
+    fn staged_tgmath_is_first_in_the_include_search() {
+        let dir = find_glcc_include_dir().expect("build script stages include/tgmath.h");
+        assert!(dir.join("tgmath.h").is_file());
     }
 
     #[test]

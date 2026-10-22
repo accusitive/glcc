@@ -40,15 +40,40 @@ const RENAMES: [&str; 11] = [
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     println!("cargo:rerun-if-changed=rt/glccrt.c");
+    println!("cargo:rerun-if-changed=include");
     if cfg!(target_arch = "x86_64") {
         println!("cargo:rerun-if-changed=rt/softfloat");
     }
+    stage_headers(&root);
     if host_uses_elf() {
         stage_elf(&root);
     } else if cfg!(all(windows, target_arch = "x86_64")) {
         stage_windows(&root);
     } else {
         println!("cargo:warning=runtime staging is implemented for ELF and x86-64 Windows hosts; skipping on this platform");
+    }
+}
+
+/// glcc-owned standard headers (`tgmath.h`) shadow the toolchain copies
+/// in the driver's include search. Stage them next to the runtime so an
+/// installed compiler finds them without access to the source tree.
+fn stage_headers(root: &Path) {
+    let src = root.join("include");
+    let Ok(entries) = std::fs::read_dir(&src) else {
+        return;
+    };
+    let dst = home_dir().join(".local/lib/glcc/include");
+    if let Err(e) = std::fs::create_dir_all(&dst) {
+        panic!("cannot create {}: {e}", dst.display());
+    }
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "h") {
+            let out = dst.join(path.file_name().expect("header has a file name"));
+            if let Err(e) = std::fs::copy(&path, &out) {
+                panic!("cannot stage {}: {e}", out.display());
+            }
+        }
     }
 }
 
