@@ -341,8 +341,16 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
         }
         InstKind::IntToPtr(a) => {
             let inner = def_inst(func, *a)?;
-            match &func.insts[inner].kind {
-                InstKind::PtrToInt(x) if func.values[*x].ty == *result_ty => Some(Plan::Value(*x)),
+            let InstKind::PtrToInt(source) = func.insts[inner].kind else {
+                return None;
+            };
+            if func.values[source].ty == *result_ty {
+                return Some(Plan::Value(source));
+            }
+            match (&func.values[source].ty, result_ty) {
+                (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => {
+                    Some(Plan::Inst(InstKind::Bitcast(source)))
+                }
                 _ => None,
             }
         }
@@ -1619,6 +1627,33 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), x);
+    }
+
+    #[test]
+    fn int_to_ptr_of_a_converted_pointer_retypes_without_round_tripping() {
+        let array = Ty::Array {
+            elem: Box::new(Ty::int(8)),
+            len: 4,
+        };
+        let source_ty = Ty::ptr(array);
+        let dest_ty = Ty::ptr(Ty::int(8));
+        let sig = Signature::new(vec![source_ty.clone()], dest_ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let source = param(&mut func, entry, source_ty, 0);
+        let int = emit(
+            &mut func,
+            entry,
+            InstKind::PtrToInt(source),
+            Ty::int(64),
+        );
+        let cast = emit(&mut func, entry, InstKind::IntToPtr(int), dest_ty);
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(cast) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("pointer conversion");
+        match &func.insts[inst].kind {
+            InstKind::Bitcast(ptr) => assert_eq!(*ptr, source),
+            other => panic!("expected a pointer bitcast, got {other:?}"),
+        }
     }
 
     #[test]
