@@ -1435,6 +1435,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn embed_emits_bytes_and_honours_parameters() {
+        let dir = test_dir("embed");
+        std::fs::write(dir.join("d.bin"), [1u8, 2, 255]).unwrap();
+        write_file(&dir.join("empty.bin"), "");
+        let main = dir.join("main.c");
+        write_file(
+            &main,
+            "#define H \"d.bin\"\n\
+             const unsigned char a[] = {\n#embed H\n};\n\
+             const unsigned char b[] = {\n#embed \"d.bin\" limit(2)\n};\n\
+             const unsigned char c[] = {\n#embed \"d.bin\" suffix(, 9)\n};\n\
+             const unsigned char d[] = {\n#embed \"empty.bin\" if_empty(7)\n};\n",
+        );
+        let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &opts()).unwrap();
+        let compact: String = got.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("a[]={1,2,255};"), "{got}");
+        assert!(compact.contains("b[]={1,2};"), "{got}");
+        assert!(compact.contains("c[]={1,2,255,9};"), "{got}");
+        assert!(compact.contains("d[]={7};"), "{got}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn has_embed_reports_found_empty_and_missing() {
+        let dir = test_dir("has-embed");
+        std::fs::write(dir.join("d.bin"), [1u8, 2]).unwrap();
+        write_file(&dir.join("empty.bin"), "");
+        let main = dir.join("main.c");
+        write_file(
+            &main,
+            "#define H \"d.bin\"\n\
+             #if __has_embed(H) != 1\n#error found\n#endif\n\
+             #if __has_embed(\"empty.bin\") != 2\n#error empty\n#endif\n\
+             #if __has_embed(\"missing.bin\") != 0\n#error missing\n#endif\n\
+             #if __has_embed(\"d.bin\" limit(0)) != 2\n#error limit\n#endif\n",
+        );
+        preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &opts()).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn embed_errors_on_missing_resources_and_bad_limits() {
+        let dir = test_dir("embed-errors");
+        std::fs::write(dir.join("d.bin"), [1u8]).unwrap();
+        let missing = dir.join("missing.c");
+        write_file(&missing, "#embed \"missing.bin\"\n");
+        assert!(preprocess(&std::fs::read_to_string(&missing).unwrap(), &missing.display().to_string(), &opts()).is_err());
+        let bad = dir.join("bad.c");
+        write_file(&bad, "#embed \"d.bin\" limit(-1)\n");
+        let e = preprocess(&std::fs::read_to_string(&bad).unwrap(), &bad.display().to_string(), &opts()).unwrap_err();
+        assert!(e.0.contains("limit is negative"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     static TEST_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     fn test_dir(tag: &str) -> PathBuf {

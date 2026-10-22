@@ -76,6 +76,14 @@ impl Tok {
     }
 }
 
+#[derive(Debug, Default)]
+struct EmbedParams {
+    limit: Option<Vec<Tok>>,
+    prefix: Option<Vec<Tok>>,
+    suffix: Option<Vec<Tok>>,
+    if_empty: Option<Vec<Tok>>,
+}
+
 #[derive(Debug, Clone)]
 pub enum MacroDef {
     Object(Vec<Tok>),
@@ -156,6 +164,7 @@ fn is_has_builtin_name(name: &str) -> bool {
             | "__has_cpp_attribute"
             | "__has_c_attribute"
             | "__has_declspec_attribute"
+            | "__has_embed"
             | "__building_module"
     )
 }
@@ -1177,25 +1186,28 @@ impl<'a, 'b> Expander<'a, 'b> {
             return Err(err(format!("{loc}: '{name}' must be followed by '(...)'")));
         }
         let value = match name {
-            "__has_include" | "__has_include_next" => self.eval_has_include(&arg_toks, name == "__has_include_next", &loc)?,
+            "__has_include" | "__has_include_next" => {
+                i64::from(self.eval_has_include(&arg_toks, name == "__has_include_next", &loc)?)
+            }
             "__has_feature" | "__has_extension" => {
                 let arg = render_raw(&arg_toks, self.interner);
-                crate::has_feature(name, arg.trim(), self.std_flag.as_deref())
+                i64::from(crate::has_feature(name, arg.trim(), self.std_flag.as_deref()))
             }
             // Never building modules in a native preprocessing run.
-            "__building_module" => false,
-            "__has_builtin" => has_builtin(render_raw(&arg_toks, self.interner).trim()),
+            "__building_module" => 0,
+            "__has_builtin" => i64::from(has_builtin(render_raw(&arg_toks, self.interner).trim())),
             "__has_attribute" | "__has_declspec_attribute" => {
-                has_attribute(render_raw(&arg_toks, self.interner).trim())
+                i64::from(has_attribute(render_raw(&arg_toks, self.interner).trim()))
             }
             // `[[...]]` is not parsed yet; claiming an attribute would
             // send headers down a path the frontend cannot compile.
-            "__has_c_attribute" | "__has_cpp_attribute" => false,
+            "__has_c_attribute" | "__has_cpp_attribute" => 0,
             // No `-W` names are modeled.
-            "__has_warning" => false,
-            _ => false,
+            "__has_warning" => 0,
+            "__has_embed" => self.eval_has_embed(&arg_toks, &loc)?,
+            _ => 0,
         };
-        let sym = self.interner.get_or_intern(if value { "1" } else { "0" }.to_string());
+        let sym = self.interner.get_or_intern(value.to_string());
         Ok(vec![Tok {
             tok: PpToken::PpNumber(sym),
             line: t.line,
@@ -1673,6 +1685,7 @@ impl<'a, 'b> Expander<'a, 'b> {
                     message: text.trim().to_string(),
                 });
             }
+            ControlLine::Embed(tail) => self.handle_embed(&tail)?,
             ControlLine::PragmaOnce => {
                 self.files.record_once(&self.file_path);
             }
@@ -2133,6 +2146,222 @@ impl<'a, 'b> Expander<'a, 'b> {
         Ok(())
     }
 
+    /// Split an `#embed`/`__has_embed` tail into its header and the
+    /// named-parameter tokens that follow it.
+    fn split_embed_tail(&self, tail: &[Tok], loc: &str) -> Result<(Vec<Tok>, Vec<Tok>), PpError> {
+        let mut start = 0;
+        while start < tail.len() && tok_is_ws(&tail[start]) {
+            start += 1;
+        }
+        let Some(first) = tail.get(start) else {
+            return Err(err(format!("{loc}: #embed is missing a resource name")));
+        };
+        let end = match first.tok {
+            PpToken::Str(_) => start + 1,
+            PpToken::Punct(Punctuator::Less) => {
+                let mut depth = 0u32;
+                let mut found = None;
+                for (i, t) in tail.iter().enumerate().skip(start) {
+                    match t.tok {
+                        PpToken::Punct(Punctuator::Less) => depth += 1,
+                        PpToken::Punct(Punctuator::Greater) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                found = Some(i + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                found.ok_or_else(|| err(format!("{loc}: malformed #embed (missing '>')")))?
+            }
+            _ => start + 1,
+        };
+        Ok((tail[start..end].to_vec(), tail[end..].to_vec()))
+    }
+
+    /// Parse `limit(...)`, `prefix(...)`, `suffix(...)`, and
+    /// `if_empty(...)` after an `#embed` header. Vendor parameters
+    /// (names beginning `__`) are accepted and ignored.
+    fn parse_embed_params(&self, toks: &[Tok], loc: &str) -> Result<EmbedParams, PpError> {
+        let mut params = EmbedParams::default();
+        let mut i = 0;
+        while i < toks.len() {
+            if tok_is_ws(&toks[i]) {
+                i += 1;
+                continue;
+            }
+            let name = match toks[i].tok {
+                PpToken::Ident(sym) => self.spelling(sym),
+                _ => return Err(err(format!("{loc}: malformed #embed parameter"))),
+            };
+            i += 1;
+            while i < toks.len() && tok_is_ws(&toks[i]) {
+                i += 1;
+            }
+            if !matches!(toks.get(i).map(|t| &t.tok), Some(PpToken::Punct(Punctuator::LParen))) {
+                return Err(err(format!("{loc}: #embed parameter '{name}' needs '(...)'")));
+            }
+            i += 1;
+            let mut depth = 0u32;
+            let mut inner = Vec::new();
+            let mut closed = false;
+            while i < toks.len() {
+                let t = &toks[i];
+                i += 1;
+                match t.tok {
+                    PpToken::Punct(Punctuator::LParen) => {
+                        depth += 1;
+                        inner.push(t.clone());
+                    }
+                    PpToken::Punct(Punctuator::RParen) => {
+                        if depth == 0 {
+                            closed = true;
+                            break;
+                        }
+                        depth -= 1;
+                        inner.push(t.clone());
+                    }
+                    _ => inner.push(t.clone()),
+                }
+            }
+            if !closed {
+                return Err(err(format!("{loc}: unterminated #embed parameter '{name}'")));
+            }
+            let slot = match name.as_str() {
+                "limit" => &mut params.limit,
+                "prefix" => &mut params.prefix,
+                "suffix" => &mut params.suffix,
+                "if_empty" => &mut params.if_empty,
+                vendor if vendor.starts_with("__") => continue,
+                other => return Err(err(format!("{loc}: unknown #embed parameter '{other}'"))),
+            };
+            if slot.replace(inner).is_some() {
+                return Err(err(format!("{loc}: duplicate #embed parameter '{name}'")));
+            }
+        }
+        Ok(params)
+    }
+
+    /// Resolve and read an embed resource. `None` means the file was not
+    /// found (or could not be read), which `__has_embed` reports and
+    /// `#embed` turns into an error.
+    fn embed_file(&mut self, header: &[Tok], loc: &str) -> Result<(String, bool, Option<Vec<u8>>), PpError> {
+        let (name, quoted) = self.embed_header(header, loc)?;
+        let dir = self.file_path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let data = self
+            .files
+            .resolve_header(&name, quoted, None, &dir, loc)
+            .ok()
+            .and_then(|(target, _)| std::fs::read(target).ok());
+        Ok((name, quoted, data))
+    }
+
+    /// The resource header, expanded when it came from a macro.
+    fn embed_header(&mut self, header: &[Tok], loc: &str) -> Result<(String, bool), PpError> {
+        let verbatim = header
+            .iter()
+            .find(|t| !tok_is_ws(t))
+            .is_some_and(|t| matches!(t.tok, PpToken::Str(_) | PpToken::Punct(Punctuator::Less)));
+        if verbatim {
+            return self.parse_header_name(header, loc);
+        }
+        let expanded = self.expand_arg(header.to_vec())?;
+        let flat: Vec<Tok> = expanded.into_iter().filter(|t| !tok_is_ws(t)).collect();
+        self.parse_header_tokens(&flat, loc)
+    }
+
+    /// Evaluate an `#embed` `limit(...)` argument (default: unlimited).
+    fn embed_limit(&mut self, params: &EmbedParams, loc: &str) -> Result<usize, PpError> {
+        let Some(tokens) = &params.limit else {
+            return Ok(usize::MAX);
+        };
+        let text = render_raw(&self.expand_arg(tokens.clone())?, self.interner);
+        let Some(value) = eval_frontend_int(&text, self.target) else {
+            return Err(err(format!("{loc}: #embed limit is not an integer constant")));
+        };
+        if value < 0 {
+            return Err(err(format!("{loc}: #embed limit is negative")));
+        }
+        Ok(usize::try_from(value).unwrap_or(usize::MAX))
+    }
+
+    /// Synthesize the comma-separated decimal byte list for `#embed`.
+    fn embed_bytes(&mut self, bytes: &[u8], line: u64) -> Vec<Tok> {
+        let mut out = Vec::with_capacity(bytes.len().saturating_mul(2));
+        for (i, byte) in bytes.iter().enumerate() {
+            if i > 0 {
+                out.push(self.embed_tok(PpToken::Punct(Punctuator::Comma), line, false));
+            }
+            let sym = self.interner.get_or_intern(byte.to_string());
+            out.push(self.embed_tok(PpToken::PpNumber(sym), line, i > 0));
+        }
+        out
+    }
+
+    fn embed_tok(&self, tok: PpToken, line: u64, space: bool) -> Tok {
+        Tok {
+            tok,
+            line,
+            file: self.file_display,
+            expanded: true,
+            lined: true,
+            space,
+            sol: false,
+            col: 1,
+            end_line: line,
+            spell: None,
+            noexpand: true,
+        }
+    }
+
+    fn emit_embed_tokens(&mut self, tokens: Vec<Tok>) -> Result<(), PpError> {
+        let expanded = self.expand_arg(tokens)?;
+        if self.emit_inline {
+            for t in &expanded {
+                self.emit_out(t)?;
+            }
+        } else {
+            self.output.extend(expanded);
+        }
+        Ok(())
+    }
+
+    fn handle_embed(&mut self, tail: &[Tok]) -> Result<(), PpError> {
+        let raw_line = tail.first().map(|t| t.line).unwrap_or(0);
+        let loc = self.loc(self.eff_raw(raw_line));
+        let line = self.eff_raw(raw_line);
+        let (header, param_toks) = self.split_embed_tail(tail, &loc)?;
+        let (name, _, data) = self.embed_file(&header, &loc)?;
+        let Some(data) = data else {
+            return Err(err(format!("{loc}: #embed '{name}' not found")));
+        };
+        let params = self.parse_embed_params(&param_toks, &loc)?;
+        let limit = self.embed_limit(&params, &loc)?;
+        let n = limit.min(data.len());
+        let tokens = if n == 0 {
+            params.if_empty.unwrap_or_default()
+        } else {
+            let mut out = params.prefix.unwrap_or_default();
+            out.extend(self.embed_bytes(&data[..n], line));
+            out.extend(params.suffix.unwrap_or_default());
+            out
+        };
+        self.emit_embed_tokens(tokens)
+    }
+
+    fn eval_has_embed(&mut self, args: &[Tok], loc: &str) -> Result<i64, PpError> {
+        let (header, param_toks) = self.split_embed_tail(args, loc)?;
+        let (_, _, data) = self.embed_file(&header, loc)?;
+        let Some(data) = data else {
+            return Ok(0);
+        };
+        let params = self.parse_embed_params(&param_toks, loc)?;
+        let limit = self.embed_limit(&params, loc)?;
+        Ok(if limit.min(data.len()) == 0 { 2 } else { 1 })
+    }
+
     /// Parse an already-verbatim header (`"..."` / `<...>`) to
     /// (name, quoted).
     fn parse_header_name(&self, header: &[Tok], loc: &str) -> Result<(String, bool), PpError> {
@@ -2256,6 +2485,29 @@ fn trim_tokens(tokens: &[Tok]) -> &[Tok] {
         end -= 1;
     }
     &tokens[start..end]
+}
+
+/// Fold an integer constant expression through the frontend, for
+/// contexts such as `#embed limit(...)`.
+fn eval_frontend_int(text: &str, target: Option<glcc_frontend::target::Target>) -> Option<i128> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        use glcc_frontend::eval::{eval_const, Value};
+        use glcc_frontend::lexer::{Interner, Lexer};
+        use glcc_frontend::parse::Parser;
+        use glcc_frontend::sema::Sema;
+        let target = target.unwrap_or_else(glcc_frontend::target::Target::native);
+        let mut interner = Interner::new();
+        let mut sema = Sema::with_target(target);
+        let tokens = Lexer::new(text, &mut interner).lex_all();
+        let mut parser = Parser::new(text, tokens, &mut sema, &mut interner);
+        let parsed = parser.parse_expression();
+        let checked = sema.check_expr(&parsed, &interner).ok()?;
+        match eval_const(&checked, &sema, &interner)? {
+            Value::Int(v) => Some(v),
+            _ => None,
+        }
+    }));
+    outcome.unwrap_or(None)
 }
 
 /// One `#if` attempt through the real frontend: parse a single
