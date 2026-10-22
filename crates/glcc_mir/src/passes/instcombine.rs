@@ -264,6 +264,9 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             }
         }
         InstKind::Zext(a) => {
+            if let Some(plan) = zext_boolean_value(func, *a, result_ty) {
+                return Some(plan);
+            }
             let inner = def_inst(func, *a)?;
             match &func.insts[inner].kind {
                 InstKind::Zext(x) => Some(Plan::Inst(InstKind::Zext(*x))),
@@ -627,9 +630,63 @@ fn cond_value(func: &Function, value: Value, cond: Value) -> bool {
 
 /// Values guaranteed to be 0 or 1 at the result width.
 fn bool_valued(func: &Function, value: Value) -> bool {
-    func.values[value].ty == Ty::Bool
+    bool_valued_depth(func, value, 0)
+}
+
+fn bool_valued_depth(func: &Function, value: Value, depth: u32) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    if func.values[value].ty == Ty::Bool
         || matches!(int_const(func, value), Some((_, 0 | 1)))
         || zext_bool(func, value).is_some()
+    {
+        return true;
+    }
+    let Some(inst) = def_inst(func, value) else {
+        return false;
+    };
+    match &func.insts[inst].kind {
+        InstKind::And(a, b) | InstKind::Or(a, b) | InstKind::Xor(a, b) => {
+            bool_valued_depth(func, *a, depth + 1) && bool_valued_depth(func, *b, depth + 1)
+        }
+        InstKind::Select { then_val, else_val, .. } => {
+            bool_valued_depth(func, *then_val, depth + 1)
+                && bool_valued_depth(func, *else_val, depth + 1)
+        }
+        _ => false,
+    }
+}
+
+/// `zext (x != 0)` is `x` when `x` already holds only 0 or 1.
+fn zext_boolean_value(func: &Function, operand: Value, result_ty: &Ty) -> Option<Plan> {
+    if func.values[operand].ty != Ty::Bool {
+        return None;
+    }
+    let inst = def_inst(func, operand)?;
+    let InstKind::Icmp { pred: IcmpPred::Ne, lhs, rhs } = &func.insts[inst].kind else {
+        return None;
+    };
+    let value = if is_int_zero(func, *rhs) {
+        *lhs
+    } else if is_int_zero(func, *lhs) {
+        *rhs
+    } else {
+        return None;
+    };
+    if !bool_valued(func, value) {
+        return None;
+    }
+    let result_bits = int_ty_bits(result_ty)?;
+    let value_bits = int_ty_bits(&func.values[value].ty)?;
+    if result_bits < 2 || value_bits == 0 {
+        return None;
+    }
+    match value_bits.cmp(&result_bits) {
+        std::cmp::Ordering::Equal => Some(Plan::Value(value)),
+        std::cmp::Ordering::Less => Some(Plan::Inst(InstKind::Zext(value))),
+        std::cmp::Ordering::Greater => Some(Plan::Inst(InstKind::Trunc(value))),
+    }
 }
 
 /// `select c, x, zext(c)` is `x & zext(c)` when `x` is 0/1, and
@@ -1425,6 +1482,28 @@ mod tests {
         assert!(run(&mut func));
         let inst = def_inst(&func, returned(&func)).expect("rebuilt bitwise op");
         assert!(matches!(func.insts[inst].kind, InstKind::Or(a, b) if a == cond_wide && b == x_wide));
+    }
+
+    #[test]
+    fn zext_of_a_boolean_comparison_uses_the_boolean_value() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let a = param(&mut func, entry, Ty::Bool, 0);
+        let b = param(&mut func, entry, Ty::Bool, 1);
+        let a_wide = emit(&mut func, entry, InstKind::Zext(a), Ty::int(32));
+        let b_wide = emit(&mut func, entry, InstKind::Zext(b), Ty::int(32));
+        let both = emit(&mut func, entry, InstKind::And(a_wide, b_wide), Ty::int(32));
+        let zero = iconst(&mut func, 32, 0);
+        let normalized = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp { pred: IcmpPred::Ne, lhs: both, rhs: zero },
+            Ty::Bool,
+        );
+        let out = emit(&mut func, entry, InstKind::Zext(normalized), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), both);
     }
 
     #[test]

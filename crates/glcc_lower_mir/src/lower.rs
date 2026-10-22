@@ -7486,6 +7486,43 @@ mod tests {
         assert_eq!(jit_run_main(module), 2);
     }
 
+    /// Chained `&&`/`||` combines diamonds; speculating each small pure
+    /// arm makes the whole function branchless and lets the bitwise
+    /// simplifications see nested boolean values.
+    #[test]
+    fn optimized_pipeline_if_converts_chained_boolean_operators() {
+        let src = "__attribute__((noinline)) int land3(int a, int b, int c) {\n\
+                       return (a > 0) && (b > 0) && (c > 0);\n\
+                   }\n\
+                   __attribute__((noinline)) int lor3(int a, int b, int c) {\n\
+                       return (a > 0) || (b > 0) || (c > 0);\n\
+                   }\n\
+                   int main() {\n\
+                       return land3(1, 2, 3) + land3(1, 0, 1)\n\
+                           + lor3(0, 0, 1) + lor3(0, 0, 0);\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["land3", "lor3"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            assert!(
+                !func
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block.term, Some(mir::Terminator::CondBr { .. }))),
+                "{name} kept a conditional branch:\n{dump}"
+            );
+            assert!(
+                !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+                    matches!(func.insts[*inst].kind, mir::InstKind::Select { .. })
+                }),
+                "{name} kept a select:\n{dump}"
+            );
+        }
+        assert_eq!(jit_run_main(module), 2);
+    }
+
     /// A ternary producing only 0 and 1 is a boolean extension. The
     /// inverted arm must negate with a comparison, not a bitwise `not`,
     /// because `Bool` is byte-carried rather than a one-bit integer.
