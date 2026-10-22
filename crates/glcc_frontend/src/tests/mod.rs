@@ -1634,6 +1634,46 @@ fn unaligned_qualifier_is_erased() {
 }
 
 #[test]
+fn c23_typeof_unqual_strips_top_level_qualifiers() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let decl_ty = |src: &str| {
+        let mut sema = gated_sema(c23);
+        let mut interner = Interner::new();
+        let mut parser = test_parser(src, &mut sema, &mut interner);
+        let id = parse_decl(&mut parser);
+        parser.sema.decls[id.0 as usize].ty.clone()
+    };
+    assert_eq!(decl_ty("typeof_unqual(const int) a;"), Ty::Int);
+    assert_eq!(
+        decl_ty("typeof_unqual(int *const) a;"),
+        Ty::Pointer {
+            qualifiers: Vec::new(),
+            size: PtrSize::Default,
+            pointee: Box::new(Ty::Int),
+        }
+    );
+    assert_eq!(
+        decl_ty("typeof_unqual(const int *) a;"),
+        Ty::Pointer {
+            qualifiers: Vec::new(),
+            size: PtrSize::Default,
+            pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Int)),
+        }
+    );
+    let Ty::Array { elem, quals, bound } = decl_ty("typeof_unqual(const int[3]) a;") else {
+        panic!("expected an array");
+    };
+    assert_eq!(*elem, Ty::Int);
+    assert!(quals.is_empty());
+    assert_eq!(bound, Some(ArrayBound::Fixed(3)));
+}
+
+#[test]
 fn c89_static_assert_keyword() {
     let mut sema = gated_sema(LangOpts {
         std: Std::C89,

@@ -2701,6 +2701,7 @@ impl<'a> Parser<'a> {
                 }
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
+                    || self.peek_c23_keyword("typeof_unqual")
                     || self.peek_alternate_inline()
                     || self.peek_gnu_qualifier().is_some()
                     // MSVC declaration prefixes (`__declspec(noreturn)
@@ -2741,6 +2742,16 @@ impl<'a> Parser<'a> {
             Some(Token::Identifier(sym)) => self.intern.resolve(*sym) == Some(word) && crate::lang::spelling_family(word).allowed(self.sema.lang),
             _ => false,
         }
+    }
+    /// A bare C23 keyword. The lexer has no dialect, so spellings that
+    /// became keywords in C23 stay identifiers here and are gated at the
+    /// parse site.
+    fn peek_c23_keyword(&self, word: &str) -> bool {
+        self.sema.lang.standard_includes(Std::C23)
+            && matches!(
+                self.tokens.peek_val(),
+                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some(word)
+            )
     }
     /// A GNU alternate qualifier spelling (`__restrict__`, `__const`,
     /// ...), accepted everywhere the standard spelling is. System
@@ -2825,7 +2836,7 @@ impl<'a> Parser<'a> {
     /// as a type name when they start like one — a typedef name counts,
     /// mirroring the cast disambiguation — and as an expression checked
     /// here otherwise.
-    fn parse_typeof_specifier(&mut self) -> Ty {
+    fn parse_typeof_specifier(&mut self, unqual: bool) -> Ty {
         self.tokens.advance();
         self.skip_gnu_suffixes();
         self.expect_punct(Punctuator::LParen);
@@ -2836,7 +2847,7 @@ impl<'a> Parser<'a> {
             self.checked_expr(&expr).ty
         };
         self.expect_punct(Punctuator::RParen);
-        ty
+        if unqual { ty.unqualified_owned() } else { ty }
     }
 
     /// Implicit GCC builtins, none declared anywhere: the `<stdarg.h>`
@@ -4474,8 +4485,13 @@ impl<'a> Parser<'a> {
             // builtins, each a whole type by itself. `__signed__` is
             // the GNU spelling of `signed` (<asm-generic/int-ll64.h>
             // writes `typedef __signed__ char __s8;`).
+            if self.peek_c23_keyword("typeof_unqual") {
+                let ty = self.parse_typeof_specifier(true);
+                ds.type_specifier.push(TypeSpecifier::Builtin(ty));
+                continue;
+            }
             if self.peek_is_gnu("typeof") || self.peek_is_gnu("__typeof__") || self.peek_is_gnu("__typeof") {
-                let ty = self.parse_typeof_specifier();
+                let ty = self.parse_typeof_specifier(false);
                 ds.type_specifier.push(TypeSpecifier::Builtin(ty));
                 continue;
             }
@@ -5813,7 +5829,12 @@ impl<'a> Parser<'a> {
                 | Keyword::Restrict
                 | Keyword::Volatile,
             )) => true,
-            Some(Token::Identifier(sym)) => self.is_typedef_name(*sym) || self.is_gnu_type_keyword(*sym) || self.is_future_specifier(*sym),
+            Some(Token::Identifier(sym)) => {
+                self.is_typedef_name(*sym)
+                    || self.is_gnu_type_keyword(*sym)
+                    || self.is_future_specifier(*sym)
+                    || self.peek_c23_keyword("typeof_unqual")
+            }
             _ => false,
         }
     }
@@ -7916,6 +7937,26 @@ impl Ty {
         match self {
             Ty::Qualified { inner, .. } => inner.unqualified(),
             ty => ty,
+        }
+    }
+
+    /// The unqualified version of this type, as C23 `typeof_unqual`
+    /// spells it: top-level qualifiers go, while qualifiers below a
+    /// pointer stay (`const int *const` becomes `const int *`).
+    pub fn unqualified_owned(&self) -> Ty {
+        match self {
+            Ty::Qualified { inner, .. } => inner.unqualified_owned(),
+            Ty::Pointer { size, pointee, .. } => Ty::Pointer {
+                qualifiers: Vec::new(),
+                size: *size,
+                pointee: pointee.clone(),
+            },
+            Ty::Array { elem, bound, .. } => Ty::Array {
+                elem: Box::new(elem.unqualified_owned()),
+                quals: Vec::new(),
+                bound: bound.clone(),
+            },
+            ty => ty.clone(),
         }
     }
     /// Whether the type itself is `const`-qualified (looking only at
