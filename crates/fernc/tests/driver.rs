@@ -187,6 +187,27 @@ fn optimized_object_runs_the_same() {
 }
 
 #[test]
+fn optimized_recursive_data_match_lowers() {
+    if !have_cc() {
+        return;
+    }
+    let src = "data Expr = Lit(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\
+               \n\
+               fun eval(e : Expr) : Int = match e {\n\
+                   case Lit(n) => n\n\
+                   case Add(a, b) => eval(a) + eval(b)\n\
+                   case Mul(a, b) => eval(a) * eval(b)\n\
+               }\n\
+               \n\
+               fun answer() : Int = eval(Add(Lit(2), Mul(Lit(3), Lit(4))))\n";
+    let (dir, object) = run_fernc(src, "opt-data-match", &["-O2"]);
+    let (stdout, code) = link_and_run(&dir, &object);
+    assert_eq!(code, 0, "program failed: {stdout}");
+    assert_eq!(stdout, "14\n");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn async_io_round_trips_a_file() {
     if !have_cc() {
         return;

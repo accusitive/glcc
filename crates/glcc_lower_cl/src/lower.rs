@@ -1791,17 +1791,23 @@ fn emit_inst<M: Module>(
         mir::InstKind::Trunc(a) => {
             let dst = result_clif(&result_ty);
             let lowered = operand(body, builder, a);
-            Some(builder.ins().ireduce(dst, lowered))
+            let src_bits = mir_int_bits(&body.func.values[a].ty);
+            let dst_bits = mir_int_bits(result_ty.as_ref().expect("trunc needs a result type"));
+            Some(convert_int(builder, lowered, dst, src_bits, dst_bits, IntConvert::Trunc))
         }
         mir::InstKind::Zext(a) => {
             let dst = result_clif(&result_ty);
             let lowered = operand(body, builder, a);
-            Some(builder.ins().uextend(dst, lowered))
+            let src_bits = mir_int_bits(&body.func.values[a].ty);
+            let dst_bits = mir_int_bits(result_ty.as_ref().expect("zext needs a result type"));
+            Some(convert_int(builder, lowered, dst, src_bits, dst_bits, IntConvert::Zext))
         }
         mir::InstKind::Sext(a) => {
             let dst = result_clif(&result_ty);
             let lowered = operand(body, builder, a);
-            Some(builder.ins().sextend(dst, lowered))
+            let src_bits = mir_int_bits(&body.func.values[a].ty);
+            let dst_bits = mir_int_bits(result_ty.as_ref().expect("sext needs a result type"));
+            Some(convert_int(builder, lowered, dst, src_bits, dst_bits, IntConvert::Sext))
         }
         mir::InstKind::Bitcast(a) => {
             let dst = result_clif(&result_ty);
@@ -2580,6 +2586,43 @@ fn resize_int(builder: &mut FunctionBuilder, v: ClifValue, from: Type, to: Type)
         builder.ins().uextend(to, v)
     } else {
         builder.ins().ireduce(to, v)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IntConvert {
+    Trunc,
+    Zext,
+    Sext,
+}
+
+/// An integer conversion, respecting the MIR bit widths inside one Clif
+/// type. `Bool` and sub-byte `Int`s all occupy `i8`, so Cranelift sees no
+/// width change for e.g. `zext bool -> int8` even though the conversion
+/// is real; extend or reduce those on the MIR widths instead.
+fn convert_int(builder: &mut FunctionBuilder, v: ClifValue, to: Type, src_bits: u32, dst_bits: u32, convert: IntConvert) -> ClifValue {
+    let from = builder.func.dfg.value_type(v);
+    if from != to {
+        return match convert {
+            IntConvert::Trunc => builder.ins().ireduce(to, v),
+            IntConvert::Zext => builder.ins().uextend(to, v),
+            IntConvert::Sext => builder.ins().sextend(to, v),
+        };
+    }
+    let clif_bits = to.bits();
+    match convert {
+        // The source is already canonical for its declared width.
+        IntConvert::Zext => v,
+        IntConvert::Sext if src_bits > 0 && src_bits < dst_bits && src_bits < clif_bits => {
+            let shift = builder.ins().iconst(to, i64::from(clif_bits - src_bits));
+            let up = builder.ins().ishl(v, shift);
+            builder.ins().sshr(up, shift)
+        }
+        IntConvert::Trunc if dst_bits > 0 && dst_bits < src_bits && dst_bits < clif_bits && clif_bits <= 64 => {
+            let mask = builder.ins().iconst(to, (1i64 << dst_bits) - 1);
+            builder.ins().band(v, mask)
+        }
+        _ => v,
     }
 }
 
@@ -3581,6 +3624,40 @@ mod tests {
         let (jit, ids) = jit_module(&module);
         assert_eq!(run_i32_0(&jit, &ids, 0), 5);
         assert_eq!(run_i32_0(&jit, &ids, 1), -7);
+    }
+
+    #[test]
+    fn conversions_within_one_clif_width_respect_mir_bits() {
+        // `Bool` and `i8` are both `i8` in Clif, so a `zext`/`sext`/`trunc`
+        // between them has no Cranelift width change even though the MIR
+        // widths differ.
+        let mut module = mir::Module::new();
+
+        let (mut f, entry) = mir::Function::new("z", mir::Signature::new(vec![mir::Ty::Bool], mir::Ty::int(8)));
+        let x = param(&mut f, entry, mir::Ty::Bool, 0);
+        let z = emit(&mut f, entry, mir::InstKind::Zext(x), mir::Ty::int(8));
+        ret(&mut f, entry, Some(z));
+        module.push_func(f);
+
+        let (mut f, entry) = mir::Function::new("s", mir::Signature::new(vec![mir::Ty::Bool], mir::Ty::int(8)));
+        let x = param(&mut f, entry, mir::Ty::Bool, 0);
+        let s = emit(&mut f, entry, mir::InstKind::Sext(x), mir::Ty::int(8));
+        ret(&mut f, entry, Some(s));
+        module.push_func(f);
+
+        let (mut f, entry) = mir::Function::new("t", mir::Signature::new(vec![mir::Ty::int(8)], mir::Ty::Bool));
+        let x = param(&mut f, entry, mir::Ty::int(8), 0);
+        let t = emit(&mut f, entry, mir::InstKind::Trunc(x), mir::Ty::Bool);
+        ret(&mut f, entry, Some(t));
+        module.push_func(f);
+
+        let (jit, ids) = jit_module(&module);
+        let zext: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 0)) };
+        let sext: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 1)) };
+        let trunc: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 2)) };
+        assert_eq!((zext(0), zext(1)), (0, 1));
+        assert_eq!((sext(0), sext(1)), (0, -1));
+        assert_eq!((trunc(2), trunc(3)), (0, 1));
     }
 
     #[test]

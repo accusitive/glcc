@@ -52,7 +52,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         Ok(match c {
             ConstValue::Int(v) => self.iconst(64, *v as i128),
             ConstValue::Float(v) => self.fconst(*v),
-            ConstValue::Bool(b) => self.iconst(8, *b as i128),
+            ConstValue::Bool(b) => self.bool_const(*b),
             ConstValue::Str(s) => self.string_const(s)?,
         })
     }
@@ -458,7 +458,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 mir::Ty::Bool,
             )?;
             if matches!(op, BinOp::Ne) {
-                let one = self.iconst(8, 1);
+                let one = self.bool_const(true);
                 return self.emit(mir::InstKind::Xor(call, one), mir::Ty::Bool);
             }
             return Ok(call);
@@ -512,7 +512,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             else_args: Default::default(),
         });
         self.goto(const_block);
-        let c = self.iconst(8, i128::from(op == BinOp::Or));
+        let c = self.bool_const(op == BinOp::Or);
         self.branch(join, vec![c]);
         self.goto(rhs_block);
         let r = self.expr_at(rhs, tail)?;
@@ -536,7 +536,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 self.emit(kind, ty)
             }
             UnOp::Not => {
-                let one = self.iconst(8, 1);
+                let one = self.bool_const(true);
                 self.emit(mir::InstKind::Xor(v, one), ty)
             }
         }

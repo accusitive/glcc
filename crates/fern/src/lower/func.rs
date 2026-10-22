@@ -239,6 +239,15 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         self.func.push_const(mir::Const::Int { bits, value })
     }
 
+    /// A `Bool` constant. `Const::Int` has no `Bool` variant, so the value
+    /// carries the one-bit 0/1 convention while its type stays `Bool`.
+    pub(super) fn bool_const(&mut self, value: bool) -> mir::Value {
+        self.func.values.push(mir::ValueData {
+            ty: mir::Ty::Bool,
+            def: mir::Def::Const(mir::Const::Int { bits: 1, value: i128::from(value) }),
+        })
+    }
+
     pub(super) fn fconst(&mut self, value: f64) -> mir::Value {
         self.func.push_const(mir::Const::Float {
             kind: mir::FloatKind::F64,
@@ -370,7 +379,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 self.branch_on(cond, fail)
             }
             HirPatKind::Bool(b) => {
-                let want = self.iconst(8, i128::from(*b));
+                let want = self.bool_const(*b);
                 let cond = self.emit(
                     mir::InstKind::Icmp {
                         pred: mir::IcmpPred::Eq,
