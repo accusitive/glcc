@@ -21,10 +21,110 @@ use crate::pass::{FunctionPass, ModulePass};
 use crate::ty::{FloatKind, GepIndex, Ty};
 
 fn int_const(func: &Function, v: Value) -> Option<(u32, i128)> {
-    match func.const_value(v) {
-        Some(Const::Int { bits, value }) => Some((*bits, *value)),
-        _ => None,
+    int_const_depth(func, v, 0)
+}
+
+/// Resolve the integer value of constants and constant-only integer
+/// expressions. Address lowering emits `sext`/`mul`/`add` chains even
+/// for literal indices, so analyses that ask for a byte offset need to
+/// see through them.
+fn int_const_depth(func: &Function, v: Value, depth: u32) -> Option<(u32, i128)> {
+    if depth > 64 {
+        return None;
     }
+    if let Some(Const::Int { bits, value }) = func.const_value(v) {
+        return Some((*bits, *value));
+    }
+    let Def::Inst(inst) = func.values[v].def else {
+        return None;
+    };
+    let bits = int_ty_bits(&func.values[v].ty)?;
+    let recurse = |value| int_const_depth(func, value, depth + 1);
+    let (bits, value) = match &func.insts[inst].kind {
+        InstKind::Zext(x) => {
+            let (source_bits, value) = recurse(*x)?;
+            (bits, wrap(bits, ((value as u128) & mask(source_bits)) as i128))
+        }
+        InstKind::Sext(x) => {
+            let (_, value) = recurse(*x)?;
+            (bits, wrap(bits, value))
+        }
+        InstKind::Trunc(x) => {
+            let (_, value) = recurse(*x)?;
+            (bits, wrap(bits, value))
+        }
+        InstKind::Bitcast(x) => {
+            let (source_bits, value) = recurse(*x)?;
+            if source_bits != bits {
+                return None;
+            }
+            (bits, wrap(bits, value))
+        }
+        InstKind::Add(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x.wrapping_add(y)))
+        }
+        InstKind::Sub(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x.wrapping_sub(y)))
+        }
+        InstKind::Mul(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x.wrapping_mul(y)))
+        }
+        InstKind::And(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x & y))
+        }
+        InstKind::Or(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x | y))
+        }
+        InstKind::Xor(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, y) = recurse(*b)?;
+            (bits, wrap(bits, x ^ y))
+        }
+        InstKind::Neg(x) => {
+            let (_, value) = recurse(*x)?;
+            (bits, wrap(bits, value.wrapping_neg()))
+        }
+        InstKind::Not(x) => {
+            let (_, value) = recurse(*x)?;
+            (bits, wrap(bits, !value))
+        }
+        InstKind::Shl(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, shift) = recurse(*b)?;
+            let Const::Int { bits, value } = fold_shift_bits(bits, x as u128, shift, |x, s| x << s)? else {
+                return None;
+            };
+            return Some((bits, value));
+        }
+        InstKind::LShr(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, shift) = recurse(*b)?;
+            let Const::Int { bits, value } = fold_shift_bits(bits, x as u128, shift, |x, s| x >> s)? else {
+                return None;
+            };
+            return Some((bits, value));
+        }
+        InstKind::AShr(a, b) => {
+            let (_, x) = recurse(*a)?;
+            let (_, shift) = recurse(*b)?;
+            let Const::Int { bits, value } = fold_ashr_bits(bits, x, shift)? else {
+                return None;
+            };
+            return Some((bits, value));
+        }
+        _ => return None,
+    };
+    Some((bits, value))
 }
 
 /// Integer/bool width of a MIR type, for conversion folds.
@@ -3518,6 +3618,36 @@ mod tests {
         let Terminator::Return { val } = term.unwrap() else { unreachable!() };
         let c = func.const_value(val.unwrap()).unwrap();
         assert_eq!(c, &Const::Int { bits: 32, value: 14 });
+    }
+
+    #[test]
+    fn int_const_folds_address_arithmetic() {
+        let (mut func, entry) = Function::new("address", Signature::new(vec![], Ty::int(64)));
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let widened = func.values.push(ValueData {
+            ty: Ty::int(64),
+            def: Def::Inst(Inst::from_usize(0)),
+        });
+        let sext = func.insts.push(InstData {
+            block: entry,
+            kind: InstKind::Sext(one),
+            result: Some(widened),
+            loc: None,
+        });
+        func.values[widened].def = Def::Inst(sext);
+        let four = func.push_const(Const::Int { bits: 64, value: 4 });
+        let scaled = func.values.push(ValueData {
+            ty: Ty::int(64),
+            def: Def::Inst(Inst::from_usize(0)),
+        });
+        let mul = func.insts.push(InstData {
+            block: entry,
+            kind: InstKind::Mul(widened, four),
+            result: Some(scaled),
+            loc: None,
+        });
+        func.values[scaled].def = Def::Inst(mul);
+        assert_eq!(int_const(&func, scaled), Some((64, 4)));
     }
 
     #[test]
