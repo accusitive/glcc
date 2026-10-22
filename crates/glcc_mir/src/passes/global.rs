@@ -23,6 +23,8 @@ use crate::ir::{Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst,
 use crate::pass::ModulePass;
 use crate::ty::Ty;
 
+use super::{address_info, MemoryObject};
+
 /// Replace loads from read-only local storage with their initializer.
 pub struct GlobalConstProp;
 
@@ -47,7 +49,7 @@ impl ModulePass for GlobalConstProp {
             }
         }
 
-        let mut sites: Vec<(usize, Inst, Global)> = Vec::new();
+        let mut sites: Vec<(usize, Inst, Global, u64)> = Vec::new();
         for (func_id, func) in module.funcs.iter().enumerate() {
             let resident = func.resident_mask();
             let addresses = global_addresses(func, &resident);
@@ -55,24 +57,32 @@ impl ModulePass for GlobalConstProp {
                 if !resident[inst_id.index()] {
                     continue;
                 }
+                let resolved = inst.result.and_then(|result| global_root(func, result, &addresses));
                 match &inst.kind {
                     InstKind::Load { addr, flags } => {
                         if !flags.volatile {
-                            if let Some(global) = addresses.get(addr) {
-                                sites.push((func_id, inst_id, *global));
+                            if let Some((global, offset)) = global_at(func, *addr, &addresses) {
+                                sites.push((func_id, inst_id, global, offset));
                             }
                         }
                     }
                     InstKind::Store { addr, val, .. } => {
-                        if let Some(global) = addresses.get(addr) {
+                        if let Some(global) = global_root(func, *addr, &addresses) {
                             written[global.index()] = true;
                         }
-                        if let Some(global) = addresses.get(val) {
+                        if let Some(global) = global_root(func, *val, &addresses) {
                             escaped[global.index()] = true;
                         }
                     }
+                    InstKind::GetElementPtr { .. }
+                    | InstKind::Bitcast(_)
+                    | InstKind::PtrToInt(_)
+                    | InstKind::IntToPtr(_)
+                    | InstKind::Add(_, _)
+                    | InstKind::Sub(_, _)
+                        if resolved.is_some() => {}
                     kind => kind.for_each_operand(&mut |value| {
-                        if let Some(global) = addresses.get(&value) {
+                        if let Some(global) = global_root(func, value, &addresses) {
                             escaped[global.index()] = true;
                         }
                     }),
@@ -81,7 +91,7 @@ impl ModulePass for GlobalConstProp {
             for block in func.blocks.iter() {
                 if let Some(term) = &block.term {
                     term.for_each_operand(&mut |value| {
-                        if let Some(global) = addresses.get(&value) {
+                        if let Some(global) = global_root(func, value, &addresses) {
                             escaped[global.index()] = true;
                         }
                     });
@@ -102,13 +112,19 @@ impl ModulePass for GlobalConstProp {
                     && !escaped[id]
                     && matches!(
                         &global.init,
-                        Some(Const::Int { .. } | Const::Float { .. } | Const::Null | Const::Zero)
+                        Some(
+                            Const::Int { .. }
+                                | Const::Float { .. }
+                                | Const::Null
+                                | Const::Zero
+                                | Const::Bytes(_)
+                        )
                     )
             })
             .collect();
 
         let mut replacements = Vec::new();
-        for (func_id, inst_id, global) in sites {
+        for (func_id, inst_id, global, offset) in sites {
             let func = &module.funcs[func_id];
             if !candidates[global.index()] {
                 continue;
@@ -116,8 +132,8 @@ impl ModulePass for GlobalConstProp {
             let Some(result) = func.insts[inst_id].result else {
                 continue;
             };
-            let init = module.globals[global.index()].init.clone().unwrap();
-            if init_matches(&init, &func.values[result].ty) {
+            let global = &module.globals[global.index()];
+            if let Some(init) = constant_at(global, &func.values[result].ty, offset) {
                 replacements.push((func_id, inst_id, init));
             }
         }
@@ -407,6 +423,67 @@ fn global_addresses(func: &Function, resident: &[bool]) -> HashMap<Value, Global
     addresses
 }
 
+fn global_root(func: &Function, value: Value, addresses: &HashMap<Value, Global>) -> Option<Global> {
+    match address_info(func, value)?.object {
+        MemoryObject::Global(root) => addresses.get(&root).copied(),
+        MemoryObject::Stack(_) => None,
+    }
+}
+
+fn global_at(func: &Function, value: Value, addresses: &HashMap<Value, Global>) -> Option<(Global, u64)> {
+    let info = address_info(func, value)?;
+    let MemoryObject::Global(root) = info.object else {
+        return None;
+    };
+    Some((*addresses.get(&root)?, info.offset?))
+}
+
+fn constant_at(global: &GlobalData, ty: &Ty, offset: u64) -> Option<Const> {
+    let init = global.init.as_ref()?;
+    if offset == 0 && init_matches(init, ty) {
+        return Some(init.clone());
+    }
+    let Const::Bytes(bytes) = init else {
+        return None;
+    };
+    // Bounds and width first, then any relocation touching the load.
+    let size = ty.size_bytes();
+    let len = usize::try_from(size).ok()?;
+    let start = usize::try_from(offset).ok()?;
+    let end = start.checked_add(len)?;
+    let slice = bytes.get(start..end)?;
+    if reloc_overlaps(global, offset, size) {
+        return None;
+    }
+    let mut raw = [0u8; 16];
+    if len > raw.len() {
+        return None;
+    }
+    raw[..len].copy_from_slice(slice);
+    // Global images are little-endian (lower_mir stores integers and
+    // float bits with `to_le_bytes`), matching the supported targets.
+    match ty {
+        Ty::Int { bits } if *bits >= 8 && *bits <= 128 && u64::from(*bits) / 8 == size => {
+            Some(Const::Int { bits: *bits, value: i128::from_le_bytes(raw) }.canonical())
+        }
+        Ty::Bool => match slice {
+            [0] => Some(Const::Int { bits: 1, value: 0 }),
+            [1] => Some(Const::Int { bits: 1, value: 1 }),
+            _ => None,
+        },
+        Ty::Float(kind) => Some(Const::Float { kind: *kind, bits: u128::from_le_bytes(raw) }),
+        Ty::Ptr { .. } if slice.iter().all(|byte| *byte == 0) => Some(Const::Null),
+        _ => None,
+    }
+}
+
+fn reloc_overlaps(global: &GlobalData, offset: u64, size: u64) -> bool {
+    let end = offset.saturating_add(size);
+    let overlaps = |at: u64, width: u64| at < end && offset < at.saturating_add(width);
+    global.relocs.iter().any(|(at, _)| overlaps(*at, 8))
+        || global.relocs32.iter().any(|(at, _)| overlaps(*at, 4))
+}
+
 fn init_matches(init: &Const, ty: &Ty) -> bool {
     match init {
         Const::Int { bits, .. } => {
@@ -660,6 +737,78 @@ mod tests {
         }
         assert!(!MergeReadOnlyGlobals.run(&mut module));
         assert_eq!(module.globals.len(), 2);
+    }
+
+    fn load_at_byte_offset(module: &mut Module, global: Global, offset: i128) -> (Func, Value) {
+        let sig = Signature::new(vec![], Ty::int(32));
+        let (mut func, entry) = Function::new("read_at", sig);
+        let pointee = module.globals[global].ty.clone();
+        let addr = emit(
+            &mut func,
+            entry,
+            InstKind::GlobalAddr { global },
+            Ty::ptr(pointee),
+        );
+        let base = emit(&mut func, entry, InstKind::PtrToInt(addr), Ty::int(64));
+        let four = func.push_const(Const::Int { bits: 64, value: offset });
+        let offset_addr = emit(&mut func, entry, InstKind::Add(base, four), Ty::int(64));
+        let ptr = emit(
+            &mut func,
+            entry,
+            InstKind::IntToPtr(offset_addr),
+            Ty::ptr(Ty::int(32)),
+        );
+        let value = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: ptr,
+                flags: Default::default(),
+            },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(value) });
+        let func = module.push_func(func);
+        (func, value)
+    }
+
+    #[test]
+    fn propagates_byte_initializers_through_constant_offsets() {
+        let mut module = Module::new();
+        let ty = Ty::Array { elem: Box::new(Ty::int(32)), len: 2 };
+        let init = Const::Bytes(vec![1, 0, 0, 0, 2, 0, 0, 0]);
+        let global = module.push_global("table", ty, Some(init));
+        module.globals[global].local = true;
+        module.globals[global].writable = false;
+        let (func, _) = load_at_byte_offset(&mut module, global, 4);
+
+        assert!(GlobalConstProp.run(&mut module));
+        assert_eq!(
+            module.funcs[func].const_value(returned(&module.funcs[func])),
+            Some(&Const::Int { bits: 32, value: 2 })
+        );
+        assert!(module.funcs[func].blocks[module.funcs[func].entry]
+            .insts
+            .iter()
+            .all(|inst| !matches!(module.funcs[func].insts[*inst].kind, InstKind::Load { .. })));
+        assert!(verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn does_not_fold_loads_overlapping_relocations() {
+        let mut module = Module::new();
+        let ty = Ty::Array { elem: Box::new(Ty::int(32)), len: 2 };
+        let global = module.push_global("relocated", ty, Some(Const::Bytes(vec![0; 8])));
+        module.globals[global].local = true;
+        module.globals[global].writable = false;
+        let target = int32_global(&mut module, "target", 7);
+        module.globals[global]
+            .relocs
+            .push((4, DataReloc::Global { target, addend: 0 }));
+        let (func, value) = load_at_byte_offset(&mut module, global, 4);
+
+        assert!(!GlobalConstProp.run(&mut module));
+        assert_eq!(returned(&module.funcs[func]), value);
     }
 
     #[test]

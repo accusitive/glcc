@@ -7654,6 +7654,34 @@ mod tests {
         assert_eq!(jit_run_main(module), 0);
     }
 
+    /// Read-only aggregate initializers become constants at the byte
+    /// offset the load reaches, including through the `sext`/`mul`/`add`
+    /// address chain array indexing produces.
+    #[test]
+    fn optimized_pipeline_folds_read_only_aggregate_loads() {
+        let src = "static const int a[3] = {1, 2, 3};\n\
+                   static const struct P { int x; short y; char z; } p = {4, 5, 6};\n\
+                   static const double d[2] = {2.5, 4.0};\n\
+                   __attribute__((noinline)) int fa(void) { return a[1]; }\n\
+                   __attribute__((noinline)) int fp(void) { return p.x + p.y + p.z; }\n\
+                   __attribute__((noinline)) int fd(void) { return (int)d[0] + (int)d[1]; }\n\
+                   int main() { return fa() + fp() + fd(); }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["fa", "fp", "fd"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let loads = func
+                .blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .any(|inst| matches!(func.insts[*inst].kind, mir::InstKind::Load { .. }));
+            assert!(!loads, "{name} still loads read-only storage:\n{dump}");
+        }
+        assert_eq!(jit_run_main(module), 23);
+        assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
+    }
+
     /// Lowering materializes one constant per literal occurrence, so
     /// `const-merge` must unify them before `cse` can recognize
     /// repeated expressions — in one block (`local`) and across a
