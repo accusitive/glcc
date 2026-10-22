@@ -9801,6 +9801,20 @@ mod tests {
     }
 
     #[test]
+    fn atomic_load_store_aggregate() {
+        // Aggregates go through a memory copy; a scalar Clif load would
+        // panic on the non-scalar result type.
+        assert_eq!(
+            run_main(
+                "struct S{int a; int b;}; int main(){struct S s={3,4}; struct S r;\
+                __atomic_store(&s, &s, 0); __atomic_load(&s, &r, 0);\
+                return r.a * 10 + r.b;}"
+            ),
+            34
+        );
+    }
+
+    #[test]
     fn atomic_c11_builtins() {
         // The clang C11 spellings `<stdatomic.h>` expands to: the same
         // behavior as the GCC forms, minus the `_n` suffix and the

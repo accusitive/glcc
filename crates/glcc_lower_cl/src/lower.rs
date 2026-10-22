@@ -2431,14 +2431,33 @@ fn emit_inst<M: Module>(
             None
         }
         mir::InstKind::AtomicLoad { addr } => {
-            let ty = result_clif(&result_ty);
             let a = addr_operand(body, builder, addr);
-            Some(builder.ins().atomic_load(ty, MemFlagsData::new(), a))
+            let Some(mir_ty) = result_ty.clone() else {
+                panic!("atomic load needs a result type");
+            };
+            if mir_ty.is_aggregate() {
+                builder.ins().fence();
+                let slot = stack_slot(builder, &mir_ty);
+                let dst = builder.ins().stack_addr(types::I64, slot, 0);
+                emit_memcpy(builder, dst, a, mir_ty.size_bytes());
+                builder.ins().fence();
+                Some(dst)
+            } else {
+                let ty = result_clif(&Some(mir_ty));
+                Some(builder.ins().atomic_load(ty, MemFlagsData::new(), a))
+            }
         }
         mir::InstKind::AtomicStore { addr, val } => {
             let a = addr_operand(body, builder, addr);
             let v = operand(body, builder, val);
-            builder.ins().atomic_store(MemFlagsData::new(), v, a);
+            let mir_ty = body.func.values[val].ty.clone();
+            if mir_ty.is_aggregate() {
+                builder.ins().fence();
+                emit_memcpy(builder, a, v, mir_ty.size_bytes());
+                builder.ins().fence();
+            } else {
+                builder.ins().atomic_store(MemFlagsData::new(), v, a);
+            }
             None
         }
         mir::InstKind::AtomicRmw { op, addr, val } => {
