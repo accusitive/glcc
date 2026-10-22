@@ -16,9 +16,9 @@ pub use loadstore::LoadStoreForward;
 pub use sccp::Sccp;
 pub use sroa::Sroa;
 
-use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, Module, Terminator, Value, ValueData};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData};
 use crate::pass::{FunctionPass, ModulePass};
-use crate::ty::{FloatKind, Ty};
+use crate::ty::{FloatKind, GepIndex, Ty};
 
 fn int_const(func: &Function, v: Value) -> Option<(u32, i128)> {
     match func.const_value(v) {
@@ -476,8 +476,168 @@ impl FunctionPass for ForwardAggregateCopy {
                 func.blocks[block].insts.retain(|inst| !removed.contains(inst));
             }
         }
+        changed |= expand_local_aggregate_copies(func);
         changed
     }
+}
+
+/// Rewrite a whole-aggregate copy between two disjoint local slots into
+/// scalar field copies, exposing the copy to `Sroa` on the next pipeline
+/// turn.
+fn expand_local_aggregate_copies(func: &mut Function) -> bool {
+    let mut changed = false;
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let insts = func.blocks[block].insts.clone();
+        let mut expanded = false;
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            let copy = match &func.insts[inst].kind {
+                InstKind::Memcpy { dst, src, len } => Some((*dst, *src, *len)),
+                _ => None,
+            };
+            let Some((dst, src, len)) = copy else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Some(leaves) = local_aggregate_copy_leaves(func, dst, src, len) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Ty::Ptr { bits, .. } = func.values[dst].ty else {
+                unreachable!("local copy destinations are pointers");
+            };
+            for (path, ty) in leaves {
+                let (dst_ptr, dst_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::GetElementPtr {
+                        base: dst,
+                        indices: path.clone().into_iter().collect(),
+                    },
+                    Ty::ptr_bits(ty.clone(), bits),
+                );
+                rebuilt.push(dst_inst);
+                let (src_ptr, src_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::GetElementPtr {
+                        base: src,
+                        indices: path.into_iter().collect(),
+                    },
+                    Ty::ptr_bits(ty.clone(), bits),
+                );
+                rebuilt.push(src_inst);
+                let (value, load_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::Load {
+                        addr: src_ptr,
+                        flags: MemFlags::plain(),
+                    },
+                    ty.clone(),
+                );
+                rebuilt.push(load_inst);
+                rebuilt.push(make_unit(
+                    func,
+                    block,
+                    InstKind::Store {
+                        addr: dst_ptr,
+                        val: value,
+                        flags: MemFlags::plain(),
+                    },
+                ));
+            }
+            expanded = true;
+            changed = true;
+        }
+        if expanded {
+            func.blocks[block].insts = rebuilt;
+        }
+    }
+    changed
+}
+
+fn local_aggregate_copy_leaves(func: &Function, dst: Value, src: Value, len: u64) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
+    let Ty::Ptr { pointee, .. } = &func.values[dst].ty else {
+        return None;
+    };
+    if func.values[src].ty != func.values[dst].ty || pointee.size_bytes() != len {
+        return None;
+    }
+    let (MemoryObject::Stack(dst_root), MemoryObject::Stack(src_root)) = (address_info(func, dst)?.object, address_info(func, src)?.object) else {
+        return None;
+    };
+    if dst_root == src_root {
+        return None;
+    }
+    let mut leaves = Vec::new();
+    collect_copy_leaves(pointee, &mut Vec::new(), &mut leaves, 16).then_some(leaves)
+}
+
+fn collect_copy_leaves(ty: &Ty, path: &mut Vec<GepIndex>, out: &mut Vec<(Vec<GepIndex>, Ty)>, budget: usize) -> bool {
+    match ty {
+        Ty::Bool | Ty::Int { .. } | Ty::Float(_) | Ty::Ptr { .. } if budget > 0 => {
+            out.push((path.clone(), ty.clone()));
+            true
+        }
+        Ty::Struct { fields, offsets, size } => {
+            if fields.len() != offsets.len() {
+                return false;
+            }
+            let mut end = 0;
+            for (index, (field, offset)) in fields.iter().zip(offsets).enumerate() {
+                if *offset != end {
+                    return false;
+                }
+                path.push(GepIndex::Field(index as u32));
+                if !collect_copy_leaves(field, path, out, budget.saturating_sub(out.len())) {
+                    return false;
+                }
+                path.pop();
+                end = match end.checked_add(field.size_bytes()) {
+                    Some(end) => end,
+                    None => return false,
+                };
+            }
+            end == *size
+        }
+        Ty::Array { elem, len } => {
+            for index in 0..*len {
+                path.push(GepIndex::ConstIndex(index));
+                if !collect_copy_leaves(elem, path, out, budget.saturating_sub(out.len())) {
+                    return false;
+                }
+                path.pop();
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn make_value(func: &mut Function, block: Block, kind: InstKind, ty: Ty) -> (Value, Inst) {
+    let result = func.values.push(ValueData {
+        ty,
+        def: Def::Inst(Inst::from_usize(func.insts.len())),
+    });
+    let inst = func.insts.push(InstData {
+        block,
+        kind,
+        result: Some(result),
+        loc: None,
+    });
+    func.values[result].def = Def::Inst(inst);
+    (result, inst)
+}
+
+fn make_unit(func: &mut Function, block: Block, kind: InstKind) -> Inst {
+    func.insts.push(InstData {
+        block,
+        kind,
+        result: None,
+        loc: None,
+    })
 }
 
 /// A later write that may cover an earlier one.
@@ -2982,6 +3142,45 @@ mod tests {
         assert!(!func.blocks[func.entry].insts.contains(&store));
         assert!(crate::verify::verify_func(&func).is_empty());
         assert!(!pass.run(&mut func), "second run is a no-op");
+    }
+
+    #[test]
+    fn expands_local_aggregate_copies_for_sroa() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("copy", Signature::new(vec![], Ty::int(32)));
+        let dst = stack_slot(&mut func, entry, ty.clone());
+        let src = stack_slot(&mut func, entry, ty.clone());
+        let copy = push_unit(&mut func, entry, InstKind::Memcpy { dst, src, len: 8 });
+        let field = push_value(
+            &mut func,
+            entry,
+            InstKind::GetElementPtr {
+                base: dst,
+                indices: [crate::ty::GepIndex::Field(0)].into_iter().collect(),
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let loaded = push_scalar_load(&mut func, entry, field, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&copy));
+        assert!(!func.blocks[entry]
+            .insts
+            .iter()
+            .any(|inst| matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
+
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        assert!(sroa.run(&mut func));
+        assert!(mem2reg.run(&mut func));
+        assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
     }
 
     #[test]
