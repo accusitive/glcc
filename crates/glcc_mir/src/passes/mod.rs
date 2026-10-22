@@ -2853,16 +2853,20 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
     changed
 }
 
-/// If-convert one diamond at a time: a conditional edge into a block
-/// that only computes pure values and then joins the other edge becomes
-/// unconditional computation at the fork plus selects at the join.
+/// If-convert one diamond per fork per round: a conditional edge into a
+/// block that only computes pure values and then joins the other edge
+/// becomes unconditional computation at the fork plus selects at the
+/// join. Conversions in other forks do not invalidate the use map: they
+/// only move or duplicate uses into their own fork, which can turn a
+/// confined value into an escaping one but never the reverse.
 fn if_convert_diamonds(func: &mut Function) -> bool {
     const MAX_SPECULATED_INSNS: usize = 8;
     let mut changed = false;
+    let mut uses = SoleUse::compute(func);
     loop {
-        let reachable = func.reachable_blocks();
-        let preds = predecessor_counts(func);
-        let uses = sole_use_blocks(func);
+        let mut reachable = func.reachable_blocks();
+        let mut preds = predecessor_counts(func);
+        uses.recompute(func);
         let mut converted = false;
         for idx in 0..func.blocks.len() {
             let fork = Block::from_usize(idx);
@@ -2929,11 +2933,7 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                             .filter_map(|inst| func.insts[*inst].result),
                     )
                     .collect();
-                let escapes_arm = local_values.iter().any(|value| match uses.get(value) {
-                    None => false,
-                    Some(Some(block)) => *block != arm,
-                    Some(None) => true,
-                });
+                let escapes_arm = local_values.iter().any(|value| !uses.confined_to(*value, arm));
                 if escapes_arm {
                     continue;
                 }
@@ -2990,11 +2990,11 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                 func.blocks[arm].insts.clear();
                 func.blocks[arm].params.clear();
                 func.blocks[arm].term = Some(Terminator::Unreachable);
+                reachable[arm.index()] = false;
+                preds[arm.index()] -= 1;
+                preds[dest.index()] += 1;
                 changed = true;
                 converted = true;
-                break;
-            }
-            if converted {
                 break;
             }
         }
@@ -3005,35 +3005,101 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
     changed
 }
 
-/// For every value with uses, the one block all of them live in —
-/// `None` when they are spread over several blocks. Terminator
+/// For every value, the one block all of its uses live in — `None` when
+/// they are spread over several blocks or it has no uses. Terminator
 /// operands count as uses in the branching block, where they are
 /// evaluated.
-fn sole_use_blocks(func: &Function) -> std::collections::HashMap<Value, Option<Block>> {
-    fn note(uses: &mut std::collections::HashMap<Value, Option<Block>>, v: Value, block: Block) {
-        use std::collections::hash_map::Entry;
-        match uses.entry(v) {
-            Entry::Vacant(e) => {
-                e.insert(Some(block));
+///
+/// Dense tables keyed by `Value` index: hashing dominated this scan
+/// when it was a `HashMap`, and `SimplifyCfg` runs it once per fixpoint
+/// round.
+struct SoleUse {
+    seen: Vec<bool>,
+    block: Vec<Option<Block>>,
+    total: Vec<u32>,
+}
+
+impl SoleUse {
+    fn compute(func: &Function) -> Self {
+        let mut uses = SoleUse {
+            seen: Vec::new(),
+            block: Vec::new(),
+            total: Vec::new(),
+        };
+        uses.recompute(func);
+        uses
+    }
+
+    fn recompute(&mut self, func: &Function) {
+        self.seen.clear();
+        self.seen.resize(func.values.len(), false);
+        self.block.clear();
+        self.block.resize(func.values.len(), None);
+        self.total.clear();
+        self.total.resize(func.values.len(), 0);
+        for (idx, data) in func.blocks.iter().enumerate() {
+            let here = Block::from_usize(idx);
+            for inst in &data.insts {
+                func.insts[*inst].kind.for_each_operand(&mut |v| self.note(v, here));
             }
-            Entry::Occupied(mut e) => {
-                if *e.get() != Some(block) {
-                    e.insert(None);
-                }
+            if let Some(term) = &data.term {
+                term.for_each_operand(&mut |v| self.note(v, here));
             }
         }
     }
-    let mut uses = std::collections::HashMap::new();
-    for (idx, block) in func.blocks.iter().enumerate() {
-        let here = Block::from_usize(idx);
-        for inst in &block.insts {
-            func.insts[*inst].kind.for_each_operand(&mut |v| note(&mut uses, v, here));
-        }
-        if let Some(term) = &block.term {
-            term.for_each_operand(&mut |v| note(&mut uses, v, here));
+
+    fn note(&mut self, value: Value, block: Block) {
+        let index = value.index();
+        self.total[index] += 1;
+        if !self.seen[index] {
+            self.seen[index] = true;
+            self.block[index] = Some(block);
+        } else if self.block[index] != Some(block) {
+            self.block[index] = None;
         }
     }
-    uses
+
+    /// Move every use made by `kind` from `from` to `to`. Operands are
+    /// counted first so a duplicated operand (e.g. `add x, x`) moves
+    /// atomically; relocating one occurrence at a time would look like a
+    /// spread and lose the value's single user block.
+    fn relocate_operands(&mut self, kind: &InstKind, from: Block, to: Block) {
+        let mut pending: smallvec::SmallVec<[(Value, u32); 4]> = smallvec::SmallVec::new();
+        kind.for_each_operand(&mut |value| {
+            if let Some(entry) = pending.iter_mut().find(|(v, _)| *v == value) {
+                entry.1 += 1;
+            } else {
+                pending.push((value, 1));
+            }
+        });
+        for (value, count) in pending {
+            self.relocate(value, from, to, count);
+        }
+    }
+
+    /// Move one use of `value` from `from` to `to`.
+    fn relocate(&mut self, value: Value, from: Block, to: Block, count: u32) {
+        let index = value.index();
+        debug_assert!(self.seen[index], "relocating a use that was never noted");
+        self.total[index] -= count;
+        if self.block[index] == Some(from) {
+            // All uses were here, so the rest are now in `to` only when
+            // these were the last ones.
+            self.block[index] = if self.total[index] == 0 { Some(to) } else { None };
+        }
+    }
+
+    /// The one block all uses live in; `None` when unused or spread.
+    fn sole_block(&self, value: Value) -> Option<Block> {
+        let index = value.index();
+        if self.seen[index] { self.block[index] } else { None }
+    }
+
+    /// Whether every use is in `block` (also true when there are none).
+    fn confined_to(&self, value: Value, block: Block) -> bool {
+        let index = value.index();
+        !self.seen[index] || self.block[index] == Some(block)
+    }
 }
 
 /// Move pure instructions into the successor that holds every use: a
@@ -3043,9 +3109,13 @@ fn sole_use_blocks(func: &Function) -> std::collections::HashMap<Value, Option<B
 /// before (a loop body reached from several blocks is off limits).
 fn sink_pure_instructions(func: &mut Function) -> bool {
     let mut changed = false;
+    // Sinking moves instructions but never rewires edges, so the
+    // predecessor counts stay valid across rounds. Uses move with their
+    // instructions, so `relocate` keeps the map current instead of
+    // rehashing every operand each round.
+    let preds = predecessor_counts(func);
+    let mut uses = SoleUse::compute(func);
     loop {
-        let preds = predecessor_counts(func);
-        let uses = sole_use_blocks(func);
         let mut moved = false;
         for idx in 0..func.blocks.len() {
             let block = Block::from_usize(idx);
@@ -3061,13 +3131,11 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
             // Back to front, so a value whose only user just sank is
             // considered again on the next round.
             for inst in insts.into_iter().rev() {
-                let dest = func.insts[inst]
-                    .result
-                    .and_then(|result| uses.get(&result).copied().flatten())
-                    .filter(|dest| sinks.contains(dest));
+                let dest = func.insts[inst].result.and_then(|result| uses.sole_block(result)).filter(|dest| sinks.contains(dest));
                 match dest {
                     Some(dest) if func.insts[inst].kind.is_pure() => {
                         func.insts[inst].block = dest;
+                        uses.relocate_operands(&func.insts[inst].kind, block, dest);
                         // Front insertion plus reverse iteration keeps
                         // the original order within `dest`.
                         func.blocks[dest].insts.insert(0, inst);
