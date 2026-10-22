@@ -134,6 +134,8 @@ enum Plan {
         rhs: Value,
         ty: Ty,
     },
+    /// Start from `source` and overwrite `fields`, keeping the rest.
+    RebuildAggregate { source: Value, fields: Vec<(u32, Value)> },
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
@@ -290,8 +292,8 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             if let Some(source) = reconstructed_aggregate(func, result) {
                 return Some(Plan::Value(source));
             }
-            if let Some((source, elem, index)) = single_field_update(func, result) {
-                return Some(Plan::Inst(InstKind::InsertValue { agg: source, elem, index }));
+            if let Some((source, fields)) = aggregate_field_updates(func, result) {
+                return Some(Plan::RebuildAggregate { source, fields });
             }
             let InstKind::InsertValue { agg, elem, index } = kind else {
                 unreachable!("matched an insert");
@@ -541,6 +543,23 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
+        Plan::RebuildAggregate { source, fields } => {
+            let ty = func.values[result].ty.clone();
+            let loc = func.insts[inst].loc.clone();
+            let mut current = source;
+            for (index, elem) in fields {
+                let (next, new) = super::make_value(
+                    func,
+                    block,
+                    InstKind::InsertValue { agg: current, elem, index },
+                    ty.clone(),
+                );
+                func.insts[new].loc = loc.clone();
+                out.push(new);
+                current = next;
+            }
+            return current;
+        }
         Plan::BoolCast { value, ty, signed, invert } => {
             let loc = func.insts[inst].loc.clone();
             let cond = if invert {
@@ -711,9 +730,9 @@ fn bool_valued_depth(func: &Function, value: Value, depth: u32) -> bool {
     }
 }
 
-/// A full rebuild from `undef` where exactly one field differs from a
-/// source aggregate can start from that source and write only the field.
-fn single_field_update(func: &Function, value: Value) -> Option<(Value, Value, u32)> {
+/// A full rebuild from `undef` can start from the source aggregate and
+/// overwrite only the fields whose values differ, keeping the rest.
+fn aggregate_field_updates(func: &Function, value: Value) -> Option<(Value, Vec<(u32, Value)>)> {
     let ty = &func.values[value].ty;
     let total = match ty {
         Ty::Struct { fields, .. } => fields.len(),
@@ -746,7 +765,7 @@ fn single_field_update(func: &Function, value: Value) -> Option<(Value, Value, u
         return None;
     }
     let mut source = None;
-    let mut changed = None;
+    let mut changed = Vec::new();
     for index in 0..total as u32 {
         let elem = *fields.get(&index)?;
         let unchanged = def_inst(func, elem).and_then(|inst| match &func.insts[inst].kind {
@@ -763,14 +782,13 @@ fn single_field_update(func: &Function, value: Value) -> Option<(Value, Value, u
                 Some(_) => {}
                 None => source = Some(agg),
             },
-            None => {
-                if changed.replace((elem, index)).is_some() {
-                    return None;
-                }
-            }
+            None => changed.push((index, elem)),
         }
     }
-    Some((source?, changed?.0, changed?.1))
+    if changed.is_empty() {
+        return None;
+    }
+    Some((source?, changed))
 }
 
 /// A chain that fills every field or element of an aggregate from the
@@ -1822,6 +1840,69 @@ mod tests {
                 assert_eq!(*index, 1);
             }
             other => panic!("expected a field update on the source, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rebuilding_with_several_changed_fields_keeps_the_source() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4, 8],
+            size: 12,
+        };
+        let sig = Signature::new(
+            vec![ty.clone(), Ty::int(32), Ty::int(32)],
+            ty.clone(),
+        );
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let first = param(&mut func, entry, Ty::int(32), 1);
+        let second = param(&mut func, entry, Ty::int(32), 2);
+        let undef = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Const(Const::Undef),
+        });
+        let unchanged = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 2 },
+            Ty::int(32),
+        );
+        let with_first = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            ty.clone(),
+        );
+        let with_second = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: with_first, elem: second, index: 1 },
+            ty.clone(),
+        );
+        let rebuilt = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: with_second, elem: unchanged, index: 2 },
+            ty,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
+        assert!(run(&mut func));
+        let outer = def_inst(&func, returned(&func)).expect("aggregate value");
+        let (inner, elem, index) = match &func.insts[outer].kind {
+            InstKind::InsertValue { agg, elem, index } => (*agg, *elem, *index),
+            other => panic!("expected a field update on the source, got {other:?}"),
+        };
+        assert_eq!(index, 1);
+        assert_eq!(elem, second);
+        let inner = def_inst(&func, inner).expect("first field update");
+        match &func.insts[inner].kind {
+            InstKind::InsertValue { agg, elem, index } => {
+                assert_eq!(*agg, base);
+                assert_eq!(*elem, first);
+                assert_eq!(*index, 0);
+            }
+            other => panic!("expected the unchanged source as the base, got {other:?}"),
         }
     }
 

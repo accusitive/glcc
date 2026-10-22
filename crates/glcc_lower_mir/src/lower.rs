@@ -7890,6 +7890,27 @@ mod tests {
         assert_eq!(jit_run_main(module), 35);
     }
 
+    /// Overwriting several fields of a copied aggregate should still
+    /// use the source for fields that the function leaves alone.
+    #[test]
+    fn optimized_pipeline_updates_several_aggregate_fields() {
+        let src = "struct P { int x; int y; int z; };\n\
+                   __attribute__((noinline)) struct P bump(struct P p) { struct P q = p; q.x++; q.y += 2; return q; }\n\
+                   int main() { struct P p = {3, 4, 5}; struct P q = bump(p); return q.x * 100 + q.y * 10 + q.z; }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let func = module.funcs.iter().find(|f| f.name == "bump").expect("function lowered");
+        let rebuilds_unchanged = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+            matches!(
+                func.insts[*inst].kind,
+                mir::InstKind::ExtractValue { index: 2, .. }
+            )
+        });
+        assert!(!rebuilds_unchanged, "bump still extracts the unchanged field:\n{dump}");
+        assert_eq!(jit_run_main(module), 465);
+    }
+
     /// Literal floating-point expressions fold before codegen, so
     /// subsequent conversions see a single constant.
     #[test]
