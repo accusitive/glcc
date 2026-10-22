@@ -477,11 +477,94 @@ impl FunctionPass for ForwardAggregateCopy {
             }
         }
         let non_escaping = non_escaping_stack_slots(func);
+        changed |= expand_local_zero_memsets(func, &non_escaping);
         changed |= expand_local_aggregate_copies(func, &non_escaping);
         changed |= expand_local_aggregate_stores(func, &non_escaping);
         changed |= expand_returned_aggregate_loads(func, &non_escaping);
         changed |= expand_aggregate_load_extracts(func, &non_escaping);
         changed
+    }
+}
+
+/// Replace a zero-fill of a non-escaping local aggregate with scalar zero
+/// stores, so `Sroa` can split the slot instead of refusing the `Memset`.
+fn expand_local_zero_memsets(func: &mut Function, non_escaping: &std::collections::HashSet<Value>) -> bool {
+    let mut changed = false;
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let insts = func.blocks[block].insts.clone();
+        let mut expanded = false;
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            let memset = match &func.insts[inst].kind {
+                InstKind::Memset { dst, byte: 0, len } => Some((*dst, *len)),
+                _ => None,
+            };
+            let Some((dst, len)) = memset else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Ty::Ptr { pointee, bits } = func.values[dst].ty.clone() else {
+                rebuilt.push(inst);
+                continue;
+            };
+            if !pointee.is_aggregate() || pointee.size_bytes() != len {
+                rebuilt.push(inst);
+                continue;
+            }
+            if !matches!(
+                address_info(func, dst).map(|info| info.object),
+                Some(MemoryObject::Stack(root)) if non_escaping.contains(&root)
+            ) {
+                rebuilt.push(inst);
+                continue;
+            }
+            let Some(leaves) = aggregate_leaves(&pointee) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            for (path, ty) in leaves {
+                let (addr, addr_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::GetElementPtr {
+                        base: dst,
+                        indices: path.into_iter().collect(),
+                    },
+                    Ty::ptr_bits(ty.clone(), bits),
+                );
+                rebuilt.push(addr_inst);
+                let zero = func.values.push(ValueData {
+                    ty: ty.clone(),
+                    def: Def::Const(zero_const_for(&ty)),
+                });
+                rebuilt.push(make_unit(
+                    func,
+                    block,
+                    InstKind::Store {
+                        addr,
+                        val: zero,
+                        flags: MemFlags::plain(),
+                    },
+                ));
+            }
+            expanded = true;
+            changed = true;
+        }
+        if expanded {
+            func.blocks[block].insts = rebuilt;
+        }
+    }
+    changed
+}
+
+fn zero_const_for(ty: &Ty) -> Const {
+    match ty {
+        Ty::Bool => Const::Int { bits: 1, value: 0 },
+        Ty::Int { bits } => Const::Int { bits: *bits, value: 0 },
+        Ty::Float(kind) => Const::Float { kind: *kind, bits: 0 },
+        Ty::Ptr { .. } => Const::Null,
+        _ => unreachable!("aggregate leaves are scalar"),
     }
 }
 
@@ -3661,6 +3744,68 @@ mod tests {
         assert!(mem2reg.run(&mut func));
         assert!(!has_memory_ops(&func));
         assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn expands_local_zero_memsets_for_sroa() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("zero", Signature::new(vec![], Ty::int(32)));
+        let slot = stack_slot(&mut func, entry, ty.clone());
+        let memset = push_unit(&mut func, entry, InstKind::Memset { dst: slot, byte: 0, len: 8 });
+        let field = push_value(
+            &mut func,
+            entry,
+            InstKind::GetElementPtr {
+                base: slot,
+                indices: [crate::ty::GepIndex::Field(1)].into_iter().collect(),
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let loaded = push_scalar_load(&mut func, entry, field, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&memset));
+        assert!(!resident_kinds(&func).iter().any(|kind| matches!(kind, InstKind::Memset { .. })));
+
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        assert!(sroa.run(&mut func));
+        assert!(mem2reg.run(&mut func));
+        assert!(!has_memory_ops(&func));
+        let Some(Terminator::Return { val: Some(value) }) = func.blocks[entry].term else {
+            panic!("entry still returns the field");
+        };
+        assert_eq!(func.const_value(value), Some(&Const::Int { bits: 32, value: 0 }));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn keeps_nonzero_and_escaping_memsets() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("nonzero", Signature::new(vec![], Ty::Void));
+        let slot = stack_slot(&mut func, entry, ty.clone());
+        let memset = push_unit(&mut func, entry, InstKind::Memset { dst: slot, byte: 0xFF, len: 8 });
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+        let mut forward = ForwardAggregateCopy;
+        assert!(!forward.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&memset));
+
+        let (mut func, entry) = Function::new("escape", Signature::new(vec![], Ty::ptr(ty.clone())));
+        let slot = stack_slot(&mut func, entry, ty);
+        let memset = push_unit(&mut func, entry, InstKind::Memset { dst: slot, byte: 0, len: 8 });
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(slot) });
+        assert!(!forward.run(&mut func));
+        assert!(func.blocks[entry].insts.contains(&memset));
     }
 
     #[test]

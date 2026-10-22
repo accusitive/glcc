@@ -10100,6 +10100,14 @@ mod tests {
             ),
             432
         );
+        assert_eq!(
+            run_main("struct P{int x; int y;}; int f(int v){struct P p = {0}; p.x = v; return p.x + p.y;} int main(){return f(7);}"),
+            7
+        );
+        assert_eq!(
+            run_main("int f(int v){int a[4] = {0}; a[2] = v; return a[0] + a[1] + a[2] + a[3];} int main(){return f(5);}"),
+            5
+        );
     }
 
     #[test]
