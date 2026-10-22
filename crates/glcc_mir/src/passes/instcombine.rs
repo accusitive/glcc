@@ -89,6 +89,12 @@ enum Plan {
     LshrBy(Value, u32),
     /// `v & mask` with a freshly materialized integer constant.
     AndConst(Value, i128),
+    /// `v + constant` with a freshly materialized integer constant.
+    AddConst(Value, i128),
+    /// `v - constant` with a freshly materialized integer constant.
+    SubConst(Value, i128),
+    /// `v * constant` with a freshly materialized integer constant.
+    MulConst(Value, i128),
     /// `!v` for a `Bool`-typed `v`, as `icmp.Eq v, 0`.
     BoolNot(Value),
 }
@@ -106,7 +112,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
             } else if a == b && int_ty_bits(result_ty).is_some() {
                 Some(Plan::ShlBy(*a, 1))
             } else {
-                None
+                reassociate_add(func, result_ty, *a, *b)
             }
         }
         InstKind::Sub(a, b) => {
@@ -116,8 +122,12 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
                 Some(Plan::Const(zero_const(result_ty)?))
             } else if is_int_zero(func, *a) && int_ty_bits(result_ty).is_some() {
                 Some(Plan::Inst(InstKind::Neg(*b)))
+            } else if is_all_ones(func, *b) {
+                Some(Plan::AddConst(*a, 1))
+            } else if is_all_ones(func, *a) {
+                Some(Plan::Inst(InstKind::Not(*b)))
             } else {
-                None
+                reassociate_sub(func, result_ty, *a, *b)
             }
         }
         InstKind::Mul(a, b) => {
@@ -131,6 +141,8 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
                 Some(Plan::Inst(InstKind::Neg(*b)))
             } else if is_all_ones(func, *b) {
                 Some(Plan::Inst(InstKind::Neg(*a)))
+            } else if let Some(plan) = reassociate_mul(func, result_ty, *a, *b) {
+                Some(plan)
             } else if let Some(shift) = int_pow2(func, *b) {
                 Some(Plan::ShlBy(*a, shift))
             } else if let Some(shift) = int_pow2(func, *a) {
@@ -192,6 +204,10 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
                 Some(Plan::Value(*a))
             } else if is_int_zero(func, *a) {
                 Some(Plan::Value(*b))
+            } else if is_all_ones(func, *a) {
+                Some(Plan::Inst(InstKind::Not(*b)))
+            } else if is_all_ones(func, *b) {
+                Some(Plan::Inst(InstKind::Not(*a)))
             } else {
                 None
             }
@@ -316,6 +332,18 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::And(v, push_int_const(func, &ty, value)))
         }
+        Plan::AddConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Add(v, push_int_const(func, &ty, value)))
+        }
+        Plan::SubConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Sub(v, push_int_const(func, &ty, value)))
+        }
+        Plan::MulConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Mul(v, push_int_const(func, &ty, value)))
+        }
         other => other,
     };
     match plan {
@@ -348,7 +376,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
-        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) => {
+        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) | Plan::AddConst(..) | Plan::SubConst(..) | Plan::MulConst(..) => {
             unreachable!("normalized above")
         }
     }
@@ -450,6 +478,111 @@ fn invert_fcmp(pred: FcmpPred) -> FcmpPred {
         FcmpPred::Ge => FcmpPred::Lt,
         FcmpPred::Uno => FcmpPred::Ord,
         FcmpPred::Ord => FcmpPred::Uno,
+    }
+}
+
+/// Integer bits for arithmetic reassociation. `Bool` arithmetic is left
+/// alone because C only reaches it through explicit bit operations.
+fn arith_bits(ty: &Ty) -> Option<u32> {
+    match ty {
+        Ty::Int { bits } => Some(*bits),
+        _ => None,
+    }
+}
+
+/// Fold `(x op c1) op c2` into `x op (c1 op c2)` so each chain of
+/// constant adjustments costs one instruction instead of one per step.
+fn reassociate_add(func: &Function, result_ty: &Ty, a: Value, b: Value) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    let (base, constant) = constant_and_base(func, bits, a, b)?;
+    let inst = def_inst(func, base)?;
+    match &func.insts[inst].kind {
+        InstKind::Add(x, y) => {
+            if let Some((_, cy)) = int_const(func, *y) {
+                return Some(add_constant(*x, wrap(bits, constant.wrapping_add(cy))));
+            }
+            if let Some((_, cx)) = int_const(func, *x) {
+                return Some(add_constant(*y, wrap(bits, constant.wrapping_add(cx))));
+            }
+            None
+        }
+        InstKind::Sub(x, y) => {
+            let (_, cy) = int_const(func, *y)?;
+            Some(add_constant(*x, wrap(bits, constant.wrapping_sub(cy))))
+        }
+        _ => None,
+    }
+}
+
+fn reassociate_sub(func: &Function, result_ty: &Ty, a: Value, b: Value) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    let (_, subtrahend) = int_const(func, b)?;
+    let subtrahend = wrap(bits, subtrahend);
+    let inst = def_inst(func, a)?;
+    match &func.insts[inst].kind {
+        InstKind::Add(x, y) => {
+            if let Some((_, cy)) = int_const(func, *y) {
+                return Some(add_constant(*x, wrap(bits, cy.wrapping_sub(subtrahend))));
+            }
+            if let Some((_, cx)) = int_const(func, *x) {
+                return Some(add_constant(*y, wrap(bits, cx.wrapping_sub(subtrahend))));
+            }
+            None
+        }
+        InstKind::Sub(x, y) => {
+            let (_, cy) = int_const(func, *y)?;
+            Some(sub_constant(*x, wrap(bits, cy.wrapping_add(subtrahend))))
+        }
+        _ => None,
+    }
+}
+
+fn reassociate_mul(func: &Function, result_ty: &Ty, a: Value, b: Value) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    let (base, constant) = constant_and_base(func, bits, a, b)?;
+    let inst = def_inst(func, base)?;
+    let InstKind::Mul(x, y) = &func.insts[inst].kind else {
+        return None;
+    };
+    let (other, inner) = match (int_const(func, *x), int_const(func, *y)) {
+        (Some((_, value)), _) => (*y, value),
+        (_, Some((_, value))) => (*x, value),
+        _ => return None,
+    };
+    let product = wrap(bits, constant.wrapping_mul(inner));
+    if product == 0 {
+        return Some(Plan::Const(zero_const(result_ty)?));
+    }
+    if product == 1 {
+        return Some(Plan::Value(other));
+    }
+    if product == -1 {
+        return Some(Plan::Inst(InstKind::Neg(other)));
+    }
+    Some(Plan::MulConst(other, product))
+}
+
+fn constant_and_base(func: &Function, bits: u32, a: Value, b: Value) -> Option<(Value, i128)> {
+    if let Some((_, value)) = int_const(func, b) {
+        Some((a, wrap(bits, value)))
+    } else {
+        int_const(func, a).map(|(_, value)| (b, wrap(bits, value)))
+    }
+}
+
+fn add_constant(value: Value, constant: i128) -> Plan {
+    if constant == 0 {
+        Plan::Value(value)
+    } else {
+        Plan::AddConst(value, constant)
+    }
+}
+
+fn sub_constant(value: Value, constant: i128) -> Plan {
+    if constant == 0 {
+        Plan::Value(value)
+    } else {
+        Plan::SubConst(value, constant)
     }
 }
 
@@ -886,6 +1019,77 @@ mod tests {
                 assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 1 }));
             }
             other => panic!("expected shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reassociates_constant_additions() {
+        let (mut func, entry, x) = int_func();
+        let seven = iconst(&mut func, 32, 7);
+        let five = iconst(&mut func, 32, 5);
+        let inner = emit(&mut func, entry, InstKind::Add(x, seven), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Add(inner, five), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt addition");
+        match &func.insts[inst].kind {
+            InstKind::Add(lhs, rhs) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: 12 }));
+            }
+            other => panic!("expected addition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reassociation_wraps_like_the_original_operations() {
+        let (mut func, entry, x) = int_func();
+        let max = iconst(&mut func, 32, i128::from(i32::MAX));
+        let one = iconst(&mut func, 32, 1);
+        let inner = emit(&mut func, entry, InstKind::Add(x, max), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Add(inner, one), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt addition");
+        match &func.insts[inst].kind {
+            InstKind::Add(lhs, rhs) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: i128::from(i32::MIN) }));
+            }
+            other => panic!("expected addition, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reassociates_constant_multiplications() {
+        let (mut func, entry, x) = int_func();
+        let six = iconst(&mut func, 32, 6);
+        let four = iconst(&mut func, 32, 4);
+        let inner = emit(&mut func, entry, InstKind::Mul(x, six), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Mul(inner, four), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt product");
+        match &func.insts[inst].kind {
+            InstKind::Mul(lhs, rhs) => {
+                assert_eq!(*lhs, x);
+                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: 24 }));
+            }
+            other => panic!("expected product, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn xor_with_all_ones_becomes_not() {
+        let (mut func, entry, x) = int_func();
+        let ones = iconst(&mut func, 32, -1);
+        let out = emit(&mut func, entry, InstKind::Xor(x, ones), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt negation");
+        match &func.insts[inst].kind {
+            InstKind::Not(operand) => assert_eq!(*operand, x),
+            other => panic!("expected not, got {other:?}"),
         }
     }
 
