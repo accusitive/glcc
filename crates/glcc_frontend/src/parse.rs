@@ -5228,6 +5228,18 @@ impl<'a> Parser<'a> {
             None
         };
         self.skip_gnu_suffixes();
+        let fixed = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon))) {
+            self.tokens.advance();
+            let span = self.peek_span();
+            let ty = self.parse_type_name().unqualified().clone();
+            if !Self::is_enum_underlying_type(&ty) {
+                return self.fail(span, "enum underlying type must be an integer type");
+            }
+            Some(ty)
+        } else {
+            None
+        };
+        self.skip_gnu_suffixes();
         if !matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
             // Anonymous types must carry a body to describe (C17 §6.7.2.3).
             let Some((tag, tag_span)) = tag else {
@@ -5237,7 +5249,13 @@ impl<'a> Parser<'a> {
             let span = kw_span.merge(tag_span);
             let referred = self.sema.reference_enum_tag(tag, span);
             return match self.unwrap_diag_opt(referred) {
-                Some(id) => TypeSpecifier::Enum(id),
+                Some(id) => {
+                    if let Some(fixed) = fixed {
+                        let set = self.sema.set_enum_fixed(id, Some(fixed), span);
+                        self.unwrap_diag(set);
+                    }
+                    TypeSpecifier::Enum(id)
+                }
                 None => TypeSpecifier::recover(),
             };
         }
@@ -5252,14 +5270,56 @@ impl<'a> Parser<'a> {
             None => self.sema.new_anonymous_enum(kw_span),
         };
         self.expect_punct(Punctuator::LBrace);
-        let (enumerators, repr) = self.parse_enumerator_list();
+        let (enumerators, repr) = self.parse_enumerator_list(fixed.as_ref());
         if !self.cancelled() {
             self.expect_punct(Punctuator::RBrace);
         }
         self.skip_gnu_suffixes();
-        let completed = self.sema.complete_enum_tag(id, enumerators, repr);
+        let completed = self.sema.complete_enum_tag(id, enumerators, repr, fixed);
         self.unwrap_diag(completed);
         TypeSpecifier::Enum(id)
+    }
+
+    fn is_enum_underlying_type(ty: &Ty) -> bool {
+        matches!(
+            ty.unqualified(),
+            Ty::Bool
+                | Ty::Char
+                | Ty::SignedChar
+                | Ty::UnsignedChar
+                | Ty::Short
+                | Ty::UnsignedShort
+                | Ty::Int
+                | Ty::UnsignedInt
+                | Ty::Long
+                | Ty::UnsignedLong
+                | Ty::LongLong
+                | Ty::UnsignedLongLong
+                | Ty::Int128
+                | Ty::UnsignedInt128
+        )
+    }
+
+    fn enum_value_fits(&self, value: i128, ty: &Ty) -> bool {
+        let ty = ty.unqualified();
+        if matches!(ty, Ty::Bool) {
+            return matches!(value, 0 | 1);
+        }
+        let Some(size) = crate::check::int_type_size(ty, &self.sema.target) else {
+            return false;
+        };
+        let bits = size * 8;
+        if crate::check::is_signed_int_in(ty, self.sema.target.char_signed).unwrap_or(false) {
+            if bits >= 127 {
+                return true;
+            }
+            let bound = 1i128 << (bits - 1);
+            value >= -bound && value < bound
+        } else if bits >= 127 {
+            value >= 0
+        } else {
+            value >= 0 && (value as u128) < (1u128 << bits)
+        }
     }
 
     // `A, B = 3, C, ...` with the `{` consumed and `}` unconsumed: each
@@ -5274,11 +5334,11 @@ impl<'a> Parser<'a> {
     // `unsigned long` holding it (so `DW_CIE_ID_32` is unsigned), and
     // the enum's representation is the largest of those. Anything
     // outside `unsigned long` fails.
-    fn parse_enumerator_list(&mut self) -> (Vec<Enumerator>, Ty) {
+    fn parse_enumerator_list(&mut self, fixed: Option<&Ty>) -> (Vec<Enumerator>, Ty) {
         let mut enumerators = Vec::new();
         let mut previous: Option<i128> = None;
-        let mut repr = Ty::Int;
-        let mut all_nonnegative = true;
+        let mut repr = fixed.cloned().unwrap_or(Ty::Int);
+        let mut all_nonnegative = fixed.is_none();
         loop {
             if self.cancelled() {
                 break;
@@ -5318,20 +5378,31 @@ impl<'a> Parser<'a> {
                 },
                 None => previous.map(|p| p.wrapping_add(1)).unwrap_or(0),
             };
-            let const_ty = match Self::enum_ladder_ty(const_value) {
-                Some(ty) => ty,
-                None => {
-                    return self.fail(span, "enumerator value is not representable");
+            let const_ty = match fixed {
+                Some(ty) => {
+                    if !self.enum_value_fits(const_value, ty) {
+                        return self.fail(span, "enumerator value does not fit the fixed underlying type");
+                    }
+                    ty.clone()
                 }
+                None => match Self::enum_ladder_ty(const_value) {
+                    Some(ty) => ty,
+                    None => {
+                        return self.fail(span, "enumerator value is not representable");
+                    }
+                },
             };
             // The enum's representation is the largest ladder rung any
             // value needed (plain `int` for ordinary enums), with the
             // unsigned rung when no value is negative — GCC's rule for
             // C enums, and what makes an enum bit-field read unsigned.
-            if Self::enum_ladder_rank(&const_ty) > Self::enum_ladder_rank(&repr) {
-                repr = const_ty.clone();
+            // A fixed underlying type wins instead.
+            if fixed.is_none() {
+                if Self::enum_ladder_rank(&const_ty) > Self::enum_ladder_rank(&repr) {
+                    repr = const_ty.clone();
+                }
+                all_nonnegative &= const_value >= 0;
             }
-            all_nonnegative &= const_value >= 0;
             previous = Some(const_value);
             let declared = self.sema.declare(
                 name,

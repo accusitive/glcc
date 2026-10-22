@@ -55,9 +55,13 @@ pub struct EnumDef {
     /// Smallest type holding every value (C23 §6.7.2.2p4 ladder:
     /// `int`, `unsigned int`, `long`, `unsigned long`): `int` for
     /// ordinary enums, wider for sentinel values like
-    /// `DW_CIE_ID_32`. Fixed at completion; layout, conversions,
-    /// and promotions all key off it.
+    /// `DW_CIE_ID_32`, or the declared fixed underlying type in C23.
+    /// Fixed at completion; layout, conversions, and promotions all
+    /// key off it.
     pub repr: Ty,
+    /// C23 `enum E : type`: the declared underlying type, retained so
+    /// later declarations must agree with it.
+    pub fixed: Option<Ty>,
     pub span: Span,
 }
 
@@ -798,6 +802,7 @@ impl Sema {
             // Unknown until the body parses; plain `int` is right
             // for every enum without out-of-range sentinels.
             repr: Ty::Int,
+            fixed: None,
             span,
         });
         self.scopes.current_mut().enum_tags.insert(tag, id);
@@ -813,14 +818,42 @@ impl Sema {
             enumerators: vec![],
             complete: false,
             repr: Ty::Int,
+            fixed: None,
             span,
         });
         id
     }
 
+    /// Record or check a C23 fixed underlying type on a (possibly still
+    /// incomplete) enum. Redeclarations must repeat the same type, and
+    /// a tag once declared with one may not shed it.
+    pub fn set_enum_fixed(&mut self, id: EnumId, fixed: Option<Ty>, span: Span) -> Result<(), CompileError> {
+        let def = &mut self.enums[id.0 as usize];
+        match (&def.fixed, fixed) {
+            (Some(previous), Some(new)) if *previous != new => Err(CompileError::new(
+                "enumeration redeclared with a different underlying type",
+                span,
+            )
+            .with_secondary(def.span, "previous declaration here")),
+            (Some(_), None) => Err(CompileError::new("enumeration previously declared with fixed underlying type", span)
+                .with_secondary(def.span, "previous declaration here")),
+            (None, Some(_)) if def.complete => Err(CompileError::new(
+                "enumeration previously declared with nonfixed underlying type",
+                span,
+            )
+            .with_secondary(def.span, "previous declaration here")),
+            (_, fixed @ Some(_)) => {
+                def.fixed = fixed;
+                Ok(())
+            }
+            (None, None) => Ok(()),
+        }
+    }
+
     // Attach the parsed enumerator list, completing the type.
     // Completing an already-complete tag again is a redefinition.
-    pub fn complete_enum_tag(&mut self, id: EnumId, enumerators: Vec<Enumerator>, repr: Ty) -> Result<(), CompileError> {
+    pub fn complete_enum_tag(&mut self, id: EnumId, enumerators: Vec<Enumerator>, repr: Ty, fixed: Option<Ty>) -> Result<(), CompileError> {
+        self.set_enum_fixed(id, fixed, self.enums[id.0 as usize].span)?;
         let def = &mut self.enums[id.0 as usize];
         if def.complete {
             return Err(CompileError::new("redefinition of enum tag", def.span));

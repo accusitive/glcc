@@ -3988,10 +3988,14 @@ impl Sema {
                     }
                 }
                 Some(ty) => {
-                    if checked.iter().any(|(t, _)| t.as_ref() == Some(ty)) {
+                    if checked
+                        .iter()
+                        .filter_map(|(t, _)| t.as_ref())
+                        .any(|previous| types_compatible(previous, ty) || self.enum_repr_pair(previous, ty))
+                    {
                         return Err(CompileError::new("duplicate type in `_Generic`", assoc.span));
                     }
-                    if selected.is_none() && types_compatible(&ctrl.ty, ty) {
+                    if selected.is_none() && (types_compatible(&ctrl.ty, ty) || self.enum_repr_pair(&ctrl.ty, ty)) {
                         selected = Some(checked.len());
                     }
                 }

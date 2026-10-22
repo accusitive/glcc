@@ -2246,6 +2246,75 @@ fn enum_specifier_cannot_mix_with_primitives() {
     assert_base_error("unsigned enum E", "`enum` with other type specifiers");
 }
 
+#[test]
+fn enum_fixed_underlying_type_sizes_and_types() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let src = "enum A : unsigned char { A0 = 1, A1 = 255 };\n\
+               enum B : long long { B0 = -1, B1 = 0x100000000LL };\n\
+               enum F : int;\n\
+               enum F : int { F0 = 7 };\n\
+               _Static_assert(sizeof(enum A) == 1, \"A size\");\n\
+               _Static_assert(sizeof(enum B) == 8, \"B size\");\n\
+               _Static_assert(_Generic((enum A)0, unsigned char: 1, default: 0), \"A generic\");\n\
+               _Static_assert(_Generic((enum B)0, long long: 1, default: 0), \"B generic\");\n\
+               _Static_assert(_Generic(A0, unsigned char: 1, default: 0), \"enumerator generic\");";
+    let diagnostics = tu_diagnostics_with_lang(src, c23);
+    assert!(diagnostics.iter().all(|d| !d.is_error()), "{diagnostics:#?}");
+
+    let mut sema = gated_sema(c23);
+    let mut interner = Interner::new();
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let a = parser.intern.get_or_intern("A");
+    let id = parser.sema.lookup_enum_tag(a).unwrap();
+    assert_eq!(parser.sema.enums[id.0 as usize].repr, Ty::UnsignedChar);
+    assert_eq!(parser.sema.enums[id.0 as usize].fixed, Some(Ty::UnsignedChar));
+    let a0 = parser.intern.get_or_intern("A0");
+    let binding = &parser.sema.decls[parser.sema.lookup_symbol(a0).unwrap().0 as usize];
+    assert_eq!(binding.ty, Ty::UnsignedChar);
+}
+
+#[test]
+fn enum_fixed_underlying_type_rejects_bad_values_and_types() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    for src in [
+        "enum A : unsigned char { A0 = 256 };",
+        "enum A : _Bool { A0 = 2 };",
+        "enum A : float { A0 };",
+    ] {
+        let diagnostics = tu_diagnostics_with_lang(src, c23);
+        assert!(diagnostics.iter().any(|d| d.is_error()), "{src}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn enum_fixed_underlying_type_redeclaration_checks() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    for src in [
+        "enum E : int; enum E { A };",
+        "enum E : int; enum E : long { A };",
+        "enum E { A }; enum E : int;",
+    ] {
+        let diagnostics = tu_diagnostics_with_lang(src, c23);
+        assert!(diagnostics.iter().any(|d| d.is_error()), "{src}: {diagnostics:#?}");
+    }
+}
+
 // ---- tag scoping (directly on Sema) ----
 
 #[test]

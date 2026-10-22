@@ -8560,6 +8560,15 @@ mod tests {
     }
 
     #[test]
+    fn c23_fixed_enum_underlying_type_lower() {
+        let src = "enum A : unsigned char { A1 = 255 };\n\
+                   enum B : long long { B1 = 0x100000000LL };\n\
+                   int main(void) { enum A a = A1; enum B b = B1; \
+                   return (sizeof a == 1 && sizeof b == 8 && a == 255 && b == 0x100000000LL) ? 0 : 1; }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 0);
+    }
+
+    #[test]
     fn computed_goto() {
         // A label address held in a local, dispatched on.
         assert_eq!(run_main("int main(){void *p = &&l; goto *p; l: return 5;}"), 5);
