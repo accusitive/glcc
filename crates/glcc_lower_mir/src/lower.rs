@@ -10086,6 +10086,20 @@ mod tests {
             7
         );
         assert_eq!(run_main("struct P{int x; int y;}; struct P g = {.y = 5}; int main(){return g.x+g.y;}"), 5);
+        assert_eq!(
+            run_main(
+                "struct P{int x; int y;}; struct P bump(struct P p){struct P q = p; q.y++; return q;}\
+                 int main(){struct P p = {3, 4}; struct P q = bump(p); return q.x * 10 + q.y;}"
+            ),
+            35
+        );
+        assert_eq!(
+            run_main(
+                "struct S{int a[2]; struct I{int v;} inner;}; struct S id(struct S s){return s;}\
+                 int main(){struct S s = {{2, 3}, {4}}; struct S t = id(s); return t.a[0] + t.a[1] * 10 + t.inner.v * 100;}"
+            ),
+            432
+        );
     }
 
     #[test]

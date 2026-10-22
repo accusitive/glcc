@@ -477,6 +477,8 @@ impl FunctionPass for ForwardAggregateCopy {
             }
         }
         changed |= expand_local_aggregate_copies(func);
+        changed |= expand_local_aggregate_stores(func);
+        changed |= expand_returned_aggregate_loads(func);
         changed
     }
 }
@@ -638,6 +640,243 @@ fn make_unit(func: &mut Function, block: Block, kind: InstKind) -> Inst {
         result: None,
         loc: None,
     })
+}
+
+/// Split an aggregate store into its scalar fields. The source aggregate
+/// value is read with `ExtractValue`, so a following `Sroa` sees only the
+/// individual field stores.
+fn expand_local_aggregate_stores(func: &mut Function) -> bool {
+    let mut changed = false;
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let insts = func.blocks[block].insts.clone();
+        let mut expanded = false;
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            let store = match &func.insts[inst].kind {
+                InstKind::Store { addr, val, flags } if !flags.volatile => Some((*addr, *val, *flags)),
+                _ => None,
+            };
+            let Some((addr, val, flags)) = store else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Ty::Ptr { pointee, bits } = func.values[addr].ty.clone() else {
+                rebuilt.push(inst);
+                continue;
+            };
+            if func.values[val].ty != *pointee || !pointee.is_aggregate() {
+                rebuilt.push(inst);
+                continue;
+            }
+            if !matches!(address_info(func, addr).map(|info| info.object), Some(MemoryObject::Stack(_))) {
+                rebuilt.push(inst);
+                continue;
+            }
+            let Some(leaves) = aggregate_leaves(&pointee) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            for (path, ty) in leaves {
+                let Some(extracted) = extract_value_path(func, block, val, &path, &mut rebuilt) else {
+                    unreachable!("validated aggregate path");
+                };
+                let (dst, dst_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::GetElementPtr {
+                        base: addr,
+                        indices: path.into_iter().collect(),
+                    },
+                    Ty::ptr_bits(ty, bits),
+                );
+                rebuilt.push(dst_inst);
+                rebuilt.push(make_unit(
+                    func,
+                    block,
+                    InstKind::Store {
+                        addr: dst,
+                        val: extracted,
+                        flags,
+                    },
+                ));
+            }
+            expanded = true;
+            changed = true;
+        }
+        if expanded {
+            func.blocks[block].insts = rebuilt;
+        }
+    }
+    changed
+}
+
+fn extract_value_path(func: &mut Function, block: Block, aggregate: Value, path: &[GepIndex], rebuilt: &mut Vec<Inst>) -> Option<Value> {
+    let mut value = aggregate;
+    for step in path {
+        let (index, ty) = match (&func.values[value].ty, step) {
+            (Ty::Struct { fields, .. }, GepIndex::Field(index)) => (*index, fields.get(*index as usize)?.clone()),
+            (Ty::Array { elem, len }, GepIndex::ConstIndex(index)) if *index < *len => (*index as u32, (**elem).clone()),
+            _ => return None,
+        };
+        let (next, inst) = make_value(func, block, InstKind::ExtractValue { agg: value, index }, ty);
+        rebuilt.push(inst);
+        value = next;
+    }
+    Some(value)
+}
+
+/// Replace an aggregate load whose only use is the function's return with a
+/// field-wise load and `InsertValue` chain. This lets `Sroa` scalarize the
+/// source slot while still returning a value of the aggregate type.
+fn expand_returned_aggregate_loads(func: &mut Function) -> bool {
+    let counts = func.count_resident_uses();
+    let mut changed = false;
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let Some(Terminator::Return { val: Some(returned) }) = func.blocks[block].term else {
+            continue;
+        };
+        let insts = func.blocks[block].insts.clone();
+        let mut replacement = None;
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            let load = match &func.insts[inst].kind {
+                InstKind::Load { addr, flags } if !flags.volatile => Some((*addr, *flags)),
+                _ => None,
+            };
+            let Some((addr, flags)) = load else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Some(result) = func.insts[inst].result else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let ty = func.values[result].ty.clone();
+            if result != returned || counts.get(result.index()).copied().unwrap_or(0) != 1 || !ty.is_aggregate() {
+                rebuilt.push(inst);
+                continue;
+            }
+            if !matches!(address_info(func, addr).map(|info| info.object), Some(MemoryObject::Stack(_))) {
+                rebuilt.push(inst);
+                continue;
+            }
+            let Ty::Ptr { bits, .. } = func.values[addr].ty else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let Some(leaves) = aggregate_leaves(&ty) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            let mut undefs = Vec::new();
+            let mut budget = leaves.len();
+            let Some(aggregate) = build_aggregate_value(func, block, addr, &mut Vec::new(), &ty, bits, flags, &mut undefs, &mut budget, &mut rebuilt) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            replacement = Some(aggregate);
+            changed = true;
+        }
+        if replacement.is_some() {
+            func.blocks[block].insts = rebuilt;
+            func.blocks[block].term = Some(Terminator::Return { val: replacement });
+        }
+    }
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_aggregate_value(
+    func: &mut Function,
+    block: Block,
+    addr: Value,
+    path: &mut Vec<GepIndex>,
+    ty: &Ty,
+    bits: u32,
+    flags: MemFlags,
+    undefs: &mut Vec<(Ty, Value)>,
+    budget: &mut usize,
+    rebuilt: &mut Vec<Inst>,
+) -> Option<Value> {
+    match ty {
+        Ty::Bool | Ty::Int { .. } | Ty::Float(_) | Ty::Ptr { .. } => {
+            if *budget == 0 {
+                return None;
+            }
+            *budget -= 1;
+            let (field, field_inst) = make_value(
+                func,
+                block,
+                InstKind::GetElementPtr {
+                    base: addr,
+                    indices: path.clone().into_iter().collect(),
+                },
+                Ty::ptr_bits(ty.clone(), bits),
+            );
+            rebuilt.push(field_inst);
+            let (loaded, load_inst) = make_value(func, block, InstKind::Load { addr: field, flags }, ty.clone());
+            rebuilt.push(load_inst);
+            Some(loaded)
+        }
+        Ty::Struct { fields, offsets, size } => {
+            if fields.len() != offsets.len() {
+                return None;
+            }
+            let mut end = 0;
+            let mut aggregate = undef_value(func, ty, undefs);
+            for (index, (field, offset)) in fields.iter().zip(offsets).enumerate() {
+                if *offset != end {
+                    return None;
+                }
+                path.push(GepIndex::Field(index as u32));
+                let value = build_aggregate_value(func, block, addr, path, field, bits, flags, undefs, budget, rebuilt)?;
+                path.pop();
+                let (next, insert) = make_value(
+                    func,
+                    block,
+                    InstKind::InsertValue {
+                        agg: aggregate,
+                        elem: value,
+                        index: index as u32,
+                    },
+                    ty.clone(),
+                );
+                rebuilt.push(insert);
+                aggregate = next;
+                end = end.checked_add(field.size_bytes())?;
+            }
+            (end == *size).then_some(aggregate)
+        }
+        Ty::Array { elem, len } => {
+            let mut aggregate = undef_value(func, ty, undefs);
+            for index in 0..*len {
+                path.push(GepIndex::ConstIndex(index));
+                let value = build_aggregate_value(func, block, addr, path, elem, bits, flags, undefs, budget, rebuilt)?;
+                path.pop();
+                let (next, insert) = make_value(
+                    func,
+                    block,
+                    InstKind::InsertValue {
+                        agg: aggregate,
+                        elem: value,
+                        index: index as u32,
+                    },
+                    ty.clone(),
+                );
+                rebuilt.push(insert);
+                aggregate = next;
+            }
+            Some(aggregate)
+        }
+        _ => None,
+    }
+}
+
+fn aggregate_leaves(ty: &Ty) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
+    let mut leaves = Vec::new();
+    collect_copy_leaves(ty, &mut Vec::new(), &mut leaves, 16).then_some(leaves)
 }
 
 /// A later write that may cover an earlier one.
@@ -3174,6 +3413,46 @@ mod tests {
             .insts
             .iter()
             .any(|inst| matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
+
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        assert!(sroa.run(&mut func));
+        assert!(mem2reg.run(&mut func));
+        assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn expands_aggregate_parameter_copy_and_return() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("copy_param", Signature::new(vec![ty.clone()], ty.clone()));
+        let input = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Param(entry, 0),
+        });
+        func.blocks[entry].params.push(input);
+        let slot = stack_slot(&mut func, entry, ty.clone());
+        push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: input,
+                flags: MemFlags::plain(),
+            },
+        );
+        let loaded = push_value(&mut func, entry, InstKind::Load { addr: slot, flags: MemFlags::plain() }, ty);
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!resident_kinds(&func)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::Memcpy { .. })));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;
