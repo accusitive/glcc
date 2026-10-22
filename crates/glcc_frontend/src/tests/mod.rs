@@ -5199,6 +5199,53 @@ fn c23_auto_deduces_from_initializer() {
 }
 
 #[test]
+fn c23_constexpr_values_fold_in_constant_contexts() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let src = "constexpr int n = 3;\n\
+               int a[n];\n\
+               constexpr double d = 1.5;\n\
+               int b[(int)d];\n\
+               constexpr int *p = 0;\n\
+               enum { E = n + 2 };\n\
+               _Static_assert(n == 3, \"n\");\n\
+               int main(void) {\n\
+                   constexpr int m = 4;\n\
+                   int c[m];\n\
+                   _Static_assert(m == 4, \"m\");\n\
+                   return (sizeof a / sizeof a[0]) + (sizeof c / sizeof c[0]) + E;\n\
+               }";
+    let diagnostics = tu_diagnostics_with_lang(src, c23);
+    assert!(diagnostics.iter().all(|d| !d.is_error()), "{diagnostics:#?}");
+}
+
+#[test]
+fn c23_constexpr_rejects_nonconstant_initializers_and_writes() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    for (src, expected) in [
+        ("constexpr int x;", "requires an initializer"),
+        ("int y; constexpr int x = y;", "not a constant expression"),
+        ("constexpr int *p = (int *)1;", "not a constant expression"),
+        ("int main(void) { constexpr int n = 3; n = 4; return n; }", "read-only"),
+        ("int main(void) { constexpr int n = 3; return ++n; }", "read-only"),
+    ] {
+        let diagnostics = tu_diagnostics_with_lang(src, c23);
+        assert_diag_contains(&diagnostics, expected);
+    }
+    // Before C23 the spelling is an ordinary identifier.
+    assert!(tu_diagnostics_with_lang("int constexpr = 1;", LangOpts::default()).is_empty());
+}
+
+#[test]
 fn c23_auto_rejects_bad_declarations() {
     let c23 = LangOpts {
         std: Std::C23,

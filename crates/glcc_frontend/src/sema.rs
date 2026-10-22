@@ -292,6 +292,9 @@ pub struct Sema {
     /// (implicit conversions inserted), which later phases consume.
     /// Only definitions with `= ...` have entries.
     pub inits: HashMap<DeclId, Initializer>,
+    /// C23 `constexpr` values, usable in constant expressions such as
+    /// array bounds even though they live in objects.
+    pub constexprs: HashMap<DeclId, crate::eval::Value>,
     /// GNU label addresses (`&&label`) and computed `goto`: one small
     /// id per label spelling, assigned when the label is defined (so
     /// ids run in definition order) and keyed by spelling, with the
@@ -384,6 +387,7 @@ impl Sema {
             warnings: RefCell::new(Vec::new()),
             bodies: HashMap::new(),
             inits: HashMap::new(),
+            constexprs: HashMap::new(),
             label_ids: HashMap::new(),
             vla_bounds: Vec::new(),
             address_taken: RefCell::new(HashSet::new()),

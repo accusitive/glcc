@@ -2727,6 +2727,7 @@ impl<'a> Parser<'a> {
                     || self.is_gnu_type_keyword(*sym)
                     || self.peek_c23_keyword("typeof_unqual")
                     || self.peek_c23_keyword("bool")
+                    || self.peek_c23_keyword("constexpr")
                     || self.peek_alternate_inline()
                     || self.peek_gnu_qualifier().is_some()
                     // MSVC declaration prefixes (`__declspec(noreturn)
@@ -3395,6 +3396,9 @@ impl<'a> Parser<'a> {
                 let span = declarator.span();
                 return self.fail(span, "declaration does not declare anything");
             }
+            if specifiers.constexpr && !has_init {
+                return self.fail(specifiers.span.merge(declarator.span()), "`constexpr` requires an initializer");
+            }
             let id = self.declare_one(specifiers, &declarator, ty, has_init, &suffix);
             if self.failed() {
                 if has_init && inferred_init.is_none() {
@@ -3409,6 +3413,30 @@ impl<'a> Parser<'a> {
                 };
                 let ty = self.sema.decls[id.0 as usize].ty.clone();
                 let checked = self.checked_initializer(&ty, &init);
+                if specifiers.constexpr {
+                    let value = match &checked {
+                        Initializer::Expr(expr) => {
+                            let value = crate::eval::eval_static_init(expr, self.sema, &self.intern);
+                            if value.is_none() && !crate::eval::is_constant_initializer(expr, self.sema, &self.intern) {
+                                self.fail::<()>(
+                                    specifiers.span.merge(declarator.span()),
+                                    "`constexpr` initializer is not a constant expression",
+                                );
+                            }
+                            value
+                        }
+                        Initializer::List { .. } => {
+                            self.fail::<()>(
+                                specifiers.span.merge(declarator.span()),
+                                "`constexpr` initializer is not a constant expression",
+                            );
+                            None
+                        }
+                    };
+                    if let Some(value) = value {
+                        self.sema.constexprs.insert(id, value);
+                    }
+                }
                 // An array of unknown size takes its size from the
                 // initializer (see `complete_array_bound`).
                 self.complete_array_bound(id, &checked);
@@ -4678,6 +4706,12 @@ impl<'a> Parser<'a> {
             if ds.type_specifier.is_empty() && self.peek_is_gnu("_Float64") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Double));
+                continue;
+            }
+            if self.peek_c23_keyword("constexpr") {
+                ds.constexpr = true;
+                ds.type_qualifier.push(TypeQualifier::Const);
+                self.tokens.advance();
                 continue;
             }
             // C23 `auto` is a type specifier, not a storage class.
@@ -7217,6 +7251,9 @@ pub struct DeclarationSpecifiers {
     pub(crate) thread_local: bool,
     /// C23 `auto` as a type specifier: infer from the initializer.
     pub(crate) auto_infer: bool,
+    /// C23 `constexpr`: the object is const and its initializer must be
+    /// a constant expression.
+    pub(crate) constexpr: bool,
     /// GNU attributes interleaved with the specifiers
     /// (`__attribute__((weak)) int x;`): declaration-level effects
     /// (`weak` here) apply to every declarator in the list.

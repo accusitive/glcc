@@ -818,6 +818,25 @@ pub fn eval_static_init(expr: &CheckedExpr, sema: &Sema, interner: &Interner) ->
     eval_const_in(expr, sema, interner, true)
 }
 
+/// Whether `expr` is a constant expression suitable for a C23
+/// `constexpr` initializer: foldable arithmetic or a non-null address
+/// constant. A null pointer constant folds through the cast path.
+pub fn is_constant_initializer(expr: &CheckedExpr, sema: &Sema, interner: &Interner) -> bool {
+    if eval_static_init(expr, sema, interner).is_some() || address_nonzero(expr, sema) {
+        return true;
+    }
+    // A cast null pointer constant does not fold to a `Value`, but is
+    // still a constant initializer.
+    match &expr.kind {
+        CheckedExprKind::Cast { ty, expr } | CheckedExprKind::Convert { expr, ty }
+            if matches!(ty.unqualified(), Ty::Pointer { .. }) =>
+        {
+            matches!(eval_const(expr, sema, interner), Some(Value::Int(0)))
+        }
+        _ => false,
+    }
+}
+
 fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_conds: bool) -> Option<Value> {
     match &expr.kind {
         CheckedExprKind::Int(lit) => {
@@ -847,7 +866,7 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         CheckedExprKind::Await(_) => None,
         CheckedExprKind::Ident(id) => match &sema.decls.get(id.0 as usize)?.kind {
             BindingKind::EnumConst { value } => Some(Value::Int(*value)),
-            _ => None,
+            _ => sema.constexprs.get(id).cloned(),
         },
         CheckedExprKind::Unary(op, operand) => eval_unary(*op, operand, sema, interner, addr_conds),
         CheckedExprKind::Binary(op, lhs, rhs) => eval_binary(*op, lhs, rhs, sema, interner, addr_conds),

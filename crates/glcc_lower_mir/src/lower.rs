@@ -8560,6 +8560,15 @@ mod tests {
     }
 
     #[test]
+    fn c23_constexpr_values_lower() {
+        let src = "constexpr int n = 3;\n\
+                   int a[n];\n\
+                   int main(void) { constexpr int m = 4; int c[m]; \
+                   return (sizeof a / sizeof a[0]) + (sizeof c / sizeof c[0]); }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 7);
+    }
+
+    #[test]
     fn c23_auto_deduced_objects_lower() {
         let src = "int main(void) { auto x = 2.5; auto p = &x; auto s = \"hi\"; auto const z = 7; \\\n                   return (sizeof x == 8 && sizeof p == 8 && s[0] == 'h' && *p == 2.5 && z == 7) ? 0 : 1; }";
         assert_eq!(jit_run_main(lower_module_c23(src)), 0);
