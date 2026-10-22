@@ -76,7 +76,13 @@ fn declarator_diagnostics(src: &str) -> Vec<CompileError> {
 
 /// The diagnostics from parsing `src` as a whole translation unit.
 fn tu_diagnostics(src: &str) -> Vec<CompileError> {
+    tu_diagnostics_with_lang(src, LangOpts::default())
+}
+
+/// Translation-unit diagnostics under a specific dialect.
+fn tu_diagnostics_with_lang(src: &str, lang: LangOpts) -> Vec<CompileError> {
     let mut sema = Sema::new();
+    sema.lang = lang;
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4945,6 +4951,22 @@ fn alignas_specifier_aligns_members() {
     // against gcc.
     assert_eq!(struct_size_of("struct A { char c; int _Alignas(16) x; };", "A"), (32, 16));
     assert_eq!(struct_size_of("struct B { char c; int alignas(8) y; };", "B"), (16, 8));
+}
+
+#[test]
+fn alignas_opens_a_declaration_at_file_and_block_scope() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics("_Alignas(16) int x;").is_empty());
+    assert!(tu_diagnostics("void f(void) { _Alignas(16) int y; (void)y; }").is_empty());
+    assert!(tu_diagnostics_with_lang("alignas(16) int x;", c23).is_empty());
+    assert!(
+        tu_diagnostics_with_lang("void f(void) { alignas(16) int y; (void)y; }", c23).is_empty()
+    );
 }
 
 #[test]

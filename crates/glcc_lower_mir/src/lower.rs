@@ -1740,7 +1740,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             return;
         }
         let mir_ty = lower_ty(&binding.ty, self.sema, self.interner);
-        let slot = self.alloca(func, frame, mir_ty);
+        let natural = self.sema.type_align(&binding.ty, self.interner).unwrap_or(1);
+        let requested = binding.align.unwrap_or(0).max(natural);
+        let slot = if requested > natural {
+            self.alloca_aligned(func, frame, mir_ty, requested)
+        } else {
+            self.alloca(func, frame, mir_ty)
+        };
         frame.slots.insert(id, slot);
         if let Some(init) = self.sema.inits.get(&id) {
             self.lower_init(module, func, frame, funcs, externs, globals, slot, &binding.ty, init);
@@ -7210,6 +7216,32 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         result
     }
 
+    /// Allocate `ty` with at least `align` bytes of alignment. A plain
+    /// stack slot only guarantees the type's natural alignment, so an
+    /// over-aligned local gets a byte buffer and a rounded pointer
+    /// computed in the entry block.
+    fn alloca_aligned(&self, func: &mut mir::Function, frame: &mut Frame, ty: mir::Ty, align: u64) -> mir::Value {
+        debug_assert!(align.is_power_of_two());
+        let size = ty.size_bytes().max(1);
+        let bytes = size.checked_add(align - 1).expect("aligned alloca size overflow");
+        let raw = self.alloca(
+            func,
+            frame,
+            mir::Ty::Array {
+                elem: Box::new(mir::Ty::int(8)),
+                len: bytes,
+            },
+        );
+        let bits = (self.sema.target.pointer_size * 8) as u32;
+        let int_ty = mir::Ty::int(bits);
+        let addr = self.emit(func, frame, mir::InstKind::PtrToInt(raw), int_ty.clone());
+        let bias = self.iconst(func, bits, i128::from(align - 1));
+        let biased = self.emit(func, frame, mir::InstKind::Add(addr, bias), int_ty.clone());
+        let mask = self.iconst(func, bits, i128::from(!(align - 1)));
+        let aligned = self.emit(func, frame, mir::InstKind::And(biased, mask), int_ty);
+        self.emit(func, frame, mir::InstKind::IntToPtr(aligned), mir::Ty::ptr(ty))
+    }
+
     fn load(&self, func: &mut mir::Function, frame: &mut Frame, addr: mir::Value, ty: mir::Ty, vol: bool) -> mir::Value {
         let flags = if vol { mir::MemFlags::vol() } else { mir::MemFlags::plain() };
         self.emit(func, frame, mir::InstKind::Load { addr, flags }, ty)
@@ -8096,6 +8128,15 @@ mod tests {
             mir::display::dump_module(&module)
         );
         assert_eq!(jit_run_main(module), 10);
+    }
+
+    /// An over-aligned local gets a slot whose address satisfies the
+    /// requested alignment; the raw stack slot only guarantees the
+    /// type's natural alignment.
+    #[test]
+    fn over_aligned_local_is_aligned() {
+        let src = "int main(void){ char pad[3]; _Alignas(64) int x; return (int)((unsigned long)&x % 64); }";
+        assert_eq!(jit_run_main(lower_module(src)), 0);
     }
 
     /// C text all the way to MIR for the host target (the JIT below

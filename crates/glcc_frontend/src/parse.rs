@@ -2666,6 +2666,10 @@ impl<'a> Parser<'a> {
         if self.peek_is_gnu("__extension__") {
             return true;
         }
+        // `_Alignas`/`alignas` may open a declaration (`_Alignas(16) int x`).
+        if self.peek_alignas() {
+            return true;
+        }
         // Thread-local specifiers open declarations too
         // (`__thread int x;`, `_Thread_local int x;`).
         if self.peek_is_gnu("_Thread_local") || self.peek_is_gnu("__thread") || self.peek_is_gnu("thread_local") {
