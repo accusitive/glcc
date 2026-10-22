@@ -508,7 +508,7 @@ fn char_escapes_stay_raw() {
 
 #[test]
 fn char_prefixes() {
-    assert_eq!(lex_lits("L'a' u'a' U'a'"), ["c:L'a'", "c:u'a'", "c:U'a'"]);
+    assert_eq!(lex_lits("L'a' u'a' U'a' u8'a'"), ["c:L'a'", "c:u'a'", "c:U'a'", "c:u8'a'"]);
 }
 
 #[test]
@@ -516,7 +516,7 @@ fn char_prefix_metadata() {
     use crate::lexer::CharPrefix;
     let mut sema = Sema::new();
     let mut interner = Interner::new();
-    let mut parser = test_parser("'a' L'a' u'a' U'a'", &mut sema, &mut interner);
+    let mut parser = test_parser("'a' L'a' u'a' U'a' u8'a'", &mut sema, &mut interner);
     let mut prefixes = Vec::new();
     while let Some(t) = parser.tokens.advance() {
         match &t.val {
@@ -524,7 +524,10 @@ fn char_prefix_metadata() {
             other => panic!("expected char constant, got {other:?}"),
         }
     }
-    assert_eq!(prefixes, [CharPrefix::None, CharPrefix::L, CharPrefix::SmallU, CharPrefix::BigU]);
+    assert_eq!(
+        prefixes,
+        [CharPrefix::None, CharPrefix::L, CharPrefix::SmallU, CharPrefix::BigU, CharPrefix::U8]
+    );
 }
 
 #[test]
@@ -597,6 +600,31 @@ fn string_prefix_metadata() {
         }
     }
     assert_eq!(prefixes, [StringPrefix::None, StringPrefix::L, StringPrefix::SmallU, StringPrefix::BigU, StringPrefix::U8,]);
+}
+
+#[test]
+fn c23_u8_literals_are_unsigned_char() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "_Static_assert(_Generic(u8\"x\"[0], unsigned char: 1, default: 0), \"string\");\n\
+         _Static_assert(_Generic(u8'x', unsigned char: 1, default: 0), \"char\");\n\
+         _Static_assert(sizeof(u8\"x\") == 2, \"size\");",
+        c23
+    )
+    .is_empty());
+    let diags = tu_diagnostics_with_lang("int x = u8'a';", c17);
+    assert!(diags.iter().any(|d| d.is_error() && d.message.contains("u8 character constants need C23")), "{diags:#?}");
 }
 
 #[test]

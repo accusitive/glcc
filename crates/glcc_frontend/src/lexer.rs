@@ -732,6 +732,8 @@ pub enum CharPrefix {
     L,
     SmallU,
     BigU,
+    /// C23 `u8'c'`: a UTF-8 code unit, typed `char8_t`.
+    U8,
 }
 
 impl CharPrefix {
@@ -741,6 +743,7 @@ impl CharPrefix {
             CharPrefix::L => "L",
             CharPrefix::SmallU => "u",
             CharPrefix::BigU => "U",
+            CharPrefix::U8 => "u8",
         }
     }
 }
@@ -1502,7 +1505,15 @@ impl<'a> Lexer<'a> {
         let (prefix, mut buf) = match first {
             '\'' => (CharPrefix::None, String::from("'")),
             'L' => (CharPrefix::L, String::from("L")),
-            'u' => (CharPrefix::SmallU, String::from("u")),
+            'u' => {
+                let mut buf = String::from("u");
+                if self.peek_char(0) == Some('8') {
+                    self.bump_into(&mut buf);
+                    (CharPrefix::U8, buf)
+                } else {
+                    (CharPrefix::SmallU, buf)
+                }
+            }
             'U' => (CharPrefix::BigU, String::from("U")),
             c => unreachable!("lex_char_constant called on {c:?}"),
         };
@@ -1752,6 +1763,9 @@ impl<'a> Lexer<'a> {
                 // lex as an identifier.
                 '\'' => return Some(self.lex_char_constant()),
                 'L' | 'u' | 'U' if self.peek_char(1) == Some('\'') => {
+                    return Some(self.lex_char_constant());
+                }
+                'u' if self.peek_char(1) == Some('8') && self.peek_char(2) == Some('\'') => {
                     return Some(self.lex_char_constant());
                 }
                 // C17 §6.4.5: string literals, plain or L/u/U/u8-prefixed.

@@ -1228,7 +1228,7 @@ impl Sema {
                 if let Ty::Array { elem, bound, .. } = target.unqualified() {
                     if matches!(expr.ty.unqualified(), Ty::Array { .. }) {
                         if let CheckedExprKind::Str(parts) = &expr.kind {
-                            let lit_elem = crate::eval::string_elem_ty_in(parts, self.target.wchar());
+                            let lit_elem = self.string_elem_ty(parts);
                             if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                 // Same overlong-literal warning the
                                 // braced path gets; only the fit check
@@ -1271,7 +1271,7 @@ impl Sema {
                         if item.designators.is_empty() {
                             if let Initializer::Expr(expr) = &*item.init {
                                 if let CheckedExprKind::Str(parts) = &expr.kind {
-                                    if crate::eval::string_elem_ty_in(parts, self.target.wchar()).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
+                                    if self.string_elem_ty(parts).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                         return Ok(Initializer::Expr(expr.clone()));
                                     }
                                 }
@@ -1425,7 +1425,7 @@ impl Sema {
         match member_ty.unqualified() {
             Ty::Array { elem, .. } => {
                 if let CheckedExprKind::Str(parts) = &expr.kind {
-                    if let Some(lit_elem) = crate::eval::string_elem_ty_in(parts, self.target.wchar()) {
+                    if let Some(lit_elem) = self.string_elem_ty(parts) {
                         return !Self::string_elem_matches(elem, &lit_elem);
                     }
                 }
@@ -1502,6 +1502,12 @@ impl Sema {
         items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
     }
 
+    /// Element type of a string literal under the selected dialect
+    /// (C23 makes UTF-8 literals arrays of `unsigned char`).
+    fn string_elem_ty(&self, parts: &[crate::lexer::StringLiteral]) -> Option<Ty> {
+        crate::eval::string_elem_ty_std(parts, self.target.wchar(), self.lang.standard_includes(crate::lang::Std::C23))
+    }
+
     /// Element type of the bare string-literal item at `items[j]`, if
     /// any: a string fills a whole character array as one item.
     fn string_item(&self, items: &[InitItem], j: usize) -> Option<Ty> {
@@ -1515,7 +1521,7 @@ impl Sema {
         let CheckedExprKind::Str(parts) = &expr.kind else {
             return None;
         };
-        crate::eval::string_elem_ty_in(parts, self.target.wchar())
+        self.string_elem_ty(parts)
     }
 
     /// The member at a cursor path, walking nested structs. `None` when
@@ -1756,7 +1762,7 @@ impl Sema {
             if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
                 if let Initializer::Expr(expr) = &*item.init {
                     if let CheckedExprKind::Str(parts) = &expr.kind {
-                        let lit_elem = crate::eval::string_elem_ty_in(parts, self.target.wchar());
+                        let lit_elem = self.string_elem_ty(parts);
                         if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                             self.check_string_fit(parts, bound, item.span, interner);
                             return Ok(vec![item.clone()]);
@@ -1913,7 +1919,7 @@ impl Sema {
         };
         if let Some(expr) = string {
             if let CheckedExprKind::Str(parts) = &expr.kind {
-                let lit_elem = crate::eval::string_elem_ty_in(parts, self.target.wchar());
+                let lit_elem = self.string_elem_ty(parts);
                 if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                     match crate::eval::string_length(parts, interner) {
                         Some(len) => {
@@ -2033,16 +2039,22 @@ impl Sema {
             // A narrow character constant checks as `int` (C17
             // §6.4.4.4p10); prefixed ones take their provided type
             // (`wchar_t` for `L`, `char16_t`/`char32_t` for `u`/`U`).
-            Expr::Char { lit, .. } => Ok(CheckedExpr {
-                ty: match lit.prefix {
-                    CharPrefix::None => Ty::Int,
-                    CharPrefix::L => self.target.wchar().ty(),
-                    CharPrefix::SmallU => Ty::UnsignedShort,
-                    CharPrefix::BigU => Ty::UnsignedInt,
-                },
-                span,
-                kind: CheckedExprKind::Char(*lit),
-            }),
+            Expr::Char { lit, .. } => {
+                if lit.prefix == CharPrefix::U8 && !self.lang.standard_includes(crate::lang::Std::C23) {
+                    return Err(CompileError::new("u8 character constants need C23", span));
+                }
+                Ok(CheckedExpr {
+                    ty: match lit.prefix {
+                        CharPrefix::None => Ty::Int,
+                        CharPrefix::L => self.target.wchar().ty(),
+                        CharPrefix::SmallU => Ty::UnsignedShort,
+                        CharPrefix::BigU => Ty::UnsignedInt,
+                        CharPrefix::U8 => Ty::UnsignedChar,
+                    },
+                    span,
+                    kind: CheckedExprKind::Char(*lit),
+                })
+            }
             // Array of the literal's element type (`char` for narrow,
             // `int` for `L`, ...), bounded by its escape-aware element
             // count plus the NUL (`sizeof "ab"` is 3, including in
@@ -2051,7 +2063,7 @@ impl Sema {
             // caller to reject.
             Expr::Str { parts, .. } => Ok(CheckedExpr {
                 ty: Ty::Array {
-                    elem: Box::new(crate::eval::string_elem_ty_in(parts, self.target.wchar()).unwrap_or(Ty::Char)),
+                    elem: Box::new(self.string_elem_ty(parts).unwrap_or(Ty::Char)),
                     quals: Vec::new(),
                     bound: crate::eval::string_length(parts, interner).map(|len| ArrayBound::Fixed(len + 1)),
                 },

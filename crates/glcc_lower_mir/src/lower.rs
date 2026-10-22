@@ -8554,6 +8554,12 @@ mod tests {
     }
 
     #[test]
+    fn c23_u8_literals_lower() {
+        assert_eq!(jit_run_main(lower_module_c23("int main(){return u8'A';}")), 65);
+        assert_eq!(jit_run_main(lower_module_c23("int main(){return sizeof(u8\"abc\");}")), 4);
+    }
+
+    #[test]
     fn computed_goto() {
         // A label address held in a local, dispatched on.
         assert_eq!(run_main("int main(){void *p = &&l; goto *p; l: return 5;}"), 5);

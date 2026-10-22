@@ -507,10 +507,11 @@ pub fn char_constant_in(lit: &CharLiteral, interner: &Interner, char_signed: boo
     let prefix_len = match lit.prefix {
         CharPrefix::None => 0,
         CharPrefix::L | CharPrefix::SmallU | CharPrefix::BigU => 1,
+        CharPrefix::U8 => 2,
     };
     let body = spelling.get(prefix_len + 1..spelling.len().checked_sub(1)?)?;
     let mut values: Vec<u32> = Vec::new();
-    if lit.prefix == CharPrefix::None {
+    if matches!(lit.prefix, CharPrefix::None | CharPrefix::U8) {
         // Narrow: GCC combines raw bytes, so each source character is
         // its Latin-1 byte (or UTF-8 bytes for a wider `char`).
         let chars: Vec<char> = body.chars().collect();
@@ -555,6 +556,10 @@ pub fn char_constant_in(lit: &CharLiteral, interner: &Interner, char_signed: boo
                 i += 1;
             }
         }
+    }
+    if values.len() == 1 && lit.prefix == CharPrefix::U8 {
+        // A UTF-8 code unit is unsigned.
+        return Some(values[0] as u8 as i128);
     }
     if values.len() == 1 && lit.prefix == CharPrefix::None {
         // A single narrow character has `char` range: sign- or
@@ -628,12 +633,20 @@ pub fn string_elem_ty(parts: &[StringLiteral]) -> Option<Ty> {
 /// [`string_elem_ty`] with the target's `wchar_t` shape: `L` literals
 /// take the `Ty` matching `__WCHAR_TYPE__`.
 pub fn string_elem_ty_in(parts: &[StringLiteral], wchar: crate::target::WChar) -> Option<Ty> {
+    string_elem_ty_std(parts, wchar, false)
+}
+
+/// [`string_elem_ty_in`] with the C23 `char8_t` rule: a UTF-8 string
+/// literal is an array of `unsigned char` instead of plain `char`.
+pub fn string_elem_ty_std(parts: &[StringLiteral], wchar: crate::target::WChar, c23: bool) -> Option<Ty> {
     let mut wide = false;
     let mut char16 = false;
     let mut char32 = false;
+    let mut utf8 = false;
     for part in parts {
         match part.prefix {
-            StringPrefix::None | StringPrefix::U8 => {}
+            StringPrefix::None => {}
+            StringPrefix::U8 => utf8 = true,
             StringPrefix::L => wide = true,
             StringPrefix::SmallU => char16 = true,
             StringPrefix::BigU => char32 = true,
@@ -644,6 +657,7 @@ pub fn string_elem_ty_in(parts: &[StringLiteral], wchar: crate::target::WChar) -
         (true, _, _) | (false, true, true) => None,
         (false, true, false) => Some(Ty::UnsignedShort),
         (false, false, true) => Some(Ty::UnsignedInt),
+        (false, false, false) if c23 && utf8 => Some(Ty::UnsignedChar),
         (false, false, false) => Some(Ty::Char),
     }
 }
@@ -652,7 +666,7 @@ pub fn string_elem_ty_in(parts: &[StringLiteral], wchar: crate::target::WChar) -
 /// [`string_elem_ty`].
 fn string_elem_width(elem: &Ty) -> u64 {
     match elem {
-        Ty::Char => 1,
+        Ty::Char | Ty::SignedChar | Ty::UnsignedChar => 1,
         Ty::Short | Ty::UnsignedShort => 2,
         _ => 4,
     }
