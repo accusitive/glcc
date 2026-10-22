@@ -16,7 +16,10 @@ pub use loadstore::LoadStoreForward;
 pub use sccp::Sccp;
 pub use sroa::Sroa;
 
-use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData};
+use crate::ir::{
+    remap_inst, Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module,
+    Terminator, Value, ValueData,
+};
 use crate::pass::{FunctionPass, ModulePass};
 use crate::ty::{FloatKind, GepIndex, Ty};
 
@@ -2345,6 +2348,10 @@ impl FunctionPass for SimplifyCfg {
             changed = true;
         }
         changed |= merge_single_pred_blocks(func);
+        changed |= if_convert_diamonds(func);
+        // The converted arm now shares its destination with the other
+        // arm; fold the fork into selects in the same run.
+        changed |= fold_redundant_successors(func);
         changed |= sink_pure_instructions(func);
         changed
     }
@@ -2701,6 +2708,147 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
     if !redirect.is_empty() {
         collapse_chains(&mut redirect);
         func.remap_operands(&redirect);
+    }
+    changed
+}
+
+/// If-convert one diamond at a time: a conditional edge into a block
+/// that only computes pure values and then joins the other edge becomes
+/// unconditional computation at the fork plus selects at the join.
+fn if_convert_diamonds(func: &mut Function) -> bool {
+    let mut changed = false;
+    loop {
+        let reachable = func.reachable_blocks();
+        let preds = predecessor_counts(func);
+        let uses = sole_use_blocks(func);
+        let mut converted = false;
+        for idx in 0..func.blocks.len() {
+            let fork = Block::from_usize(idx);
+            if !reachable[idx] {
+                continue;
+            }
+            let Some(Terminator::CondBr {
+                cond,
+                then_block,
+                else_block,
+                then_args,
+                else_args,
+            }) = func.blocks[fork].term.clone()
+            else {
+                continue;
+            };
+            for (arm, incoming, other, other_args) in [
+                (then_block, then_args.clone(), else_block, else_args.clone()),
+                (else_block, else_args.clone(), then_block, then_args.clone()),
+            ] {
+                if arm == fork || arm == other || arm == func.entry || other == func.entry {
+                    continue;
+                }
+                if !reachable[arm.index()] || preds[arm.index()] != 1 {
+                    continue;
+                }
+                let Some(Terminator::Br { dest, args: outgoing }) = func.blocks[arm].term.clone() else {
+                    continue;
+                };
+                if dest != other || func.blocks[other].term.is_none() {
+                    continue;
+                }
+                let params = func.blocks[arm].params.clone();
+                if params.len() != incoming.len() {
+                    continue;
+                }
+                if func.blocks[other].params.len() != outgoing.len()
+                    || func.blocks[other].params.len() != other_args.len()
+                {
+                    continue;
+                }
+                if func.blocks[arm]
+                    .insts
+                    .iter()
+                    .any(|inst| !func.insts[*inst].kind.is_pure())
+                {
+                    continue;
+                }
+                let local_values: Vec<Value> = params
+                    .iter()
+                    .copied()
+                    .chain(
+                        func.blocks[arm]
+                            .insts
+                            .iter()
+                            .filter_map(|inst| func.insts[*inst].result),
+                    )
+                    .collect();
+                let escapes_arm = local_values.iter().any(|value| match uses.get(value) {
+                    None => false,
+                    Some(Some(block)) => *block != arm,
+                    Some(None) => true,
+                });
+                if escapes_arm {
+                    continue;
+                }
+                let differing = outgoing.iter().zip(&other_args).find(|(a, b)| a != b);
+                if let Some((arm_arg, other_arg)) = differing {
+                    let ty = &func.values[*arm_arg].ty;
+                    if !ty.is_scalar() || func.values[*other_arg].ty != *ty {
+                        continue;
+                    }
+                }
+
+                let mut map = std::collections::HashMap::new();
+                for (param, arg) in params.iter().copied().zip(incoming.iter().copied()) {
+                    map.insert(param, arg);
+                }
+                let insts = func.blocks[arm].insts.clone();
+                let mut cloned = Vec::with_capacity(insts.len());
+                for inst in insts {
+                    let data = func.insts[inst].clone();
+                    let result = data.result.map(|old| {
+                        let fresh = func.values.push(ValueData {
+                            ty: func.values[old].ty.clone(),
+                            def: Def::Inst(Inst::from_usize(func.insts.len())),
+                        });
+                        map.insert(old, fresh);
+                        fresh
+                    });
+                    let kind = remap_inst(&data.kind, |value| map.get(&value).copied().unwrap_or(value));
+                    let fresh = func.insts.push(InstData {
+                        block: fork,
+                        kind,
+                        result,
+                        loc: data.loc,
+                    });
+                    if let Some(value) = result {
+                        func.values[value].def = Def::Inst(fresh);
+                    }
+                    cloned.push(fresh);
+                }
+                func.blocks[fork].insts.extend(cloned);
+                let outgoing: smallvec::SmallVec<[Value; 4]> = outgoing
+                    .iter()
+                    .map(|value| map.get(value).copied().unwrap_or(*value))
+                    .collect();
+                func.blocks[fork].term = Some(Terminator::CondBr {
+                    cond,
+                    then_block: if arm == then_block { other } else { then_block },
+                    else_block: if arm == else_block { other } else { else_block },
+                    then_args: if arm == then_block { outgoing.clone() } else { then_args.clone() },
+                    else_args: if arm == else_block { outgoing } else { else_args.clone() },
+                });
+                func.blocks[arm].insts.clear();
+                func.blocks[arm].params.clear();
+                func.blocks[arm].term = Some(Terminator::Unreachable);
+                changed = true;
+                converted = true;
+                break;
+            }
+            if converted {
+                break;
+            }
+        }
+        if !converted {
+            break;
+        }
     }
     changed
 }
@@ -4576,6 +4724,96 @@ mod tests {
         assert!(matches!(func.blocks[then_block].term, Some(Terminator::Unreachable)));
         assert!(matches!(func.blocks[else_block].term, Some(Terminator::Unreachable)));
         assert!(matches!(func.blocks[merge].term, Some(Terminator::Unreachable)));
+    }
+
+    #[test]
+    fn if_converts_pure_diamond() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::int(32), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("diamond", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let x = param(&mut func, entry, Ty::int(32));
+        let y = param(&mut func, entry, Ty::int(32));
+        let arm = func.push_block(vec![]);
+        let merge = func.push_block(vec![Ty::int(32)]);
+        let result = func.blocks[merge].params[0];
+        let sum = emit_bin(&mut func, arm, InstKind::Add(x, y), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: arm,
+            else_block: merge,
+            then_args: Default::default(),
+            else_args: [x].into_iter().collect(),
+        });
+        func.blocks[arm].term = Some(Terminator::Br {
+            dest: merge,
+            args: [sum].into_iter().collect(),
+        });
+        func.blocks[merge].term = Some(Terminator::Return { val: Some(result) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(matches!(func.blocks[arm].term, Some(Terminator::Unreachable)));
+        let select = func.blocks[entry]
+            .insts
+            .iter()
+            .find_map(|inst| match &func.insts[*inst].kind {
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == x => {
+                    Some((*inst, *then_val))
+                }
+                _ => None,
+            })
+            .expect("diamond arm became a select");
+        let Def::Inst(cloned_sum) = func.values[select.1].def else {
+            panic!("select arm was not a computed value");
+        };
+        assert!(matches!(
+            func.insts[cloned_sum].kind,
+            InstKind::Add(a, b) if a == x && b == y
+        ));
+
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        let Terminator::Return { val: Some(value) } = func.blocks[entry].term.clone().unwrap() else {
+            panic!("join did not merge into entry");
+        };
+        assert!(matches!(
+            func.values[value].def,
+            Def::Inst(inst) if matches!(func.insts[inst].kind, InstKind::Select { .. })
+        ));
+    }
+
+    #[test]
+    fn does_not_if_convert_trapping_arms() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::int(32), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("trap", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let x = param(&mut func, entry, Ty::int(32));
+        let y = param(&mut func, entry, Ty::int(32));
+        let arm = func.push_block(vec![]);
+        let merge = func.push_block(vec![Ty::int(32)]);
+        let result = func.blocks[merge].params[0];
+        let quotient = emit_bin(&mut func, arm, InstKind::Sdiv(x, y), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: arm,
+            else_block: merge,
+            then_args: Default::default(),
+            else_args: [x].into_iter().collect(),
+        });
+        func.blocks[arm].term = Some(Terminator::Br {
+            dest: merge,
+            args: [quotient].into_iter().collect(),
+        });
+        func.blocks[merge].term = Some(Terminator::Return { val: Some(result) });
+
+        let mut simp = SimplifyCfg;
+        assert!(!simp.run(&mut func));
+        let Def::Inst(quotient_inst) = func.values[quotient].def else {
+            panic!("expected a division instruction");
+        };
+        assert!(func.blocks[arm].insts.contains(&quotient_inst));
+        assert!(crate::verify::verify_func(&func).is_empty());
     }
 
     #[test]
