@@ -8560,6 +8560,12 @@ mod tests {
     }
 
     #[test]
+    fn c23_auto_deduced_objects_lower() {
+        let src = "int main(void) { auto x = 2.5; auto p = &x; auto s = \"hi\"; auto const z = 7; \\\n                   return (sizeof x == 8 && sizeof p == 8 && s[0] == 'h' && *p == 2.5 && z == 7) ? 0 : 1; }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 0);
+    }
+
+    #[test]
     fn c23_fixed_enum_underlying_type_lower() {
         let src = "enum A : unsigned char { A1 = 255 };\n\
                    enum B : long long { B1 = 0x100000000LL };\n\

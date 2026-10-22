@@ -901,6 +901,12 @@ impl Sema {
         CheckedExpr { ty, span, kind }
     }
 
+    /// C23 `auto x = init`: the deduced type is the initializer's type
+    /// after lvalue conversion (arrays and functions decay).
+    pub(crate) fn auto_deduced_type(&self, init: &CheckedExpr) -> Ty {
+        self.decay_checked(init.clone()).ty
+    }
+
     /// Whether a checked expression may appear left of `=` or under `&`:
     /// variables (never functions, typedefs, or enumeration constants),
     /// dereferences, subscripts, and members of lvalues (conversions look

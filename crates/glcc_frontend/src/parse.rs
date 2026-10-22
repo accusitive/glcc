@@ -1028,13 +1028,15 @@ impl<'a> Parser<'a> {
         // (C17 §6.9.1), which takes exactly one declarator and no `;`.
         let first = self.parse_declarator();
         let suffix = self.parse_gnu_annotations();
-        let ty = self.spec_to_ty(&specifiers, &first);
-        if matches!(ty, Ty::Func { .. }) && self.is_function_definition_ahead(&first) {
-            let id = self.parse_function_definition(&specifiers, first, ty, &suffix);
-            if self.failed() {
-                return vec![];
+        if !specifiers.is_auto_infer() {
+            let ty = self.spec_to_ty(&specifiers, &first);
+            if matches!(ty, Ty::Func { .. }) && self.is_function_definition_ahead(&first) {
+                let id = self.parse_function_definition(&specifiers, first, ty, &suffix);
+                if self.failed() {
+                    return vec![];
+                }
+                return vec![ExternalDeclaration::Func(id)];
             }
-            return vec![ExternalDeclaration::Func(id)];
         }
         // Otherwise an init-declarator-list (`int a = 1, *b, f(void);`):
         // the first declarator is already parsed (it was needed for the
@@ -3346,7 +3348,37 @@ impl<'a> Parser<'a> {
             // (which passes them in); the capture here is a no-op for
             // it and live for the rest.
             suffix.merge(self.parse_gnu_annotations());
-            let ty = self.spec_to_ty(specifiers, &declarator);
+            let auto_infer = specifiers.is_auto_infer();
+            let mut inferred_init = None;
+            let ty = if auto_infer {
+                if !Self::is_plain_auto_declarator(&declarator) {
+                    return self.fail(declarator.span(), "`auto` requires a plain identifier declarator");
+                }
+                if !specifiers.type_specifier.is_empty() {
+                    return self.fail(specifiers.span, "`auto` cannot be combined with a type specifier");
+                }
+                if !matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Assign))) {
+                    return self.fail(specifiers.span.merge(declarator.span()), "declaration with `auto` requires an initializer");
+                }
+                if matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LBrace))) {
+                    let span = self.peek_span();
+                    let _ = self.parse_initializer();
+                    return self.fail(span, "`auto` initializer must be an expression");
+                }
+                let init = self.parse_initializer();
+                let Initializer::Expr(expr) = &init else {
+                    return self.fail(self.peek_span(), "`auto` initializer must be an expression");
+                };
+                let mut ty = self.sema.auto_deduced_type(expr);
+                if specifiers.type_qualifier.iter().any(|q| matches!(q, TypeQualifier::Restrict)) && !matches!(ty, Ty::Pointer { .. }) {
+                    return self.fail(specifiers.span, "invalid use of 'restrict'");
+                }
+                ty = Ty::qualified(specifiers.type_qualifier.clone(), ty);
+                inferred_init = Some(init);
+                ty
+            } else {
+                self.spec_to_ty(specifiers, &declarator)
+            };
             // A `{` after a function declarator opens a definition, which
             // takes exactly one declarator (C17 §6.9.1p2). Leading
             // definitions are dispatched by the caller, so one reaching
@@ -3358,20 +3390,23 @@ impl<'a> Parser<'a> {
                 }
                 return self.fail(span, "function definition with multiple declarators");
             }
-            let has_init = matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Assign)));
+            let has_init = auto_infer || matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Assign)));
             if has_init && declarator.name().is_none() {
                 let span = declarator.span();
                 return self.fail(span, "declaration does not declare anything");
             }
             let id = self.declare_one(specifiers, &declarator, ty, has_init, &suffix);
             if self.failed() {
-                if has_init {
+                if has_init && inferred_init.is_none() {
                     let _ = self.parse_initializer();
                 }
                 break;
             }
             if has_init {
-                let init = self.parse_initializer();
+                let init = match inferred_init {
+                    Some(init) => init,
+                    None => self.parse_initializer(),
+                };
                 let ty = self.sema.decls[id.0 as usize].ty.clone();
                 let checked = self.checked_initializer(&ty, &init);
                 // An array of unknown size takes its size from the
@@ -3396,6 +3431,9 @@ impl<'a> Parser<'a> {
             }
             ids.push(id);
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
+                if auto_infer {
+                    return self.fail(self.peek_span(), "`auto` may only be used with a single declarator");
+                }
                 self.tokens.advance();
                 is_first = false;
                 continue;
@@ -3412,6 +3450,12 @@ impl<'a> Parser<'a> {
         }
         ids
     }
+    fn is_plain_auto_declarator(declarator: &Declarator) -> bool {
+        declarator.pointer.is_empty()
+            && declarator.direct.suffixes.is_empty()
+            && matches!(declarator.direct.base, DirectBase::Ident(_))
+    }
+
     /// Complete an array of unknown size from its initializer (C17
     /// §6.7.9p22): `int a[] = {1, 2}` becomes `int a[2]`, and
     /// `char s[] = "ab"` becomes `char s[3]` (NUL included). Only the
@@ -4636,6 +4680,12 @@ impl<'a> Parser<'a> {
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Double));
                 continue;
             }
+            // C23 `auto` is a type specifier, not a storage class.
+            if self.sema.lang.standard_includes(Std::C23) && matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Auto))) {
+                ds.auto_infer = true;
+                self.tokens.advance();
+                continue;
+            }
             match self.tokens.peek().map(|x| &x.val) {
                 // C99 §6.7.2 lists `_Imaginary` among the type specifiers,
                 // but imaginary types are a conditional feature this
@@ -4706,8 +4756,12 @@ impl<'a> Parser<'a> {
                     // a GNU type keyword opens the declarator under C89
                     // implicit `int` (`static inline fu (x) { ... }`,
                     // `f (a, b)`), so leave the token for the declarator
-                    // parser and fill in the missing specifier.
+                    // parser and fill in the missing specifier. C23
+                    // `auto` already supplied the type.
                     if !self.is_typedef_name(sym) {
+                        if ds.auto_infer {
+                            break;
+                        }
                         let span = self.peek_span();
                         self.warn(span, "missing type specifier; C89 implicit `int` assumed");
                         ds.type_specifier.push(TypeSpecifier::Int);
@@ -7161,6 +7215,8 @@ pub struct DeclarationSpecifiers {
     /// Thread-local storage (`_Thread_local`, `__thread`,
     /// `thread_local`): combines with `static`/`extern` like GCC.
     pub(crate) thread_local: bool,
+    /// C23 `auto` as a type specifier: infer from the initializer.
+    pub(crate) auto_infer: bool,
     /// GNU attributes interleaved with the specifiers
     /// (`__attribute__((weak)) int x;`): declaration-level effects
     /// (`weak` here) apply to every declarator in the list.
@@ -7195,6 +7251,9 @@ impl DeclarationSpecifiers {
     }
     pub fn has_storage_class(&self) -> bool {
         !self.class.is_empty()
+    }
+    pub fn is_auto_infer(&self) -> bool {
+        self.auto_infer
     }
 }
 

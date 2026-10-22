@@ -5172,6 +5172,54 @@ fn c23_nullptr() {
 }
 
 #[test]
+fn c23_auto_deduces_from_initializer() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let src = "int main(void) {\n\
+                   auto x = 2.5;\n\
+                   auto p = &x;\n\
+                   auto s = \"hi\";\n\
+                   const int ci = 4;\n\
+                   auto y = ci;\n\
+                   auto const z = 7;\n\
+                   static auto st = 3;\n\
+                   _Static_assert(_Generic(x, double: 1, default: 0), \"x\");\n\
+                   _Static_assert(_Generic(p, double *: 1, default: 0), \"p\");\n\
+                   _Static_assert(_Generic(s, char *: 1, default: 0), \"s\");\n\
+                   _Static_assert(_Generic(y, int: 1, default: 0), \"y\");\n\
+                   _Static_assert(_Generic(&z, const int *: 1, default: 0), \"z\");\n\
+                   return z + st;\n\
+               }";
+    let diagnostics = tu_diagnostics_with_lang(src, c23);
+    assert!(diagnostics.iter().all(|d| !d.is_error()), "{diagnostics:#?}");
+}
+
+#[test]
+fn c23_auto_rejects_bad_declarations() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    for (src, expected) in [
+        ("int main(void) { auto x; return 0; }", "requires an initializer"),
+        ("int main(void) { auto *p = 0; return 0; }", "plain identifier"),
+        ("int main(void) { auto a[2] = {1, 2}; return 0; }", "plain identifier"),
+        ("int main(void) { auto x = 1, y = 2; return 0; }", "single declarator"),
+        ("int main(void) { auto int z = 3; return 0; }", "cannot be combined"),
+        ("int main(void) { auto q = {1}; return 0; }", "must be an expression"),
+    ] {
+        let diagnostics = tu_diagnostics_with_lang(src, c23);
+        assert_diag_contains(&diagnostics, expected);
+    }
+}
+
+#[test]
 fn c23_bare_alignof() {
     let c23 = LangOpts {
         std: Std::C23,
