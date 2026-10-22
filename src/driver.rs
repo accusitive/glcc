@@ -61,7 +61,7 @@ fn native_pp_default(env: Option<&OsStr>) -> bool {
 /// Preprocessor-output modes the native pp does not implement: those
 /// jobs keep the `clang -E` path (`-P` is handled by the caller).
 fn pp_flags_native_compatible(cpp: &[OsString]) -> bool {
-    const INCOMPATIBLE: [&str; 7] = ["-dM", "-dD", "-dN", "-H", "-C", "-CC", "-trigraphs"];
+    const INCOMPATIBLE: [&str; 6] = ["-dM", "-dD", "-dN", "-H", "-C", "-CC"];
     !cpp.iter().any(|a| INCOMPATIBLE.iter().any(|f| a.as_os_str() == OsStr::new(f)))
 }
 
@@ -802,7 +802,7 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                 }
                 job.order.push(OrderItem::LinkArg(arg.clone()));
             }
-            "-undef" | "-nostdinc" | "-nostdinc++" | "-H" | "-C" | "-CC" | "-P" | "-dM" | "-dD" | "-dN" | "-trigraphs" => job.cpp.push(arg.clone()),
+            "-undef" | "-nostdinc" | "-nostdinc++" | "-H" | "-C" | "-CC" | "-P" | "-dM" | "-dD" | "-dN" | "-trigraphs" | "-no-trigraphs" => job.cpp.push(arg.clone()),
             "-pedantic" | "-pedantic-errors" | "-w" | "-pipe" | "-time" | "-Q" => {}
             "-o" | "-x" | "-e" | "-u" | "-z" | "-T" | "-Xlinker" | "-Xpreprocessor" | "-MF" | "-MT" | "-MQ" | "-include" | "-imacros" | "-isystem" | "-idirafter" | "-iquote"
             | "-l" | "-L" | "-I" | "-D" | "-U" => {
@@ -1146,16 +1146,16 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         let mut opts = glcc_pp::cpp_flags_to_opts(&job.cpp, &input.to_string_lossy());
         opts.linemarkers = !job.cpp.iter().any(|a| a == "-P");
         opts.target = Some(job.target);
+        let std = pp_std_flag(job);
+        opts.std = std.clone();
         // GCC drops all builtins under `-undef`; otherwise seed the
         // native preprocessor with exactly what `clang -E` predefines.
         if !job.cpp.iter().any(|a| a == "-undef") {
-            let std = pp_std_flag(job);
             let mut predefined = glcc_pp::predefines(Some(job.target.triple()), std.as_deref());
             if !job.pic {
                 predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
             }
             opts.predefined = predefined;
-            opts.std = std;
         }
         // The default system search (resource headers, libc) comes from
         // the same clang seed; `-nostdinc` keeps only the `-I` paths.

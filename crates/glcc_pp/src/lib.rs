@@ -41,11 +41,13 @@ mod tree;
 
 pub use glcc_toolchain::{MsvcDirs, find_clang, msvc_dirs};
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use glcc_frontend::lang::Std;
 use glcc_frontend::lexer::{Interner, Lexer, PpToken, PpWs};
 use string_interner::symbol::SymbolU32;
 
@@ -94,6 +96,10 @@ pub fn cpp_flags_to_opts(cpp: &[OsString], filename: &str) -> PpOptions {
             push_joined(&mut opts, "-I", rest);
         } else if s == "-nostdinc" {
             opts.no_std_includes = true;
+        } else if s == "-trigraphs" {
+            opts.trigraphs = Some(true);
+        } else if s == "-no-trigraphs" {
+            opts.trigraphs = Some(false);
         }
         i += 1;
     }
@@ -712,6 +718,9 @@ pub struct PpOptions {
     pub clang_resource_dir: Option<PathBuf>,
     /// Input name used in diagnostics.
     pub filename: String,
+    /// `-trigraphs`/`-no-trigraphs`; `None` follows the standard level
+    /// (enabled before C23, disabled from C23 on).
+    pub trigraphs: Option<bool>,
 }
 
 /// The clang resource include directory of a seeded search list: clang
@@ -872,6 +881,68 @@ fn is_ident(s: &str) -> bool {
     }
 }
 
+/// Whether translation phase 1 should replace trigraphs. C23 removed
+/// them; `-trigraphs`/`-no-trigraphs` override the dialect default.
+fn trigraphs_enabled(opts: &PpOptions) -> bool {
+    if let Some(enabled) = opts.trigraphs {
+        return enabled;
+    }
+    let Some(flag) = opts.std.as_deref() else {
+        return true;
+    };
+    let text = if flag == "-ansi" { "c89" } else { flag.strip_prefix("-std=").unwrap_or(flag) };
+    Std::parse(text).is_none_or(|std| std.level() < Std::C23.level())
+}
+
+/// Replace the nine C trigraph sequences, leaving text with no `??`
+/// untouched. C23 modes keep the sequences literal.
+fn translate_trigraphs(source: &str) -> Cow<'_, str> {
+    if !source.contains("??") {
+        return Cow::Borrowed(source);
+    }
+    let bytes = source.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let mut changed = false;
+    while i < bytes.len() {
+        if i + 2 < bytes.len() && bytes[i] == b'?' && bytes[i + 1] == b'?' {
+            let replacement = match bytes[i + 2] {
+                b'=' => Some(b'#'),
+                b'/' => Some(b'\\'),
+                b'\'' => Some(b'^'),
+                b'(' => Some(b'['),
+                b')' => Some(b']'),
+                b'!' => Some(b'|'),
+                b'<' => Some(b'{'),
+                b'>' => Some(b'}'),
+                b'-' => Some(b'~'),
+                _ => None,
+            };
+            if let Some(replacement) = replacement {
+                out.push(replacement);
+                i += 3;
+                changed = true;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    if changed {
+        Cow::Owned(String::from_utf8(out).expect("trigraph replacement preserves UTF-8"))
+    } else {
+        Cow::Borrowed(source)
+    }
+}
+
+fn translate_source<'a>(source: &'a str, opts: &PpOptions) -> Cow<'a, str> {
+    if trigraphs_enabled(opts) {
+        translate_trigraphs(source)
+    } else {
+        Cow::Borrowed(source)
+    }
+}
+
 /// Preprocess `source` and return the expanded text.
 ///
 /// Implements object- and function-like macros, conditionals evaluated
@@ -886,6 +957,7 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
 /// [`preprocess`], also returning the `#warning` diagnostics it emitted
 /// (including from included files).
 pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) -> Result<(String, Vec<PpWarning>), PpError> {
+    let source = translate_source(source, opts);
     let mut interner = Interner::new();
     let mut ctx = Ctx {
         opts: opts.clone(),
@@ -924,10 +996,11 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
             continue;
         }
         let text = std::fs::read_to_string(&target).map_err(|_| err(format!("{filename}: cannot read '{}'", target.display())))?;
+        let text = translate_source(&text, opts);
         // An `-include` file reports include level 1 (as if included).
         ctx.depth = 1;
         let r = run_source(
-            &text,
+            text.as_ref(),
             &target,
             interner.get_or_intern(target.display().to_string()),
             main_display,
@@ -945,7 +1018,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
         ctx.out.push_str(&marker(1, filename));
     }
     run_source(
-        source,
+        source.as_ref(),
         &main_path,
         main_display,
         main_display,
@@ -1363,6 +1436,56 @@ mod tests {
         assert!(e.0.contains("bad.h:1: #endif without #if"), "was: {e}");
         assert!(!e.0.contains("main.c:1: #endif"), "was: {e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trigraphs_translate_before_c23() {
+        assert_eq!(
+            translate_trigraphs("??=??/??'??(??)??!??<??>??-").as_ref(),
+            "#\\^[]|{}~"
+        );
+        let c17 = PpOptions {
+            std: Some("-std=c17".to_string()),
+            ..opts()
+        };
+        let got = preprocess("int a = 1; ??/\nint b = 2;\n", "t.c", &c17).unwrap();
+        assert!(got.contains("int a = 1; int b = 2;"), "was: {got}");
+        let got = preprocess("int a??(2??) = {0};\n", "t.c", &c17).unwrap();
+        assert!(got.contains("int a[2]"), "was: {got}");
+
+        let c23 = PpOptions {
+            std: Some("-std=c23".to_string()),
+            ..opts()
+        };
+        let got = preprocess("int a??(2??) = {0};\n", "t.c", &c23).unwrap();
+        assert!(!got.contains("int a[2]"), "was: {got}");
+        assert_eq!(got, "int a??(2??) = {0};\n");
+        assert!(!trigraphs_enabled(&c23));
+        assert!(trigraphs_enabled(&PpOptions { trigraphs: Some(true), ..c23.clone() }));
+    }
+
+    #[test]
+    fn trigraphs_apply_inside_includes() {
+        let dir = test_dir("trigraph-include");
+        write_file(&dir.join("tri.h"), "int h??(1??) = {2};\n");
+        let main = dir.join("main.c");
+        write_file(&main, "#include \"tri.h\"\n");
+        let c17 = PpOptions {
+            include_paths: vec![dir.clone()],
+            std: Some("-std=c17".to_string()),
+            ..opts()
+        };
+        let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &c17).unwrap();
+        assert!(got.contains("int h[1]"), "was: {got}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn digraph_directives_and_paste() {
+        let src = "%:define X 1\n#define G(a,b) a %:%: b\n#define AB 3\nint a = G(A,B);\nint b<:2:> = <% X, 2 %>;\n";
+        let got = pp(src).unwrap();
+        assert!(got.contains("int a = 3;"), "was: {got}");
+        assert!(got.contains("int b[2]"), "was: {got}");
     }
 
     #[test]

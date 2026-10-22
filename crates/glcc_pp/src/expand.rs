@@ -2435,6 +2435,7 @@ impl<'a, 'b> Expander<'a, 'b> {
             return Ok(false);
         }
         let text = std::fs::read_to_string(path).map_err(|_| err(format!("{}: cannot read '{}'", self.display(), path.display())))?;
+        let text = crate::translate_source(&text, &self.files.opts);
         let display = self.interner.get_or_intern(path.display().to_string());
         if self.files.opts.linemarkers {
             // clang `FileChanged(EnterFile)`: skip ahead to the `#include`
@@ -2456,7 +2457,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let save_override = self.display_override.take();
         self.line_base = 0;
         self.files.depth += 1;
-        let r = self.run_tokens(&text, display);
+        let r = self.run_tokens(text.as_ref(), display);
         self.files.depth -= 1;
         self.file_display = save_display;
         self.file_path = save_path;

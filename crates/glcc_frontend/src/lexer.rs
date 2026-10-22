@@ -389,6 +389,24 @@ impl<'a> Lexer<'a> {
                     }
                     col += 1;
                 }
+                '%' if self.chars.peek().is_some_and(|(c, _, _)| *c == ':') => {
+                    let start_col = col;
+                    col += 1;
+                    let _ = self.pp_next(&mut line);
+                    col += 1;
+                    let hashhash = self.chars.peek().is_some_and(|(c, _, _)| *c == '%')
+                        && self.chars.peek_nth(1).is_some_and(|(c, _, _)| *c == ':');
+                    if hashhash {
+                        let _ = self.pp_next(&mut line);
+                        let _ = self.pp_next(&mut line);
+                        col += 2;
+                        push!(PpToken::Punct(Punctuator::HashHash), tok_line, start_col, tok_off);
+                    } else if tok_sol {
+                        push!(PpToken::Directive, tok_line, start_col, tok_off);
+                    } else {
+                        push!(PpToken::Punct(Punctuator::Hash), tok_line, start_col, tok_off);
+                    }
+                }
                 '"' => {
                     let start_col = col;
                     let raw = self.lex_pp_quoted('"', &mut col, &mut line);
@@ -522,6 +540,10 @@ impl<'a> Lexer<'a> {
             ('.', Some('.'), Some('.')) => Some((Punctuator::Ellipsis, 3)),
             ('<', Some('<'), Some('=')) => Some((Punctuator::LessLessEq, 3)),
             ('>', Some('>'), Some('=')) => Some((Punctuator::GreaterGreaterEq, 3)),
+            ('<', Some(':'), _) => Some((Punctuator::LBracket, 2)),
+            (':', Some('>'), _) => Some((Punctuator::RBracket, 2)),
+            ('<', Some('%'), _) => Some((Punctuator::LBrace, 2)),
+            ('%', Some('>'), _) => Some((Punctuator::RBrace, 2)),
             ('-', Some('>'), _) => Some((Punctuator::Arrow, 2)),
             ('+', Some('+'), _) => Some((Punctuator::PlusPlus, 2)),
             ('-', Some('-'), _) => Some((Punctuator::MinusMinus, 2)),
@@ -1040,62 +1062,75 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_punctuator(&mut self) -> Located<Token> {
-        let (punct, len) = match (self.peek_char(0).expect("lex_punctuator at EOF"), self.peek_char(1), self.peek_char(2)) {
-            // three-character
-            ('.', Some('.'), Some('.')) => (Punctuator::Ellipsis, 3),
-            ('<', Some('<'), Some('=')) => (Punctuator::LessLessEq, 3),
-            ('>', Some('>'), Some('=')) => (Punctuator::GreaterGreaterEq, 3),
+        let (punct, len) = if self.peek_char(0) == Some('%')
+            && self.peek_char(1) == Some(':')
+            && self.peek_char(2) == Some('%')
+            && self.peek_char(3) == Some(':')
+        {
+            (Punctuator::HashHash, 4)
+        } else {
+            match (self.peek_char(0).expect("lex_punctuator at EOF"), self.peek_char(1), self.peek_char(2)) {
+                // three-character
+                ('.', Some('.'), Some('.')) => (Punctuator::Ellipsis, 3),
+                ('<', Some('<'), Some('=')) => (Punctuator::LessLessEq, 3),
+                ('>', Some('>'), Some('=')) => (Punctuator::GreaterGreaterEq, 3),
 
-            // two-character
-            ('-', Some('>'), _) => (Punctuator::Arrow, 2),
-            ('+', Some('+'), _) => (Punctuator::PlusPlus, 2),
-            ('-', Some('-'), _) => (Punctuator::MinusMinus, 2),
-            ('<', Some('<'), _) => (Punctuator::LessLess, 2),
-            ('>', Some('>'), _) => (Punctuator::GreaterGreater, 2),
-            ('<', Some('='), _) => (Punctuator::LessEq, 2),
-            ('>', Some('='), _) => (Punctuator::GreaterEq, 2),
-            ('=', Some('='), _) => (Punctuator::EqEq, 2),
-            ('!', Some('='), _) => (Punctuator::BangEq, 2),
-            ('&', Some('&'), _) => (Punctuator::AmpAmp, 2),
-            ('|', Some('|'), _) => (Punctuator::PipePipe, 2),
-            ('+', Some('='), _) => (Punctuator::PlusEq, 2),
-            ('-', Some('='), _) => (Punctuator::MinusEq, 2),
-            ('*', Some('='), _) => (Punctuator::StarEq, 2),
-            ('/', Some('='), _) => (Punctuator::SlashEq, 2),
-            ('%', Some('='), _) => (Punctuator::PercentEq, 2),
-            ('&', Some('='), _) => (Punctuator::AmpEq, 2),
-            ('^', Some('='), _) => (Punctuator::CaretEq, 2),
-            ('|', Some('='), _) => (Punctuator::PipeEq, 2),
-            ('#', Some('#'), _) => (Punctuator::HashHash, 2),
+                // two-character
+                ('<', Some(':'), _) => (Punctuator::LBracket, 2),
+                (':', Some('>'), _) => (Punctuator::RBracket, 2),
+                ('<', Some('%'), _) => (Punctuator::LBrace, 2),
+                ('%', Some('>'), _) => (Punctuator::RBrace, 2),
+                ('%', Some(':'), _) => (Punctuator::Hash, 2),
+                ('-', Some('>'), _) => (Punctuator::Arrow, 2),
+                ('+', Some('+'), _) => (Punctuator::PlusPlus, 2),
+                ('-', Some('-'), _) => (Punctuator::MinusMinus, 2),
+                ('<', Some('<'), _) => (Punctuator::LessLess, 2),
+                ('>', Some('>'), _) => (Punctuator::GreaterGreater, 2),
+                ('<', Some('='), _) => (Punctuator::LessEq, 2),
+                ('>', Some('='), _) => (Punctuator::GreaterEq, 2),
+                ('=', Some('='), _) => (Punctuator::EqEq, 2),
+                ('!', Some('='), _) => (Punctuator::BangEq, 2),
+                ('&', Some('&'), _) => (Punctuator::AmpAmp, 2),
+                ('|', Some('|'), _) => (Punctuator::PipePipe, 2),
+                ('+', Some('='), _) => (Punctuator::PlusEq, 2),
+                ('-', Some('='), _) => (Punctuator::MinusEq, 2),
+                ('*', Some('='), _) => (Punctuator::StarEq, 2),
+                ('/', Some('='), _) => (Punctuator::SlashEq, 2),
+                ('%', Some('='), _) => (Punctuator::PercentEq, 2),
+                ('&', Some('='), _) => (Punctuator::AmpEq, 2),
+                ('^', Some('='), _) => (Punctuator::CaretEq, 2),
+                ('|', Some('='), _) => (Punctuator::PipeEq, 2),
+                ('#', Some('#'), _) => (Punctuator::HashHash, 2),
 
-            // single-character
-            ('[', _, _) => (Punctuator::LBracket, 1),
-            (']', _, _) => (Punctuator::RBracket, 1),
-            ('(', _, _) => (Punctuator::LParen, 1),
-            (')', _, _) => (Punctuator::RParen, 1),
-            ('{', _, _) => (Punctuator::LBrace, 1),
-            ('}', _, _) => (Punctuator::RBrace, 1),
-            ('.', _, _) => (Punctuator::Dot, 1),
-            ('&', _, _) => (Punctuator::Amp, 1),
-            ('*', _, _) => (Punctuator::Star, 1),
-            ('+', _, _) => (Punctuator::Plus, 1),
-            ('-', _, _) => (Punctuator::Minus, 1),
-            ('~', _, _) => (Punctuator::Tilde, 1),
-            ('!', _, _) => (Punctuator::Bang, 1),
-            ('/', _, _) => (Punctuator::Slash, 1),
-            ('%', _, _) => (Punctuator::Percent, 1),
-            ('<', _, _) => (Punctuator::Less, 1),
-            ('>', _, _) => (Punctuator::Greater, 1),
-            ('^', _, _) => (Punctuator::Caret, 1),
-            ('|', _, _) => (Punctuator::Pipe, 1),
-            ('?', _, _) => (Punctuator::Question, 1),
-            (':', _, _) => (Punctuator::Colon, 1),
-            (';', _, _) => (Punctuator::Semi, 1),
-            ('=', _, _) => (Punctuator::Assign, 1),
-            (',', _, _) => (Punctuator::Comma, 1),
-            ('#', _, _) => (Punctuator::Hash, 1),
+                // single-character
+                ('[', _, _) => (Punctuator::LBracket, 1),
+                (']', _, _) => (Punctuator::RBracket, 1),
+                ('(', _, _) => (Punctuator::LParen, 1),
+                (')', _, _) => (Punctuator::RParen, 1),
+                ('{', _, _) => (Punctuator::LBrace, 1),
+                ('}', _, _) => (Punctuator::RBrace, 1),
+                ('.', _, _) => (Punctuator::Dot, 1),
+                ('&', _, _) => (Punctuator::Amp, 1),
+                ('*', _, _) => (Punctuator::Star, 1),
+                ('+', _, _) => (Punctuator::Plus, 1),
+                ('-', _, _) => (Punctuator::Minus, 1),
+                ('~', _, _) => (Punctuator::Tilde, 1),
+                ('!', _, _) => (Punctuator::Bang, 1),
+                ('/', _, _) => (Punctuator::Slash, 1),
+                ('%', _, _) => (Punctuator::Percent, 1),
+                ('<', _, _) => (Punctuator::Less, 1),
+                ('>', _, _) => (Punctuator::Greater, 1),
+                ('^', _, _) => (Punctuator::Caret, 1),
+                ('|', _, _) => (Punctuator::Pipe, 1),
+                ('?', _, _) => (Punctuator::Question, 1),
+                (':', _, _) => (Punctuator::Colon, 1),
+                (';', _, _) => (Punctuator::Semi, 1),
+                ('=', _, _) => (Punctuator::Assign, 1),
+                (',', _, _) => (Punctuator::Comma, 1),
+                ('#', _, _) => (Punctuator::Hash, 1),
 
-            (c, _, _) => unreachable!("lex_punctuator called on non-punctuator {c:?}"),
+                (c, _, _) => unreachable!("lex_punctuator called on non-punctuator {c:?}"),
+            }
         };
 
         let (_, start) = self.bump_at().expect("lex_punctuator at EOF");

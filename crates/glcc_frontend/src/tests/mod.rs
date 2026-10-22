@@ -162,14 +162,13 @@ fn three_char_punctuators() {
 }
 
 #[test]
-fn digraphs_are_not_supported() {
-    // Former digraph spellings must split into separate punctuators.
-    assert_eq!(lex_puncts("<:"), ["<", ":"]);
-    assert_eq!(lex_puncts(":>"), [":", ">"]);
-    assert_eq!(lex_puncts("<%"), ["<", "%"]);
-    assert_eq!(lex_puncts("%>"), ["%", ">"]);
-    assert_eq!(lex_puncts("%:"), ["%", ":"]);
-    assert_eq!(lex_puncts("%:%:"), ["%", ":", "%", ":"]);
+fn digraph_spellings_map_to_canonical_punctuators() {
+    assert_eq!(lex_puncts("<:"), ["["]);
+    assert_eq!(lex_puncts(":>"), ["]"]);
+    assert_eq!(lex_puncts("<%"), ["{"]);
+    assert_eq!(lex_puncts("%>"), ["}"]);
+    assert_eq!(lex_puncts("%:"), ["#"]);
+    assert_eq!(lex_puncts("%:%:"), ["##"]);
 }
 
 #[test]
@@ -3549,6 +3548,15 @@ fn folded_zero_is_null() {
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 2);
     assert_eq!(check_with(&["int *p;"], "p == 1 - 1").ty, Ty::Int);
+}
+
+#[test]
+fn digraphs_are_punctuators() {
+    assert!(tu_diagnostics(
+        "int arr<:3:> = <% 1, 2, 3 %>;\n\
+         int main(void) <% return arr<:0:>; %>"
+    )
+    .is_empty());
 }
 
 #[test]
