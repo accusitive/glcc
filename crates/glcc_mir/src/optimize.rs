@@ -51,8 +51,24 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
     if !level.optimize() {
         return pm.run(module);
     }
+    let mut inline = passes::Inline::small();
+    if let Ok(value) = std::env::var("GLCC_INLINE_MAX") {
+        if let Ok(limit) = value.parse() {
+            inline.max_insts = limit;
+        }
+    }
+    if let Ok(value) = std::env::var("GLCC_INLINE_HOT") {
+        if let Ok(limit) = value.parse() {
+            inline.max_hot_insts = limit;
+        }
+    }
+    if let Ok(value) = std::env::var("GLCC_INLINE_MARKED") {
+        if let Ok(limit) = value.parse() {
+            inline.max_inline_insts = limit;
+        }
+    }
     pm = pm
-        .add_module_pass(passes::Inline::small())
+        .add_module_pass(inline)
         .add_module_pass(passes::GlobalConstProp)
         .add_module_pass(passes::MergeReadOnlyGlobals)
         .add_module_pass(passes::DeadModuleItems);

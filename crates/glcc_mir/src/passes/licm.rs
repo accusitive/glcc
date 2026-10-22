@@ -75,7 +75,7 @@ impl FunctionPass for Licm {
 /// plus everything that can reach `n` without passing through `h`.
 /// Predecessors explored from `n` stop at `h` itself (already in the
 /// set), which is exactly that reachability.
-fn natural_loops(func: &Function, dom: &DomInfo) -> Vec<(Block, HashSet<Block>)> {
+pub(super) fn natural_loops(func: &Function, dom: &DomInfo) -> Vec<(Block, HashSet<Block>)> {
     let mut loops = Vec::new();
     for (idx, block) in func.blocks.iter().enumerate() {
         let n = Block::from_usize(idx);

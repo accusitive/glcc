@@ -1234,7 +1234,10 @@ fn stack_slot(builder: &mut FunctionBuilder, ty: &mir::Ty) -> StackSlot {
     if size > u32::MAX as u64 {
         panic!("cannot materialize stack slot of {size} bytes");
     }
-    builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size as u32, 4))
+    let align = mir::ty::ty_align(ty).max(1);
+    debug_assert!(align.is_power_of_two(), "non-power-of-two alignment {align}");
+    let align_shift = align.trailing_zeros() as u8;
+    builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, size as u32, align_shift))
 }
 
 /// Store a static byte image at an address, chunked like `memcpy`.
@@ -2739,9 +2742,34 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
             };
             if cases.iter().all(|(value, _)| *value >= 0 && *value <= max_case) {
                 let base = cases.iter().map(|(value, _)| *value).min().expect("non-empty cases");
+                let max = cases.iter().map(|(value, _)| *value).max().expect("non-empty cases");
+                let mut entries: Vec<(i128, ClifBlock)> = cases.iter().map(|(value, dest)| (*value, body.blocks[dest])).collect();
+                entries.sort_by_key(|(value, _)| *value);
+                let span = (max - base) as u128 + 1;
+                // Cranelift's Switch splits the table at holes. When the
+                // cases cover nearly the whole span, filling the holes
+                // with the default keeps the dispatch to one range check
+                // and one table lookup.
+                let dense = span <= 4096 && span <= (entries.len() as u128).saturating_mul(2) + 8;
                 let mut switch = Switch::new();
-                for (value, dest) in &cases {
-                    switch.set_entry((*value - base) as u128, body.blocks[dest]);
+                if dense {
+                    let mut next = base;
+                    for (value, dest) in entries {
+                        while next < value {
+                            switch.set_entry((next - base) as u128, default_target);
+                            next += 1;
+                        }
+                        switch.set_entry((value - base) as u128, dest);
+                        next = value + 1;
+                    }
+                    while next <= max {
+                        switch.set_entry((next - base) as u128, default_target);
+                        next += 1;
+                    }
+                } else {
+                    for (value, dest) in entries {
+                        switch.set_entry((value - base) as u128, dest);
+                    }
                 }
                 let index = if base == 0 {
                     scrut

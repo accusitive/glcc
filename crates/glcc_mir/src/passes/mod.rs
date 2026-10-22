@@ -1942,6 +1942,10 @@ struct SlotSites {
 }
 
 fn promote_slots(func: &mut Function) -> bool {
+    let phi_budget: usize = std::env::var("GLCC_PHI_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(usize::MAX);
     // A `setjmp` call site can be re-entered by `longjmp` with the
     // registers of the first return: any slot written between the two
     // would read stale. Leave every slot in memory.
@@ -2039,11 +2043,12 @@ fn promote_slots(func: &mut Function) -> bool {
     let mut dead: std::collections::HashSet<Inst> = std::collections::HashSet::new();
     let mut changed = false;
     if !promotable.is_empty() {
+        promotable.sort_by_key(|slot| (std::cmp::Reverse(slot.loads.len() + slot.stores.len()), slot.alloca.index()));
         let dom = DomInfo::compute(func, &reachable);
         let switch_targets = switch_targets(func);
         let mut undef_cache: Vec<(Ty, Value)> = Vec::new();
         for slot in &promotable {
-            changed |= promote_slot(func, &dom, &switch_targets, slot, &mut replace, &mut dead, &mut undef_cache);
+            changed |= promote_slot(func, &dom, &switch_targets, slot, &mut replace, &mut dead, &mut undef_cache, phi_budget);
         }
     }
 
@@ -2072,13 +2077,17 @@ fn promote_slot(
     replace: &mut std::collections::HashMap<Value, Value>,
     dead: &mut std::collections::HashSet<Inst>,
     undef_cache: &mut Vec<(Ty, Value)>,
+    phi_budget: usize,
 ) -> bool {
     let mut store_blocks: Vec<Block> = slot.stores.iter().map(|store| store.block).collect();
     store_blocks.sort_by_key(|block| block.index());
     store_blocks.dedup();
-    let Some(phi_blocks) = place_phis(func, dom, &store_blocks, switch_targets) else {
+    let Some(phi_blocks) = place_phis(func, dom, &store_blocks, switch_targets, slot) else {
         return false;
     };
+    if phi_blocks.iter().any(|block| func.blocks[*block].params.len() >= phi_budget) {
+        return false;
+    }
 
     let undef = undef_value(func, &slot.pointee, undef_cache);
     let mut phi_index: std::collections::HashMap<Block, usize> = std::collections::HashMap::new();
@@ -2108,13 +2117,20 @@ fn promote_slot(
 /// definitions of the slot gets one phi. Returns `None` when a phi
 /// would land somewhere unsupported (the entry block or a `Switch`
 /// target), leaving the caller to keep the slot in memory.
-fn place_phis(func: &Function, dom: &DomInfo, store_blocks: &[Block], switch_targets: &std::collections::HashSet<Block>) -> Option<Vec<Block>> {
+fn place_phis(
+    func: &Function,
+    dom: &DomInfo,
+    store_blocks: &[Block],
+    switch_targets: &std::collections::HashSet<Block>,
+    slot: &SlotSites,
+) -> Option<Vec<Block>> {
+    let live_in = slot_live_in(func, slot);
     let mut placed: std::collections::HashSet<Block> = std::collections::HashSet::new();
     let mut work: Vec<Block> = store_blocks.to_vec();
     let mut phis = Vec::new();
     while let Some(block) = work.pop() {
         for &frontier in &dom.df[block.index()] {
-            if !placed.insert(frontier) {
+            if !placed.insert(frontier) || !live_in[frontier.index()] {
                 continue;
             }
             if frontier == func.entry || switch_targets.contains(&frontier) {
@@ -2125,6 +2141,52 @@ fn place_phis(func: &Function, dom: &DomInfo, store_blocks: &[Block], switch_tar
         }
     }
     Some(phis)
+}
+
+/// Liveness of one slot's value: true when a block can load the slot
+/// before any store on a path from its entry. Pruned SSA only needs a
+/// phi where the value is live-in, which keeps variables whose
+/// lifetimes stay inside one loop iteration out of the loop header.
+fn slot_live_in(func: &Function, slot: &SlotSites) -> Vec<bool> {
+    let reachable = func.reachable_blocks();
+    let mut live = vec![false; func.blocks.len()];
+    let mut defines = vec![false; func.blocks.len()];
+    for (index, block) in func.blocks.iter_enumerated() {
+        if !reachable[index.index()] {
+            continue;
+        }
+        let mut defined = false;
+        for &inst in &block.insts {
+            match &func.insts[inst].kind {
+                InstKind::Load { addr, .. } if *addr == slot.addr => {
+                    if !defined {
+                        live[index.index()] = true;
+                    }
+                }
+                InstKind::Store { addr, .. } if *addr == slot.addr => defined = true,
+                _ => {}
+            }
+        }
+        defines[index.index()] = defined;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (index, block) in func.blocks.iter_enumerated() {
+            if !reachable[index.index()] || live[index.index()] || defines[index.index()] {
+                continue;
+            }
+            let flows_out = block
+                .term
+                .as_ref()
+                .is_some_and(|term| term.successors().into_iter().any(|succ| live[succ.index()]));
+            if flows_out {
+                live[index.index()] = true;
+                changed = true;
+            }
+        }
+    }
+    live
 }
 
 /// Rename loads to the definition current on the dominator-tree walk,
@@ -3158,8 +3220,10 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
 ///
 /// Two tiers share one mechanism:
 ///
-/// - Heuristic: small single-block, single-return callees up to
-///   `max_insts` inline whether or not they are marked `inline`.
+/// - Heuristic: small callees up to `max_insts` inline whether or not
+///   they are marked `inline`. Calls inside a natural loop get the
+///   larger `max_hot_insts` budget because loop bodies run many times
+///   and a call there costs more than its code size suggests.
 /// - Keyword: callees with `Function::inline` (the C `inline` hint
 ///   from the frontend) inline up to `max_inline_insts`, including
 ///   multi-block bodies via return-block rewiring through block
@@ -3170,6 +3234,7 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
 #[derive(Debug, Clone)]
 pub struct Inline {
     pub max_insts: usize,
+    pub max_hot_insts: usize,
     pub max_inline_insts: usize,
 }
 
@@ -3183,6 +3248,7 @@ impl Inline {
     pub fn small() -> Self {
         Inline {
             max_insts: 24,
+            max_hot_insts: 96,
             max_inline_insts: 256,
         }
     }
@@ -3193,6 +3259,7 @@ impl Inline {
     pub fn inline_only() -> Self {
         Inline {
             max_insts: 0,
+            max_hot_insts: 0,
             max_inline_insts: 256,
         }
     }
@@ -3216,6 +3283,15 @@ impl ModulePass for Inline {
                 .iter()
                 .flat_map(|b| b.insts.clone())
                 .filter(|inst| matches!(module.funcs[caller_id].insts[*inst].kind, InstKind::Call { .. }))
+                .collect();
+            if sites.is_empty() {
+                continue;
+            }
+            let reachable = module.funcs[caller_id].reachable_blocks();
+            let dom = DomInfo::compute(&module.funcs[caller_id], &reachable);
+            let hot_blocks: std::collections::HashSet<Block> = licm::natural_loops(&module.funcs[caller_id], &dom)
+                .into_iter()
+                .flat_map(|(_, blocks)| blocks)
                 .collect();
             for site in sites {
                 let (block, callee, args, result) = {
@@ -3247,14 +3323,17 @@ impl ModulePass for Inline {
                 }
                 let marked = module.funcs[callee].inline;
                 let total: usize = module.funcs[callee].blocks.iter().map(|b| b.insts.len()).sum();
-                let limit = if marked { self.max_inline_insts } else { self.max_insts };
+                let limit = if marked {
+                    self.max_inline_insts
+                } else if hot_blocks.contains(&block) {
+                    self.max_hot_insts
+                } else {
+                    self.max_insts
+                };
                 if total > limit {
                     continue;
                 }
                 let single_block = module.funcs[callee].blocks.len() == 1;
-                if !single_block && !marked {
-                    continue;
-                }
                 if !callee_eligible(module, caller_id, callee, &args, result) {
                     continue;
                 }
@@ -5695,10 +5774,21 @@ mod tests {
     }
 
     #[test]
-    fn refuses_unmarked_multi_block_callee() {
+    fn inlines_small_unmarked_multi_block_callee() {
         let (mut module, _) = branchy_callee(false);
         let caller = crate::ir::Func::from_usize(1);
         let mut inline = Inline::small();
+        assert!(inline.run(&mut module));
+        assert!(!caller_still_calls(&module, caller));
+        assert!(crate::verify::verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn refuses_oversized_unmarked_multi_block_callee() {
+        let (mut module, _) = branchy_callee(false);
+        let caller = crate::ir::Func::from_usize(1);
+        let mut inline = Inline::small();
+        inline.max_insts = 0;
         assert!(!inline.run(&mut module));
         assert!(caller_still_calls(&module, caller));
     }
