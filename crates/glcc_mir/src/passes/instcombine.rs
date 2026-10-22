@@ -127,6 +127,13 @@ enum Plan {
         signed: bool,
         invert: bool,
     },
+    /// Bitwise operation on two booleans, zero-extended to the result.
+    ZextBoolOp {
+        op: Bitwise,
+        lhs: Value,
+        rhs: Value,
+        ty: Ty,
+    },
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
@@ -214,6 +221,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(Plan::Value(*a))
             } else {
                 combine_bitwise(func, result_ty, *a, *b, Bitwise::And)
+                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::And))
             }
         }
         InstKind::Or(a, b) => {
@@ -227,6 +235,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(Plan::Value(*a))
             } else {
                 combine_bitwise(func, result_ty, *a, *b, Bitwise::Or)
+                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Or))
             }
         }
         InstKind::Xor(a, b) => {
@@ -242,6 +251,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(Plan::Inst(InstKind::Not(*a)))
             } else {
                 combine_bitwise(func, result_ty, *a, *b, Bitwise::Xor)
+                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Xor))
             }
         }
         InstKind::Shl(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::Left, use_counts),
@@ -520,6 +530,16 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let kind = if signed { InstKind::Sext(cond) } else { InstKind::Zext(cond) };
             push_temp(func, block, kind, ty, loc, out)
         }
+        Plan::ZextBoolOp { op, lhs, rhs, ty } => {
+            let loc = func.insts[inst].loc.clone();
+            let kind = match op {
+                Bitwise::And => InstKind::And(lhs, rhs),
+                Bitwise::Or => InstKind::Or(lhs, rhs),
+                Bitwise::Xor => InstKind::Xor(lhs, rhs),
+            };
+            let inner = push_temp(func, block, kind, Ty::Bool, loc.clone(), out);
+            push_temp(func, block, InstKind::Zext(inner), ty, loc, out)
+        }
         Plan::SignedPow2 { value, shift, remainder } => {
             let ty = func.values[result].ty.clone();
             let bits = int_ty_bits(&ty).expect("signed integer division");
@@ -664,7 +684,7 @@ fn zext_boolean_value(func: &Function, operand: Value, result_ty: &Ty) -> Option
         return None;
     }
     let inst = def_inst(func, operand)?;
-    let InstKind::Icmp { pred: IcmpPred::Ne, lhs, rhs } = &func.insts[inst].kind else {
+    let InstKind::Icmp { pred, lhs, rhs } = &func.insts[inst].kind else {
         return None;
     };
     let value = if is_int_zero(func, *rhs) {
@@ -682,10 +702,14 @@ fn zext_boolean_value(func: &Function, operand: Value, result_ty: &Ty) -> Option
     if result_bits < 2 || value_bits == 0 {
         return None;
     }
-    match value_bits.cmp(&result_bits) {
-        std::cmp::Ordering::Equal => Some(Plan::Value(value)),
-        std::cmp::Ordering::Less => Some(Plan::Inst(InstKind::Zext(value))),
-        std::cmp::Ordering::Greater => Some(Plan::Inst(InstKind::Trunc(value))),
+    match pred {
+        IcmpPred::Ne => Some(match value_bits.cmp(&result_bits) {
+            std::cmp::Ordering::Equal => Plan::Value(value),
+            std::cmp::Ordering::Less => Plan::Inst(InstKind::Zext(value)),
+            std::cmp::Ordering::Greater => Plan::Inst(InstKind::Trunc(value)),
+        }),
+        IcmpPred::Eq if value_bits == result_bits => Some(Plan::XorConst(value, 1)),
+        _ => None,
     }
 }
 
@@ -1153,6 +1177,19 @@ enum Bitwise {
     Xor,
 }
 
+/// Doing the bitwise operation on the booleans saves one extension.
+fn zext_bitwise(func: &Function, result_ty: &Ty, a: Value, b: Value, op: Bitwise) -> Option<Plan> {
+    if !matches!(result_ty, Ty::Int { bits } if *bits >= 2) {
+        return None;
+    }
+    Some(Plan::ZextBoolOp {
+        op,
+        lhs: zext_bool(func, a)?,
+        rhs: zext_bool(func, b)?,
+        ty: result_ty.clone(),
+    })
+}
+
 /// Merge `(x op c1) op c2` into one bitwise operation with a combined
 /// mask. The inner operation may stay alive for other users; nothing is
 /// added to the block in that case.
@@ -1494,16 +1531,28 @@ mod tests {
         let b_wide = emit(&mut func, entry, InstKind::Zext(b), Ty::int(32));
         let both = emit(&mut func, entry, InstKind::And(a_wide, b_wide), Ty::int(32));
         let zero = iconst(&mut func, 32, 0);
-        let normalized = emit(
+        let not_zero = emit(
             &mut func,
             entry,
             InstKind::Icmp { pred: IcmpPred::Ne, lhs: both, rhs: zero },
             Ty::Bool,
         );
-        let out = emit(&mut func, entry, InstKind::Zext(normalized), Ty::int(32));
-        func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
-        assert!(run(&mut func));
-        assert_eq!(returned(&func), both);
+        match zext_boolean_value(&func, not_zero, &Ty::int(32)) {
+            Some(Plan::Value(value)) => assert_eq!(value, both),
+            Some(_) => panic!("expected the boolean value"),
+            None => panic!("nonzero boolean comparison was not recognized"),
+        }
+
+        let is_zero = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp { pred: IcmpPred::Eq, lhs: both, rhs: zero },
+            Ty::Bool,
+        );
+        match zext_boolean_value(&func, is_zero, &Ty::int(32)) {
+            Some(Plan::XorConst(value, 1)) => assert_eq!(value, both),
+            _ => panic!("expected an inverted boolean"),
+        }
     }
 
     #[test]
@@ -2223,6 +2272,41 @@ mod tests {
                 func.const_value(returned(&func)),
                 Some(&Const::Int { bits: 1, value: i128::from(truth) })
             );
+        }
+    }
+
+    #[test]
+    fn bitwise_operations_on_extended_booleans_use_boolean_ops() {
+        for op in [Bitwise::And, Bitwise::Or, Bitwise::Xor] {
+            let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::int(32));
+            let (mut func, entry) = Function::new("f", sig);
+            let a = param(&mut func, entry, Ty::Bool, 0);
+            let b = param(&mut func, entry, Ty::Bool, 1);
+            let a_wide = emit(&mut func, entry, InstKind::Zext(a), Ty::int(32));
+            let b_wide = emit(&mut func, entry, InstKind::Zext(b), Ty::int(32));
+            let kind = match op {
+                Bitwise::And => InstKind::And(a_wide, b_wide),
+                Bitwise::Or => InstKind::Or(a_wide, b_wide),
+                Bitwise::Xor => InstKind::Xor(a_wide, b_wide),
+            };
+            let out = emit(&mut func, entry, kind, Ty::int(32));
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+            assert!(run(&mut func));
+            let outer = def_inst(&func, returned(&func)).expect("extension");
+            let inner = match &func.insts[outer].kind {
+                InstKind::Zext(inner) => *inner,
+                other => panic!("expected boolean extension, got {other:?}"),
+            };
+            let inner = def_inst(&func, inner).expect("boolean operation");
+            match (&func.insts[inner].kind, op) {
+                (InstKind::And(x, y), Bitwise::And)
+                | (InstKind::Or(x, y), Bitwise::Or)
+                | (InstKind::Xor(x, y), Bitwise::Xor) => {
+                    assert_eq!(*x, a);
+                    assert_eq!(*y, b);
+                }
+                (other, _) => panic!("expected boolean operation, got {other:?}"),
+            }
         }
     }
 

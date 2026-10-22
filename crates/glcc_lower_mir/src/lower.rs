@@ -7523,6 +7523,40 @@ mod tests {
         assert_eq!(jit_run_main(module), 2);
     }
 
+    /// Bitwise combinations of normalized comparisons stay boolean until
+    /// the final extension, avoiding one extension per operand.
+    #[test]
+    fn optimized_pipeline_keeps_bitwise_boolean_ops_boolean() {
+        let src = "__attribute__((noinline)) int band(int a, int b) { return (a > 0) & (b > 0); }\n\
+                   __attribute__((noinline)) int bor(int a, int b) { return (a > 0) | (b > 0); }\n\
+                   __attribute__((noinline)) int bxor(int a, int b) { return (a > 0) ^ (b > 0); }\n\
+                   int main() {\n\
+                       return band(1, 2) + band(1, -1) * 2\n\
+                           + bor(1, -1) * 4 + bor(-1, -1) * 8\n\
+                           + bxor(1, 2) * 16 + bxor(1, -1) * 32;\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["band", "bor", "bxor"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let zexts = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .filter(|inst| matches!(func.insts[**inst].kind, mir::InstKind::Zext(..)))
+                .count();
+            assert_eq!(zexts, 1, "{name} did not keep one extension:\n{dump}");
+            assert!(
+                !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+                    matches!(func.insts[*inst].kind, mir::InstKind::Select { .. })
+                }),
+                "{name} kept a select:\n{dump}"
+            );
+        }
+        assert_eq!(jit_run_main(module), 37);
+    }
+
     /// A ternary producing only 0 and 1 is a boolean extension. The
     /// inverted arm must negate with a comparison, not a bitwise `not`,
     /// because `Bool` is byte-carried rather than a one-bit integer.
