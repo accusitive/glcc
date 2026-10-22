@@ -22,15 +22,18 @@ pub enum Std {
     C17,
     /// C23 (`-std=c23`; the pre-standard spelling `c2x` parses too).
     C23,
+    /// C2y draft (`-std=c2y`); a superset of C23.
+    C2y,
     Gnu89,
     Gnu99,
     Gnu11,
     Gnu17,
     Gnu23,
+    Gnu2y,
 }
 
 impl Std {
-    /// Standard level ignoring gnu-ness: 0 = C89, 4 = C23.
+    /// Standard level ignoring gnu-ness: 0 = C89, 5 = C2y.
     pub fn level(self) -> u8 {
         match self {
             Std::C89 | Std::Gnu89 => 0,
@@ -38,11 +41,12 @@ impl Std {
             Std::C11 | Std::Gnu11 => 2,
             Std::C17 | Std::Gnu17 => 3,
             Std::C23 | Std::Gnu23 => 4,
+            Std::C2y | Std::Gnu2y => 5,
         }
     }
 
     pub fn is_gnu(self) -> bool {
-        matches!(self, Std::Gnu89 | Std::Gnu99 | Std::Gnu11 | Std::Gnu17 | Std::Gnu23)
+        matches!(self, Std::Gnu89 | Std::Gnu99 | Std::Gnu11 | Std::Gnu17 | Std::Gnu23 | Std::Gnu2y)
     }
 
     /// A `-std=` value without its prefix (the ISO spellings match
@@ -60,6 +64,7 @@ impl Std {
             "11" | "1x" | "iso9899:2011" => 2,
             "17" | "18" | "iso9899:2017" | "iso9899:2018" => 3,
             "2x" | "23" | "iso9899:2024" => 4,
+            "2y" => 5,
             _ => return None,
         };
         Some(match (gnu, level) {
@@ -67,12 +72,14 @@ impl Std {
             (false, 1) => Std::C99,
             (false, 2) => Std::C11,
             (false, 3) => Std::C17,
-            (false, _) => Std::C23,
+            (false, 4) => Std::C23,
+            (false, _) => Std::C2y,
             (true, 0) => Std::Gnu89,
             (true, 1) => Std::Gnu99,
             (true, 2) => Std::Gnu11,
             (true, 3) => Std::Gnu17,
-            (true, _) => Std::Gnu23,
+            (true, 4) => Std::Gnu23,
+            (true, _) => Std::Gnu2y,
         })
     }
 }
@@ -177,9 +184,11 @@ mod tests {
             ("c2x", Std::C23),
             ("c23", Std::C23),
             ("iso9899:2024", Std::C23),
+            ("c2y", Std::C2y),
             ("gnu89", Std::Gnu89),
             ("gnu17", Std::Gnu17),
             ("gnu2x", Std::Gnu23),
+            ("gnu2y", Std::Gnu2y),
         ] {
             assert_eq!(Std::parse(text), Some(want), "{text}");
         }
@@ -193,7 +202,9 @@ mod tests {
         assert_eq!(Std::C89.level(), 0);
         assert_eq!(Std::Gnu17.level(), Std::C17.level());
         assert_eq!(Std::C23.level(), 4);
+        assert_eq!(Std::C2y.level(), 5);
         assert!(Std::Gnu11.is_gnu());
+        assert!(Std::Gnu2y.is_gnu());
         assert!(!Std::C11.is_gnu());
         assert!(LangOpts::default().standard_includes(Std::C11));
         assert!(
