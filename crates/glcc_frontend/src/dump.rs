@@ -356,7 +356,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::Offsetof { ty, offset } => {
             format!("(offsetof {} {} :{})", dump_ty(ty, sema, interner), offset, t)
         }
-        CheckedExprKind::CompoundLiteral { ty, init } => format!("(compound {} {} :{})", dump_ty(ty, sema, interner), dump_init(init, sema, interner), t),
+        CheckedExprKind::CompoundLiteral { ty, init, .. } => format!("(compound {} {} :{})", dump_ty(ty, sema, interner), dump_init(init, sema, interner), t),
         CheckedExprKind::Convert { expr, ty } => format!("(convert {} {} :{})", dump_ty(ty, sema, interner), dump_ex(expr, sema, interner), t),
         CheckedExprKind::SizeofExpr(expr) => {
             format!("(sizeof {} :{})", dump_ex(expr, sema, interner), t)

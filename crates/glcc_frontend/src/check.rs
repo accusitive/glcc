@@ -338,6 +338,7 @@ pub enum CheckedExprKind {
     CompoundLiteral {
         ty: Ty,
         init: Box<Initializer>,
+        storage: crate::parse::CompoundStorage,
     },
     Convert {
         expr: Box<CheckedExpr>,
@@ -2136,7 +2137,7 @@ impl Sema {
                     kind: CheckedExprKind::StmtExpr { items: items.clone() },
                 })
             }
-            Expr::CompoundLiteral { ty, init, .. } => {
+            Expr::CompoundLiteral { ty, init, storage, .. } => {
                 // An array of unknown size completes from the
                 // initializer (see `complete_compound_ty`), like a
                 // declaration's `[]` does.
@@ -2155,12 +2156,16 @@ impl Sema {
                     return Err(CompileError::new("compound literal of incomplete type", span));
                 }
                 let init = self.check_initializer(&ty, init, interner)?;
+                if !storage.is_automatic() && !crate::eval::initializer_is_constant(&init, self, interner) {
+                    return Err(CompileError::new("initializer element is not constant", span));
+                }
                 Ok(CheckedExpr {
                     ty: ty.clone(),
                     span,
                     kind: CheckedExprKind::CompoundLiteral {
                         ty: ty.clone(),
                         init: Box::new(init),
+                        storage: *storage,
                     },
                 })
             }
@@ -4181,6 +4186,7 @@ impl Sema {
                             }],
                             span,
                         }),
+                        storage: crate::parse::CompoundStorage::default(),
                     },
                 });
             }

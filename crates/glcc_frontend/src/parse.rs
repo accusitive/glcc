@@ -5888,6 +5888,45 @@ impl<'a> Parser<'a> {
         self.parse_unary_expression()
     }
 
+    /// Number of tokens in `( storage-class-specifiers type-name` before
+    /// the type starts, including the opening paren. C23 allows `static`
+    /// and `thread_local` on compound literals; earlier dialects read no
+    /// prefix, so the caller falls back to the ordinary type-name test.
+    fn compound_storage_prefix_len(&self) -> usize {
+        let mut n = 1;
+        while self.compound_storage_at(n) {
+            n += 1;
+        }
+        n
+    }
+
+    fn compound_storage_at(&self, n: usize) -> bool {
+        if !self.sema.lang.standard_includes(Std::C23) {
+            return false;
+        }
+        match self.tokens.peek_nth(n).map(|located| &located.val) {
+            Some(Token::Keyword(Keyword::Static)) => true,
+            Some(Token::Identifier(sym)) => match self.intern.resolve(*sym) {
+                Some("_Thread_local" | "thread_local") => true,
+                Some("__thread") => self.sema.lang.gnu,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn parse_compound_literal_storage(&mut self) -> CompoundStorage {
+        let mut storage = CompoundStorage::default();
+        while self.compound_storage_at(0) {
+            match self.tokens.peek_val() {
+                Some(Token::Keyword(Keyword::Static)) => storage.static_storage = true,
+                _ => storage.thread_local = true,
+            }
+            self.tokens.advance();
+        }
+        storage
+    }
+
     /// Whether `( ...` opens a compound literal: a type-name lead
     /// whose matching `)` is followed by `{` (C17 §6.5.2.5). Scans
     /// past nested parens (function-pointer declarators carry
@@ -5897,7 +5936,12 @@ impl<'a> Parser<'a> {
         if !matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) {
             return false;
         }
-        if !self.paren_starts_type_name() {
+        let prefix = self.compound_storage_prefix_len();
+        if prefix == 1 {
+            if !self.paren_starts_type_name() {
+                return false;
+            }
+        } else if !self.token_starts_type_name(self.tokens.peek_nth(prefix).map(|located| &located.val)) {
             return false;
         }
         let mut depth = 0u32;
@@ -5926,6 +5970,7 @@ impl<'a> Parser<'a> {
     fn parse_compound_literal(&mut self) -> Expr {
         let start = self.mark();
         self.tokens.advance();
+        let storage = self.parse_compound_literal_storage();
         let ty = self.parse_type_name();
         self.expect_punct(Punctuator::RParen);
         // The function-type constraint reports here, where the type is
@@ -5940,6 +5985,7 @@ impl<'a> Parser<'a> {
         Expr::CompoundLiteral {
             ty,
             init: Box::new(init),
+            storage,
             span: self.span_since(start),
         }
     }
@@ -7464,6 +7510,21 @@ impl HasSpan for Param {
 // covers statement/condition positions while `parse_assignment_expression`
 // (and below) serve positions where commas separate instead.
 
+/// Storage class written on a C23 compound literal:
+/// `(static T){...}`, `(thread_local T){...}`. The default is the
+/// automatic object C17 gives every block-scope compound literal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompoundStorage {
+    pub static_storage: bool,
+    pub thread_local: bool,
+}
+
+impl CompoundStorage {
+    pub fn is_automatic(&self) -> bool {
+        !self.static_storage && !self.thread_local
+    }
+}
+
 /// A parsed expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
@@ -7570,6 +7631,7 @@ pub enum Expr {
     CompoundLiteral {
         ty: Ty,
         init: Box<Initializer>,
+        storage: CompoundStorage,
         span: Span,
     },
     SizeofExpr {

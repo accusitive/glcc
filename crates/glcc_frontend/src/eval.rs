@@ -35,7 +35,7 @@ use rustc_apfloat::{
 use crate::{
     check::{CheckedExpr, CheckedExprKind, corresponding_real, int_rank, int_type_size, is_complex, is_signed_int_in},
     lexer::{CharLiteral, CharPrefix, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, StringLiteral, StringPrefix},
-    parse::{BinaryOp, Ty, UnaryOp},
+    parse::{BinaryOp, Initializer, Ty, UnaryOp},
     sema::{BindingKind, Sema},
     target::{LongDoubleKind, Target},
 };
@@ -833,7 +833,21 @@ pub fn is_constant_initializer(expr: &CheckedExpr, sema: &Sema, interner: &Inter
         {
             matches!(eval_const(expr, sema, interner), Some(Value::Int(0)))
         }
+        CheckedExprKind::Ident(id) => matches!(
+            sema.decls.get(id.0 as usize).map(|binding| &binding.kind),
+            Some(BindingKind::Func)
+        ),
         _ => false,
+    }
+}
+
+/// Whether every leaf of an initializer is a constant expression.
+/// Static-storage compound literals (C23 `(static T){...}`) require
+/// this just like file-scope objects do.
+pub fn initializer_is_constant(init: &Initializer, sema: &Sema, interner: &Interner) -> bool {
+    match init {
+        Initializer::Expr(expr) => is_constant_initializer(expr, sema, interner),
+        Initializer::List { items, .. } => items.iter().all(|item| initializer_is_constant(&item.init, sema, interner)),
     }
 }
 

@@ -3322,6 +3322,37 @@ fn compound_literal_uncompletable_rejected() {
 }
 
 #[test]
+fn c23_compound_literal_storage_classes() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let ok = "int *f(void) { return &(static int){ 7 }; }\n\
+              int *g(void) { return &(static thread_local int){ 7 }; }\n\
+              int *h(void) { return &(thread_local int){ 7 }; }\n\
+              int main(void) { return *f() + *g() + *h(); }";
+    let diagnostics = tu_diagnostics_with_lang(ok, c23);
+    assert!(diagnostics.iter().all(|d| !d.is_error()), "{diagnostics:#?}");
+
+    let nonconstant = "int main(void) { int x = 5; int *p = &(static int){ x }; return *p; }";
+    let diagnostics = tu_diagnostics_with_lang(nonconstant, c23);
+    assert_diag_contains(&diagnostics, "initializer element is not constant");
+
+    // The storage prefix is a C23 spelling; earlier dialects parse the
+    // lead as an expression and reject it.
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let diagnostics = tu_diagnostics_with_lang("int main(void) { int *p = &(static int){ 1 }; return *p; }", c17);
+    assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
+}
+
+#[test]
 fn builtin_va_start_end_declare_on_call() {
     // util.c's `die`: `va_start`/`va_end` expand to builtins declared
     // nowhere; calling them declares their prototypes.

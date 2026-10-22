@@ -1039,7 +1039,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // As a value of object type its bytes patch inline; as
                 // a pointer its static object materializes anonymously
                 // and the address records as a reloc.
-                if let fe::check::CheckedExprKind::CompoundLiteral { ty: lit_ty, init: lit_init } = &e.kind {
+                if let fe::check::CheckedExprKind::CompoundLiteral { ty: lit_ty, init: lit_init, .. } = &e.kind {
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                         let target = self.materialize_global_compound(module, funcs, externs, globals, lit_ty, lit_init);
                         relocs.push((base, mir::DataReloc::Global { target, addend: 0 }, pointer_reloc_bits(mir_ty)));
@@ -1368,7 +1368,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (AddrRoot::Decl(*id), 0)
             }
             fe::check::CheckedExprKind::Str(parts) => (AddrRoot::Str(parts), 0),
-            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => (AddrRoot::Compound(ty, init), 0),
+            fe::check::CheckedExprKind::CompoundLiteral { ty, init, .. } => (AddrRoot::Compound(ty, init), 0),
             fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.global_ptr_root(expr),
             fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::AddrOf) => self.global_pointed_root(inner, 0),
             fe::check::CheckedExprKind::Binary(op, lhs, rhs) if matches!(op, fe::parse::BinaryOp::Add | fe::parse::BinaryOp::Sub) => {
@@ -1470,7 +1470,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         match &pointed.kind {
             fe::check::CheckedExprKind::Ident(id) => (AddrRoot::Decl(*id), extra),
             fe::check::CheckedExprKind::Str(parts) => (AddrRoot::Str(parts), extra),
-            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => (AddrRoot::Compound(ty, init), extra),
+            fe::check::CheckedExprKind::CompoundLiteral { ty, init, .. } => (AddrRoot::Compound(ty, init), extra),
             fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } => self.global_pointed_root(expr, extra),
             fe::check::CheckedExprKind::Unary(op, inner) if matches!(op, fe::parse::UnaryOp::AddrOf) => self.global_pointed_root(inner, extra),
             fe::check::CheckedExprKind::Member { base, offset, arrow, .. } => {
@@ -5605,11 +5605,27 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let (addr, obj) = self.gep(func, frame, base, &pair, vec![mir::GepIndex::Field(index)]);
                 (addr, obj)
             }
-            fe::check::CheckedExprKind::CompoundLiteral { ty, init } => {
+            fe::check::CheckedExprKind::CompoundLiteral { ty, init, storage } => {
                 let mir_ty = lower_ty(ty, self.sema, self.interner);
-                let slot = self.alloca(func, frame, mir_ty.clone());
-                self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, init.as_ref());
-                (slot, mir_ty)
+                if storage.is_automatic() {
+                    let slot = self.alloca(func, frame, mir_ty.clone());
+                    self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, init.as_ref());
+                    return (slot, mir_ty);
+                }
+                // A static or thread-local compound literal is one
+                // anonymous object for the whole program (or thread),
+                // not a fresh temporary on each evaluation.
+                let target = self.materialize_global_compound(module, funcs, externs, globals, ty, init);
+                if storage.thread_local {
+                    module.module.globals[target].tls = true;
+                }
+                let addr = self.emit(
+                    func,
+                    frame,
+                    mir::InstKind::GlobalAddr { global: target },
+                    mir::Ty::ptr(mir_ty.clone()),
+                );
+                (addr, mir_ty)
             }
             // Aggregate rvalues (call results, statement expressions,
             // ternaries): copy into a temporary so their members have
@@ -8557,6 +8573,18 @@ mod tests {
     fn c23_u8_literals_lower() {
         assert_eq!(jit_run_main(lower_module_c23("int main(){return u8'A';}")), 65);
         assert_eq!(jit_run_main(lower_module_c23("int main(){return sizeof(u8\"abc\");}")), 4);
+    }
+
+    #[test]
+    fn c23_compound_literal_storage_lower() {
+        let src = "int *automatic(void) { return &(int){ 7 }; }\n\
+                   int *persistent(void) { return &(static int){ 7 }; }\n\
+                   int main(void) {\n\
+                       int *p = automatic(); *p = 9; int a = *automatic();\n\
+                       int *q = persistent(); *q = 9; int b = *persistent();\n\
+                       return a * 10 + b;\n\
+                   }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 79);
     }
 
     #[test]
