@@ -4784,6 +4784,56 @@ mod tests {
     }
 
     #[test]
+    fn if_conversion_substitutes_arm_parameters() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::int(32), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("param-diamond", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let x = param(&mut func, entry, Ty::int(32));
+        let y = param(&mut func, entry, Ty::int(32));
+        let arm = func.push_block(vec![Ty::int(32)]);
+        let param_in_arm = func.blocks[arm].params[0];
+        let merge = func.push_block(vec![Ty::int(32)]);
+        let result = func.blocks[merge].params[0];
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let sum = emit_bin(&mut func, arm, InstKind::Add(param_in_arm, one), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block: arm,
+            else_block: merge,
+            then_args: [x].into_iter().collect(),
+            else_args: [y].into_iter().collect(),
+        });
+        func.blocks[arm].term = Some(Terminator::Br {
+            dest: merge,
+            args: [sum].into_iter().collect(),
+        });
+        func.blocks[merge].term = Some(Terminator::Return { val: Some(result) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(matches!(func.blocks[arm].term, Some(Terminator::Unreachable)));
+        let select = func.blocks[entry]
+            .insts
+            .iter()
+            .find_map(|inst| match &func.insts[*inst].kind {
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == y => {
+                    Some(*then_val)
+                }
+                _ => None,
+            })
+            .expect("parameterized diamond arm became a select");
+        let Def::Inst(select_inst) = func.values[select].def else {
+            panic!("select arm was not computed");
+        };
+        let InstKind::Add(lhs, rhs) = func.insts[select_inst].kind else {
+            panic!("arm computation was not cloned");
+        };
+        assert_eq!(lhs, x);
+        assert_eq!(func.const_value(rhs), Some(&Const::Int { bits: 32, value: 1 }));
+    }
+
+    #[test]
     fn does_not_if_convert_trapping_arms() {
         let sig = Signature::new(vec![Ty::Bool, Ty::int(32), Ty::int(32)], Ty::int(32));
         let (mut func, entry) = Function::new("trap", sig);
