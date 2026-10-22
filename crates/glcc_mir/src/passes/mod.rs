@@ -9,7 +9,7 @@ pub mod sroa;
 
 pub use constmerge::ConstMerge;
 pub use cse::Cse;
-pub use global::{DeadModuleItems, GlobalConstProp};
+pub use global::{DeadModuleItems, GlobalConstProp, MergeReadOnlyGlobals};
 pub use instcombine::InstCombine;
 pub use licm::Licm;
 pub use loadstore::LoadStoreForward;

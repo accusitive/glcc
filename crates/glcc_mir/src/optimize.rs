@@ -54,6 +54,7 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
     pm = pm
         .add_module_pass(passes::Inline::small())
         .add_module_pass(passes::GlobalConstProp)
+        .add_module_pass(passes::MergeReadOnlyGlobals)
         .add_module_pass(passes::DeadModuleItems)
         .add_func_pass(passes::Sroa)
         .add_func_pass(passes::Mem2Reg)

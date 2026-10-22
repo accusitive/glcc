@@ -5,18 +5,21 @@
 //! writes to it and its address never escapes; inline assembly disables the
 //! rewrite because its symbol references are invisible in the IR.
 //!
+//! [`MergeReadOnlyGlobals`] folds identical read-only internal objects (string
+//! literals) into one definition.
+//!
 //! [`DeadModuleItems`] removes internal functions and objects that no live
 //! definition references. External-linkage definitions are roots. Function
 //! and object liveness is solved together because a live object's
 //! initializer can reference a function, and a live function can address an
 //! object.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use index_vec::IndexVec;
 
 use crate::debug::{FunctionDebug, ScopeDebug, VarHome};
-use crate::ir::{Const, DataReloc, Def, Func, Function, Global, Inst, InstKind, Module, Value, ValueData};
+use crate::ir::{Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst, InstKind, Module, Value, ValueData};
 use crate::pass::ModulePass;
 use crate::ty::Ty;
 
@@ -137,6 +140,117 @@ impl ModulePass for GlobalConstProp {
         }
         changed
     }
+}
+
+/// Fold identical read-only internal objects into one definition.
+///
+/// Only objects that cannot be written and whose debug info never names them
+/// qualify, so merging cannot change observable storage: string literals are
+/// the intended case. The survivor takes the strictest alignment.
+pub struct MergeReadOnlyGlobals;
+
+impl ModulePass for MergeReadOnlyGlobals {
+    fn name(&self) -> &'static str {
+        "merge-read-only-globals"
+    }
+
+    fn run(&mut self, module: &mut Module) -> bool {
+        let nglobals = module.globals.len();
+        let mut protected = HashSet::new();
+        for func in module.funcs.iter() {
+            if let Some(debug) = &func.debug {
+                let mut named = Vec::new();
+                collect_debug_globals(debug, &mut named);
+                protected.extend(named);
+            }
+        }
+
+        let mut canonical: Vec<Option<Global>> = vec![None; nglobals];
+        {
+            let mut first: HashMap<(&Ty, &Const), Global> = HashMap::new();
+            for (id, global) in module.globals.iter_enumerated() {
+                if !mergeable(global) || protected.contains(&id) {
+                    continue;
+                }
+                let Some(init) = &global.init else { continue };
+                match first.entry((&global.ty, init)) {
+                    std::collections::hash_map::Entry::Occupied(entry) => canonical[id.index()] = Some(*entry.get()),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(id);
+                    }
+                }
+            }
+        }
+        if canonical.iter().all(Option::is_none) {
+            return false;
+        }
+
+        for (old, canonical) in canonical.iter().enumerate() {
+            let Some(canonical) = canonical else { continue };
+            let merged = match (module.globals[*canonical].align, module.globals[old].align) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (align, None) | (None, align) => align,
+            };
+            module.globals[*canonical].align = merged;
+        }
+
+        let mut survivor: Vec<Option<Global>> = vec![None; nglobals];
+        let mut kept = 0;
+        for (old, slot) in survivor.iter_mut().enumerate() {
+            if canonical[old].is_none() {
+                *slot = Some(Global::from_usize(kept));
+                kept += 1;
+            }
+        }
+        let targets: Vec<Global> = (0..nglobals)
+            .map(|old| survivor[canonical[old].unwrap_or(Global::from_usize(old)).index()].expect("canonical object survives"))
+            .collect();
+
+        for func in module.funcs.iter_mut() {
+            let resident = func.resident_mask();
+            for (id, inst) in func.insts.iter_mut().enumerate() {
+                if !resident[id] {
+                    continue;
+                }
+                if let InstKind::GlobalAddr { global } = &mut inst.kind {
+                    *global = targets[global.index()];
+                }
+            }
+            if let Some(debug) = &mut func.debug {
+                let homes: Vec<Option<Global>> = targets.iter().map(|target| Some(*target)).collect();
+                remap_debug(debug, &homes);
+            }
+        }
+
+        let old_globals = std::mem::take(&mut module.globals);
+        let mut new_globals = Vec::with_capacity(kept);
+        for (old, mut global) in old_globals.into_iter().enumerate() {
+            if canonical[old].is_some() {
+                continue;
+            }
+            for reloc in global.relocs.iter_mut().map(|(_, reloc)| reloc).chain(global.relocs32.iter_mut().map(|(_, reloc)| reloc)) {
+                if let DataReloc::Global { target, .. } = reloc {
+                    *target = targets[target.index()];
+                }
+            }
+            new_globals.push(global);
+        }
+        module.globals = IndexVec::from_vec(new_globals);
+        true
+    }
+}
+
+fn mergeable(global: &GlobalData) -> bool {
+    global.local
+        && !global.external
+        && !global.weak
+        && !global.tls
+        && !global.writable
+        && global.debug.is_none()
+        && global.section.is_none()
+        && global.init.is_some()
+        && global.relocs.is_empty()
+        && global.relocs32.is_empty()
 }
 
 /// Remove unreferenced internal functions and objects.
@@ -493,6 +607,59 @@ mod tests {
             .all(|inst| !matches!(module.funcs[func].insts[*inst].kind, InstKind::Load { .. })));
         assert!(verify_module(&module).is_empty());
         assert!(!GlobalConstProp.run(&mut module), "second run is a no-op");
+    }
+
+    #[test]
+    fn merges_identical_read_only_globals() {
+        let mut module = Module::new();
+        let ty = Ty::Array { elem: Box::new(Ty::int(8)), len: 5 };
+        let first = module.push_global("__str.1", ty.clone(), Some(Const::Bytes(b"same\0".to_vec())));
+        module.globals[first].local = true;
+        module.globals[first].writable = false;
+        module.globals[first].align = Some(1);
+        let second = module.push_global("__str.2", ty, Some(Const::Bytes(b"same\0".to_vec())));
+        module.globals[second].local = true;
+        module.globals[second].writable = false;
+        module.globals[second].align = Some(8);
+
+        for (name, global) in [("one", first), ("two", second)] {
+            let (mut func, entry) = Function::new(name, Signature::new(vec![], Ty::ptr(Ty::int(8))));
+            let addr = emit(
+                &mut func,
+                entry,
+                InstKind::GlobalAddr { global },
+                Ty::ptr(module.globals[global].ty.clone()),
+            );
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(addr) });
+            module.push_func(func);
+        }
+
+        assert!(MergeReadOnlyGlobals.run(&mut module));
+        assert_eq!(module.globals.len(), 1);
+        assert_eq!(module.globals[Global::from_usize(0)].align, Some(8));
+        for func in module.funcs.iter() {
+            let entry = func.entry;
+            let addr = func.blocks[entry].insts[0];
+            assert!(matches!(
+                func.insts[addr].kind,
+                InstKind::GlobalAddr { global } if global == Global::from_usize(0)
+            ));
+        }
+        assert!(verify_module(&module).is_empty());
+        assert!(!MergeReadOnlyGlobals.run(&mut module), "second run is a no-op");
+    }
+
+    #[test]
+    fn keeps_writable_globals_separate() {
+        let mut module = Module::new();
+        let ty = Ty::Array { elem: Box::new(Ty::int(8)), len: 5 };
+        for name in ["one", "two"] {
+            let global = module.push_global(name, ty.clone(), Some(Const::Bytes(b"same\0".to_vec())));
+            module.globals[global].local = true;
+            module.globals[global].align = Some(1);
+        }
+        assert!(!MergeReadOnlyGlobals.run(&mut module));
+        assert_eq!(module.globals.len(), 2);
     }
 
     #[test]
