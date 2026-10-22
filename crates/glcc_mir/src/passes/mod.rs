@@ -479,6 +479,7 @@ impl FunctionPass for ForwardAggregateCopy {
         changed |= expand_local_aggregate_copies(func);
         changed |= expand_local_aggregate_stores(func);
         changed |= expand_returned_aggregate_loads(func);
+        changed |= expand_aggregate_load_extracts(func);
         changed
     }
 }
@@ -877,6 +878,152 @@ fn build_aggregate_value(
 fn aggregate_leaves(ty: &Ty) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
     let mut leaves = Vec::new();
     collect_copy_leaves(ty, &mut Vec::new(), &mut leaves, 16).then_some(leaves)
+}
+
+fn extract_step(ty: &Ty, index: u32) -> Option<(GepIndex, Ty)> {
+    match ty {
+        Ty::Struct { fields, .. } => fields.get(index as usize).map(|field| (GepIndex::Field(index), field.clone())),
+        Ty::Array { elem, len } if u64::from(index) < *len => Some((GepIndex::ConstIndex(u64::from(index)), (**elem).clone())),
+        _ => None,
+    }
+}
+
+/// Replace an aggregate load consumed only by scalar `ExtractValue`s with
+/// scalar loads at the same point, removing both the aggregate load and the
+/// extraction. The source slot is then visible to `Sroa`.
+fn expand_aggregate_load_extracts(func: &mut Function) -> bool {
+    use std::collections::{HashMap, HashSet};
+
+    let resident = func.resident_mask();
+    let counts = func.count_resident_uses();
+    let mut term_values = HashSet::new();
+    for block in func.blocks.iter() {
+        if let Some(term) = &block.term {
+            term.for_each_operand(&mut |value| {
+                term_values.insert(value);
+            });
+        }
+    }
+    let mut by_aggregate: HashMap<Value, Vec<Inst>> = HashMap::new();
+    for (id, inst) in func.insts.iter_enumerated() {
+        if !resident[id.index()] {
+            continue;
+        }
+        if let InstKind::ExtractValue { agg, .. } = &inst.kind {
+            by_aggregate.entry(*agg).or_default().push(id);
+        }
+    }
+
+    struct Extraction {
+        inst: Inst,
+        result: Value,
+        step: GepIndex,
+        ty: Ty,
+    }
+    let mut candidates: HashMap<Inst, (Value, u32, MemFlags, Vec<Extraction>)> = HashMap::new();
+    let mut removed = HashSet::new();
+    for (id, inst) in func.insts.iter_enumerated() {
+        if !resident[id.index()] {
+            continue;
+        }
+        let InstKind::Load { addr, flags } = &inst.kind else {
+            continue;
+        };
+        if flags.volatile {
+            continue;
+        }
+        let Some(result) = inst.result else { continue };
+        if counts.get(result.index()).copied().unwrap_or(0) == 0 || term_values.contains(&result) {
+            continue;
+        }
+        let Some(uses) = by_aggregate.get(&result) else { continue };
+        if uses.len() != counts[result.index()] as usize {
+            continue;
+        }
+        let Ty::Ptr { pointee, bits } = &func.values[*addr].ty else {
+            continue;
+        };
+        if **pointee != func.values[result].ty {
+            continue;
+        }
+        let mut extractions = Vec::with_capacity(uses.len());
+        let mut valid = true;
+        for &use_inst in uses {
+            let InstKind::ExtractValue { index, .. } = &func.insts[use_inst].kind else {
+                valid = false;
+                break;
+            };
+            let Some(extracted) = func.insts[use_inst].result else {
+                valid = false;
+                break;
+            };
+            let Some((step, ty)) = extract_step(&func.values[result].ty, *index) else {
+                valid = false;
+                break;
+            };
+            if !ty.is_scalar() {
+                valid = false;
+                break;
+            }
+            extractions.push(Extraction {
+                inst: use_inst,
+                result: extracted,
+                step,
+                ty,
+            });
+        }
+        if valid {
+            removed.extend(extractions.iter().map(|extraction| extraction.inst));
+            candidates.insert(id, (*addr, *bits, *flags, extractions));
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+
+    let mut replacements = Vec::new();
+    for block_idx in 0..func.blocks.len() {
+        let block = Block::from_usize(block_idx);
+        let insts = func.blocks[block].insts.clone();
+        let mut rebuilt = Vec::with_capacity(insts.len());
+        for inst in insts {
+            if removed.contains(&inst) {
+                continue;
+            }
+            let Some((addr, bits, flags, extractions)) = candidates.get(&inst) else {
+                rebuilt.push(inst);
+                continue;
+            };
+            for extraction in extractions {
+                let (field, field_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::GetElementPtr {
+                        base: *addr,
+                        indices: [extraction.step.clone()].into_iter().collect(),
+                    },
+                    Ty::ptr_bits(extraction.ty.clone(), *bits),
+                );
+                rebuilt.push(field_inst);
+                let (loaded, load_inst) = make_value(
+                    func,
+                    block,
+                    InstKind::Load {
+                        addr: field,
+                        flags: *flags,
+                    },
+                    extraction.ty.clone(),
+                );
+                rebuilt.push(load_inst);
+                replacements.push((extraction.result, loaded));
+            }
+        }
+        func.blocks[block].insts = rebuilt;
+    }
+    for (old, new) in replacements {
+        func.replace_uses(old, new);
+    }
+    true
 }
 
 /// A later write that may cover an earlier one.
@@ -3453,6 +3600,41 @@ mod tests {
         assert!(!resident_kinds(&func)
             .iter()
             .any(|kind| matches!(kind, InstKind::Memcpy { .. })));
+
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        assert!(sroa.run(&mut func));
+        assert!(mem2reg.run(&mut func));
+        assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn expands_aggregate_load_consumed_by_field_extracts() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let (mut func, entry) = Function::new("load_fields", Signature::new(vec![], Ty::int(32)));
+        let slot = stack_slot(&mut func, entry, ty.clone());
+        let aggregate = push_value(&mut func, entry, InstKind::Load { addr: slot, flags: MemFlags::plain() }, ty);
+        let field = push_value(
+            &mut func,
+            entry,
+            InstKind::ExtractValue {
+                agg: aggregate,
+                index: 1,
+            },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(field) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!resident_kinds(&func)
+            .iter()
+            .any(|kind| matches!(kind, InstKind::ExtractValue { .. })));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;
