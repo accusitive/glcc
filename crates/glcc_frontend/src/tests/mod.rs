@@ -5202,12 +5202,34 @@ fn c23_nullptr() {
     assert!(tu_diagnostics_with_lang(
         "_Static_assert(sizeof(nullptr) == sizeof(void *), \"size\");\n\
          typedef typeof(nullptr) nullptr_t;\n\
+         _Static_assert(sizeof(nullptr_t) == sizeof(void *), \"nullptr_t size\");\n\
+         _Static_assert(_Generic(nullptr, nullptr_t: 1, default: 0), \"distinct type\");\n\
+         _Static_assert(!_Generic(nullptr, void *: 1, default: 0), \"not void pointer\");\n\
          nullptr_t p = nullptr;\n\
-         int main(void) { int *q = nullptr; return q == nullptr; }",
+         int main(void) {\n\
+             int *q = p;\n\
+             p = 0;\n\
+             return (q == nullptr) + (p == nullptr) + (nullptr == 0)\n\
+                 + !nullptr + (nullptr ? 0 : 1);\n\
+         }",
         c23
     )
     .is_empty());
     assert!(tu_diagnostics("int nullptr = 0;").is_empty());
+    for src in [
+        "(long long)nullptr;",
+        "(nullptr_t)1;",
+        "(nullptr_t)(int *)0;",
+        "nullptr + 1;",
+        "nullptr < nullptr;",
+    ] {
+        assert!(
+            tu_diagnostics_with_lang(&format!("typedef typeof(nullptr) nullptr_t; int x = {src} 0;"), c23)
+                .iter()
+                .any(|d| d.is_error()),
+            "expected an error for {src}"
+        );
+    }
 }
 
 #[test]

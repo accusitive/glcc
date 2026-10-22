@@ -6720,10 +6720,8 @@ impl<'a> Parser<'a> {
                 span,
             };
         }
-        // C23 `nullptr` is a null pointer constant of type `nullptr_t`.
-        // Modeling it as `(void *)0` gives it pointer size and makes
-        // `<stddef.h>`'s `typeof(nullptr) nullptr_t` work; a distinct
-        // `nullptr_t` is only needed where `_Generic` observes it.
+        // C23 `nullptr` has the distinct type `nullptr_t`; the value is
+        // the all-zero pointer representation.
         if self.peek_c23_keyword("nullptr") {
             self.tokens.advance();
             let lit = IntLiteral {
@@ -6733,13 +6731,8 @@ impl<'a> Parser<'a> {
                 imag: false,
             };
             let span = self.span_since(start);
-            let ty = Ty::Pointer {
-                qualifiers: Vec::new(),
-                size: PtrSize::Default,
-                pointee: Box::new(Ty::Void),
-            };
             return Expr::Cast {
-                ty,
+                ty: Ty::Nullptr,
                 expr: Box::new(Expr::Int { lit, span }),
                 span,
             };
@@ -8355,6 +8348,10 @@ pub enum Ty {
         width: u32,
         signed: bool,
     },
+    /// C23 `nullptr_t`: the type of `nullptr`, distinct from every
+    /// pointer type and from integer zero, but pointer-sized and
+    /// convertible to any object or function pointer.
+    Nullptr,
     Float,
     Double,
     LongDouble,

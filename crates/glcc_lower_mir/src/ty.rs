@@ -45,6 +45,7 @@ pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer:
             let bits = u32::try_from(u64::from(*width).div_ceil(8).next_power_of_two().min(8) * 8).expect("bit-int storage width");
             mir::Ty::int(bits)
         }
+        fe::parse::Ty::Nullptr => mir::Ty::ptr(mir::Ty::Void),
         fe::parse::Ty::Float => mir::Ty::Float(mir::FloatKind::F32),
         fe::parse::Ty::Double => mir::Ty::Float(mir::FloatKind::F64),
         fe::parse::Ty::LongDouble => match sema.target.long_double {

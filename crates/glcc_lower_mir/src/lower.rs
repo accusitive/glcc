@@ -8380,6 +8380,21 @@ mod tests {
         assert_eq!(jit_run_main(lower_module_c23(src)), 63);
     }
 
+    #[test]
+    fn nullptr_t_is_distinct_and_pointer_sized() {
+        let src = "typedef typeof(nullptr) nullptr_t;\n\
+                   nullptr_t g = nullptr;\n\
+                   int main(void) {\n\
+                       nullptr_t p = nullptr;\n\
+                       int *q = p;\n\
+                       p = 0;\n\
+                       return (q == nullptr) + (p == nullptr) + (nullptr == 0)\n\
+                           + !nullptr + (nullptr ? 0 : 1) + (g == nullptr)\n\
+                           + (sizeof(nullptr_t) == sizeof(void *));\n\
+                   }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 7);
+    }
+
     /// C text all the way to a JIT call returning `i32`.
     fn run_main(src: &str) -> i32 {
         jit_run_main(lower_module(src))

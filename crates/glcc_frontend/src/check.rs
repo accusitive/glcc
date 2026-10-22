@@ -474,7 +474,7 @@ fn is_arithmetic(ty: &Ty) -> bool {
 }
 
 fn is_scalar(ty: &Ty) -> bool {
-    is_arithmetic(ty) || matches!(ty, Ty::Pointer { .. })
+    is_arithmetic(ty) || matches!(ty.unqualified(), Ty::Pointer { .. } | Ty::Nullptr)
 }
 
 fn is_void_ptr(ty: &Ty) -> bool {
@@ -996,6 +996,9 @@ impl Sema {
     /// unqualified `void *` (`(void *)0`). A cast to a qualified
     /// `void *` does not count, matching GCC.
     fn is_null_pointer_constant(&self, expr: &CheckedExpr, interner: &Interner) -> bool {
+        if matches!(expr.ty.unqualified(), Ty::Nullptr) {
+            return true;
+        }
         if matches!(&expr.ty, Ty::Pointer { pointee, .. } if pointee.as_ref() == &Ty::Void) {
             if let CheckedExprKind::Cast { expr, .. } | CheckedExprKind::Convert { expr, .. } = &expr.kind {
                 return self.is_null_pointer_constant(expr, interner);
@@ -1052,6 +1055,26 @@ impl Sema {
             return Ok(CheckedExpr { ty: target.clone(), span, kind });
         }
         let span = expr.span;
+        if matches!(target.unqualified(), Ty::Nullptr) {
+            let from_same = matches!(expr.ty.unqualified(), Ty::Nullptr);
+            let from_null = from_same
+                || (is_integer(&expr.ty) && matches!(crate::eval::eval_const(&expr, self, interner), Some(crate::eval::Value::Int(0))))
+                || (is_void_ptr(&expr.ty) && self.is_null_pointer_constant(&expr, interner));
+            if !from_null {
+                return Err(CompileError::new("conversion to `nullptr_t` requires `nullptr` or a null pointer constant", span));
+            }
+            if from_same {
+                let CheckedExpr { span, kind, .. } = expr;
+                return Ok(CheckedExpr { ty: target.clone(), span, kind });
+            }
+            return Ok(self.convert(expr, target.clone()));
+        }
+        if matches!(expr.ty.unqualified(), Ty::Nullptr) {
+            if matches!(target.unqualified(), Ty::Pointer { .. } | Ty::Bool) {
+                return Ok(self.convert(expr, target.clone()));
+            }
+            return Err(CompileError::new("cannot convert `nullptr_t` to a non-pointer type", span));
+        }
         if is_arithmetic(&expr.ty) && is_arithmetic(target) {
             return Ok(self.convert(expr, target.clone()));
         }
@@ -2501,6 +2524,31 @@ impl Sema {
                     let (l, r, _) = self.usual_arithmetic_conversions(l, r);
                     return Ok(build(l, r, Ty::Int));
                 }
+                let l_null = matches!(l.ty.unqualified(), Ty::Nullptr);
+                let r_null = matches!(r.ty.unqualified(), Ty::Nullptr);
+                if l_null || r_null {
+                    if l_null && r_null {
+                        return Ok(build(l, r, Ty::Int));
+                    }
+                    if l_null {
+                        if matches!(r.ty.unqualified(), Ty::Pointer { .. }) {
+                            let ty = r.ty.clone();
+                            return Ok(build(self.convert(l, ty), r, Ty::Int));
+                        }
+                        if self.is_null_pointer_constant(&r, interner) {
+                            return Ok(build(l, self.convert(r, Ty::Nullptr), Ty::Int));
+                        }
+                    } else {
+                        if matches!(l.ty.unqualified(), Ty::Pointer { .. }) {
+                            let ty = l.ty.clone();
+                            return Ok(build(l, self.convert(r, ty), Ty::Int));
+                        }
+                        if self.is_null_pointer_constant(&l, interner) {
+                            return Ok(build(self.convert(l, Ty::Nullptr), r, Ty::Int));
+                        }
+                    }
+                    return Err(CompileError::new("invalid operands to `==`/`!=`", span));
+                }
                 if matches!(&l.ty, Ty::Pointer { .. }) && matches!(&r.ty, Ty::Pointer { .. }) {
                     return Ok(build(l, r, Ty::Int));
                 }
@@ -2692,6 +2740,9 @@ impl Sema {
         if is_arithmetic(&then.ty) && is_arithmetic(&els.ty) {
             let (then, els, ty) = self.usual_arithmetic_conversions(self.decay_checked(then), self.decay_checked(els));
             return Ok(self.conditional_node(cond, then, els, ty, span, elvis));
+        }
+        if matches!(then.ty.unqualified(), Ty::Nullptr) && matches!(els.ty.unqualified(), Ty::Nullptr) {
+            return Ok(self.conditional_node(cond, then, els, Ty::Nullptr, span, elvis));
         }
         // A single void arm is a GNU extension (`c ? (void)0 : f()`):
         // the other arm's value is discarded and the result is void.
@@ -3846,6 +3897,7 @@ impl Sema {
             | Ty::Int128
             | Ty::UnsignedInt128
             | Ty::BitInt { .. } => 1,
+            Ty::Nullptr => 5,
             Ty::Enum(_) => 3,
             Ty::Bool => 4,
             Ty::Pointer { .. } => 5,
@@ -4177,6 +4229,37 @@ impl Sema {
         // `(void)e` discards the value: legal for any operand, including
         // a `void` one (EDG lowerings wrap `void` calls this way).
         if ty.unqualified() == &Ty::Void {
+            return Ok(CheckedExpr {
+                ty: ty.clone(),
+                span,
+                kind: CheckedExprKind::Cast {
+                    ty: ty.clone(),
+                    expr: Box::new(operand),
+                },
+            });
+        }
+        let target_nullptr = matches!(ty.unqualified(), Ty::Nullptr);
+        let operand_nullptr = matches!(operand.ty.unqualified(), Ty::Nullptr);
+        if target_nullptr {
+            let null_operand = operand_nullptr
+                || (is_integer(&operand.ty) && matches!(crate::eval::eval_const(&operand, self, interner), Some(crate::eval::Value::Int(0))))
+                || (is_void_ptr(&operand.ty) && self.is_null_pointer_constant(&operand, interner));
+            if !null_operand {
+                return Err(CompileError::new("cannot cast to `nullptr_t` from a non-null pointer constant", span));
+            }
+            return Ok(CheckedExpr {
+                ty: ty.clone(),
+                span,
+                kind: CheckedExprKind::Cast {
+                    ty: ty.clone(),
+                    expr: Box::new(operand),
+                },
+            });
+        }
+        if operand_nullptr {
+            if !matches!(ty.unqualified(), Ty::Pointer { .. } | Ty::Bool) {
+                return Err(CompileError::new("cannot cast `nullptr_t` to a non-pointer type", span));
+            }
             return Ok(CheckedExpr {
                 ty: ty.clone(),
                 span,

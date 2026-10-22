@@ -451,6 +451,7 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
         Ty::Int128 => "__int128".to_string(),
         Ty::UnsignedInt128 => "unsigned __int128".to_string(),
         Ty::BitInt { width, signed } => format!("{}_BitInt({width})", if *signed { "" } else { "unsigned " }),
+        Ty::Nullptr => "nullptr_t".to_string(),
         Ty::Float => "float".to_string(),
         Ty::Double => "double".to_string(),
         Ty::LongDouble => "long double".to_string(),
