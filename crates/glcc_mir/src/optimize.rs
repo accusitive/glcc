@@ -68,7 +68,13 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
         .add_func_pass(passes::Licm)
         .add_func_pass(passes::SimplifyCfg)
         .add_func_pass(passes::DeadCodeElim);
-    pm.run(module)
+    let mut report = pm.run(module);
+    // Function passes can orphan the last reference to an internal
+    // object (a load that `GlobalConstProp` replaced, a call `Inline`
+    // removed), so sweep module liveness once more after they settle.
+    let mut settle = PassManager::new().add_module_pass(passes::DeadModuleItems);
+    report.extend(settle.run(module));
+    report
 }
 
 #[cfg(test)]
@@ -150,12 +156,67 @@ mod tests {
 
         assert_eq!(module.funcs.len(), 1);
         assert_eq!(module.funcs[0].name, "read_twice");
-        assert_eq!(module.globals.len(), 1);
-        assert_eq!(module.globals[0].name, "constant");
+        assert!(module.globals.is_empty(), "the constant was fully propagated");
         assert_eq!(
             module.funcs[0].const_value(returned(&module.funcs[0])),
             Some(&Const::Int { bits: 32, value: 8 })
         );
+        assert!(crate::verify::verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn pipeline_removes_inlined_and_propagated_internal_definitions() {
+        let mut module = Module::new();
+        let sig = Signature::new(vec![], Ty::int(32));
+
+        let (mut helper, helper_entry) = Function::new("helper", sig.clone());
+        let seven = helper.push_const(Const::Int { bits: 32, value: 7 });
+        helper.blocks[helper_entry].term = Some(Terminator::Return { val: Some(seven) });
+        helper.local = true;
+        let helper_id = module.push_func(helper);
+
+        let (mut caller, caller_entry) = Function::new("caller", sig.clone());
+        let call = emit(
+            &mut caller,
+            caller_entry,
+            InstKind::Call {
+                callee: helper_id,
+                args: Default::default(),
+            },
+            Ty::int(32),
+        );
+        caller.blocks[caller_entry].term = Some(Terminator::Return { val: Some(call) });
+        module.push_func(caller);
+
+        let seed = module.push_global("seed", Ty::int(32), Some(Const::Int { bits: 32, value: 17 }));
+        module.globals[seed].local = true;
+        let (mut reader, reader_entry) = Function::new("read_seed", sig);
+        let addr = emit(
+            &mut reader,
+            reader_entry,
+            InstKind::GlobalAddr { global: seed },
+            Ty::ptr(Ty::int(32)),
+        );
+        let loaded = emit(
+            &mut reader,
+            reader_entry,
+            InstKind::Load {
+                addr,
+                flags: Default::default(),
+            },
+            Ty::int(32),
+        );
+        reader.blocks[reader_entry].term = Some(Terminator::Return { val: Some(loaded) });
+        module.push_func(reader);
+
+        optimize(&mut module, OptLevel::Speed);
+
+        assert_eq!(module.funcs.len(), 2);
+        assert!(module.globals.is_empty(), "the propagated static was dead");
+        let caller = module.funcs.iter().find(|func| func.name == "caller").expect("caller survives");
+        let reader = module.funcs.iter().find(|func| func.name == "read_seed").expect("reader survives");
+        assert_eq!(caller.const_value(returned(caller)), Some(&Const::Int { bits: 32, value: 7 }));
+        assert_eq!(reader.const_value(returned(reader)), Some(&Const::Int { bits: 32, value: 17 }));
         assert!(crate::verify::verify_module(&module).is_empty());
     }
 }

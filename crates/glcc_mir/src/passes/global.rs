@@ -11,7 +11,7 @@
 //! initializer can reference a function, and a live function can address an
 //! object.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use index_vec::IndexVec;
 
@@ -46,12 +46,15 @@ impl ModulePass for GlobalConstProp {
 
         let mut sites: Vec<(usize, Inst, Global)> = Vec::new();
         for (func_id, func) in module.funcs.iter().enumerate() {
-            let addresses = global_addresses(func);
-            let resident: HashSet<Inst> = func.blocks.iter().flat_map(|block| block.insts.iter().copied()).collect();
+            let resident = func.resident_mask();
+            let addresses = global_addresses(func, &resident);
             for (inst_id, inst) in func.insts.iter_enumerated() {
+                if !resident[inst_id.index()] {
+                    continue;
+                }
                 match &inst.kind {
                     InstKind::Load { addr, flags } => {
-                        if resident.contains(&inst_id) && !flags.volatile {
+                        if !flags.volatile {
                             if let Some(global) = addresses.get(addr) {
                                 sites.push((func_id, inst_id, *global));
                             }
@@ -154,7 +157,11 @@ impl ModulePass for DeadModuleItems {
         let mut func_calls = vec![Vec::new(); nfuncs];
         let mut func_globals = vec![Vec::new(); nfuncs];
         for (id, func) in module.funcs.iter().enumerate() {
-            for inst in func.insts.iter() {
+            let resident = func.resident_mask();
+            for (inst_id, inst) in func.insts.iter_enumerated() {
+                if !resident[inst_id.index()] {
+                    continue;
+                }
                 match &inst.kind {
                     InstKind::Call { callee, .. } => func_calls[id].push(*callee),
                     InstKind::FuncAddr { func } => func_calls[id].push(*func),
@@ -263,15 +270,20 @@ impl ModulePass for DeadModuleItems {
 }
 
 fn has_inline_asm(module: &Module) -> bool {
-    module
-        .funcs
-        .iter()
-        .any(|func| func.insts.iter().any(|inst| matches!(inst.kind, InstKind::InlineAsm { .. })))
+    module.funcs.iter().any(|func| {
+        let resident = func.resident_mask();
+        func.insts
+            .iter_enumerated()
+            .any(|(id, inst)| resident[id.index()] && matches!(inst.kind, InstKind::InlineAsm { .. }))
+    })
 }
 
-fn global_addresses(func: &Function) -> HashMap<Value, Global> {
+fn global_addresses(func: &Function, resident: &[bool]) -> HashMap<Value, Global> {
     let mut addresses = HashMap::new();
-    for inst in func.insts.iter() {
+    for (id, inst) in func.insts.iter_enumerated() {
+        if !resident[id.index()] {
+            continue;
+        }
         if let InstKind::GlobalAddr { global } = inst.kind {
             if let Some(result) = inst.result {
                 addresses.insert(result, global);
@@ -309,7 +321,13 @@ fn build_map<T: index_vec::Idx>(live: &[bool]) -> (Vec<Option<T>>, usize) {
 }
 
 fn remap_function(func: &mut Function, funcs: &[Option<Func>], globals: &[Option<Global>]) {
-    for inst in func.insts.iter_mut() {
+    // Orphaned instructions never execute and no longer feed liveness,
+    // so a target they name may already be gone.
+    let resident = func.resident_mask();
+    for (id, inst) in func.insts.iter_mut().enumerate() {
+        if !resident[id] {
+            continue;
+        }
         match &mut inst.kind {
             InstKind::Call { callee, .. } => {
                 *callee = funcs[callee.index()].expect("live caller references a live function");
@@ -545,6 +563,33 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(c) });
         func.local = local;
         module.push_func(func)
+    }
+
+    #[test]
+    fn orphaned_references_do_not_keep_internal_definitions() {
+        let mut module = Module::new();
+        let dead = void_function(&mut module, "dead_fn", true, 0);
+        let keep = void_function(&mut module, "keep", false, 0);
+        let entry = module.funcs[keep].entry;
+        let call = emit(
+            &mut module.funcs[keep],
+            entry,
+            InstKind::Call {
+                callee: dead,
+                args: Default::default(),
+            },
+            Ty::int(32),
+        );
+        let call_inst = match &module.funcs[keep].values[call].def {
+            Def::Inst(inst) => *inst,
+            other => panic!("call result is an instruction, got {other:?}"),
+        };
+        module.funcs[keep].blocks[entry].insts.retain(|inst| *inst != call_inst);
+
+        assert!(DeadModuleItems.run(&mut module));
+        assert_eq!(module.funcs.len(), 1);
+        assert_eq!(module.funcs[Func::from_usize(0)].name, "keep");
+        assert!(verify_module(&module).is_empty());
     }
 
     #[test]

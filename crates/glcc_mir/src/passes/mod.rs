@@ -637,8 +637,12 @@ fn escape_value(func: &Function, value: Value, escaped: &mut std::collections::H
 fn non_escaping_stack_slots(func: &Function) -> std::collections::HashSet<Value> {
     use std::collections::HashSet;
 
+    let resident = func.resident_mask();
     let mut escaped = HashSet::new();
-    for inst in func.insts.iter() {
+    for (id, inst) in func.insts.iter_enumerated() {
+        if !resident[id.index()] {
+            continue;
+        }
         let result_ty = inst.result.map(|value| &func.values[value].ty);
         match &inst.kind {
             InstKind::Load { .. }
@@ -730,9 +734,9 @@ fn non_escaping_stack_slots(func: &Function) -> std::collections::HashSet<Value>
     }
 
     func.insts
-        .iter()
-        .filter_map(|inst| match (&inst.kind, inst.result) {
-            (InstKind::Alloca { .. }, Some(slot)) if !escaped.contains(&slot) => Some(slot),
+        .iter_enumerated()
+        .filter_map(|(id, inst)| match (&inst.kind, inst.result) {
+            (InstKind::Alloca { .. }, Some(slot)) if resident[id.index()] && !escaped.contains(&slot) => Some(slot),
             _ => None,
         })
         .collect()
@@ -972,12 +976,15 @@ impl FunctionPass for DeadCodeElim {
 /// A slot whose address never escapes is only ever read and written
 /// through known `Load`/`Store` sites, which is what makes it
 /// promotable (see `Mem2Reg`) and what future store-sinking passes
-/// reuse. Arena-orphaned instructions (removed from block lists by
-/// earlier passes) still count: conservatively sound, and consistent
-/// with `Function::use_count`.
+/// reuse. Arena-orphaned instructions cannot execute, so they do not
+/// count.
 pub fn escaping_addresses(func: &Function) -> Vec<bool> {
+    let resident = func.resident_mask();
     let mut escaped = vec![false; func.values.len()];
-    for inst in func.insts.iter() {
+    for (id, inst) in func.insts.iter_enumerated() {
+        if !resident[id.index()] {
+            continue;
+        }
         match &inst.kind {
             InstKind::Load { .. } => {}
             InstKind::Store { val, .. } => escaped[val.index()] = true,
@@ -4887,6 +4894,31 @@ mod tests {
         let escaped = escaping_addresses(&func);
         assert!(!escaped[slot.index()]);
         assert!(escaped[loaded.index()]);
+    }
+
+    #[test]
+    fn orphaned_address_use_does_not_block_mem2reg() {
+        let (mut func, entry) = Function::new("m2r", Signature::new(vec![], Ty::int(32)));
+        let slot = emit_alloca(&mut func, entry, Ty::int(32));
+        let call = push_unit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target: crate::ir::Extern::from_usize(0),
+                args: [slot].into_iter().collect(),
+            },
+        );
+        func.blocks[entry].insts.retain(|inst| *inst != call);
+
+        let seven = func.push_const(Const::Int { bits: 32, value: 7 });
+        emit_store(&mut func, entry, slot, seven, false);
+        let loaded = emit_load(&mut func, entry, slot, Ty::int(32), false);
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut pass = Mem2Reg;
+        assert!(pass.run(&mut func), "the dead call no longer makes the slot escape");
+        assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
     }
 
     #[test]
