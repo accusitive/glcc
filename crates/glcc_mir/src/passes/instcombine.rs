@@ -273,6 +273,30 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 _ => None,
             }
         }
+        InstKind::ExtractValue { agg, index } => {
+            let inner = def_inst(func, *agg)?;
+            match &func.insts[inner].kind {
+                InstKind::InsertValue { agg: base, elem, index: inserted } => {
+                    if inserted == index {
+                        Some(Plan::Value(*elem))
+                    } else {
+                        Some(Plan::Inst(InstKind::ExtractValue { agg: *base, index: *index }))
+                    }
+                }
+                _ => None,
+            }
+        }
+        InstKind::InsertValue { agg, elem, index } => {
+            let inner = def_inst(func, *elem)?;
+            match &func.insts[inner].kind {
+                InstKind::ExtractValue { agg: source, index: source_index }
+                    if source == agg && source_index == index =>
+                {
+                    Some(Plan::Value(*agg))
+                }
+                _ => None,
+            }
+        }
         InstKind::Zext(a) => {
             if let Some(plan) = zext_boolean_value(func, *a, result_ty) {
                 return Some(plan);
@@ -1519,6 +1543,96 @@ mod tests {
         assert!(run(&mut func));
         let inst = def_inst(&func, returned(&func)).expect("rebuilt bitwise op");
         assert!(matches!(func.insts[inst].kind, InstKind::Or(a, b) if a == cond_wide && b == x_wide));
+    }
+
+    #[test]
+    fn extract_of_insert_uses_the_inserted_field() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone(), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let x = param(&mut func, entry, Ty::int(32), 1);
+        let inserted = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: base, elem: x, index: 0 },
+            ty,
+        );
+        let extracted = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: inserted, index: 0 },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(extracted) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), x);
+    }
+
+    #[test]
+    fn extract_of_insert_reads_other_fields_from_the_base() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone(), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let x = param(&mut func, entry, Ty::int(32), 1);
+        let inserted = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: base, elem: x, index: 0 },
+            ty,
+        );
+        let extracted = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: inserted, index: 1 },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(extracted) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("field extraction");
+        match &func.insts[inst].kind {
+            InstKind::ExtractValue { agg, index } => {
+                assert_eq!(*agg, base);
+                assert_eq!(*index, 1);
+            }
+            other => panic!("expected extraction from the base, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_of_an_extracted_field_is_the_original_value() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone()], ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let field = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 0 },
+            Ty::int(32),
+        );
+        let inserted = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: base, elem: field, index: 0 },
+            ty,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(inserted) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), base);
     }
 
     #[test]
