@@ -339,8 +339,8 @@ fn suffix_len(suffix: IntSuffix) -> usize {
     match suffix {
         IntSuffix::None => 0,
         IntSuffix::U | IntSuffix::L => 1,
-        IntSuffix::UL | IntSuffix::LL | IntSuffix::I8 => 2,
-        IntSuffix::ULL | IntSuffix::I16 | IntSuffix::I32 | IntSuffix::I64 | IntSuffix::UI8 => 3,
+        IntSuffix::UL | IntSuffix::LL | IntSuffix::I8 | IntSuffix::Wb => 2,
+        IntSuffix::ULL | IntSuffix::I16 | IntSuffix::I32 | IntSuffix::I64 | IntSuffix::UI8 | IntSuffix::UWb => 3,
         IntSuffix::UI16 | IntSuffix::UI32 | IntSuffix::UI64 => 4,
     }
 }
@@ -371,6 +371,16 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
     const U64: u128 = 1 << 64;
     let (long_bound, ulong_bound) = if long_size == 8 { (I63, U64) } else { (I31, U32) };
     let decimal = matches!(lit.radix, crate::lexer::Radix::Dec);
+    if matches!(lit.suffix, IntSuffix::Wb | IntSuffix::UWb) {
+        let magnitude_bits = u128::BITS - magnitude.leading_zeros();
+        let signed = lit.suffix == IntSuffix::Wb;
+        let width = if signed { magnitude_bits + 1 } else { magnitude_bits };
+        let width = width.max(if signed { 2 } else { 1 });
+        if width > 64 {
+            return None;
+        }
+        return Some((Ty::BitInt { width, signed }, magnitude as i128));
+    }
     let table: &[(Ty, u128)] = match (decimal, lit.suffix) {
         (true, IntSuffix::None) => &[(Ty::Int, I31), (Ty::Long, long_bound), (Ty::LongLong, I63)],
         (true, IntSuffix::U) => &[(Ty::UnsignedInt, U32), (Ty::UnsignedLong, ulong_bound), (Ty::UnsignedLongLong, U64)],
@@ -403,6 +413,7 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
         (_, IntSuffix::UI16) => &[(Ty::UnsignedShort, U16)],
         (_, IntSuffix::UI32) => &[(Ty::UnsignedInt, U32)],
         (_, IntSuffix::UI64) => &[(Ty::UnsignedLongLong, U64)],
+        (_, IntSuffix::Wb | IntSuffix::UWb) => unreachable!("handled above"),
     };
     let (ty, _) = table.iter().find(|(_, bound)| magnitude < *bound)?;
     // Every surviving magnitude fits `i128` (`u64::MAX < i128::MAX`).
@@ -1004,6 +1015,7 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
 /// duplicate detection exactly.
 pub fn promoted(ty: &Ty) -> Ty {
     match ty.unqualified() {
+        Ty::BitInt { .. } => ty.unqualified().clone(),
         Ty::Complex(inner) => match int_rank(inner) {
             Some(rank) if rank < int_rank(&Ty::Int).expect("Int has a rank") => Ty::Complex(Box::new(Ty::Int)),
             _ => ty.clone(),
@@ -1017,7 +1029,10 @@ pub fn promoted(ty: &Ty) -> Ty {
 
 /// Width in bits of an integer type (`None` for non-integers).
 fn width(ty: &Ty, target: Target) -> Option<u32> {
-    int_type_size(ty, &target).map(|s| s * 8)
+    match ty.unqualified() {
+        Ty::BitInt { width, .. } => Some(*width),
+        _ => int_type_size(ty, &target).map(|s| s * 8),
+    }
 }
 
 /// The low `width(ty)` bits of `v` as an unsigned pattern.

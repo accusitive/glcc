@@ -366,6 +366,11 @@ pub(crate) fn int_rank(ty: &Ty) -> Option<u8> {
         Ty::Long | Ty::UnsignedLong => 4,
         Ty::LongLong | Ty::UnsignedLongLong => 5,
         Ty::Int128 | Ty::UnsignedInt128 => 6,
+        Ty::BitInt { width, .. } => match width {
+            0..=8 => 1,
+            9..=16 => 2,
+            _ => 3,
+        },
         _ => return None,
     })
 }
@@ -380,6 +385,7 @@ pub(crate) fn is_signed_int_in(ty: &Ty, char_signed: bool) -> Option<bool> {
         Ty::SignedChar => true,
         Ty::Char => char_signed,
         Ty::Enum(_) => true,
+        Ty::BitInt { signed, .. } => *signed,
         _ => return None,
     })
 }
@@ -428,6 +434,10 @@ pub(crate) fn int_type_size(ty: &Ty, target: &crate::target::Target) -> Option<u
         Ty::Long | Ty::UnsignedLong => target.long_size,
         Ty::LongLong | Ty::UnsignedLongLong => target.long_long_size,
         Ty::Int128 | Ty::UnsignedInt128 => target.int128_size,
+        Ty::BitInt { width, .. } => {
+            let bytes = u64::from(*width).div_ceil(8);
+            bytes.next_power_of_two().min(8)
+        }
         Ty::Enum(_) => target.enum_size,
         _ => return None,
     };
@@ -517,6 +527,7 @@ fn corresponding_unsigned(ty: &Ty) -> Ty {
         Ty::Long => Ty::UnsignedLong,
         Ty::LongLong => Ty::UnsignedLongLong,
         Ty::Int128 => Ty::UnsignedInt128,
+        Ty::BitInt { width, .. } => Ty::BitInt { width: *width, signed: false },
         other => panic!("not a signed integer type: {other:?}"),
     }
 }
@@ -705,6 +716,12 @@ impl Sema {
             }
             return self.convert(expr, repr);
         }
+        // C23 bit-precise integers do not undergo the integer
+        // promotions; their width is already known and UAC compares it
+        // directly against the standard operand.
+        if matches!(expr.ty.unqualified(), Ty::BitInt { .. }) {
+            return expr;
+        }
         let Some(rank) = int_rank(&expr.ty) else {
             return expr;
         };
@@ -758,6 +775,33 @@ impl Sema {
         };
         let left_signed = is_signed_int_in(left, target.char_signed).expect("rank implies signedness");
         let right_signed = is_signed_int_in(right, target.char_signed).expect("rank implies signedness");
+        let left_bitint = matches!(left.unqualified(), Ty::BitInt { .. });
+        let right_bitint = matches!(right.unqualified(), Ty::BitInt { .. });
+        if left_bitint || right_bitint {
+            // Standard operands have already been promoted, so these are
+            // int/unsigned/long/... widths. A bit-precise operand keeps
+            // its declared precision.
+            let precision = |ty: &Ty| match ty.unqualified() {
+                Ty::BitInt { width, .. } => u64::from(*width),
+                other => u64::from(int_type_size(other, target).expect("rank implies size") * 8),
+            };
+            let (left_bits, right_bits) = (precision(left), precision(right));
+            if left_bits != right_bits {
+                return if left_bits > right_bits { left.clone() } else { right.clone() };
+            }
+            // Equal precision: a standard type outranks a bit-precise
+            // one, and an unsigned type wins over a signed one.
+            if left_signed == right_signed {
+                return if left_bitint && !right_bitint { right.clone() } else { left.clone() };
+            }
+            return match (left_bitint, right_bitint) {
+                (true, false) if right_signed => corresponding_unsigned(right),
+                (true, false) => right.clone(),
+                (false, true) if left_signed => corresponding_unsigned(left),
+                (false, true) => left.clone(),
+                _ => if left_signed { corresponding_unsigned(left) } else { left.clone() },
+            };
+        }
         // Same signedness: the greater rank wins.
         if left_signed == right_signed {
             if left_rank >= right_rank {
@@ -773,8 +817,14 @@ impl Sema {
             return right.clone();
         }
         // Signed that can represent every value of the unsigned side wins.
-        let left_size = int_type_size(left, target).expect("rank implies size");
-        let right_size = int_type_size(right, target).expect("rank implies size");
+        // For bit-precise integers the value width, not the padded storage
+        // width, decides representability.
+        let precision = |ty: &Ty| match ty.unqualified() {
+            Ty::BitInt { width, .. } => u64::from(*width),
+            other => u64::from(int_type_size(other, target).expect("rank implies size") * 8),
+        };
+        let left_size = precision(left);
+        let right_size = precision(right);
         if left_signed && left_size > right_size {
             return left.clone();
         }
@@ -3513,7 +3563,8 @@ impl Sema {
         if !matches!(
             arg.ty.unqualified(),
             Ty::Bool | Ty::UnsignedChar | Ty::UnsignedShort | Ty::UnsignedInt | Ty::UnsignedLong | Ty::UnsignedLongLong | Ty::UnsignedInt128
-        ) {
+        ) && !matches!(arg.ty.unqualified(), Ty::BitInt { signed: false, .. })
+        {
             return Err(CompileError::new(format!("{what} requires an unsigned integer argument"), arg.span));
         }
         let fallback = match args.get(1) {
@@ -3793,7 +3844,8 @@ impl Sema {
             | Ty::LongLong
             | Ty::UnsignedLongLong
             | Ty::Int128
-            | Ty::UnsignedInt128 => 1,
+            | Ty::UnsignedInt128
+            | Ty::BitInt { .. } => 1,
             Ty::Enum(_) => 3,
             Ty::Bool => 4,
             Ty::Pointer { .. } => 5,

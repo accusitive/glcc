@@ -702,6 +702,10 @@ pub enum IntSuffix {
     UI16,
     UI32,
     UI64,
+    /// C23 `wb` / `uwb`: a bit-precise integer as narrow as the value
+    /// needs, signed or unsigned respectively.
+    Wb,
+    UWb,
 }
 /// `f`/`F` (`float`) or `l`/`L` (`long double`) suffix of a float constant;
 /// no suffix means `double`.
@@ -1305,6 +1309,23 @@ impl<'a> Lexer<'a> {
     fn lex_int_suffix(&mut self, buf: &mut String) -> IntSuffix {
         if let Some(suffix) = self.lex_ms_int_suffix(buf) {
             return suffix;
+        }
+        if matches!(self.peek_char(0), Some('u') | Some('U'))
+            && matches!(self.peek_char(1), Some('w') | Some('W'))
+            && matches!(self.peek_char(2), Some('b') | Some('B'))
+        {
+            for _ in 0..3 {
+                self.bump_into(buf);
+            }
+            return IntSuffix::UWb;
+        }
+        if matches!(self.peek_char(0), Some('w') | Some('W'))
+            && matches!(self.peek_char(1), Some('b') | Some('B'))
+        {
+            for _ in 0..2 {
+                self.bump_into(buf);
+            }
+            return IntSuffix::Wb;
         }
         if self.lex_u(buf) {
             match self.lex_l_run(buf) {

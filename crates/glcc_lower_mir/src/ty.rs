@@ -41,6 +41,10 @@ pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer:
         fe::parse::Ty::Long | fe::parse::Ty::UnsignedLong => mir::Ty::int((sema.target.long_size * 8) as u32),
         fe::parse::Ty::LongLong | fe::parse::Ty::UnsignedLongLong => mir::Ty::int(64),
         fe::parse::Ty::Int128 | fe::parse::Ty::UnsignedInt128 => mir::Ty::int(128),
+        fe::parse::Ty::BitInt { width, .. } => {
+            let bits = u32::try_from(u64::from(*width).div_ceil(8).next_power_of_two().min(8) * 8).expect("bit-int storage width");
+            mir::Ty::int(bits)
+        }
         fe::parse::Ty::Float => mir::Ty::Float(mir::FloatKind::F32),
         fe::parse::Ty::Double => mir::Ty::Float(mir::FloatKind::F64),
         fe::parse::Ty::LongDouble => match sema.target.long_double {
@@ -287,6 +291,7 @@ pub fn is_signed(ty: &fe::parse::Ty, sema: &fe::sema::Sema) -> bool {
         | fe::parse::Ty::UnsignedLong
         | fe::parse::Ty::UnsignedLongLong
         | fe::parse::Ty::UnsignedInt128 => false,
+        fe::parse::Ty::BitInt { signed, .. } => *signed,
         fe::parse::Ty::Char => sema.target.char_signed,
         // An enum is signed exactly when its representation is.
         fe::parse::Ty::Enum(id) => {

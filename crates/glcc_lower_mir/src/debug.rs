@@ -252,6 +252,11 @@ fn scalar_info(ty: &fe::parse::Ty) -> Option<(&'static str, mir::BaseEncoding, u
         Ty::UnsignedLongLong => ("unsigned long long", Unsigned, 8),
         Ty::Int128 => ("__int128", Signed, 16),
         Ty::UnsignedInt128 => ("unsigned __int128", Unsigned, 16),
+        Ty::BitInt { width, signed } => (
+            "_BitInt",
+            if *signed { Signed } else { Unsigned },
+            u64::from(*width).div_ceil(8).next_power_of_two().min(8),
+        ),
         Ty::Float => ("float", Float, 4),
         Ty::Double => ("double", Float, 8),
         // x87 80-bit extended in a 16-byte slot (LP64), like gcc.

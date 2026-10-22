@@ -2752,6 +2752,7 @@ impl<'a> Parser<'a> {
                     || self.peek_c23_keyword("typeof_unqual")
                     || self.peek_c23_keyword("bool")
                     || self.peek_c23_keyword("constexpr")
+                    || self.peek_c23_keyword("_BitInt")
                     || self.peek_alternate_inline()
                     || self.peek_gnu_qualifier().is_some()
                     // MSVC declaration prefixes (`__declspec(noreturn)
@@ -4678,6 +4679,31 @@ impl<'a> Parser<'a> {
                 ds.type_specifier.push(TypeSpecifier::Int128);
                 continue;
             }
+            // C23 `_BitInt(constant-expression)`. The lexer keeps the
+            // spelling as an identifier, so gate it here like the other
+            // C23 keywords.
+            if self.peek_c23_keyword("_BitInt") {
+                self.tokens.advance();
+                self.expect_punct(Punctuator::LParen);
+                let width_expr = self.parse_assignment_expression();
+                let width_expr = self.checked_expr(&width_expr);
+                self.expect_punct(Punctuator::RParen);
+                let width = match crate::eval::eval_const(&width_expr, self.sema, self.intern) {
+                    Some(crate::eval::Value::Int(width)) if (1..=64).contains(&width) => width as u32,
+                    Some(crate::eval::Value::Int(width)) => {
+                        let span = width_expr.span;
+                        self.fail::<()>(span, format!("`_BitInt({width})` is not supported; widths from 1 to 64 are implemented"));
+                        break;
+                    }
+                    _ => {
+                        let span = width_expr.span;
+                        self.fail::<()>(span, "`_BitInt` width must be an integer constant expression");
+                        break;
+                    }
+                };
+                ds.type_specifier.push(TypeSpecifier::BitInt(width));
+                continue;
+            }
             // MSVC's fixed-width spellings (`vcruntime.h`:
             // `typedef unsigned __int64 uintptr_t;`), composable with
             // `signed`/`unsigned` like the ISO keywords they alias.
@@ -6199,6 +6225,7 @@ impl<'a> Parser<'a> {
                     || self.is_future_specifier(*sym)
                     || self.is_c23_keyword(*sym, "typeof_unqual")
                     || self.is_c23_keyword(*sym, "bool")
+                    || self.is_c23_keyword(*sym, "_BitInt")
             }
             _ => false,
         }
@@ -7100,6 +7127,8 @@ pub enum TypeSpecifier {
     /// GCC's `__int128` keyword: combines only with a sign to `Int128`
     /// / `UnsignedInt128` (see `resolve_type_specifiers`).
     Int128,
+    /// C23 `_BitInt(N)`; the width expression is folded while parsing.
+    BitInt(u32),
     // A struct/union specifier, identified by its tag: the members and
     // completeness live behind the id in `Sema::structs`.
     Struct(StructId),
@@ -7243,6 +7272,7 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Result<Ty
     let (mut n_char, mut n_int, mut n_float, mut n_double) = (0u8, 0u8, 0u8, 0u8);
     let (mut n_bool, mut n_complex, mut n_void) = (0u8, 0u8, 0u8);
     let mut n_int128 = 0u8;
+    let mut bitint = None;
     for s in specs {
         match s {
             TypeSpecifier::Struct(id) => {
@@ -7272,6 +7302,12 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Result<Ty
             TypeSpecifier::_Complex => n_complex += 1,
             TypeSpecifier::Void => n_void += 1,
             TypeSpecifier::Int128 => n_int128 += 1,
+            TypeSpecifier::BitInt(width) => {
+                if bitint.is_some() {
+                    bail!("duplicate `_BitInt` specifier");
+                }
+                bitint = Some(*width);
+            }
         }
     }
     if let Some(id) = tag {
@@ -7306,6 +7342,19 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Result<Ty
     }
     if n_signed == 1 && n_unsigned == 1 {
         bail!("both `signed` and `unsigned` in declaration specifiers");
+    }
+    if let Some(width) = bitint {
+        if n_short > 0 || n_long > 0 || n_char > 0 || n_int > 0 || n_float > 0 || n_double > 0 || n_bool > 0 || n_complex > 0 || n_void > 0 || n_int128 > 0 {
+            bail!("`_BitInt` with other type specifiers");
+        }
+        if width == 0 || width > 64 {
+            bail!("`_BitInt({width})` is not supported; widths from 1 to 64 are implemented");
+        }
+        let signed = n_unsigned == 0;
+        if signed && width < 2 {
+            bail!("signed `_BitInt` width must be at least 2");
+        }
+        return Ok(Ty::BitInt { width, signed });
     }
     if n_signed > 1 || n_unsigned > 1 {
         bail!("duplicate sign specifier");
@@ -8299,6 +8348,13 @@ pub enum Ty {
     /// GCC's 128-bit integers: rank above `long long`, 16 bytes.
     Int128,
     UnsignedInt128,
+    /// C23 bit-precise integer (`_BitInt(N)` / `unsigned _BitInt(N)`).
+    /// `width` is the value precision, not the storage width: an object
+    /// of `_BitInt(17)` has 17 value bits but occupies 4 bytes.
+    BitInt {
+        width: u32,
+        signed: bool,
+    },
     Float,
     Double,
     LongDouble,
@@ -8446,6 +8502,7 @@ impl Ty {
     pub fn is_unsigned_in(&self, char_signed: bool) -> bool {
         match self.unqualified() {
             Ty::Bool | Ty::UnsignedChar | Ty::UnsignedShort | Ty::UnsignedInt | Ty::UnsignedLong | Ty::UnsignedLongLong | Ty::UnsignedInt128 => true,
+            Ty::BitInt { signed, .. } => !signed,
             Ty::Char => !char_signed,
             _ => false,
         }

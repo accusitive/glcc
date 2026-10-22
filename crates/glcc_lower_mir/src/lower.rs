@@ -2464,6 +2464,47 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
         expr: &fe::check::CheckedExpr,
     ) -> mir::Value {
+        let value = self.expr_value_inner(module, func, frame, funcs, externs, globals, expr);
+        self.normalize_bitint(func, frame, value, &expr.ty)
+    }
+
+    /// Keep a `_BitInt(N)` value sign- or zero-extended from its
+    /// declared precision. MIR carries the padded storage width
+    /// (8/16/32/64), so arithmetic on a 33..63-bit value must mask
+    /// here to wrap at N bits rather than at the storage width.
+    fn normalize_bitint(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, ty: &fe::parse::Ty) -> mir::Value {
+        let fe::parse::Ty::BitInt { width, signed } = ty.unqualified() else {
+            return value;
+        };
+        let mir_ty = lower_ty(ty, self.sema, self.interner);
+        let storage = int_bits(&mir_ty);
+        if *width >= storage {
+            return value;
+        }
+        let int_ty = mir::Ty::int(storage);
+        if *signed {
+            let shift = self.iconst(func, storage, i128::from(storage - *width));
+            let up = self.emit(func, frame, mir::InstKind::Shl(value, shift), int_ty.clone());
+            self.emit(func, frame, mir::InstKind::AShr(up, shift), int_ty)
+        } else {
+            let mask = (1u128 << *width) - 1;
+            let mask = self.iconst(func, storage, mask as i128);
+            self.emit(func, frame, mir::InstKind::And(value, mask), int_ty)
+        }
+    }
+
+    /// `expr_value` without the `_BitInt` normalization wrapper; every
+    /// recursive value request goes through the wrapper above.
+    fn expr_value_inner(
+        &self,
+        module: &mut mir::ModuleBuilder,
+        func: &mut mir::Function,
+        frame: &mut Frame,
+        funcs: &HashMap<fe::sema::DeclId, mir::Func>,
+        externs: &HashMap<fe::sema::DeclId, mir::Extern>,
+        globals: &HashMap<fe::sema::DeclId, mir::Global>,
+        expr: &fe::check::CheckedExpr,
+    ) -> mir::Value {
         let mir_ty = lower_ty(&expr.ty, self.sema, self.interner);
         match &expr.kind {
             fe::check::CheckedExprKind::Int(_) | fe::check::CheckedExprKind::Char(_) | fe::check::CheckedExprKind::Float(_) => {
@@ -3366,6 +3407,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // promotion): the count converts to the declared `int`,
                 // and a zero operand yields the fallback when given.
                 let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
+                let operand_bits = match arg.ty.unqualified() {
+                    fe::parse::Ty::BitInt { width, .. } => *width,
+                    _ => int_bits(&operand_mir),
+                };
                 let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
                 let count = if matches!(operand_mir, mir::Ty::Bool) {
                     // A `_Bool` is one bit: its only nonzero value has
@@ -3375,7 +3420,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     self.emit(func, frame, mir::InstKind::Sub(one, value), operand_mir.clone())
                 } else {
                     let kind = if *ctz { mir::InstKind::Ctz(value) } else { mir::InstKind::Clz(value) };
-                    self.emit(func, frame, kind, operand_mir.clone())
+                    let count = self.emit(func, frame, kind, operand_mir.clone());
+                    if !*ctz && operand_bits < int_bits(&operand_mir) {
+                        let extra = self.iconst(func, int_bits(&operand_mir), i128::from(int_bits(&operand_mir) - operand_bits));
+                        self.emit(func, frame, mir::InstKind::Sub(count, extra), operand_mir.clone())
+                    } else {
+                        count
+                    }
                 };
                 let count = self.convert(func, frame, count, &arg.ty, &expr.ty);
                 let Some(fallback) = fallback else {
@@ -3778,7 +3829,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::OverflowOp::Mul => self.emit(func, frame, mir::InstKind::Mul(a, b), wide.clone()),
         };
         let res_mir = lower_ty(res_ty, self.sema, self.interner);
-        let res_bits = int_bits(&res_mir);
+        let res_bits = match res_ty.unqualified() {
+            fe::parse::Ty::BitInt { width, .. } => *width,
+            _ => int_bits(&res_mir),
+        };
         let signed = is_signed(res_ty, self.sema);
         let unsigned_product = matches!(op, fe::check::OverflowOp::Mul)
             && !is_signed(&lhs.ty, self.sema)
@@ -8308,6 +8362,24 @@ mod tests {
         assert!(text.contains(".previous\n"), "{text}");
     }
 
+    #[test]
+    fn bitint_values_wrap_at_declared_precision() {
+        let src = "int main(void) {\n\
+                   unsigned _BitInt(8) a = 255uwb;\n\
+                   signed _BitInt(40) b = 0x7fffffffffLL;\n\
+                   signed _BitInt(33) c = 0x7fffffffffLL;\n\
+                   unsigned _BitInt(40) d = 0xffffffffffULL;\n\
+                   signed _BitInt(40) b1 = b + 1;\n\
+                   return (int)(a + 1uwb == 0)\n\
+                       + 2 * (int)(b1 < 0)\n\
+                       + 4 * (int)(c < 0)\n\
+                       + 8 * (int)(d + 1 == 0)\n\
+                       + 16 * (int)(sizeof(a) == 1)\n\
+                       + 32 * (int)(_Alignof(d) == 8);\n\
+               }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 63);
+    }
+
     /// C text all the way to a JIT call returning `i32`.
     fn run_main(src: &str) -> i32 {
         jit_run_main(lower_module(src))
@@ -10168,6 +10240,10 @@ mod tests {
         assert_eq!(run_main("int main(){return __builtin_ctzg((_Bool)0, 42);}"), 42);
         // 128-bit operands keep their width too.
         assert_eq!(run_main("int main(){return __builtin_clzg((unsigned __int128)1);}"), 127);
+        assert_eq!(
+            jit_run_main(lower_module_c23("int main(void){ unsigned _BitInt(40) x = 1uwb; return __builtin_clzg(x); }")),
+            39
+        );
     }
 
     #[test]

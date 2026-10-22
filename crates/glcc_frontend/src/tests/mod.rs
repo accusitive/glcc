@@ -3590,6 +3590,14 @@ fn int_literal_values() {
     assert_eq!(lit("0xffffui16", Radix::Hex, IntSuffix::UI16), Some((UnsignedShort, 0xffff)));
     assert_eq!(lit("2147483647i32", Radix::Dec, IntSuffix::I32), Some((Int, i32::MAX as i128)));
     assert_eq!(lit("0xffffffffui32", Radix::Hex, IntSuffix::UI32), Some((UnsignedInt, u32::MAX as i128)));
+    // C23 `wb`/`uwb` pick the narrowest bit-precise type that fits.
+    assert_eq!(lit("0wb", Radix::Dec, IntSuffix::Wb), Some((BitInt { width: 2, signed: true }, 0)));
+    assert_eq!(lit("1wb", Radix::Dec, IntSuffix::Wb), Some((BitInt { width: 2, signed: true }, 1)));
+    assert_eq!(lit("127wb", Radix::Dec, IntSuffix::Wb), Some((BitInt { width: 8, signed: true }, 127)));
+    assert_eq!(lit("128wb", Radix::Dec, IntSuffix::Wb), Some((BitInt { width: 9, signed: true }, 128)));
+    assert_eq!(lit("0uwb", Radix::Dec, IntSuffix::UWb), Some((BitInt { width: 1, signed: false }, 0)));
+    assert_eq!(lit("255uwb", Radix::Dec, IntSuffix::UWb), Some((BitInt { width: 8, signed: false }, 255)));
+    assert_eq!(lit("256uwb", Radix::Dec, IntSuffix::UWb), Some((BitInt { width: 9, signed: false }, 256)));
 }
 
 #[test]
@@ -5339,6 +5347,57 @@ fn c23_auto_rejects_bad_declarations() {
         let diagnostics = tu_diagnostics_with_lang(src, c23);
         assert_diag_contains(&diagnostics, expected);
     }
+}
+
+#[test]
+fn c23_bitint_types_and_suffixes() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "_Static_assert(sizeof(_BitInt(8)) == 1, \"8-bit storage\");\n\
+         _Static_assert(_Alignof(_BitInt(9)) == 2, \"16-bit storage\");\n\
+         _Static_assert(sizeof(_BitInt(17)) == 4, \"32-bit storage\");\n\
+         _Static_assert(sizeof(unsigned _BitInt(33)) == 8, \"64-bit storage\");\n\
+         _Static_assert(_Generic((signed _BitInt(40))1, signed _BitInt(40): 1, default: 0), \"signed type\");\n\
+         _Static_assert(_Generic(127wb, _BitInt(8): 1, default: 0), \"wb width\");\n\
+         _Static_assert(_Generic(255uwb, unsigned _BitInt(8): 1, default: 0), \"uwb width\");\n\
+         int main(void) {\n\
+             signed _BitInt(40) a = 1;\n\
+             unsigned _BitInt(9) b = 511;\n\
+             return (int)(a + b);\n\
+         }",
+        c23
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang("_BitInt(0) x;", c23).iter().any(|d| d.is_error()));
+    assert!(tu_diagnostics_with_lang("_BitInt(65) x;", c23).iter().any(|d| d.is_error()));
+    assert!(tu_diagnostics_with_lang("signed _BitInt(1) x;", c23).iter().any(|d| d.is_error()));
+    assert!(!tu_diagnostics("_BitInt(8) x;").is_empty());
+}
+
+#[test]
+fn c23_bitint_usual_arithmetic_conversions() {
+    use Ty::*;
+    let b8 = BitInt { width: 8, signed: true };
+    let u8 = BitInt { width: 8, signed: false };
+    let s32 = BitInt { width: 32, signed: true };
+    let u32 = BitInt { width: 32, signed: false };
+    let s40 = BitInt { width: 40, signed: true };
+    let u40 = BitInt { width: 40, signed: false };
+    assert_eq!(Sema::uac_common_type(&b8, &Int), Int);
+    assert_eq!(Sema::uac_common_type(&u8, &Int), Int);
+    assert_eq!(Sema::uac_common_type(&s32, &Int), Int);
+    assert_eq!(Sema::uac_common_type(&u32, &Int), UnsignedInt);
+    assert_eq!(Sema::uac_common_type(&s40, &Int), s40.clone());
+    assert_eq!(Sema::uac_common_type(&u40, &Int), u40.clone());
+    assert_eq!(Sema::uac_common_type(&s40, &Long), Long);
+    assert_eq!(Sema::uac_common_type(&u40, &Long), Long);
+    assert_eq!(Sema::uac_common_type(&b8, &u8), u8.clone());
+    assert_eq!(Sema::uac_common_type(&b8, &BitInt { width: 16, signed: true }), BitInt { width: 16, signed: true });
 }
 
 #[test]
