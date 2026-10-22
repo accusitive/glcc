@@ -6339,6 +6339,30 @@ impl<'a> Parser<'a> {
                 span,
             };
         }
+        // C23 `nullptr` is a null pointer constant of type `nullptr_t`.
+        // Modeling it as `(void *)0` gives it pointer size and makes
+        // `<stddef.h>`'s `typeof(nullptr) nullptr_t` work; a distinct
+        // `nullptr_t` is only needed where `_Generic` observes it.
+        if self.peek_c23_keyword("nullptr") {
+            self.tokens.advance();
+            let lit = IntLiteral {
+                spelling: self.intern.get_or_intern("0"),
+                radix: Radix::Dec,
+                suffix: IntSuffix::None,
+                imag: false,
+            };
+            let span = self.span_since(start);
+            let ty = Ty::Pointer {
+                qualifiers: Vec::new(),
+                size: PtrSize::Default,
+                pointee: Box::new(Ty::Void),
+            };
+            return Expr::Cast {
+                ty,
+                expr: Box::new(Expr::Int { lit, span }),
+                span,
+            };
+        }
         // `__func__`, `__FUNCTION__`, and (in C) `__PRETTY_FUNCTION__`
         // expand to the enclosing function's name as a string literal;
         // outside a function they stay identifiers (and fail lookup,

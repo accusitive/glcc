@@ -5022,6 +5022,25 @@ fn c23_bool_true_false() {
 }
 
 #[test]
+fn c23_nullptr() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "_Static_assert(sizeof(nullptr) == sizeof(void *), \"size\");\n\
+         typedef typeof(nullptr) nullptr_t;\n\
+         nullptr_t p = nullptr;\n\
+         int main(void) { int *q = nullptr; return q == nullptr; }",
+        c23
+    )
+    .is_empty());
+    assert!(tu_diagnostics("int nullptr = 0;").is_empty());
+}
+
+#[test]
 fn c23_bare_alignof() {
     let c23 = LangOpts {
         std: Std::C23,
