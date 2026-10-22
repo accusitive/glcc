@@ -57,7 +57,7 @@ impl FunctionPass for InstCombine {
                         kind = crate::ir::remap_inst(&kind, |v| redirect.get(&v).copied().unwrap_or(v));
                     }
                 }
-                let Some(plan) = plan(func, inst, &kind) else {
+                let Some(plan) = plan(func, inst, &kind, &use_counts) else {
                     out.push(inst);
                     continue;
                 };
@@ -87,6 +87,8 @@ enum Plan {
     ShlBy(Value, u32),
     /// `v >> amount` (logical) with a freshly materialized integer constant.
     LshrBy(Value, u32),
+    /// `v >> amount` (arithmetic) with a freshly materialized integer constant.
+    AshrBy(Value, u32),
     /// `v & mask` with a freshly materialized integer constant.
     AndConst(Value, i128),
     /// `v + constant` with a freshly materialized integer constant.
@@ -102,7 +104,7 @@ enum Plan {
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
-fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
+fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Option<Plan> {
     let result = func.insts[inst].result?;
     let result_ty = &func.values[result].ty;
     match kind {
@@ -214,7 +216,9 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
                 None
             }
         }
-        InstKind::Shl(a, b) | InstKind::LShr(a, b) | InstKind::AShr(a, b) => is_int_zero(func, *b).then_some(Plan::Value(*a)),
+        InstKind::Shl(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::Left, use_counts),
+        InstKind::LShr(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::LogicalRight, use_counts),
+        InstKind::AShr(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::ArithmeticRight, use_counts),
         InstKind::Neg(a) => nested_operand(func, *a, DoubleOp::Neg).map(Plan::Value),
         InstKind::Not(a) => nested_operand(func, *a, DoubleOp::Not).map(Plan::Value),
         InstKind::FNeg(a) => nested_operand(func, *a, DoubleOp::FNeg).map(Plan::Value),
@@ -336,6 +340,10 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::LShr(v, push_int_const(func, &ty, amount as i128)))
         }
+        Plan::AshrBy(v, amount) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::AShr(v, push_int_const(func, &ty, amount as i128)))
+        }
         Plan::AndConst(v, value) => {
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::And(v, push_int_const(func, &ty, value)))
@@ -393,7 +401,15 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
-        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) | Plan::AddConst(..) | Plan::SubConst(..) | Plan::MulConst(..) | Plan::CompareZero { .. } => {
+        Plan::BoolNot(_)
+        | Plan::ShlBy(..)
+        | Plan::LshrBy(..)
+        | Plan::AshrBy(..)
+        | Plan::AndConst(..)
+        | Plan::AddConst(..)
+        | Plan::SubConst(..)
+        | Plan::MulConst(..)
+        | Plan::CompareZero { .. } => {
             unreachable!("normalized above")
         }
     }
@@ -670,6 +686,74 @@ fn sub_constant(value: Value, constant: i128) -> Plan {
     } else {
         Plan::SubConst(value, constant)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShiftMode {
+    Left,
+    LogicalRight,
+    ArithmeticRight,
+}
+
+fn plan_shift(
+    func: &Function,
+    result_ty: &Ty,
+    value: Value,
+    amount: Value,
+    mode: ShiftMode,
+    use_counts: &[u32],
+) -> Option<Plan> {
+    if is_int_zero(func, amount) {
+        return Some(Plan::Value(value));
+    }
+    combine_shifts(func, result_ty, value, amount, mode, use_counts)
+}
+
+/// Merge nested shifts in the same direction. Amounts that reach the type
+/// width stay untouched because oversized shifts are undefined.
+fn combine_shifts(
+    func: &Function,
+    result_ty: &Ty,
+    value: Value,
+    amount: Value,
+    mode: ShiftMode,
+    use_counts: &[u32],
+) -> Option<Plan> {
+    if use_counts.get(value.index()).copied().unwrap_or(0) != 1 {
+        return None;
+    }
+    let bits = arith_bits(result_ty)?;
+    let (_, outer) = int_const(func, amount)?;
+    if outer < 0 || outer as u128 >= u128::from(bits) {
+        return None;
+    }
+    let inst = def_inst(func, value)?;
+    let (inner_value, inner_amount, inner_mode) = match &func.insts[inst].kind {
+        InstKind::Shl(x, by) => (*x, *by, ShiftMode::Left),
+        InstKind::LShr(x, by) => (*x, *by, ShiftMode::LogicalRight),
+        InstKind::AShr(x, by) => (*x, *by, ShiftMode::ArithmeticRight),
+        _ => return None,
+    };
+    if inner_mode != mode {
+        return None;
+    }
+    let (_, inner) = int_const(func, inner_amount)?;
+    if inner < 0 || inner as u128 >= u128::from(bits) {
+        return None;
+    }
+    let total = inner + outer;
+    if total == 0 {
+        return Some(Plan::Value(inner_value));
+    }
+    if total as u128 >= u128::from(bits) {
+        return None;
+    }
+    let total = total as u32;
+    Some(match mode {
+        ShiftMode::Left => Plan::ShlBy(inner_value, total),
+        ShiftMode::LogicalRight => Plan::LshrBy(inner_value, total),
+        ShiftMode::ArithmeticRight => Plan::AshrBy(inner_value, total),
+    })
 }
 
 /// The shift amount for a positive power-of-two constant.
@@ -1162,6 +1246,75 @@ mod tests {
                 assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: 24 }));
             }
             other => panic!("expected product, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nested_shifts_combine() {
+        for (mode, build) in [
+            (ShiftMode::Left, InstKind::Shl as fn(Value, Value) -> InstKind),
+            (ShiftMode::LogicalRight, InstKind::LShr as fn(Value, Value) -> InstKind),
+            (ShiftMode::ArithmeticRight, InstKind::AShr as fn(Value, Value) -> InstKind),
+        ] {
+            let (mut func, entry, x) = int_func();
+            let two = iconst(&mut func, 32, 2);
+            let three = iconst(&mut func, 32, 3);
+            let inner = emit(&mut func, entry, build(x, two), Ty::int(32));
+            let outer = emit(&mut func, entry, build(inner, three), Ty::int(32));
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+            assert!(run(&mut func), "{mode:?}");
+            let inst = def_inst(&func, returned(&func)).expect("rebuilt shift");
+            match &func.insts[inst].kind {
+                InstKind::Shl(lhs, by) => {
+                    assert_eq!(mode, ShiftMode::Left);
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*by), Some(&Const::Int { bits: 32, value: 5 }));
+                }
+                InstKind::LShr(lhs, by) => {
+                    assert_eq!(mode, ShiftMode::LogicalRight);
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*by), Some(&Const::Int { bits: 32, value: 5 }));
+                }
+                InstKind::AShr(lhs, by) => {
+                    assert_eq!(mode, ShiftMode::ArithmeticRight);
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*by), Some(&Const::Int { bits: 32, value: 5 }));
+                }
+                other => panic!("expected shift, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn shared_inner_shifts_are_not_duplicated() {
+        let (mut func, entry, x) = int_func();
+        let two = iconst(&mut func, 32, 2);
+        let three = iconst(&mut func, 32, 3);
+        let inner = emit(&mut func, entry, InstKind::Shl(x, two), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Shl(inner, three), Ty::int(32));
+        let sum = emit(&mut func, entry, InstKind::Add(outer, inner), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
+        assert!(!run(&mut func));
+        let inst = def_inst(&func, outer).expect("outer shift");
+        match &func.insts[inst].kind {
+            InstKind::Shl(lhs, _) => assert_eq!(*lhs, inner),
+            other => panic!("expected shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn oversized_shift_chains_are_left_alone() {
+        let (mut func, entry, x) = int_func();
+        let wide = iconst(&mut func, 32, 30);
+        let five = iconst(&mut func, 32, 5);
+        let inner = emit(&mut func, entry, InstKind::Shl(x, wide), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Shl(inner, five), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(!run(&mut func));
+        let inst = def_inst(&func, outer).expect("outer shift");
+        match &func.insts[inst].kind {
+            InstKind::Shl(lhs, _) => assert_eq!(*lhs, inner),
+            other => panic!("expected shift, got {other:?}"),
         }
     }
 
