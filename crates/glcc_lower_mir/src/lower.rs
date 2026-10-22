@@ -7450,6 +7450,48 @@ mod tests {
         assert_eq!(jit_run_main(module), 1);
     }
 
+    /// Comparisons against a constant narrow to the source width with
+    /// the right signedness, and constants outside the source range
+    /// collapse to a fixed truth value.
+    #[test]
+    fn optimized_pipeline_narrows_comparisons_with_constants() {
+        let src = "int z(unsigned char x) { return (int)x < 200; }\n\
+                   int z_high(unsigned char x) { return (int)x < 300; }\n\
+                   int z_eq_high(unsigned char x) { return (int)x == 300; }\n\
+                   int s(signed char x) { return (int)x < 100; }\n\
+                   int s_low(signed char x) { return (int)x < -200; }\n\
+                   int main() {\n\
+                       if (!z(199) || z(200) || z(255)) return 1;\n\
+                       if (!s(99) || s(100) || !s(-128)) return 2;\n\
+                       if (!z_high(0) || z_eq_high(255) || s_low(0)) return 3;\n\
+                       return 0;\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for func in &module.funcs {
+            let widened: std::collections::HashSet<mir::Value> = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .filter_map(|inst| match &func.insts[*inst].kind {
+                    mir::InstKind::Zext(_) | mir::InstKind::Sext(_) => func.insts[*inst].result,
+                    _ => None,
+                })
+                .collect();
+            for inst in func.blocks.iter().flat_map(|block| block.insts.iter()) {
+                if let mir::InstKind::Icmp { lhs, rhs, .. } = &func.insts[*inst].kind {
+                    assert!(
+                        !widened.contains(lhs) && !widened.contains(rhs),
+                        "constant comparison stayed widened in {}:\n{dump}",
+                        func.name
+                    );
+                }
+            }
+        }
+        assert_eq!(jit_run_main(module), 0);
+    }
+
     /// `(unsigned char)(x & 0xff)` keeps only the low byte: the mask is
     /// redundant under the truncation, and the result stays correct.
     #[test]
