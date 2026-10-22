@@ -8066,6 +8066,38 @@ mod tests {
         assert_eq!(jit_run_main(module), 123);
     }
 
+    /// A small loop with a constant trip count is fully unrolled, so the
+    /// header check and back edge disappear and the result folds to a
+    /// constant.
+    #[test]
+    fn optimized_pipeline_unrolls_small_counted_loops() {
+        let src = "int main(void) { int sum = 100; for (int i = 0; i < 2; i++) { sum += 1; } return sum; }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let main = module.funcs.iter().find(|f| f.name == "main").expect("main lowered");
+        let live = main.reachable_blocks().into_iter().filter(|live| *live).count();
+        assert_eq!(live, 1, "the loop survived:\n{dump}");
+        assert_eq!(jit_run_main(module), 102);
+    }
+
+    /// A loop bound that is not constant keeps its back edge: the
+    /// unroller must not assume a trip count it cannot see.
+    #[test]
+    fn optimized_pipeline_keeps_dynamic_loop_bounds() {
+        let src = "int sum_to(int n) { int sum = 0; for (int i = 0; i < n; i++) sum += i; return sum; }\n\
+                   int main() { return sum_to(5); }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let sum_to = module.funcs.iter().find(|f| f.name == "sum_to").expect("sum_to lowered");
+        assert!(
+            sum_to.reachable_blocks().into_iter().filter(|live| *live).count() > 1,
+            "the dynamic loop was removed:\n{}",
+            mir::display::dump_module(&module)
+        );
+        assert_eq!(jit_run_main(module), 10);
+    }
+
     /// C text all the way to MIR for the host target (the JIT below
     /// executes in-process, so target and host must agree).
     fn lower_module(src: &str) -> mir::Module {
