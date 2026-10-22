@@ -1213,6 +1213,21 @@ mod tests {
     }
 
     #[test]
+    fn has_builtin_and_attribute_are_closed_tables() {
+        let src = "#if __has_builtin(__builtin_expect)\nint a = 1;\n#else\nint a = 0;\n#endif\n\
+                   #if __has_builtin(__builtin_stdc_leading_zeros)\nint b = 1;\n#else\nint b = 0;\n#endif\n\
+                   #if __has_attribute(aligned)\nint c = 1;\n#else\nint c = 0;\n#endif\n\
+                   #if __has_attribute(no_such_attr)\nint d = 1;\n#else\nint d = 0;\n#endif\n\
+                   #if __has_c_attribute(nodiscard)\nint e = 1;\n#else\nint e = 0;\n#endif\n";
+        let got = pp(src).unwrap();
+        assert!(got.contains("int a = 1;"), "{got}");
+        assert!(got.contains("int b = 0;"), "{got}");
+        assert!(got.contains("int c = 1;"), "{got}");
+        assert!(got.contains("int d = 0;"), "{got}");
+        assert!(got.contains("int e = 0;"), "{got}");
+    }
+
+    #[test]
     fn has_feature_gated_by_std() {
         assert!(has_feature("__has_feature", "c_atomic", None));
         assert!(has_feature("__has_feature", "c_atomic", Some("-std=c17")));

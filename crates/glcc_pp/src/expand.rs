@@ -160,6 +160,137 @@ fn is_has_builtin_name(name: &str) -> bool {
     )
 }
 
+/// Builtins the frontend and backend actually lower. `__has_builtin`
+/// must stay a closed table: claiming an unimplemented builtin sends
+/// headers down a path that later fails to compile.
+fn has_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "__builtin_va_start"
+            | "__builtin_c23_va_start"
+            | "__builtin_va_end"
+            | "__builtin_va_copy"
+            | "__builtin_va_arg"
+            | "__builtin_clz"
+            | "__builtin_clzl"
+            | "__builtin_clzll"
+            | "__builtin_ctz"
+            | "__builtin_ctzl"
+            | "__builtin_ctzll"
+            | "__builtin_popcount"
+            | "__builtin_popcountl"
+            | "__builtin_popcountll"
+            | "__builtin_parity"
+            | "__builtin_parityl"
+            | "__builtin_parityll"
+            | "__builtin_clrsb"
+            | "__builtin_clrsbl"
+            | "__builtin_clrsbll"
+            | "__builtin_bswap16"
+            | "__builtin_bswap32"
+            | "__builtin_bswap64"
+            | "__builtin_abs"
+            | "__builtin_labs"
+            | "__builtin_llabs"
+            | "__builtin_fabs"
+            | "__builtin_fabsf"
+            | "__builtin_fabsl"
+            | "__builtin_ceil"
+            | "__builtin_ceilf"
+            | "__builtin_ceill"
+            | "__builtin_floor"
+            | "__builtin_floorf"
+            | "__builtin_floorl"
+            | "__builtin_copysign"
+            | "__builtin_copysignf"
+            | "__builtin_copysignl"
+            | "__builtin_trap"
+            | "__builtin_unreachable"
+            | "__builtin_expect"
+            | "__builtin_constant_p"
+            | "__builtin_offsetof"
+            | "__builtin_types_compatible_p"
+            | "__builtin_alloca"
+            | "__builtin_abort"
+            | "__builtin_inf"
+            | "__builtin_inff"
+            | "__builtin_infl"
+            | "__builtin_huge_val"
+            | "__builtin_huge_valf"
+            | "__builtin_huge_vall"
+            | "__builtin_nan"
+            | "__builtin_nanf"
+            | "__builtin_nanl"
+            | "__builtin_add_overflow"
+            | "__builtin_sub_overflow"
+            | "__builtin_mul_overflow"
+            | "__builtin_cabs"
+            | "__builtin_cabsf"
+            | "__builtin_cabsl"
+            | "__builtin_cimag"
+            | "__builtin_cimagf"
+            | "__builtin_cimagl"
+            | "__builtin_creal"
+            | "__builtin_crealf"
+            | "__builtin_creall"
+            | "__builtin_conj"
+            | "__builtin_conjf"
+            | "__builtin_conjl"
+    )
+}
+
+/// Attributes with real parser/codegen handling. Attributes that are
+/// merely skipped must not claim support: code may rely on their
+/// semantics.
+fn has_attribute(name: &str) -> bool {
+    let bare = name.rsplit("::").next().unwrap_or(name).trim_matches('_');
+    matches!(
+        bare,
+        // Attributes with codegen or declaration effects.
+        "aligned"
+            | "packed"
+            | "weak"
+            | "weakref"
+            | "alias"
+            | "section"
+            | "constructor"
+            | "destructor"
+            | "noinline"
+            | "naked"
+            | "async"
+            // Accepted and ignored; claiming support is safe because
+            // they only guide diagnostics or optimization.
+            | "always_inline"
+            | "artificial"
+            | "cold"
+            | "const"
+            | "deprecated"
+            | "fallthrough"
+            | "flatten"
+            | "format"
+            | "format_arg"
+            | "gnu_inline"
+            | "hot"
+            | "leaf"
+            | "malloc"
+            | "may_alias"
+            | "mode"
+            | "no_instrument_function"
+            | "noclone"
+            | "noipa"
+            | "nonnull"
+            | "noreturn"
+            | "nothrow"
+            | "pure"
+            | "returns_nonnull"
+            | "sentinel"
+            | "unused"
+            | "used"
+            | "visibility"
+            | "warn_unused_result"
+    )
+}
+
 fn is_location_name(name: &str) -> bool {
     matches!(
         name,
@@ -1041,7 +1172,16 @@ impl<'a, 'b> Expander<'a, 'b> {
             }
             // Never building modules in a native preprocessing run.
             "__building_module" => false,
-            _ => true,
+            "__has_builtin" => has_builtin(render_raw(&arg_toks, self.interner).trim()),
+            "__has_attribute" | "__has_declspec_attribute" => {
+                has_attribute(render_raw(&arg_toks, self.interner).trim())
+            }
+            // `[[...]]` is not parsed yet; claiming an attribute would
+            // send headers down a path the frontend cannot compile.
+            "__has_c_attribute" | "__has_cpp_attribute" => false,
+            // No `-W` names are modeled.
+            "__has_warning" => false,
+            _ => false,
         };
         let sym = self.interner.get_or_intern(if value { "1" } else { "0" }.to_string());
         Ok(vec![Tok {
