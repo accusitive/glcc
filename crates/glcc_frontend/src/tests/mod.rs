@@ -5277,6 +5277,50 @@ fn c23_constexpr_rejects_nonconstant_initializers_and_writes() {
 }
 
 #[test]
+fn c23_attributes_parse_and_drive_warnings() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let src = "[[nodiscard]] int f(void);\n\
+               [[deprecated]] int old(void);\n\
+               [[gnu::packed]] struct S { int x; };\n\
+               [[maybe_unused, deprecated]] int object;\n\
+               int g(int x) { switch (x) { case 1: x++; [[fallthrough]]; default: return x; } }\n\
+               int main(void) { [[maybe_unused]] int local = old(); f(); return local + g(1); }";
+    let diagnostics = tu_diagnostics_with_lang(src, c23);
+    assert!(diagnostics.iter().all(|d| !d.is_error()), "{diagnostics:#?}");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("ignoring return value of 'f'")),
+        "{diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Warning && d.message.contains("'old' is deprecated")),
+        "{diagnostics:#?}"
+    );
+
+    // Taking the nodiscard result silences its diagnostic.
+    let diagnostics = tu_diagnostics_with_lang("[[nodiscard]] int f(void); int main(void) { return f(); }", c23);
+    assert!(diagnostics.iter().all(|d| d.severity != Severity::Warning), "{diagnostics:#?}");
+
+    // The spelling is a C23 declaration form only.
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let diagnostics = tu_diagnostics_with_lang("[[deprecated]] int x;", c17);
+    assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
+}
+
+#[test]
 fn c23_auto_rejects_bad_declarations() {
     let c23 = LangOpts {
         std: Std::C23,

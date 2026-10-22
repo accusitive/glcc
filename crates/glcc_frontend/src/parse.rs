@@ -706,6 +706,24 @@ impl<'a> Parser<'a> {
     fn warn(&self, span: Span, msg: impl fmt::Display) {
         self.report_warning(CompileError::warning(msg.to_string(), span));
     }
+
+    /// Warn when an expression statement discards a direct call to a
+    /// function declared `[[nodiscard]]`.
+    fn warn_discarded_call(&self, expr: &Expr) {
+        let Expr::Call { func, .. } = expr else {
+            return;
+        };
+        let Expr::Ident { name, .. } = func.as_ref() else {
+            return;
+        };
+        let Some(id) = self.sema.lookup_symbol(*name) else {
+            return;
+        };
+        if self.sema.std_attrs.get(&id).is_some_and(|attrs| attrs.nodiscard) {
+            let text = self.intern.resolve(*name).unwrap_or("?");
+            self.warn(expr.span(), format!("ignoring return value of '{text}', declared with attribute 'nodiscard'"));
+        }
+    }
     /// Render warnings collected during checking (see `Sema::warnings`)
     /// and clear them. Called after each declaration and at end of
     /// translation unit, so every checked initializer is covered no
@@ -1211,6 +1229,9 @@ impl<'a> Parser<'a> {
         if self.failed() {
             return id;
         }
+        let mut std_attrs = specifiers.attrs.std;
+        std_attrs.merge(attrs.std);
+        self.sema.std_attrs.insert(id, std_attrs);
         // The merged binding knows about a `naked` prototype even when
         // this definition's attributes omit it.
         self.naked_function = self.sema.decls[id.0 as usize].naked;
@@ -1648,8 +1669,10 @@ impl<'a> Parser<'a> {
     /// GNU markers prefixing either are skipped first.
     fn parse_block_item(&mut self, ret: &Ty) -> BlockItem {
         // `__asm__(...)` starts a statement here, not a declaration
-        // annotation, so `__asm__` labels are not skipped.
-        self.skip_gnu_markers();
+        // annotation, so `__asm__` labels are not skipped. Keep the
+        // parsed attributes: a declaration needs `[[maybe_unused]]` (and
+        // GNU equivalents) on its binding.
+        let prefix = self.parse_gnu_annotations_impl(false);
         if self.peek_msvc_operator("__pragma") {
             self.skip_msvc_operator();
         }
@@ -1658,7 +1681,7 @@ impl<'a> Parser<'a> {
         }
         if self.can_start_declaration() {
             let start = self.mark();
-            let ids = self.parse_declaration();
+            let ids = self.parse_declaration_with_prefix(prefix);
             BlockItem::Decl {
                 ids,
                 span: self.span_since(start),
@@ -2228,6 +2251,7 @@ impl<'a> Parser<'a> {
             }
             _ => {
                 let expr = self.parse_expression();
+                self.warn_discarded_call(&expr);
                 let expr = self.checked_expr(&expr);
                 self.expect_punct(Punctuator::Semi);
                 Stmt::Expr {
@@ -3282,10 +3306,14 @@ impl<'a> Parser<'a> {
     // never appear here — `int f() {` panics, use
     // `parse_external_declaration`.
     pub fn parse_declaration(&mut self) -> Vec<DeclId> {
+        let prefix = self.parse_gnu_annotations();
+        self.parse_declaration_with_prefix(prefix)
+    }
+
+    fn parse_declaration_with_prefix(&mut self, prefix: GnuAttributes) -> Vec<DeclId> {
         let decl_start = self.mark();
-        // Prefix annotations (see `parse_external_declaration`).
-        self.skip_gnu_suffixes();
-        let specifiers = self.parse_declaration_specifiers();
+        let mut specifiers = self.parse_declaration_specifiers();
+        specifiers.attrs.merge(prefix);
         if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Semi))) {
             self.tokens.advance();
             // No declarators: only a tag may have been declared —
@@ -3406,6 +3434,9 @@ impl<'a> Parser<'a> {
                 }
                 break;
             }
+            let mut std_attrs = specifiers.attrs.std;
+            std_attrs.merge(suffix.std);
+            self.sema.std_attrs.insert(id, std_attrs);
             if has_init {
                 let init = match inferred_init {
                     Some(init) => init,
@@ -4959,13 +4990,6 @@ impl<'a> Parser<'a> {
         self.parse_gnu_annotations();
     }
 
-    /// Skip GNU markers at a position where `__asm__` starts a statement
-    /// rather than naming a symbol (block items): attributes and
-    /// `__extension__` only.
-    fn skip_gnu_markers(&mut self) {
-        self.parse_gnu_annotations_impl(false);
-    }
-
     /// Parse GNU annotations into decoded effects: `__attribute__`
     /// lists fold `packed`/`aligned` (unknown attributes validate
     /// structurally and are ignored), `__asm__` labels record the
@@ -4974,12 +4998,113 @@ impl<'a> Parser<'a> {
         self.parse_gnu_annotations_impl(true)
     }
 
+    fn peek_std_attributes(&self) -> bool {
+        self.sema.lang.standard_includes(Std::C23)
+            && matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBracket)))
+            && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::LBracket)))
+    }
+
+    /// Parse one or more C23 `[[attribute-list]]` groups, validating
+    /// names and parenthesized arguments. Standard attributes with a
+    /// frontend effect are recorded; namespaced and unknown attributes
+    /// are accepted and ignored.
+    fn parse_std_attributes(&mut self) -> StdAttributes {
+        let mut out = StdAttributes::default();
+        while self.peek_std_attributes() {
+            self.tokens.advance();
+            self.tokens.advance();
+            let mut closed = false;
+            loop {
+                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBracket)))
+                    && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::RBracket)))
+                {
+                    self.tokens.advance();
+                    self.tokens.advance();
+                    closed = true;
+                    break;
+                }
+                let (namespace, name) = match self.tokens.advance().map(|located| located.val) {
+                    Some(Token::Identifier(sym)) => (None, self.intern.resolve(sym).unwrap_or("").to_string()),
+                    Some(Token::Keyword(keyword)) => (None, format!("{keyword:?}")),
+                    other => {
+                        let span = self.peek_span();
+                        self.fail::<()>(span, format!("expected attribute name, got {other:?}"));
+                        return out;
+                    }
+                };
+                // `namespace::name` arrives as two `:` tokens: the lexer
+                // does not combine them (C23 spells scoped attributes
+                // with the same token as C++).
+                let (namespace, name) = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon)))
+                    && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon)))
+                {
+                    self.tokens.advance();
+                    self.tokens.advance();
+                    match self.tokens.advance().map(|located| located.val) {
+                        Some(Token::Identifier(sym)) => (Some(name), self.intern.resolve(sym).unwrap_or("").to_string()),
+                        other => {
+                            let span = self.peek_span();
+                            self.fail::<()>(span, format!("expected scoped attribute name, got {other:?}"));
+                            return out;
+                        }
+                    }
+                } else {
+                    (namespace, name)
+                };
+                let enabled = namespace.as_deref().is_none_or(|ns| match ns {
+                    "gnu" => self.sema.lang.gnu,
+                    "clang" => self.sema.lang.clang,
+                    _ => false,
+                });
+                if enabled {
+                    match name.as_str() {
+                        "deprecated" => out.deprecated = true,
+                        "fallthrough" => out.fallthrough = true,
+                        "maybe_unused" => out.maybe_unused = true,
+                        "nodiscard" => out.nodiscard = true,
+                        "noreturn" => out.noreturn = true,
+                        "reproducible" => out.reproducible = true,
+                        "unsequenced" => out.unsequenced = true,
+                        _ => {}
+                    }
+                }
+                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) {
+                    self.skip_balanced_parens();
+                }
+                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
+                    self.tokens.advance();
+                    continue;
+                }
+                break;
+            }
+            if !closed {
+                if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBracket))) {
+                    self.tokens.advance();
+                    if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBracket))) {
+                        self.tokens.advance();
+                    } else {
+                        let span = self.peek_span();
+                        self.fail::<()>(span, "expected `]]` to close attribute");
+                        return out;
+                    }
+                } else {
+                    let span = self.peek_span();
+                    self.fail::<()>(span, "expected `]]` to close attribute");
+                    return out;
+                }
+            }
+        }
+        out
+    }
+
     fn parse_gnu_annotations_impl(&mut self, asm_labels: bool) -> GnuAttributes {
         let mut out = GnuAttributes::default();
         loop {
+            if self.peek_std_attributes() {
+                out.std.merge(self.parse_std_attributes());
             // Both spellings are accepted: `__attribute` appears in the
             // wild next to `__attribute__` (GCC and clang take both).
-            if (self.peek_is_gnu("__attribute__") || self.peek_is_gnu("__attribute"))
+            } else if (self.peek_is_gnu("__attribute__") || self.peek_is_gnu("__attribute"))
                 && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
             {
                 out.merge(self.parse_gnu_attribute_list());
@@ -5434,6 +5559,7 @@ impl<'a> Parser<'a> {
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBrace))) {
                 break;
             }
+            self.skip_gnu_suffixes();
             let start = self.mark();
             let name = match self.tokens.peek().copied() {
                 Some(Located { val: Token::Identifier(name), .. }) => {
@@ -5445,6 +5571,7 @@ impl<'a> Parser<'a> {
                     return self.fail(span, format!("expected enumerator name, got {other:?}"));
                 }
             };
+            self.skip_gnu_suffixes();
             let value = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Assign))) {
                 self.tokens.advance();
                 let expr = self.parse_assignment_expression();
@@ -6847,6 +6974,32 @@ impl FlowVla {
     }
 }
 
+/// Standard C23 `[[...]]` attributes with a frontend effect (or a
+/// diagnostic the frontend can honor). Unknown attributes validate
+/// structurally and are ignored.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StdAttributes {
+    pub deprecated: bool,
+    pub fallthrough: bool,
+    pub maybe_unused: bool,
+    pub nodiscard: bool,
+    pub noreturn: bool,
+    pub reproducible: bool,
+    pub unsequenced: bool,
+}
+
+impl StdAttributes {
+    pub fn merge(&mut self, other: StdAttributes) {
+        self.deprecated |= other.deprecated;
+        self.fallthrough |= other.fallthrough;
+        self.maybe_unused |= other.maybe_unused;
+        self.nodiscard |= other.nodiscard;
+        self.noreturn |= other.noreturn;
+        self.reproducible |= other.reproducible;
+        self.unsequenced |= other.unsequenced;
+    }
+}
+
 /// Decoded GNU attributes: the only effects the frontend models
 /// (`packed`, which drops member alignment to 1, and `aligned(n)`, a
 /// minimum alignment). Every other attribute validates structurally
@@ -6854,6 +7007,7 @@ impl FlowVla {
 /// has no diagnostics or codegen to consume it.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct GnuAttributes {
+    pub std: StdAttributes,
     pub packed: bool,
     pub aligned: Option<u64>,
     /// `__attribute__((noinline))`: hard opt-out of call-site inlining.
@@ -6891,6 +7045,7 @@ pub(crate) struct GnuAttributes {
 
 impl GnuAttributes {
     fn merge(&mut self, other: GnuAttributes) {
+        self.std.merge(other.std);
         self.packed |= other.packed;
         self.aligned = match (self.aligned, other.aligned) {
             (Some(a), Some(b)) => Some(a.max(b)),

@@ -2008,6 +2008,12 @@ impl Sema {
                     let text = interner.resolve(*name).unwrap_or("?");
                     return Err(CompileError::new(format!("typedef name '{text}' used as a value"), span));
                 }
+                if self.std_attrs.get(&id).is_some_and(|attrs| attrs.deprecated) {
+                    let text = interner.resolve(*name).unwrap_or("?");
+                    self.warnings
+                        .borrow_mut()
+                        .push(CompileError::warning(format!("'{text}' is deprecated"), span));
+                }
                 Ok(CheckedExpr {
                     ty: binding.ty.clone(),
                     span,

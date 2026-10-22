@@ -300,6 +300,18 @@ fn has_attribute(name: &str) -> bool {
     )
 }
 
+/// Standard C23 attributes the frontend parses, plus `gnu::`/`clang::`
+/// spellings that share an existing `__attribute__` implementation.
+fn has_c_attribute(name: &str) -> bool {
+    if let Some((namespace, bare)) = name.split_once("::") {
+        return matches!(namespace, "gnu" | "clang") && has_attribute(bare);
+    }
+    matches!(
+        name.trim_matches('_'),
+        "deprecated" | "fallthrough" | "maybe_unused" | "nodiscard" | "noreturn" | "reproducible" | "unsequenced"
+    )
+}
+
 fn is_location_name(name: &str) -> bool {
     matches!(
         name,
@@ -1199,9 +1211,10 @@ impl<'a, 'b> Expander<'a, 'b> {
             "__has_attribute" | "__has_declspec_attribute" => {
                 i64::from(has_attribute(render_raw(&arg_toks, self.interner).trim()))
             }
-            // `[[...]]` is not parsed yet; claiming an attribute would
-            // send headers down a path the frontend cannot compile.
-            "__has_c_attribute" | "__has_cpp_attribute" => 0,
+            "__has_c_attribute" => i64::from(has_c_attribute(render_raw(&arg_toks, self.interner).trim())),
+            // C++ attributes are not part of C23; keep this false rather
+            // than claiming the C spellings through the C++ probe.
+            "__has_cpp_attribute" => 0,
             // No `-W` names are modeled.
             "__has_warning" => 0,
             "__has_embed" => self.eval_has_embed(&arg_toks, &loc)?,

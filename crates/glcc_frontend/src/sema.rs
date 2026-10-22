@@ -295,6 +295,8 @@ pub struct Sema {
     /// C23 `constexpr` values, usable in constant expressions such as
     /// array bounds even though they live in objects.
     pub constexprs: HashMap<DeclId, crate::eval::Value>,
+    /// C23 `[[...]]` attributes attached to declarations.
+    pub std_attrs: HashMap<DeclId, crate::parse::StdAttributes>,
     /// GNU label addresses (`&&label`) and computed `goto`: one small
     /// id per label spelling, assigned when the label is defined (so
     /// ids run in definition order) and keyed by spelling, with the
@@ -388,6 +390,7 @@ impl Sema {
             bodies: HashMap::new(),
             inits: HashMap::new(),
             constexprs: HashMap::new(),
+            std_attrs: HashMap::new(),
             label_ids: HashMap::new(),
             vla_bounds: Vec::new(),
             address_taken: RefCell::new(HashSet::new()),

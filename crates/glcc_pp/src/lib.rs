@@ -1284,7 +1284,14 @@ mod tests {
         assert!(got.contains("int b = 0;"), "{got}");
         assert!(got.contains("int c = 1;"), "{got}");
         assert!(got.contains("int d = 0;"), "{got}");
-        assert!(got.contains("int e = 0;"), "{got}");
+        assert!(got.contains("int e = 1;"), "{got}");
+    }
+
+    #[test]
+    fn has_c_attribute_is_a_closed_table() {
+        let src = "#if __has_c_attribute(nodiscard) && __has_c_attribute(deprecated) && !__has_c_attribute(no_such_attr) && __has_c_attribute(gnu::packed)\nint a = 1;\n#else\nint a = 0;\n#endif\n";
+        let got = pp(src).unwrap();
+        assert!(got.contains("int a = 1;"), "{got}");
     }
 
     #[test]
