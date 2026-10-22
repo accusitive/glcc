@@ -22,6 +22,12 @@ pub enum ControlLine {
     Elif {
         condition: Vec<Tok>,
     },
+    ElifDef {
+        macro_name: String,
+    },
+    ElifNDef {
+        macro_name: String,
+    },
     Else,
     EndIf,
     DefineFunction {
@@ -74,6 +80,16 @@ pub enum TokenTree {
     },
     Elif {
         condition: Vec<Tok>,
+        body: Vec<TokenTree>,
+        opposition: Box<TokenTree>,
+    },
+    ElifDef {
+        macro_name: String,
+        body: Vec<TokenTree>,
+        opposition: Box<TokenTree>,
+    },
+    ElifNDef {
+        macro_name: String,
         body: Vec<TokenTree>,
         opposition: Box<TokenTree>,
     },
@@ -158,11 +174,25 @@ impl IntoTokenTree {
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
                 Ok(Some(TokenTree::IfNDef { macro_name, body, opposition }))
             }
-            ControlLine::Elif { .. } | ControlLine::Else if !self.expecting_opposition => Err(err(format!("{file}:{}: #elif/#else without #if", tok.line))),
+            ControlLine::Elif { .. } | ControlLine::ElifDef { .. } | ControlLine::ElifNDef { .. } | ControlLine::Else
+                if !self.expecting_opposition =>
+            {
+                Err(err(format!("{file}:{}: #elif/#else without #if", tok.line)))
+            }
             ControlLine::Elif { condition } => {
                 let body = self.until_closer(file, interner)?;
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
                 Ok(Some(TokenTree::Elif { condition, body, opposition }))
+            }
+            ControlLine::ElifDef { macro_name } => {
+                let body = self.until_closer(file, interner)?;
+                let opposition = Box::new(self.maybe_opposition(file, interner)?);
+                Ok(Some(TokenTree::ElifDef { macro_name, body, opposition }))
+            }
+            ControlLine::ElifNDef { macro_name } => {
+                let body = self.until_closer(file, interner)?;
+                let opposition = Box::new(self.maybe_opposition(file, interner)?);
+                Ok(Some(TokenTree::ElifNDef { macro_name, body, opposition }))
             }
             ControlLine::Else => {
                 let body = self.until_closer(file, interner)?;
@@ -217,6 +247,20 @@ impl IntoTokenTree {
                 self.expecting_opposition = false;
                 Ok(TokenTree::Elif { condition, body, opposition })
             }
+            ControlLine::ElifDef { macro_name } => {
+                self.expecting_opposition = true;
+                let body = self.until_closer(file, interner)?;
+                let opposition = Box::new(self.maybe_opposition(file, interner)?);
+                self.expecting_opposition = false;
+                Ok(TokenTree::ElifDef { macro_name, body, opposition })
+            }
+            ControlLine::ElifNDef { macro_name } => {
+                self.expecting_opposition = true;
+                let body = self.until_closer(file, interner)?;
+                let opposition = Box::new(self.maybe_opposition(file, interner)?);
+                self.expecting_opposition = false;
+                Ok(TokenTree::ElifNDef { macro_name, body, opposition })
+            }
             ControlLine::Else => {
                 self.expecting_opposition = true;
                 let body = self.until_closer(file, interner)?;
@@ -260,7 +304,7 @@ fn directive_kind(rest: &[Tok], interner: &Interner) -> Kind {
     };
     match interner.resolve(sym).unwrap_or("") {
         "endif" => Kind::EndIf,
-        "elif" => Kind::Elif,
+        "elif" | "elifdef" | "elifndef" => Kind::Elif,
         "else" => Kind::Else,
         _ => Kind::Other,
     }
@@ -319,6 +363,19 @@ pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Intern
         }
         "if" => Ok(ControlLine::If { condition: tail.to_vec() }),
         "elif" => Ok(ControlLine::Elif { condition: tail.to_vec() }),
+        "elifdef" | "elifndef" => {
+            let [m] = tail_args.as_slice() else {
+                return Err(err(format!("{loc}: malformed #{name} (expected one macro name)")));
+            };
+            let Some(n) = ident_name(m, interner) else {
+                return Err(err(format!("{loc}: malformed #{name} (expected one macro name)")));
+            };
+            if name == "elifdef" {
+                Ok(ControlLine::ElifDef { macro_name: n.to_string() })
+            } else {
+                Ok(ControlLine::ElifNDef { macro_name: n.to_string() })
+            }
+        }
         "else" => {
             if !tail_args.is_empty() {
                 return Err(err(format!("{loc}: junk after #else")));

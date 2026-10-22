@@ -1213,6 +1213,28 @@ mod tests {
     }
 
     #[test]
+    fn elifdef_and_elifndef_select_branches() {
+        let src = "#define B 1\n\
+                   #if 0\nint a = 1;\n\
+                   #elifdef B\nint b = 1;\n\
+                   #elifndef C\nint c = 1;\n\
+                   #else\nint d = 1;\n\
+                   #endif\n\
+                   #if 0\nint e = 1;\n\
+                   #elifdef MISSING\nint f = 1;\n\
+                   #elifndef ALSO_MISSING\nint g = 1;\n\
+                   #else\nint h = 1;\n\
+                   #endif\n";
+        let got = pp(src).unwrap();
+        assert!(got.contains("int b = 1;"), "{got}");
+        assert!(!got.contains("int c = 1;"), "{got}");
+        assert!(!got.contains("int d = 1;"), "{got}");
+        assert!(got.contains("int g = 1;"), "{got}");
+        assert!(!got.contains("int f = 1;"), "{got}");
+        assert!(!got.contains("int h = 1;"), "{got}");
+    }
+
+    #[test]
     fn has_builtin_and_attribute_are_closed_tables() {
         let src = "#if __has_builtin(__builtin_expect)\nint a = 1;\n#else\nint a = 0;\n#endif\n\
                    #if __has_builtin(__builtin_stdc_leading_zeros)\nint b = 1;\n#else\nint b = 0;\n#endif\n\

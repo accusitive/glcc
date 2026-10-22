@@ -752,6 +752,16 @@ impl<'a, 'b> Expander<'a, 'b> {
                 let trees = if take { body } else { vec![*opposition] };
                 self.trees.prepend_extend(trees.into_iter());
             }
+            TokenTree::ElifDef { macro_name, body, opposition } => {
+                let hit = self.is_defined_name(&macro_name);
+                let trees = if hit { body } else { vec![*opposition] };
+                self.trees.prepend_extend(trees.into_iter());
+            }
+            TokenTree::ElifNDef { macro_name, body, opposition } => {
+                let hit = self.is_defined_name(&macro_name);
+                let trees = if hit { vec![*opposition] } else { body };
+                self.trees.prepend_extend(trees.into_iter());
+            }
             TokenTree::Else { body } => {
                 self.trees.prepend_extend(body.into_iter());
             }
@@ -1680,7 +1690,13 @@ impl<'a, 'b> Expander<'a, 'b> {
                 self.handle_include(&header, verbatim, next)?;
             }
             ControlLine::Empty | ControlLine::EndIf => {}
-            ControlLine::IfDef { .. } | ControlLine::IfNDef { .. } | ControlLine::If { .. } | ControlLine::Elif { .. } | ControlLine::Else => {
+            ControlLine::IfDef { .. }
+            | ControlLine::IfNDef { .. }
+            | ControlLine::If { .. }
+            | ControlLine::Elif { .. }
+            | ControlLine::ElifDef { .. }
+            | ControlLine::ElifNDef { .. }
+            | ControlLine::Else => {
                 // Built by the tree layer into If-nodes; never observed here.
             }
         }
