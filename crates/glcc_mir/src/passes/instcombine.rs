@@ -97,6 +97,8 @@ enum Plan {
     MulConst(Value, i128),
     /// `!v` for a `Bool`-typed `v`, as `icmp.Eq v, 0`.
     BoolNot(Value),
+    /// Compare `v` against zero (`Eq` when `equal`, otherwise `Ne`).
+    CompareZero { value: Value, equal: bool },
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
@@ -273,6 +275,12 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind) -> Option<Plan> {
             if let Some(plan) = bool_zero_compare(func, *pred, *lhs, *rhs) {
                 return Some(plan);
             }
+            if let Some(plan) = unsigned_zero_bound(func, *pred, *lhs, *rhs) {
+                return Some(plan);
+            }
+            if let Some(plan) = narrow_widened_compare(func, *pred, *lhs, *rhs) {
+                return Some(plan);
+            }
             let (pred, zext_side, zero_side) = (*pred, *lhs, *rhs);
             for (maybe_zext, maybe_zero) in [(zext_side, zero_side), (zero_side, zext_side)] {
                 if !is_int_zero(func, maybe_zero) {
@@ -344,6 +352,15 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::Mul(v, push_int_const(func, &ty, value)))
         }
+        Plan::CompareZero { value, equal } => {
+            let ty = func.values[value].ty.clone();
+            let zero = push_int_const(func, &ty, 0);
+            Plan::Inst(InstKind::Icmp {
+                pred: if equal { IcmpPred::Eq } else { IcmpPred::Ne },
+                lhs: value,
+                rhs: zero,
+            })
+        }
         other => other,
     };
     match plan {
@@ -376,7 +393,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             out.push(new);
             replacement
         }
-        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) | Plan::AddConst(..) | Plan::SubConst(..) | Plan::MulConst(..) => {
+        Plan::BoolNot(_) | Plan::ShlBy(..) | Plan::LshrBy(..) | Plan::AndConst(..) | Plan::AddConst(..) | Plan::SubConst(..) | Plan::MulConst(..) | Plan::CompareZero { .. } => {
             unreachable!("normalized above")
         }
     }
@@ -451,6 +468,75 @@ fn bool_zero_compare(func: &Function, outer: IcmpPred, lhs: Value, rhs: Value) -
         },
         _ => None,
     }
+}
+
+/// Unsigned comparisons against zero have a fixed truth value or reduce
+/// to an equality test (`x <= 0` is `x == 0`, `0 < x` is `x != 0`).
+fn unsigned_zero_bound(func: &Function, pred: IcmpPred, lhs: Value, rhs: Value) -> Option<Plan> {
+    let rhs_zero = is_int_zero(func, rhs);
+    let lhs_zero = is_int_zero(func, lhs);
+    if !rhs_zero && !lhs_zero {
+        return None;
+    }
+    let compare_zero = |value, equal| {
+        Some(Plan::CompareZero {
+            value,
+            equal,
+        })
+    };
+    match (pred, rhs_zero) {
+        (IcmpPred::Ult, true) | (IcmpPred::Ugt, false) => Some(Plan::Const(Const::Int { bits: 1, value: 0 })),
+        (IcmpPred::Uge, true) | (IcmpPred::Ule, false) => Some(Plan::Const(Const::Int { bits: 1, value: 1 })),
+        (IcmpPred::Ule, true) => compare_zero(lhs, true),
+        (IcmpPred::Uge, false) => compare_zero(rhs, true),
+        (IcmpPred::Ugt, true) => compare_zero(lhs, false),
+        (IcmpPred::Ult, false) => compare_zero(rhs, false),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Widening {
+    Zero,
+    Sign,
+}
+
+/// The narrow value a `Zext` or `Sext` promotes, keeping track of which
+/// extension was used so order predicates can be mapped soundly.
+fn widening_source(func: &Function, value: Value) -> Option<(Value, Widening)> {
+    let inst = def_inst(func, value)?;
+    match &func.insts[inst].kind {
+        InstKind::Zext(source) => Some((*source, Widening::Zero)),
+        InstKind::Sext(source) => Some((*source, Widening::Sign)),
+        _ => None,
+    }
+}
+
+/// Compare promoted integers at their original width. Zero extension makes
+/// signed predicates behave like unsigned ones in the wide type; sign
+/// extension preserves both orders.
+fn narrow_widened_compare(func: &Function, pred: IcmpPred, lhs: Value, rhs: Value) -> Option<Plan> {
+    let (narrow_lhs, left) = widening_source(func, lhs)?;
+    let (narrow_rhs, right) = widening_source(func, rhs)?;
+    if func.values[narrow_lhs].ty != func.values[narrow_rhs].ty || !matches!(func.values[narrow_lhs].ty, Ty::Int { .. }) {
+        return None;
+    }
+    let pred = match (left, right) {
+        (Widening::Zero, Widening::Zero) => match pred {
+            IcmpPred::Slt => IcmpPred::Ult,
+            IcmpPred::Sle => IcmpPred::Ule,
+            IcmpPred::Sgt => IcmpPred::Ugt,
+            IcmpPred::Sge => IcmpPred::Uge,
+            other => other,
+        },
+        (Widening::Sign, Widening::Sign) => pred,
+        _ => return None,
+    };
+    Some(Plan::Inst(InstKind::Icmp {
+        pred,
+        lhs: narrow_lhs,
+        rhs: narrow_rhs,
+    }))
 }
 
 fn invert_icmp(pred: IcmpPred) -> IcmpPred {
@@ -1076,6 +1162,95 @@ mod tests {
                 assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: 24 }));
             }
             other => panic!("expected product, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsigned_comparisons_against_zero_fold() {
+        for (pred, truth) in [(IcmpPred::Ult, false), (IcmpPred::Uge, true)] {
+            let (mut func, entry, x) = int_func();
+            let zero = iconst(&mut func, 32, 0);
+            let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: x, rhs: zero }, Ty::Bool);
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+            assert!(run(&mut func), "{pred:?}");
+            assert_eq!(func.const_value(returned(&func)), Some(&Const::Int { bits: 1, value: i128::from(truth) }));
+        }
+
+        for (pred, equal) in [(IcmpPred::Ule, true), (IcmpPred::Ugt, false)] {
+            let (mut func, entry, x) = int_func();
+            let zero = iconst(&mut func, 32, 0);
+            let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: x, rhs: zero }, Ty::Bool);
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+            assert!(run(&mut func), "{pred:?}");
+            let inst = def_inst(&func, returned(&func)).expect("rebuilt comparison");
+            match &func.insts[inst].kind {
+                InstKind::Icmp { pred: narrowed, lhs, rhs } => {
+                    assert_eq!(*narrowed, if equal { IcmpPred::Eq } else { IcmpPred::Ne });
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: 0 }));
+                }
+                other => panic!("expected comparison, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn zero_extension_comparisons_narrow() {
+        let sig = Signature::new(vec![Ty::int(8), Ty::int(8)], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let x = param(&mut func, entry, Ty::int(8), 0);
+        let y = param(&mut func, entry, Ty::int(8), 1);
+        let left = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+        let right = emit(&mut func, entry, InstKind::Zext(y), Ty::int(32));
+        let cmp = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: left,
+                rhs: right,
+            },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt comparison");
+        match &func.insts[inst].kind {
+            InstKind::Icmp { pred, lhs, rhs } => {
+                assert_eq!(*pred, IcmpPred::Ult);
+                assert_eq!((*lhs, *rhs), (x, y));
+            }
+            other => panic!("expected comparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sign_extension_comparisons_keep_their_order() {
+        let sig = Signature::new(vec![Ty::int(8), Ty::int(8)], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let x = param(&mut func, entry, Ty::int(8), 0);
+        let y = param(&mut func, entry, Ty::int(8), 1);
+        let left = emit(&mut func, entry, InstKind::Sext(x), Ty::int(32));
+        let right = emit(&mut func, entry, InstKind::Sext(y), Ty::int(32));
+        let cmp = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Ugt,
+                lhs: left,
+                rhs: right,
+            },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt comparison");
+        match &func.insts[inst].kind {
+            InstKind::Icmp { pred, lhs, rhs } => {
+                assert_eq!(*pred, IcmpPred::Ugt);
+                assert_eq!((*lhs, *rhs), (x, y));
+            }
+            other => panic!("expected comparison, got {other:?}"),
         }
     }
 
