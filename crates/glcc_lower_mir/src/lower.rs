@@ -7450,6 +7450,42 @@ mod tests {
         assert_eq!(jit_run_main(module), 1);
     }
 
+    /// A short-circuit `&&`/`||` whose right side is side-effect-free
+    /// becomes a select, then a bitwise operation over the normalized
+    /// comparisons.
+    #[test]
+    fn optimized_pipeline_if_converts_boolean_operators() {
+        let src = "__attribute__((noinline)) int land(int a, int b) { return (a > 0) && (b > 0); }\n\
+                   __attribute__((noinline)) int lor(int a, int b) { return (a > 0) || (b > 0); }\n\
+                   int main() {\n\
+                       return land(1, 2) + land(1, -1) + lor(1, -1) + lor(-1, -1);\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for (name, expected) in [("land", "and"), ("lor", "or")] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let kinds: Vec<&mir::InstKind> = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .map(|inst| &func.insts[*inst].kind)
+                .collect();
+            assert!(
+                kinds.iter().any(|kind| match (expected, kind) {
+                    ("and", mir::InstKind::And(..)) | ("or", mir::InstKind::Or(..)) => true,
+                    _ => false,
+                }),
+                "{name} did not become a bitwise operation:\n{dump}"
+            );
+            assert!(
+                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
+                "{name} kept a select:\n{dump}"
+            );
+        }
+        assert_eq!(jit_run_main(module), 2);
+    }
+
     /// Comparisons against a constant narrow to the source width with
     /// the right signedness, and constants outside the source range
     /// collapse to a fixed truth value.

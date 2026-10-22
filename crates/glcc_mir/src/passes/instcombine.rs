@@ -332,7 +332,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             match int_const(func, *cond) {
                 Some((_, 0)) => Some(Plan::Value(*else_val)),
                 Some(_) => Some(Plan::Value(*then_val)),
-                None => None,
+                None => select_boolean_arm(func, *cond, *then_val, *else_val),
             }
         }
         InstKind::GetElementPtr { base, indices } if indices.is_empty() && func.values[*base].ty == *result_ty => Some(Plan::Value(*base)),
@@ -552,6 +552,33 @@ fn zext_bool(func: &Function, v: Value) -> Option<Value> {
     match &func.insts[inst].kind {
         InstKind::Zext(x) if func.values[*x].ty == Ty::Bool => Some(*x),
         _ => None,
+    }
+}
+
+/// A value that is `cond` itself or its zero extension.
+fn cond_value(func: &Function, value: Value, cond: Value) -> bool {
+    value == cond || zext_bool(func, value) == Some(cond)
+}
+
+/// Values guaranteed to be 0 or 1 at the result width.
+fn bool_valued(func: &Function, value: Value) -> bool {
+    func.values[value].ty == Ty::Bool
+        || matches!(int_const(func, value), Some((_, 0 | 1)))
+        || zext_bool(func, value).is_some()
+}
+
+/// `select c, x, zext(c)` is `x & zext(c)` when `x` is 0/1, and
+/// `select c, zext(c), x` is `x | zext(c)`.
+fn select_boolean_arm(func: &Function, cond: Value, then_val: Value, else_val: Value) -> Option<Plan> {
+    if func.values[cond].ty != Ty::Bool {
+        return None;
+    }
+    if cond_value(func, else_val, cond) && bool_valued(func, then_val) {
+        Some(Plan::Inst(InstKind::And(else_val, then_val)))
+    } else if cond_value(func, then_val, cond) && bool_valued(func, else_val) {
+        Some(Plan::Inst(InstKind::Or(then_val, else_val)))
+    } else {
+        None
     }
 }
 
@@ -1249,6 +1276,76 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), x);
+    }
+
+    #[test]
+    fn select_with_a_condition_arm_becomes_bitwise() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let x = param(&mut func, entry, Ty::Bool, 1);
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val: x, else_val: cond },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt boolean op");
+        assert!(matches!(func.insts[inst].kind, InstKind::And(a, b) if a == cond && b == x));
+
+        let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::Bool);
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let x = param(&mut func, entry, Ty::Bool, 1);
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val: cond, else_val: x },
+            Ty::Bool,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt boolean op");
+        assert!(matches!(func.insts[inst].kind, InstKind::Or(a, b) if a == cond && b == x));
+    }
+
+    #[test]
+    fn select_of_zero_extended_arms_becomes_bitwise() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let x = param(&mut func, entry, Ty::Bool, 1);
+        let cond_wide = emit(&mut func, entry, InstKind::Zext(cond), Ty::int(32));
+        let x_wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val: x_wide, else_val: cond_wide },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt bitwise op");
+        assert!(matches!(func.insts[inst].kind, InstKind::And(a, b) if a == cond_wide && b == x_wide));
+
+        let sig = Signature::new(vec![Ty::Bool, Ty::Bool], Ty::int(32));
+        let (mut func, entry) = Function::new("f", sig);
+        let cond = param(&mut func, entry, Ty::Bool, 0);
+        let x = param(&mut func, entry, Ty::Bool, 1);
+        let cond_wide = emit(&mut func, entry, InstKind::Zext(cond), Ty::int(32));
+        let x_wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
+        let sel = emit(
+            &mut func,
+            entry,
+            InstKind::Select { cond, then_val: cond_wide, else_val: x_wide },
+            Ty::int(32),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt bitwise op");
+        assert!(matches!(func.insts[inst].kind, InstKind::Or(a, b) if a == cond_wide && b == x_wide));
     }
 
     #[test]
