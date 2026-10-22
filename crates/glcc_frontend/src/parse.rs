@@ -4871,13 +4871,18 @@ impl<'a> Parser<'a> {
         out
     }
 
-    /// Whether the next token is a `_Static_assert` keyword (C11 and
-    /// later; gated off under `-std=c89`/`c99`).
+    /// Whether the next token is a `_Static_assert`/`static_assert`
+    /// keyword (`_Static_assert` needs C11, the bare C23 spelling needs
+    /// C23).
     fn peek_is_static_assert(&self) -> bool {
-        matches!(
-            self.tokens.peek_val(),
-            Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("_Static_assert")
-        ) && self.sema.lang.standard_includes(Std::C11)
+        match self.tokens.peek_val() {
+            Some(Token::Identifier(sym)) => match self.intern.resolve(*sym) {
+                Some("_Static_assert") => self.sema.lang.standard_includes(Std::C11),
+                Some("static_assert") => self.sema.lang.standard_includes(Std::C23),
+                _ => false,
+            },
+            _ => false,
+        }
     }
 
     /// `_Static_assert ( constant-expression , string-literal ) ;`
@@ -5857,13 +5862,14 @@ impl<'a> Parser<'a> {
                 };
             }
         }
-        let is_alignof = matches!(
-            self.tokens.peek_val(),
-            Some(Token::Identifier(sym)) if matches!(
-                self.intern.resolve(*sym),
-                Some("__alignof__" | "__alignof" | "_Alignof")
-            )
-        );
+        let is_alignof = match self.tokens.peek_val() {
+            Some(Token::Identifier(sym)) => match self.intern.resolve(*sym) {
+                Some("__alignof__" | "__alignof" | "_Alignof") => true,
+                Some("alignof") => self.sema.lang.standard_includes(Std::C23),
+                _ => false,
+            },
+            _ => false,
+        };
         if is_alignof {
             self.tokens.advance();
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) && self.paren_starts_type_name() && !self.paren_starts_compound_literal() {

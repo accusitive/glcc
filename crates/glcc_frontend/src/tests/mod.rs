@@ -3213,7 +3213,11 @@ fn checked_init(src: &str) -> Initializer {
 
 /// The folded value of the enumerator `name` in `src`.
 fn enum_value_of(src: &str, name: &str) -> i128 {
-    let mut sema = Sema::new();
+    enum_value_of_with_lang(src, name, LangOpts::default())
+}
+
+fn enum_value_of_with_lang(src: &str, name: &str, lang: LangOpts) -> i128 {
+    let mut sema = gated_sema(lang);
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3449,6 +3453,26 @@ fn static_assert_checks_and_disappears() {
     let [BlockItem::Stmt(Stmt::Empty { .. }), BlockItem::Stmt(_)] = body.block.items.as_slice() else {
         panic!("expected the static assert to vanish, got {:?}", body.block.items)
     };
+}
+
+#[test]
+fn c23_bare_static_assert() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang("static_assert(1);", c23).is_empty());
+    assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1, \"ok\"); }", c23).is_empty());
+    let diags = tu_diagnostics_with_lang("static_assert(0, \"boom\");", c23);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.is_error() && d.message.contains("static assertion failed: \"boom\"")),
+        "missing failure: {diags:#?}"
+    );
+    assert!(!tu_diagnostics("static_assert(1);").is_empty());
 }
 
 #[test]
@@ -4936,6 +4960,18 @@ fn alignof_folds() {
         struct_size_of("struct M { long long a __attribute__((__aligned__(__alignof__(long long)))); char c; };", "M"),
         (16, 8)
     );
+}
+
+#[test]
+fn c23_bare_alignof() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert_eq!(enum_value_of_with_lang("enum { N = alignof(long long) };", "N", c23), 8);
+    assert_eq!(enum_value_of_with_lang("int x; enum { N = alignof x };", "N", c23), 4);
 }
 
 #[test]
