@@ -1612,9 +1612,31 @@ mod tests {
     }
 
     #[test]
-    fn va_opt_fails_loudly() {
-        let err = pp("#define F(...) __VA_OPT__(x)\nF(1)\n").unwrap_err();
-        assert!(err.0.contains("__VA_OPT__"), "{err}");
+    fn va_opt_expands_only_for_a_nonempty_pack() {
+        let src = "#define F(...) f(0 __VA_OPT__(,) __VA_ARGS__)\n\
+                   #define G(x, ...) g(x __VA_OPT__(, __VA_ARGS__))\n\
+                   #define H(...) h(__VA_OPT__(a) b)\n\
+                   F();\nF(1, 2);\nG(3);\nG(3, 4);\nH();\nH(1);\n";
+        let got = pp(src).unwrap();
+        assert!(got.contains("f(0  );"), "{got}");
+        assert!(got.contains("f(0 , 1,2);"), "{got}");
+        assert!(got.contains("g(3 );"), "{got}");
+        assert!(got.contains("g(3 , 4);"), "{got}");
+        assert!(got.contains("h( b);"), "{got}");
+        assert!(got.contains("h(a b);"), "{got}");
+    }
+
+    #[test]
+    fn va_opt_pastes_and_keeps_line_starts() {
+        let src = "#define CAT(a, ...) a ## __VA_OPT__(b)\n\
+                   #define CAT2(...) __VA_OPT__(x) ## y\n\
+                   CAT(p,);\nCAT(p,1);\nCAT2();\nCAT2(1);\n\
+                   int a;\n#define E(...) __VA_OPT__(x) y\nE()\nint b;\n";
+        let got = pp(src).unwrap();
+        let lines: Vec<&str> = got.lines().map(|line| line.trim().trim_end_matches(';')).collect();
+        for want in ["p", "pb", "y", "xy"] {
+            assert!(lines.contains(&want), "missing {want:?}: {got}");
+        }
     }
 
     #[test]

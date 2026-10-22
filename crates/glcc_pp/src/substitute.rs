@@ -170,6 +170,34 @@ impl<'a> ArgumentSubstitution<'a> {
                 return Ok(Some(Vec::new()));
             }
         }
+        if !tok_is_ws(&tok) {
+            if let PpToken::Ident(sym) = tok.tok {
+                let name = self.interner.resolve(sym).unwrap_or("");
+                if self.is_variadic && name == "__VA_OPT__" {
+                    self.pos += 1;
+                    let (open, close) = self.va_opt_group()?;
+                    if self.va_empty() {
+                        self.replacements.drain(open..=close);
+                        self.pos = open;
+                        if self.glue_open {
+                            if matches!(self.peek_non_ws().map(|t| &t.tok), Some(PpToken::Punct(Punctuator::HashHash))) {
+                                self.eat_hashhash();
+                                return Ok(Some(Vec::new()));
+                            }
+                            return self.finish_chain(Vec::new());
+                        }
+                        if matches!(self.peek_non_ws().map(|t| &t.tok), Some(PpToken::Punct(Punctuator::HashHash))) {
+                            self.eat_hashhash();
+                        }
+                        return Ok(Some(Vec::new()));
+                    }
+                    let inner = self.replacements[open + 1..close].to_vec();
+                    self.replacements.splice(open..=close, inner);
+                    self.pos = open;
+                    return Ok(Some(Vec::new()));
+                }
+            }
+        }
         self.pos += 1;
         // Right operand of an open paste chain.
         if self.glue_open {
@@ -249,9 +277,6 @@ impl<'a> ArgumentSubstitution<'a> {
             }
             PpToken::Ident(sym) => {
                 let name = self.interner.resolve(*sym).unwrap_or("").to_string();
-                if self.is_variadic && name == "__VA_OPT__" {
-                    return Err(crate::err("'__VA_OPT__' is not supported by native pp yet"));
-                }
                 if self.is_variadic && self.named_variadic.is_none() && name == "__VA_ARGS__" {
                     let mut joined: Vec<Tok> = Vec::new();
                     for (i, extra) in self.extras.iter().enumerate() {
@@ -290,6 +315,32 @@ impl<'a> ArgumentSubstitution<'a> {
             tok.space = true;
         }
         tok
+    }
+
+    /// The parenthesized group after a `__VA_OPT__` identifier: returns
+    /// the indices of its `(` and matching `)`.
+    fn va_opt_group(&self) -> Result<(usize, usize), crate::PpError> {
+        let mut open = self.pos;
+        while open < self.replacements.len() && tok_is_ws(&self.replacements[open]) {
+            open += 1;
+        }
+        if !matches!(self.replacements.get(open).map(|t| &t.tok), Some(PpToken::Punct(Punctuator::LParen))) {
+            return Err(crate::err("'__VA_OPT__' must be followed by '('"));
+        }
+        let mut depth = 0u32;
+        for (i, tok) in self.replacements.iter().enumerate().skip(open) {
+            match tok.tok {
+                PpToken::Punct(Punctuator::LParen) => depth += 1,
+                PpToken::Punct(Punctuator::RParen) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok((open, i));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Err(crate::err("unterminated '__VA_OPT__('"))
     }
 
     /// Is this identifier the variadic parameter (`__VA_ARGS__` or the

@@ -954,6 +954,7 @@ impl<'a, 'b> Expander<'a, 'b> {
             sub.run()?
         };
         let mut out = Vec::new();
+        let first = substituted.iter().position(|t| !tok_is_ws(t));
         for (i, s) in substituted.into_iter().enumerate() {
             let mut tok = s;
             tok.line = name.line;
@@ -962,8 +963,9 @@ impl<'a, 'b> Expander<'a, 'b> {
             tok.lined = true;
             tok.expanded = true;
             // clang `TokenLexer::Lex`: the first emitted token takes the
-            // macro name's `StartOfLine`/`LeadingSpace`.
-            if i == 0 {
+            // macro name's `StartOfLine`/`LeadingSpace`. Whitespace from
+            // an elided `__VA_OPT__` must not claim it.
+            if Some(i) == first {
                 tok.sol = name.sol;
                 tok.space = name.space;
             }
@@ -1465,6 +1467,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         // at the `)` for a function-like macro, and `__LINE__` resolves
         // through the range's end.
         let end_line = rparen.map_or(t.end_line, |r| r.end_line);
+        let first = substituted.iter().position(|t| !tok_is_ws(t));
         for (i, s) in substituted.into_iter().enumerate() {
             let mut tok = s;
             tok.line = t.line;
@@ -1473,8 +1476,9 @@ impl<'a, 'b> Expander<'a, 'b> {
             tok.lined = true;
             tok.expanded = true;
             // clang `TokenLexer::Lex`: the first emitted token takes the
-            // macro name's `StartOfLine`/`LeadingSpace`.
-            if i == 0 {
+            // macro name's `StartOfLine`/`LeadingSpace`. Whitespace from
+            // an elided `__VA_OPT__` must not claim it.
+            if Some(i) == first {
                 tok.sol = t.sol;
                 tok.space = t.space;
             }
