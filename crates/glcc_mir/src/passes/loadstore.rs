@@ -8,10 +8,12 @@
 //! `DeadStoreElim` only removes writes, never reads.
 //!
 //! Addresses compare by `address_info` when both resolve to the same
-//! stack slot or global at a constant offset, and by SSA identity
-//! otherwise. Writes invalidate every potentially aliasing entry using
-//! the same stack-slot escape rules as `DeadStoreElim`. Calls, inline
-//! asm, volatile accesses, and aggregate copies are barriers.
+//! stack slot, global, or allocation at a constant offset, and by SSA
+//! identity otherwise. Writes invalidate every potentially aliasing
+//! entry using the same stack-slot escape rules as `DeadStoreElim`.
+//! Calls, inline asm, volatile accesses, and aggregate copies are
+//! barriers unless an extern's [`ExternEffect`](crate::ir::ExternEffect)
+//! promises it does not write program-visible memory.
 
 use std::collections::HashSet;
 
@@ -110,6 +112,7 @@ fn forward_block(func: &mut Function, block: Block, non_escaping: &HashSet<Value
             // Division may trap but does not touch memory; treating it as
             // a barrier would discard valid loads for no safety gain.
             InstKind::Udiv(..) | InstKind::Sdiv(..) | InstKind::Urem(..) | InstKind::Srem(..) => Action::Keep,
+            InstKind::CallExtern { target, .. } if !func.extern_effect(*target).writes => Action::Keep,
             kind if kind.is_pure() => Action::Keep,
             _ => Action::Barrier,
         };
@@ -289,6 +292,81 @@ mod tests {
 
         assert!(run(&mut func), "the dead call no longer makes the slot escape");
         assert_eq!(returned(&func), five);
+    }
+
+    #[test]
+    fn neutral_extern_does_not_block_forwarding() {
+        let (mut func, entry, p) = ptr_func();
+        func.set_extern_effects(&[crate::ir::ExternEffect::neutral()]);
+        let five = int_const(&mut func, 5);
+        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(&mut func, entry, InstKind::CallExtern { target: Extern::from_usize(0), args: Default::default() }, Ty::Void);
+        let loaded = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), five);
+    }
+
+    #[test]
+    fn allocator_results_do_not_alias() {
+        let sig = Signature::new(vec![], Ty::int(32));
+        let (mut func, entry) = Function::new("alloc", sig);
+        func.set_extern_effects(&[crate::ir::ExternEffect::allocator()]);
+        let size = func.push_const(Const::Int { bits: 64, value: 8 });
+        let ptr_ty = Ty::ptr(Ty::int(32));
+        let target = Extern::from_usize(0);
+        let a = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty.clone());
+        let b = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty);
+        let five = int_const(&mut func, 5);
+        let seven = int_const(&mut func, 7);
+        emit(&mut func, entry, InstKind::Store { addr: a, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(&mut func, entry, InstKind::Store { addr: b, val: seven, flags: MemFlags::plain() }, Ty::Void);
+        let loaded = emit(&mut func, entry, InstKind::Load { addr: a, flags: MemFlags::plain() }, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), five);
+    }
+
+    #[test]
+    fn pass_manager_copies_extern_effects_onto_functions() {
+        let sig = Signature::new(vec![], Ty::int(32));
+        let mut module = crate::ir::Module::new();
+        let target = module.push_extern("neutral", Signature::new(vec![], Ty::Void));
+        module.externs[target].effect = crate::ir::ExternEffect::neutral();
+        let (mut func, entry) = Function::new("caller", sig);
+        let p = param(&mut func, entry, Ty::ptr(Ty::int(32)), 0);
+        let five = int_const(&mut func, 5);
+        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(&mut func, entry, InstKind::CallExtern { target, args: Default::default() }, Ty::Void);
+        let loaded = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+        module.push_func(func);
+
+        let mut pipeline = crate::pass::PassManager::new().add_func_pass(LoadStoreForward);
+        pipeline.run(&mut module);
+        assert_eq!(returned(&module.funcs[0]), five);
+    }
+
+    #[test]
+    fn default_extern_is_not_treated_as_a_fresh_allocator() {
+        let sig = Signature::new(vec![], Ty::int(32));
+        let (mut func, entry) = Function::new("external_alloc", sig);
+        let size = func.push_const(Const::Int { bits: 64, value: 8 });
+        let ptr_ty = Ty::ptr(Ty::int(32));
+        let target = Extern::from_usize(0);
+        let a = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty.clone());
+        let b = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty);
+        let five = int_const(&mut func, 5);
+        let seven = int_const(&mut func, 7);
+        emit(&mut func, entry, InstKind::Store { addr: a, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(&mut func, entry, InstKind::Store { addr: b, val: seven, flags: MemFlags::plain() }, Ty::Void);
+        let loaded = emit(&mut func, entry, InstKind::Load { addr: a, flags: MemFlags::plain() }, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        assert!(!run(&mut func), "an unannotated extern may return an aliasing pointer");
+        assert_eq!(returned(&func), loaded);
     }
 
     #[test]

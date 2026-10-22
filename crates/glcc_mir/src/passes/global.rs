@@ -560,7 +560,7 @@ fn global_addresses(func: &Function, resident: &[bool]) -> HashMap<Value, Global
 fn global_root(func: &Function, value: Value, addresses: &HashMap<Value, Global>) -> Option<Global> {
     match address_info(func, value)?.object {
         MemoryObject::Global(root) => addresses.get(&root).copied(),
-        MemoryObject::Stack(_) => None,
+        MemoryObject::Stack(_) | MemoryObject::Heap(_) => None,
     }
 }
 

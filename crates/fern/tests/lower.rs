@@ -31,6 +31,23 @@ fn empty_program() {
 }
 
 #[test]
+fn runtime_externs_carry_memory_effects() {
+    let m = lower("");
+    let effect = |name: &str| {
+        m.externs
+            .iter()
+            .find(|data| data.name == name)
+            .unwrap_or_else(|| panic!("missing runtime extern `{name}`"))
+            .effect
+    };
+    assert_eq!(effect("fern_enter"), glcc_mir::ExternEffect::neutral());
+    assert_eq!(effect("fern_pin"), glcc_mir::ExternEffect::neutral());
+    assert_eq!(effect("fern_leave"), glcc_mir::ExternEffect::neutral());
+    assert_eq!(effect("fern_alloc"), glcc_mir::ExternEffect::allocator());
+    assert_eq!(effect("fern_str_eq"), glcc_mir::ExternEffect::read_only());
+}
+
+#[test]
 fn identity_and_call() {
     let m = lower("fun id(x : a) : a = x\nfun main() : Int = id(1)");
     assert!(has(&m, "id$$Int"));

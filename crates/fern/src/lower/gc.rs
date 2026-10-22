@@ -41,15 +41,24 @@ pub(crate) struct Runtime {
 pub(crate) fn declare(module: &mut mir::Module) -> Runtime {
     let word = mir::Ty::int(64);
     let ptr = mir::Ty::ptr(mir::Ty::Void);
+    let enter = module.push_extern("fern_enter", mir::Signature::new(vec![], word.clone()));
+    let pin = module.push_extern("fern_pin", mir::Signature::new(vec![word.clone(), word.clone(), ptr.clone()], mir::Ty::Void));
+    let leave = module.push_extern("fern_leave", mir::Signature::new(vec![word], mir::Ty::Void));
+    let alloc = module.push_extern("fern_alloc", mir::Signature::new(vec![mir::Ty::int(64)], ptr.clone()));
+    let str_eq = module.push_extern("fern_str_eq", mir::Signature::new(vec![ptr.clone(), ptr], mir::Ty::Bool));
+
+    module.externs[enter].effect = mir::ExternEffect::neutral();
+    module.externs[pin].effect = mir::ExternEffect::neutral();
+    module.externs[leave].effect = mir::ExternEffect::neutral();
+    module.externs[alloc].effect = mir::ExternEffect::allocator();
+    module.externs[str_eq].effect = mir::ExternEffect::read_only();
+
     Runtime {
-        enter: module.push_extern("fern_enter", mir::Signature::new(vec![], word.clone())),
-        pin: module.push_extern("fern_pin", mir::Signature::new(vec![word.clone(), word.clone(), ptr.clone()], mir::Ty::Void)),
-        leave: module.push_extern("fern_leave", mir::Signature::new(vec![word], mir::Ty::Void)),
-        alloc: module.push_extern("fern_alloc", mir::Signature::new(vec![mir::Ty::int(64)], ptr.clone())),
-        str_eq: module.push_extern(
-            "fern_str_eq",
-            mir::Signature::new(vec![ptr.clone(), ptr], mir::Ty::Bool),
-        ),
+        enter,
+        pin,
+        leave,
+        alloc,
+        str_eq,
     }
 }
 

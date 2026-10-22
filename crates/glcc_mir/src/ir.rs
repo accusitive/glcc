@@ -743,6 +743,10 @@ pub struct Function {
     /// Debug-only: provenance of constants a pass materialized, keyed by
     /// the fresh value. Empty outside debug-oriented dumps.
     pub origins: std::collections::HashMap<Value, ValueOrigin>,
+    /// Memory behavior of each module extern, indexed by [`Extern`].
+    /// [`PassManager`](crate::pass::PassManager) fills this before
+    /// function passes; a missing entry means [`ExternEffect::clobber`].
+    pub(crate) extern_effects: Vec<ExternEffect>,
 }
 
 impl Function {
@@ -762,10 +766,20 @@ impl Function {
             blocks: IndexVec::new(),
             entry: Block::from_usize(0),
             origins: std::collections::HashMap::new(),
+            extern_effects: Vec::new(),
         };
         let entry = func.push_block(vec![]);
         func.entry = entry;
         (func, entry)
+    }
+
+    pub(crate) fn set_extern_effects(&mut self, effects: &[ExternEffect]) {
+        self.extern_effects.clear();
+        self.extern_effects.extend_from_slice(effects);
+    }
+
+    pub(crate) fn extern_effect(&self, target: Extern) -> ExternEffect {
+        self.extern_effects.get(target.index()).copied().unwrap_or_default()
     }
 
     pub fn push_block(&mut self, param_tys: Vec<Ty>) -> Block {
@@ -1164,6 +1178,69 @@ pub struct GlobalData {
     pub debug: Option<GlobalDebug>,
 }
 
+/// How a call to an external function may touch program-visible memory.
+///
+/// The default is deliberately the most conservative answer: an import
+/// may read and write any memory the program can name. Frontends that
+/// know more about a runtime helper can opt it into narrower behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternEffect {
+    /// May read program-visible memory.
+    pub reads: bool,
+    /// May write program-visible memory.
+    pub writes: bool,
+    /// A pointer result is a fresh allocation that cannot alias any
+    /// object that was live at the call.
+    pub allocates: bool,
+}
+
+impl ExternEffect {
+    /// An ordinary external call: it may read or write anything.
+    pub const fn clobber() -> Self {
+        Self {
+            reads: true,
+            writes: true,
+            allocates: false,
+        }
+    }
+
+    /// The call has no effect on program-visible memory. It may still
+    /// have other side effects, so it is not necessarily removable.
+    pub const fn neutral() -> Self {
+        Self {
+            reads: false,
+            writes: false,
+            allocates: false,
+        }
+    }
+
+    /// The call may read program-visible memory but never writes it.
+    pub const fn read_only() -> Self {
+        Self {
+            reads: true,
+            writes: false,
+            allocates: false,
+        }
+    }
+
+    /// The call is an allocator: it may inspect existing memory (for
+    /// example, a collector tracing roots) but it does not modify it.
+    /// A pointer result is fresh and does not alias an existing object.
+    pub const fn allocator() -> Self {
+        Self {
+            reads: true,
+            writes: false,
+            allocates: true,
+        }
+    }
+}
+
+impl Default for ExternEffect {
+    fn default() -> Self {
+        Self::clobber()
+    }
+}
+
 /// A function defined outside this module: name plus signature for
 /// import. Variadic imports take the platform foreign-variadic path.
 #[derive(Debug, Clone)]
@@ -1174,6 +1251,8 @@ pub struct ExternData {
     /// marks the undefined symbol `STB_WEAK`, so the linker resolves it
     /// to zero instead of reporting it (GCC's `extern ... __attribute__((weak))`).
     pub weak: bool,
+    /// Memory behavior an optimizer may assume at call sites.
+    pub effect: ExternEffect,
 }
 
 /// Whole compilation unit: functions plus globals plus externs.
@@ -1239,6 +1318,7 @@ impl Module {
             name: name.to_string(),
             sig,
             weak: false,
+            effect: ExternEffect::clobber(),
         })
     }
 }

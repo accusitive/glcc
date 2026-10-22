@@ -42,7 +42,9 @@ impl PassManager {
         for pass in self.module_passes.iter_mut() {
             report.push((pass.name(), pass.run(module)));
         }
+        let effects: Vec<_> = module.externs.iter().map(|data| data.effect).collect();
         for func in module.funcs.iter_mut() {
+            func.set_extern_effects(&effects);
             for _ in 0..16 {
                 let mut changed = false;
                 for pass in self.func_passes.iter_mut() {

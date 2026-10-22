@@ -1471,6 +1471,10 @@ struct MemoryRead {
 pub(crate) enum MemoryObject {
     Stack(Value),
     Global(Value),
+    /// A payload returned by an allocator extern. Distinct allocation
+    /// sites name disjoint objects; offsets into one allocation still
+    /// compare by byte position.
+    Heap(Value),
 }
 
 #[derive(Clone, Copy)]
@@ -1493,10 +1497,11 @@ fn sub_offset(offset: Option<u64>, delta: Option<(u32, i128)>) -> Option<u64> {
     (0..=u64::MAX as i128).contains(&result).then_some(result as u64)
 }
 
-/// Track the stack/global object a pointer or address integer derives
-/// from, plus a constant byte offset when the arithmetic is known.
-/// `PtrToInt`/`IntToPtr` are address algebra here; escape analysis below
-/// is what decides whether the address actually leaves the function.
+/// Track the stack, global, or allocation object a pointer or address
+/// integer derives from, plus a constant byte offset when the arithmetic
+/// is known. `PtrToInt`/`IntToPtr` are address algebra here; escape
+/// analysis below is what decides whether a stack address actually
+/// leaves the function.
 pub(crate) fn address_info(func: &Function, value: Value) -> Option<AddressInfo> {
     let Def::Inst(inst) = func.values[value].def else {
         return None;
@@ -1506,6 +1511,14 @@ pub(crate) fn address_info(func: &Function, value: Value) -> Option<AddressInfo>
             object: MemoryObject::Stack(value),
             offset: Some(0),
         }),
+        InstKind::CallExtern { target, .. }
+            if func.extern_effect(*target).allocates && matches!(func.values[value].ty, Ty::Ptr { .. }) =>
+        {
+            Some(AddressInfo {
+                object: MemoryObject::Heap(value),
+                offset: Some(0),
+            })
+        }
         InstKind::Bitcast(inner)
             if matches!(func.values[value].ty, Ty::Ptr { .. })
                 && matches!(func.values[*inner].ty, Ty::Ptr { .. }) =>
@@ -1751,8 +1764,9 @@ fn ranges_may_overlap(func: &Function, non_escaping: &std::collections::HashSet<
         (Some(a), Some(b)) => {
             let may_alias = match (a.object, b.object) {
                 (MemoryObject::Stack(a), MemoryObject::Stack(b)) => a == b,
-                (MemoryObject::Stack(_), MemoryObject::Global(_)) | (MemoryObject::Global(_), MemoryObject::Stack(_)) => false,
+                (MemoryObject::Heap(a), MemoryObject::Heap(b)) => a == b,
                 (MemoryObject::Global(_), MemoryObject::Global(_)) => true,
+                _ => false,
             };
             if !may_alias {
                 return false;
@@ -1821,7 +1835,9 @@ fn forget_covered_reads(reads: &mut Vec<MemoryRead>, func: &Function, addr: Valu
 /// Writes are tracked backwards through the block. A read from a
 /// different known object cannot alias; a read from an unknown pointer
 /// may, so it keeps the write live. Calls and volatile/atomic accesses
-/// are barriers: they may read anything, so earlier writes stay.
+/// are barriers: they may read anything, so earlier writes stay. An
+/// extern explicitly marked as touching no program memory is the one
+/// exception.
 #[derive(Default)]
 pub struct DeadStoreElim;
 
@@ -1909,6 +1925,12 @@ fn eliminate_dead_stores_in_block(func: &Function, block: Block, non_escaping: &
             }
             kind if kind.is_pure() => {}
             InstKind::Udiv(..) | InstKind::Sdiv(..) | InstKind::Urem(..) | InstKind::Srem(..) => {}
+            InstKind::CallExtern { target, .. } => {
+                let effect = func.extern_effect(*target);
+                if effect.reads || effect.writes {
+                    return;
+                }
+            }
             _ => return,
         }
     }
@@ -4660,6 +4682,47 @@ mod tests {
         assert!(!func.blocks[entry].insts.contains(&first));
         assert!(func.blocks[entry].insts.contains(&second));
         assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn removes_store_overwritten_across_a_neutral_extern() {
+        let (mut func, entry) = Function::new("dse", Signature::new(vec![], Ty::Void));
+        func.set_extern_effects(&[crate::ir::ExternEffect::neutral()]);
+        let slot = stack_slot(&mut func, entry, Ty::int(32));
+        let one = func.push_const(Const::Int { bits: 32, value: 1 });
+        let two = func.push_const(Const::Int { bits: 32, value: 2 });
+        let first = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: one,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        push_unit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target: crate::ir::Extern::from_usize(0),
+                args: Default::default(),
+            },
+        );
+        let second = push_unit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: two,
+                flags: crate::ir::MemFlags::plain(),
+            },
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+        let mut pass = DeadStoreElim;
+        assert!(pass.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&first));
+        assert!(func.blocks[entry].insts.contains(&second));
     }
 
     #[test]
