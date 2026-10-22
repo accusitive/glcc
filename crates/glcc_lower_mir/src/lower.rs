@@ -2008,6 +2008,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             frame.loc = Some(loc);
         }
         match stmt {
+            fe::parse::Stmt::Decl { ids, .. } => {
+                for id in ids {
+                    self.lower_local(module, func, frame, funcs, externs, globals, *id);
+                }
+            }
             fe::parse::Stmt::Empty { .. } => {}
             fe::parse::Stmt::Expr { expr, .. } => {
                 // Ensure a current block exists even for dead code.
@@ -8156,6 +8161,17 @@ mod tests {
         lower_translation_unit(&sema, &interner, &tu)
     }
 
+    /// `lower_module` for C23 sources.
+    fn lower_module_c23(src: &str) -> mir::Module {
+        let mut interner = fe::lexer::Interner::new();
+        let mut sema = fe::sema::Sema::new();
+        sema.lang.std = fe::lang::Std::C23;
+        let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
+        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let tu = parser.parse_translation_unit();
+        lower_translation_unit(&sema, &interner, &tu)
+    }
+
     /// `lower_module` with MS extensions on, for `__ptr32`/`__ptr64`.
     fn lower_module_ms(src: &str) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
@@ -8522,6 +8538,19 @@ mod tests {
         // Jumping out of a loop, and into a switch body.
         assert_eq!(run_main("int main(){for(int i = 0; i < 100; i++){if(i == 4) goto done;} done: return 7;}"), 7);
         assert_eq!(run_main("int main(){goto inner; switch(1){case 1: return 1; inner: return 2; default: return 3;}}"), 2);
+    }
+
+    #[test]
+    fn label_before_declaration_initializes_on_the_path() {
+        assert_eq!(
+            jit_run_main(lower_module_c23(
+                "int main(){int n = 0; goto L; n = 100; L: int x = 41; n += x;\
+                 switch (n) { case 41: int y = 1; n += y; break; default: break; } return n;}"
+            )),
+            42
+        );
+        // A label at the end of a compound statement still lands there.
+        assert_eq!(jit_run_main(lower_module_c23("int main(){goto E; E:}")), 0);
     }
 
     #[test]

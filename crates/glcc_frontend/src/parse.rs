@@ -2183,22 +2183,22 @@ impl<'a> Parser<'a> {
                     None
                 };
                 self.expect_punct(Punctuator::Colon);
-                let stmt = self.parse_statement(ret);
+                let body = self.parse_label_body(ret, start);
                 Stmt::Case {
                     expr: Some(checked),
                     hi,
-                    stmt: Box::new(stmt),
+                    stmt: Box::new(body),
                     span: self.span_since(start),
                 }
             }
             Some(Token::Keyword(Keyword::Default)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::Colon);
-                let stmt = self.parse_statement(ret);
+                let body = self.parse_label_body(ret, start);
                 Stmt::Case {
                     expr: None,
                     hi: None,
-                    stmt: Box::new(stmt),
+                    stmt: Box::new(body),
                     span: self.span_since(start),
                 }
             }
@@ -2213,10 +2213,10 @@ impl<'a> Parser<'a> {
                 // gotos agree on them without extra context.
                 let next = self.sema.label_ids.len() as u64;
                 self.sema.label_ids.entry(name).or_insert(next);
-                let stmt = self.parse_statement(ret);
+                let body = self.parse_label_body(ret, start);
                 Stmt::Label {
                     name,
-                    stmt: Box::new(stmt),
+                    stmt: Box::new(body),
                     span: self.span_since(start),
                 }
             }
@@ -2235,6 +2235,21 @@ impl<'a> Parser<'a> {
             }
         }
     }
+    /// The item after a label. C23 allows a declaration or the end of
+    /// the compound statement; earlier standards require a statement.
+    fn parse_label_body(&mut self, ret: &Ty, start: Location) -> Stmt {
+        if self.sema.lang.standard_includes(Std::C23) {
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::RBrace))) {
+                return Stmt::Empty { span: self.span_since(start) };
+            }
+            if self.can_start_declaration() {
+                let ids = self.parse_declaration();
+                return Stmt::Decl { ids, span: self.span_since(start) };
+            }
+        }
+        self.parse_statement(ret)
+    }
+
     /// Abort like `fail` but with a secondary label pointing at the
     /// previous declaration (duplicate `default`, duplicate `case`).
     fn fail_secondary<T: Recover>(&self, span: Span, msg: impl fmt::Display, prev: Span, prev_msg: &str) -> T {
@@ -2306,7 +2321,8 @@ impl<'a> Parser<'a> {
             Stmt::Label { stmt, .. } => {
                 self.collect_switch_cases(promoted, stmt, values, default);
             }
-            Stmt::Empty { .. }
+            Stmt::Decl { .. }
+            | Stmt::Empty { .. }
             | Stmt::Expr { .. }
             | Stmt::Asm(_)
             | Stmt::Return { .. }
@@ -2413,6 +2429,12 @@ impl<'a> Parser<'a> {
                             self.check_flow_stmt(inner_stmt, ctx, labels, gotos, inner, fv);
                         }
                     }
+                }
+            }
+            Stmt::Decl { ids, .. } => {
+                self.record_vla_decls(ids, scope, fv);
+                for id in ids {
+                    self.check_flow_decl_init(*id, gotos, scope, fv);
                 }
             }
             Stmt::Empty { .. } => {}
@@ -7705,6 +7727,12 @@ pub struct AsmStmt {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
     Compound(Compound),
+    /// A declaration under a label (C23 §6.8.1). The declaration keeps
+    /// the enclosing block's scope, unlike a compound statement.
+    Decl {
+        ids: Vec<DeclId>,
+        span: Span,
+    },
     Empty {
         span: Span,
     },
@@ -7781,6 +7809,7 @@ impl HasSpan for Stmt {
     fn span(&self) -> Span {
         match self {
             Stmt::Compound(compound) => compound.span,
+            Stmt::Decl { span, .. } => *span,
             Stmt::Asm(asm) => asm.span,
             Stmt::Empty { span }
             | Stmt::Expr { span, .. }

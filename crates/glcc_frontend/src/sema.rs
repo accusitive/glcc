@@ -1208,6 +1208,14 @@ fn remap_block_items(items: &mut [BlockItem], inits: &mut HashMap<DeclId, Initia
 fn remap_stmt_ident(stmt: &mut Stmt, inits: &mut HashMap<DeclId, Initializer>, map: &HashMap<DeclId, DeclId>) {
     match stmt {
         Stmt::Compound(compound) => remap_block_items(&mut compound.items, inits, map),
+        Stmt::Decl { ids, .. } => {
+            for id in ids {
+                if let Some(mut init) = inits.remove(id) {
+                    remap_init_ident(&mut init, inits, map);
+                    inits.insert(*id, init);
+                }
+            }
+        }
         Stmt::Empty { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } => {}
         Stmt::GotoComputed { expr, .. } => remap_expr_ident(expr, inits, map),
         Stmt::Expr { expr, .. } => remap_expr_ident(expr, inits, map),

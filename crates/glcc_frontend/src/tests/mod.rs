@@ -5013,6 +5013,30 @@ fn alignof_folds() {
 }
 
 #[test]
+fn c23_labels_before_declarations_and_at_block_end() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "int main(void) { goto L; L: int x = 1; return x; }",
+        c23
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang("int main(void) { switch (0) { case 1: int x = 1; break; } return 0; }", c23).is_empty());
+    assert!(tu_diagnostics_with_lang("int main(void) { L: }", c23).is_empty());
+    assert!(!tu_diagnostics_with_lang("int main(void) { L: int x = 1; return x; }", c17).is_empty());
+}
+
+#[test]
 fn c23_bool_true_false() {
     let c23 = LangOpts {
         std: Std::C23,

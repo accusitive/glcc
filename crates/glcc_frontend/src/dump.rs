@@ -105,6 +105,10 @@ fn dump_stmt(s: &Stmt, sema: &Sema, interner: &Interner) -> String {
             }
             format!("(block {})", items.join(" "))
         }
+        Stmt::Decl { ids, .. } => {
+            let decls = ids.iter().map(|id| dump_var(sema, interner, *id)).collect::<Vec<_>>();
+            format!("(decl {})", decls.join(" "))
+        }
         Stmt::Empty { .. } => "(empty)".to_string(),
         Stmt::Expr { expr, .. } => format!("(; {})", dump_ex(expr, sema, interner)),
         Stmt::Asm(asm) => {
