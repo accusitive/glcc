@@ -15,7 +15,7 @@
 
 use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, Value, ValueData};
 use crate::pass::FunctionPass;
-use crate::ty::Ty;
+use crate::ty::{GepIndex, Ty};
 
 use super::{eval_icmp, mask, wrap};
 
@@ -399,7 +399,27 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                     .or_else(|| select_boolean_arm(func, *cond, *then_val, *else_val)),
             }
         }
-        InstKind::GetElementPtr { base, indices } if indices.is_empty() && func.values[*base].ty == *result_ty => Some(Plan::Value(*base)),
+        InstKind::GetElementPtr { base, indices } => {
+            let zero = indices.iter().all(|index| match index {
+                GepIndex::Field(field) => *field == 0,
+                GepIndex::ConstIndex(index) => *index == 0,
+                GepIndex::Index(value) => int_const(func, *value).is_some_and(|(_, value)| value == 0),
+            });
+            if !zero {
+                return None;
+            }
+            let base_ty = &func.values[*base].ty;
+            if base_ty == result_ty {
+                Some(Plan::Value(*base))
+            } else {
+                match (base_ty, result_ty) {
+                    (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => {
+                        Some(Plan::Inst(InstKind::Bitcast(*base)))
+                    }
+                    _ => None,
+                }
+            }
+        }
         _ => None,
     }
 }
@@ -1627,6 +1647,35 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), x);
+    }
+
+    #[test]
+    fn zero_index_gep_retypes_with_a_bitcast() {
+        let array = Ty::Array {
+            elem: Box::new(Ty::int(8)),
+            len: 4,
+        };
+        let source_ty = Ty::ptr(array);
+        let dest_ty = Ty::ptr(Ty::int(8));
+        let sig = Signature::new(vec![source_ty.clone()], dest_ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let source = param(&mut func, entry, source_ty, 0);
+        let gep = emit(
+            &mut func,
+            entry,
+            InstKind::GetElementPtr {
+                base: source,
+                indices: smallvec::smallvec![GepIndex::ConstIndex(0)],
+            },
+            dest_ty,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(gep) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("pointer conversion");
+        match &func.insts[inst].kind {
+            InstKind::Bitcast(ptr) => assert_eq!(*ptr, source),
+            other => panic!("expected a pointer bitcast, got {other:?}"),
+        }
     }
 
     #[test]
