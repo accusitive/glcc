@@ -720,7 +720,40 @@ fn plan_shift(
     if is_int_zero(func, amount) {
         return Some(Plan::Value(value));
     }
-    combine_shifts(func, result_ty, value, amount, mode, use_counts)
+    mask_shift(func, result_ty, value, amount, mode).or_else(|| combine_shifts(func, result_ty, value, amount, mode, use_counts))
+}
+
+/// A shift pair that moves bits out and then back leaves a plain mask.
+///
+/// `(x << a) >> a` keeps the low `width - a` bits, while `(x >> a) << a`
+/// clears the low `a` bits. Arithmetic right shift only has the second
+/// form: shifting its sign fill back left still clears the same bits.
+fn mask_shift(func: &Function, result_ty: &Ty, value: Value, amount: Value, mode: ShiftMode) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    let (_, outer) = int_const(func, amount)?;
+    if outer < 0 || outer as u128 >= u128::from(bits) {
+        return None;
+    }
+    let inst = def_inst(func, value)?;
+    let (value, inner_amount) = match (&func.insts[inst].kind, mode) {
+        (InstKind::Shl(x, by), ShiftMode::LogicalRight) => (*x, *by),
+        (InstKind::LShr(x, by) | InstKind::AShr(x, by), ShiftMode::Left) => (*x, *by),
+        _ => return None,
+    };
+    let (_, inner) = int_const(func, inner_amount)?;
+    if inner != outer {
+        return None;
+    }
+    if inner == 0 {
+        return Some(Plan::Value(value));
+    }
+    let shift = outer as u32;
+    let mask = match mode {
+        ShiftMode::LogicalRight => mask(bits - shift) as i128,
+        ShiftMode::Left => wrap(bits, (!mask(shift)) as i128),
+        ShiftMode::ArithmeticRight => return None,
+    };
+    Some(Plan::AndConst(value, mask))
 }
 
 /// Merge nested shifts in the same direction. Amounts that reach the type
@@ -1442,6 +1475,41 @@ mod tests {
             InstKind::Not(operand) => assert_eq!(*operand, x),
             other => panic!("expected not, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn shift_pairs_fold_to_masks() {
+        let cases = [
+            (InstKind::Shl as fn(Value, Value) -> InstKind, InstKind::LShr as fn(Value, Value) -> InstKind, 2, 0x3FFFFFFF),
+            (InstKind::LShr as fn(Value, Value) -> InstKind, InstKind::Shl as fn(Value, Value) -> InstKind, 3, -8),
+            (InstKind::AShr as fn(Value, Value) -> InstKind, InstKind::Shl as fn(Value, Value) -> InstKind, 3, -8),
+        ];
+        for (inner, outer, amount, expected) in cases {
+            let (mut func, entry, x) = int_func();
+            let by = iconst(&mut func, 32, amount);
+            let shifted = emit(&mut func, entry, inner(x, by), Ty::int(32));
+            let masked = emit(&mut func, entry, outer(shifted, by), Ty::int(32));
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(masked) });
+            assert!(run(&mut func));
+            let inst = def_inst(&func, returned(&func)).expect("rebuilt mask");
+            match &func.insts[inst].kind {
+                InstKind::And(lhs, rhs) => {
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: expected }));
+                }
+                other => panic!("expected and, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn arithmetic_shift_after_left_shift_is_not_a_mask() {
+        let (mut func, entry, x) = int_func();
+        let two = iconst(&mut func, 32, 2);
+        let shifted = emit(&mut func, entry, InstKind::Shl(x, two), Ty::int(32));
+        let out = emit(&mut func, entry, InstKind::AShr(shifted, two), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+        assert!(!run(&mut func));
     }
 
     #[test]
