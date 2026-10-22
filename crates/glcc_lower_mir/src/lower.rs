@@ -7868,6 +7868,28 @@ mod tests {
         assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
     }
 
+    /// Copying an aggregate and changing one field should keep the
+    /// source as the base instead of extracting and rebuilding fields
+    /// that stay the same.
+    #[test]
+    fn optimized_pipeline_updates_one_aggregate_field() {
+        let src = "struct P { int x; int y; };\n\
+                   __attribute__((noinline)) struct P inc(struct P p) { struct P q = p; q.y++; return q; }\n\
+                   int main() { struct P p = {3, 4}; struct P q = inc(p); return q.x * 10 + q.y; }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let func = module.funcs.iter().find(|f| f.name == "inc").expect("function lowered");
+        let rebuilds_first = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+            matches!(
+                func.insts[*inst].kind,
+                mir::InstKind::ExtractValue { index: 0, .. }
+            )
+        });
+        assert!(!rebuilds_first, "inc still extracts the unchanged field:\n{dump}");
+        assert_eq!(jit_run_main(module), 35);
+    }
+
     /// Literal floating-point expressions fold before codegen, so
     /// subsequent conversions see a single constant.
     #[test]

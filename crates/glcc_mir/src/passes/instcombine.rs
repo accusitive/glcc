@@ -290,6 +290,9 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             if let Some(source) = reconstructed_aggregate(func, result) {
                 return Some(Plan::Value(source));
             }
+            if let Some((source, elem, index)) = single_field_update(func, result) {
+                return Some(Plan::Inst(InstKind::InsertValue { agg: source, elem, index }));
+            }
             let InstKind::InsertValue { agg, elem, index } = kind else {
                 unreachable!("matched an insert");
             };
@@ -706,6 +709,68 @@ fn bool_valued_depth(func: &Function, value: Value, depth: u32) -> bool {
         }
         _ => false,
     }
+}
+
+/// A full rebuild from `undef` where exactly one field differs from a
+/// source aggregate can start from that source and write only the field.
+fn single_field_update(func: &Function, value: Value) -> Option<(Value, Value, u32)> {
+    let ty = &func.values[value].ty;
+    let total = match ty {
+        Ty::Struct { fields, .. } => fields.len(),
+        Ty::Array { len, .. } => usize::try_from(*len).ok()?,
+        _ => return None,
+    };
+    if total == 0 || total > 16 {
+        return None;
+    }
+    // Walking backwards keeps the last value inserted at each index.
+    let mut fields = std::collections::HashMap::new();
+    let mut current = value;
+    for _ in 0..=16 {
+        if func.values[current].ty != *ty {
+            return None;
+        }
+        let Some(inst) = def_inst(func, current) else {
+            break;
+        };
+        let InstKind::InsertValue { agg, elem, index } = &func.insts[inst].kind else {
+            return None;
+        };
+        if *index as usize >= total {
+            return None;
+        }
+        fields.entry(*index).or_insert(*elem);
+        current = *agg;
+    }
+    if fields.len() != total || !matches!(func.values[current].def, Def::Const(Const::Undef)) {
+        return None;
+    }
+    let mut source = None;
+    let mut changed = None;
+    for index in 0..total as u32 {
+        let elem = *fields.get(&index)?;
+        let unchanged = def_inst(func, elem).and_then(|inst| match &func.insts[inst].kind {
+            InstKind::ExtractValue { agg, index: field }
+                if *field == index && func.values[*agg].ty == *ty =>
+            {
+                Some(*agg)
+            }
+            _ => None,
+        });
+        match unchanged {
+            Some(agg) => match source {
+                Some(existing) if existing != agg => return None,
+                Some(_) => {}
+                None => source = Some(agg),
+            },
+            None => {
+                if changed.replace((elem, index)).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((source?, changed?.0, changed?.1))
 }
 
 /// A chain that fills every field or element of an aggregate from the
@@ -1712,6 +1777,52 @@ mod tests {
         func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), base);
+    }
+
+    #[test]
+    fn rebuilding_with_one_changed_field_uses_the_source() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone(), Ty::int(32)], ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let changed = param(&mut func, entry, Ty::int(32), 1);
+        let undef = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Const(Const::Undef),
+        });
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 0 },
+            Ty::int(32),
+        );
+        let with_first = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            ty.clone(),
+        );
+        let rebuilt = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: with_first, elem: changed, index: 1 },
+            ty,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("aggregate value");
+        match &func.insts[inst].kind {
+            InstKind::InsertValue { agg, elem, index } => {
+                assert_eq!(*agg, base);
+                assert_eq!(*elem, changed);
+                assert_eq!(*index, 1);
+            }
+            other => panic!("expected a field update on the source, got {other:?}"),
+        }
     }
 
     #[test]
