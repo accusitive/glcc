@@ -2716,6 +2716,7 @@ fn merge_single_pred_blocks(func: &mut Function) -> bool {
 /// that only computes pure values and then joins the other edge becomes
 /// unconditional computation at the fork plus selects at the join.
 fn if_convert_diamonds(func: &mut Function) -> bool {
+    const MAX_SPECULATED_INSNS: usize = 8;
     let mut changed = false;
     loop {
         let reachable = func.reachable_blocks();
@@ -2747,19 +2748,27 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                 if !reachable[arm.index()] || preds[arm.index()] != 1 {
                     continue;
                 }
+                if func.blocks[arm].insts.len() > MAX_SPECULATED_INSNS {
+                    continue;
+                }
                 let Some(Terminator::Br { dest, args: outgoing }) = func.blocks[arm].term.clone() else {
                     continue;
                 };
-                if dest != other || func.blocks[other].term.is_none() {
+                if dest == arm
+                    || dest == fork
+                    || dest == func.entry
+                    || func.blocks[dest].term.is_none()
+                {
                     continue;
                 }
                 let params = func.blocks[arm].params.clone();
                 if params.len() != incoming.len() {
                     continue;
                 }
-                if func.blocks[other].params.len() != outgoing.len()
-                    || func.blocks[other].params.len() != other_args.len()
-                {
+                if func.blocks[dest].params.len() != outgoing.len() {
+                    continue;
+                }
+                if dest == other && func.blocks[dest].params.len() != other_args.len() {
                     continue;
                 }
                 if func.blocks[arm]
@@ -2787,11 +2796,13 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                 if escapes_arm {
                     continue;
                 }
-                let differing = outgoing.iter().zip(&other_args).find(|(a, b)| a != b);
-                if let Some((arm_arg, other_arg)) = differing {
-                    let ty = &func.values[*arm_arg].ty;
-                    if !ty.is_scalar() || func.values[*other_arg].ty != *ty {
-                        continue;
+                if dest == other {
+                    let differing = outgoing.iter().zip(&other_args).find(|(a, b)| a != b);
+                    if let Some((arm_arg, other_arg)) = differing {
+                        let ty = &func.values[*arm_arg].ty;
+                        if !ty.is_scalar() || func.values[*other_arg].ty != *ty {
+                            continue;
+                        }
                     }
                 }
 
@@ -2830,8 +2841,8 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                     .collect();
                 func.blocks[fork].term = Some(Terminator::CondBr {
                     cond,
-                    then_block: if arm == then_block { other } else { then_block },
-                    else_block: if arm == else_block { other } else { else_block },
+                    then_block: if arm == then_block { dest } else { then_block },
+                    else_block: if arm == else_block { dest } else { else_block },
                     then_args: if arm == then_block { outgoing.clone() } else { then_args.clone() },
                     else_args: if arm == else_block { outgoing } else { else_args.clone() },
                 });
@@ -4781,6 +4792,61 @@ mod tests {
             func.values[value].def,
             Def::Inst(inst) if matches!(func.insts[inst].kind, InstKind::Select { .. })
         ));
+    }
+
+    #[test]
+    fn if_converts_a_diamond_with_two_pure_arms() {
+        let sig = Signature::new(vec![Ty::Bool, Ty::int(32), Ty::int(32)], Ty::int(32));
+        let (mut func, entry) = Function::new("two-arms", sig);
+        let cond = param(&mut func, entry, Ty::Bool);
+        let x = param(&mut func, entry, Ty::int(32));
+        let y = param(&mut func, entry, Ty::int(32));
+        let then_block = func.push_block(vec![]);
+        let else_block = func.push_block(vec![]);
+        let merge = func.push_block(vec![Ty::int(32)]);
+        let result = func.blocks[merge].params[0];
+        let sum = emit_bin(&mut func, then_block, InstKind::Add(x, y), Ty::int(32));
+        let difference = emit_bin(&mut func, else_block, InstKind::Sub(x, y), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::CondBr {
+            cond,
+            then_block,
+            else_block,
+            then_args: Default::default(),
+            else_args: Default::default(),
+        });
+        func.blocks[then_block].term = Some(Terminator::Br {
+            dest: merge,
+            args: [sum].into_iter().collect(),
+        });
+        func.blocks[else_block].term = Some(Terminator::Br {
+            dest: merge,
+            args: [difference].into_iter().collect(),
+        });
+        func.blocks[merge].term = Some(Terminator::Return { val: Some(result) });
+
+        let mut simp = SimplifyCfg;
+        assert!(simp.run(&mut func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+        assert!(matches!(func.blocks[then_block].term, Some(Terminator::Unreachable)));
+        assert!(matches!(func.blocks[else_block].term, Some(Terminator::Unreachable)));
+        let select = func.blocks[entry]
+            .insts
+            .iter()
+            .find_map(|inst| match &func.insts[*inst].kind {
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond => {
+                    Some((*then_val, *else_val))
+                }
+                _ => None,
+            })
+            .expect("both diamond arms became one select");
+        let Def::Inst(then_inst) = func.values[select.0].def else {
+            panic!("then arm was not cloned");
+        };
+        let Def::Inst(else_inst) = func.values[select.1].def else {
+            panic!("else arm was not cloned");
+        };
+        assert!(matches!(func.insts[then_inst].kind, InstKind::Add(a, b) if a == x && b == y));
+        assert!(matches!(func.insts[else_inst].kind, InstKind::Sub(a, b) if a == x && b == y));
     }
 
     #[test]
