@@ -55,8 +55,33 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
         .add_module_pass(passes::Inline::small())
         .add_module_pass(passes::GlobalConstProp)
         .add_module_pass(passes::MergeReadOnlyGlobals)
-        .add_module_pass(passes::DeadModuleItems)
-        .add_func_pass(passes::Sroa)
+        .add_module_pass(passes::DeadModuleItems);
+    let mut report = function_pipeline(pm).run(module);
+    // Function passes turn aggregate loads and stores into copies, so
+    // give module-level propagation another look at the settled IR. A
+    // copied read-only global can then expose its field initializers.
+    for _ in 0..3 {
+        let mut globals = PassManager::new()
+            .add_module_pass(passes::GlobalConstProp)
+            .add_module_pass(passes::DeadModuleItems);
+        let module_report = globals.run(module);
+        let changed = module_report.iter().any(|(_, changed)| *changed);
+        report.extend(module_report);
+        if !changed {
+            break;
+        }
+        report.extend(function_pipeline(PassManager::new()).run(module));
+    }
+    // Function passes can orphan the last reference to an internal
+    // object (a load that `GlobalConstProp` replaced, a call `Inline`
+    // removed), so sweep module liveness once more after they settle.
+    let mut settle = PassManager::new().add_module_pass(passes::DeadModuleItems);
+    report.extend(settle.run(module));
+    report
+}
+
+fn function_pipeline(pm: PassManager) -> PassManager {
+    pm.add_func_pass(passes::Sroa)
         .add_func_pass(passes::Mem2Reg)
         .add_func_pass(passes::ConstFold)
         .add_func_pass(passes::Sccp)
@@ -68,14 +93,7 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
         .add_func_pass(passes::Cse)
         .add_func_pass(passes::Licm)
         .add_func_pass(passes::SimplifyCfg)
-        .add_func_pass(passes::DeadCodeElim);
-    let mut report = pm.run(module);
-    // Function passes can orphan the last reference to an internal
-    // object (a load that `GlobalConstProp` replaced, a call `Inline`
-    // removed), so sweep module liveness once more after they settle.
-    let mut settle = PassManager::new().add_module_pass(passes::DeadModuleItems);
-    report.extend(settle.run(module));
-    report
+        .add_func_pass(passes::DeadCodeElim)
 }
 
 #[cfg(test)]

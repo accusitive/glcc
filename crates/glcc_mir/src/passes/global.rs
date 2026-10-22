@@ -19,9 +19,9 @@ use std::collections::{HashMap, HashSet};
 use index_vec::IndexVec;
 
 use crate::debug::{FunctionDebug, ScopeDebug, VarHome};
-use crate::ir::{Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst, InstKind, Module, Value, ValueData};
+use crate::ir::{Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst, InstKind, MemFlags, Module, Value, ValueData};
 use crate::pass::ModulePass;
-use crate::ty::Ty;
+use crate::ty::{GepIndex, Ty};
 
 use super::{address_info, MemoryObject};
 
@@ -72,6 +72,16 @@ impl ModulePass for GlobalConstProp {
                         }
                         if let Some(global) = global_root(func, *val, &addresses) {
                             escaped[global.index()] = true;
+                        }
+                    }
+                    InstKind::Memcpy { dst, .. } => {
+                        if let Some(global) = global_root(func, *dst, &addresses) {
+                            written[global.index()] = true;
+                        }
+                    }
+                    InstKind::Memset { dst, .. } => {
+                        if let Some(global) = global_root(func, *dst, &addresses) {
+                            written[global.index()] = true;
                         }
                     }
                     InstKind::GetElementPtr { .. }
@@ -154,8 +164,132 @@ impl ModulePass for GlobalConstProp {
             func.blocks[block].insts.retain(|i| *i != inst_id);
             changed = true;
         }
+        changed |= expand_global_memcpys(module, &candidates);
         changed
     }
+}
+
+/// Copying a whole local aggregate from a read-only global leaves a
+/// `memcpy` that hides the individual scalar initializers. Split it into
+/// field stores so `Sroa` can promote the destination and the loads fold
+/// away. The source global must not escape; a global only read by a copy
+/// still qualifies.
+fn expand_global_memcpys(module: &mut Module, candidates: &[bool]) -> bool {
+    let globals = &module.globals;
+    let mut changed = false;
+    for func in module.funcs.iter_mut() {
+        let resident = func.resident_mask();
+        let addresses = global_addresses(func, &resident);
+        let non_escaping = super::non_escaping_stack_slots(func);
+        for block_idx in 0..func.blocks.len() {
+            let block = crate::ir::Block::from_usize(block_idx);
+            let insts = func.blocks[block].insts.clone();
+            let mut rebuilt = Vec::with_capacity(insts.len());
+            let mut expanded = false;
+            for inst in insts {
+                let copy = match &func.insts[inst].kind {
+                    InstKind::Memcpy { dst, src, len } => Some((*dst, *src, *len)),
+                    _ => None,
+                };
+                let Some((dst, src, len)) = copy else {
+                    rebuilt.push(inst);
+                    continue;
+                };
+                let Some(leaves) = global_copy_leaves(func, dst, src, len, &addresses, &non_escaping, globals, candidates) else {
+                    rebuilt.push(inst);
+                    continue;
+                };
+                let Ty::Ptr { bits, .. } = func.values[dst].ty else {
+                    unreachable!("local copy destinations are pointers");
+                };
+                for (path, ty, init) in leaves {
+                    let addr_ty = Ty::ptr_bits(ty.clone(), bits);
+                    let (addr, addr_inst) = super::make_value(
+                        func,
+                        block,
+                        InstKind::GetElementPtr { base: dst, indices: path.into_iter().collect() },
+                        addr_ty,
+                    );
+                    rebuilt.push(addr_inst);
+                    let value = func.values.push(ValueData {
+                        ty,
+                        def: Def::Const(init),
+                    });
+                    rebuilt.push(super::make_unit(
+                        func,
+                        block,
+                        InstKind::Store { addr, val: value, flags: MemFlags::plain() },
+                    ));
+                }
+                expanded = true;
+                changed = true;
+            }
+            if expanded {
+                func.blocks[block].insts = rebuilt;
+            }
+        }
+    }
+    changed
+}
+
+fn global_copy_leaves(
+    func: &Function,
+    dst: Value,
+    src: Value,
+    len: u64,
+    addresses: &HashMap<Value, Global>,
+    non_escaping: &HashSet<Value>,
+    globals: &IndexVec<Global, GlobalData>,
+    candidates: &[bool],
+) -> Option<Vec<(Vec<GepIndex>, Ty, Const)>> {
+    let Ty::Ptr { pointee, .. } = &func.values[dst].ty else {
+        return None;
+    };
+    if !pointee.is_aggregate() || pointee.size_bytes() != len {
+        return None;
+    }
+    let Some(super::AddressInfo { object: MemoryObject::Stack(root), .. }) = address_info(func, dst) else {
+        return None;
+    };
+    if !non_escaping.contains(&root) {
+        return None;
+    }
+    let (global, source_offset) = global_at(func, src, addresses)?;
+    if !candidates[global.index()] {
+        return None;
+    }
+    let global = &globals[global.index()];
+    let init = global.init.as_ref()?;
+    let mut leaves = Vec::new();
+    for (path, ty) in super::aggregate_leaves(pointee)? {
+        let offset = source_offset.checked_add(leaf_offset(pointee, &path)?)?;
+        let value = match init {
+            Const::Zero => super::zero_const_for(&ty),
+            _ => constant_at(global, &ty, offset)?,
+        };
+        leaves.push((path, ty, value));
+    }
+    Some(leaves)
+}
+
+fn leaf_offset(root: &Ty, path: &[GepIndex]) -> Option<u64> {
+    let mut ty = root;
+    let mut offset = 0u64;
+    for step in path {
+        match (ty, step) {
+            (Ty::Struct { fields, offsets, .. }, GepIndex::Field(index)) => {
+                let index = *index as usize;
+                offset = offset.checked_add(*offsets.get(index)?)?;
+                ty = fields.get(index)?;
+            }
+            (Ty::Array { elem, .. }, GepIndex::ConstIndex(index)) => {
+                offset = offset.checked_add(elem.size_bytes().checked_mul(*index)?)?;
+                ty = elem;
+            }
+            _ => return None,
+        }
+    }
+    Some(offset)
 }
 
 /// Fold identical read-only internal objects into one definition.
@@ -792,6 +926,139 @@ mod tests {
             .iter()
             .all(|inst| !matches!(module.funcs[func].insts[*inst].kind, InstKind::Load { .. })));
         assert!(verify_module(&module).is_empty());
+    }
+
+    fn struct_with_two_ints() -> Ty {
+        Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        }
+    }
+
+    fn copy_global_into_local(module: &mut Module, global: Global, ty: Ty) -> Func {
+        let (mut func, entry) = Function::new("copy", Signature::new(vec![], Ty::int(32)));
+        let dst = emit(
+            &mut func,
+            entry,
+            InstKind::Alloca { pointee: ty.clone(), count: 1 },
+            Ty::ptr(ty.clone()),
+        );
+        let src = emit(
+            &mut func,
+            entry,
+            InstKind::GlobalAddr { global },
+            Ty::ptr(ty.clone()),
+        );
+        emit_void(
+            &mut func,
+            entry,
+            InstKind::Memcpy { dst, src, len: ty.size_bytes() },
+        );
+        let zero = func.push_const(Const::Int { bits: 32, value: 0 });
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(zero) });
+        module.push_func(func)
+    }
+
+    fn stored_values(func: &Function) -> Vec<(Value, Value)> {
+        func.blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .filter_map(|inst| match func.insts[*inst].kind {
+                InstKind::Store { addr, val, .. } => Some((addr, val)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn expands_copies_from_read_only_initializers() {
+        let mut module = Module::new();
+        let ty = struct_with_two_ints();
+        let global = module.push_global(
+            "pair",
+            ty.clone(),
+            Some(Const::Bytes(vec![1, 0, 0, 0, 2, 0, 0, 0])),
+        );
+        module.globals[global].local = true;
+        module.globals[global].writable = false;
+        let func = copy_global_into_local(&mut module, global, ty);
+        let local_inst = module.funcs[func].blocks[module.funcs[func].entry].insts[0];
+        let local = module.funcs[func].insts[local_inst].result.expect("alloca result");
+
+        assert!(GlobalConstProp.run(&mut module));
+        let func = &module.funcs[func];
+        assert!(func
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .all(|inst| !matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
+        let stores = stored_values(func);
+        assert_eq!(stores.len(), 2);
+        for (index, (addr, value)) in stores.into_iter().enumerate() {
+            let Def::Inst(addr_inst) = func.values[addr].def else {
+                panic!("field store address is a GEP");
+            };
+            match &func.insts[addr_inst].kind {
+                InstKind::GetElementPtr { base, indices } => {
+                    assert_eq!(*base, local);
+                    assert_eq!(indices.as_slice(), &[GepIndex::Field(index as u32)]);
+                }
+                other => panic!("field store goes through a field GEP, got {other:?}"),
+            }
+            assert_eq!(
+                func.const_value(value),
+                Some(&Const::Int { bits: 32, value: index as i128 + 1 })
+            );
+        }
+        assert!(verify_module(&module).is_empty());
+        assert!(!GlobalConstProp.run(&mut module), "second run is a no-op");
+    }
+
+    #[test]
+    fn expands_zero_initialized_copies() {
+        let mut module = Module::new();
+        let ty = struct_with_two_ints();
+        let global = module.push_global("zeroed", ty.clone(), Some(Const::Zero));
+        module.globals[global].local = true;
+        module.globals[global].writable = false;
+        let func = copy_global_into_local(&mut module, global, ty);
+
+        assert!(GlobalConstProp.run(&mut module));
+        let func = &module.funcs[func];
+        let stores = stored_values(func);
+        assert_eq!(stores.len(), 2);
+        assert!(stores
+            .into_iter()
+            .all(|(_, value)| func.const_value(value) == Some(&Const::Int { bits: 32, value: 0 })));
+        assert!(verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn keeps_copies_over_relocated_initializers() {
+        let mut module = Module::new();
+        let pointer = Ty::ptr(Ty::int(32));
+        let ty = Ty::Struct {
+            fields: vec![pointer.clone(), Ty::int(32)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let target = int32_global(&mut module, "target", 7);
+        let global = module.push_global("relocated", ty.clone(), Some(Const::Bytes(vec![0; 16])));
+        module.globals[global].local = true;
+        module.globals[global].writable = false;
+        module.globals[global]
+            .relocs
+            .push((0, DataReloc::Global { target, addend: 0 }));
+        let func = copy_global_into_local(&mut module, global, ty);
+
+        assert!(!GlobalConstProp.run(&mut module));
+        assert!(stored_values(&module.funcs[func]).is_empty());
+        assert!(module.funcs[func]
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .any(|inst| matches!(module.funcs[func].insts[*inst].kind, InstKind::Memcpy { .. })));
     }
 
     #[test]

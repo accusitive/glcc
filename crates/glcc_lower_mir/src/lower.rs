@@ -7868,6 +7868,32 @@ mod tests {
         assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
     }
 
+    /// A local aggregate initialized by copying a read-only global is a
+    /// bundle of constants. Splitting the copy exposes them to `Sroa`,
+    /// including when the local is later modified.
+    #[test]
+    fn optimized_pipeline_folds_read_only_global_copies() {
+        let src = "struct P { int x; short y; char z; };\n\
+                   static const struct P p = {7, 8, 9};\n\
+                   __attribute__((noinline)) int px(void) { struct P q = p; return q.x + q.y + q.z; }\n\
+                   __attribute__((noinline)) int py(void) { struct P q = p; q.x++; return q.x + q.y + q.z; }\n\
+                   int main() { return px() + py(); }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["px", "py"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let hidden = func.blocks.iter().flat_map(|b| b.insts.iter()).any(|inst| {
+                matches!(
+                    func.insts[*inst].kind,
+                    mir::InstKind::Memcpy { .. } | mir::InstKind::Load { .. }
+                )
+            });
+            assert!(!hidden, "{name} still copies or loads the global initializer:\n{dump}");
+        }
+        assert_eq!(jit_run_main(module), 49);
+    }
+
     /// Lowering materializes one constant per literal occurrence, so
     /// `const-merge` must unify them before `cse` can recognize
     /// repeated expressions — in one block (`local`) and across a
