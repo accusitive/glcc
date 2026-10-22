@@ -7868,6 +7868,30 @@ mod tests {
         assert_eq!(run_main("int main() { return \"abc\"[1]; }"), 98);
     }
 
+    /// Returning an aggregate parameter lowers to extracting every
+    /// field and rebuilding the aggregate. Filling all fields from one
+    /// source is the source itself, so the identity survives.
+    #[test]
+    fn optimized_pipeline_returns_aggregate_identity_directly() {
+        let src = "struct P { int x; double y; };\n\
+                   __attribute__((noinline)) struct P id(struct P p) { return p; }\n\
+                   int main() { struct P p = {3, 4.0}; struct P q = id(p); return q.x + (int)q.y; }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let func = module.funcs.iter().find(|f| f.name == "id").expect("function lowered");
+        assert!(
+            !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
+                matches!(
+                    func.insts[*inst].kind,
+                    mir::InstKind::ExtractValue { .. } | mir::InstKind::InsertValue { .. }
+                )
+            }),
+            "id still rebuilds its parameter:\n{dump}"
+        );
+        assert_eq!(jit_run_main(module), 7);
+    }
+
     /// A local aggregate initialized by copying a read-only global is a
     /// bundle of constants. Splitting the copy exposes them to `Sroa`,
     /// including when the local is later modified.

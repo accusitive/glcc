@@ -286,7 +286,13 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 _ => None,
             }
         }
-        InstKind::InsertValue { agg, elem, index } => {
+        InstKind::InsertValue { .. } => {
+            if let Some(source) = reconstructed_aggregate(func, result) {
+                return Some(Plan::Value(source));
+            }
+            let InstKind::InsertValue { agg, elem, index } = kind else {
+                unreachable!("matched an insert");
+            };
             let inner = def_inst(func, *elem)?;
             match &func.insts[inner].kind {
                 InstKind::ExtractValue { agg: source, index: source_index }
@@ -700,6 +706,63 @@ fn bool_valued_depth(func: &Function, value: Value, depth: u32) -> bool {
         }
         _ => false,
     }
+}
+
+/// A chain that fills every field or element of an aggregate from the
+/// matching fields of one source value is that source.
+fn reconstructed_aggregate(func: &Function, value: Value) -> Option<Value> {
+    let ty = &func.values[value].ty;
+    let total = match ty {
+        Ty::Struct { fields, .. } => fields.len(),
+        Ty::Array { len, .. } => usize::try_from(*len).ok()?,
+        _ => return None,
+    };
+    if total == 0 || total > 16 {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut source = None;
+    walk_reconstruction(func, value, ty, total, &mut seen, &mut source, 0)?;
+    if seen.len() != total {
+        return None;
+    }
+    source
+}
+
+fn walk_reconstruction(
+    func: &Function,
+    value: Value,
+    ty: &Ty,
+    total: usize,
+    seen: &mut std::collections::HashSet<u32>,
+    source: &mut Option<Value>,
+    depth: u32,
+) -> Option<()> {
+    if depth > 16 {
+        return None;
+    }
+    let Some(inst) = def_inst(func, value) else {
+        return Some(());
+    };
+    let InstKind::InsertValue { agg, elem, index } = &func.insts[inst].kind else {
+        return Some(());
+    };
+    let elem_inst = def_inst(func, *elem)?;
+    let InstKind::ExtractValue { agg: field_source, index: field_index } = &func.insts[elem_inst].kind else {
+        return None;
+    };
+    if field_index != index || *index as usize >= total || func.values[*field_source].ty != *ty {
+        return None;
+    }
+    if !seen.insert(*index) {
+        return None;
+    }
+    match source {
+        Some(existing) if existing != field_source => return None,
+        Some(_) => {}
+        None => *source = Some(*field_source),
+    }
+    walk_reconstruction(func, *agg, ty, total, seen, source, depth + 1)
 }
 
 /// `zext (x != 0)` is `x` when `x` already holds only 0 or 1.
@@ -1606,6 +1669,80 @@ mod tests {
             }
             other => panic!("expected extraction from the base, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuilding_an_aggregate_from_its_fields_is_the_original_value() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone()], ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let undef = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Const(Const::Undef),
+        });
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 0 },
+            Ty::int(32),
+        );
+        let second = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 1 },
+            Ty::int(32),
+        );
+        let with_first = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            ty.clone(),
+        );
+        let rebuilt = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: with_first, elem: second, index: 1 },
+            ty,
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
+        assert!(run(&mut func));
+        assert_eq!(returned(&func), base);
+    }
+
+    #[test]
+    fn partial_rebuild_is_not_the_original_aggregate() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 4],
+            size: 8,
+        };
+        let sig = Signature::new(vec![ty.clone()], ty.clone());
+        let (mut func, entry) = Function::new("f", sig);
+        let base = param(&mut func, entry, ty.clone(), 0);
+        let undef = func.values.push(ValueData {
+            ty: ty.clone(),
+            def: Def::Const(Const::Undef),
+        });
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::ExtractValue { agg: base, index: 0 },
+            Ty::int(32),
+        );
+        let rebuilt = emit(
+            &mut func,
+            entry,
+            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            ty.clone(),
+        );
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
+        assert!(!run(&mut func));
+        assert_eq!(returned(&func), rebuilt);
     }
 
     #[test]
