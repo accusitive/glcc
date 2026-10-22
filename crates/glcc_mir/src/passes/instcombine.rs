@@ -91,6 +91,10 @@ enum Plan {
     AshrBy(Value, u32),
     /// `v & mask` with a freshly materialized integer constant.
     AndConst(Value, i128),
+    /// `v | mask` with a freshly materialized integer constant.
+    OrConst(Value, i128),
+    /// `v ^ mask` with a freshly materialized integer constant.
+    XorConst(Value, i128),
     /// `v + constant` with a freshly materialized integer constant.
     AddConst(Value, i128),
     /// `v - constant` with a freshly materialized integer constant.
@@ -185,7 +189,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if is_all_ones(func, *b) {
                 Some(Plan::Value(*a))
             } else {
-                None
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::And)
             }
         }
         InstKind::Or(a, b) => {
@@ -198,7 +202,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if a == b {
                 Some(Plan::Value(*a))
             } else {
-                None
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::Or)
             }
         }
         InstKind::Xor(a, b) => {
@@ -213,7 +217,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if is_all_ones(func, *b) {
                 Some(Plan::Inst(InstKind::Not(*a)))
             } else {
-                None
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::Xor)
             }
         }
         InstKind::Shl(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::Left, use_counts),
@@ -348,6 +352,14 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::And(v, push_int_const(func, &ty, value)))
         }
+        Plan::OrConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Or(v, push_int_const(func, &ty, value)))
+        }
+        Plan::XorConst(v, value) => {
+            let ty = func.values[result].ty.clone();
+            Plan::Inst(InstKind::Xor(v, push_int_const(func, &ty, value)))
+        }
         Plan::AddConst(v, value) => {
             let ty = func.values[result].ty.clone();
             Plan::Inst(InstKind::Add(v, push_int_const(func, &ty, value)))
@@ -406,6 +418,8 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
         | Plan::LshrBy(..)
         | Plan::AshrBy(..)
         | Plan::AndConst(..)
+        | Plan::OrConst(..)
+        | Plan::XorConst(..)
         | Plan::AddConst(..)
         | Plan::SubConst(..)
         | Plan::MulConst(..)
@@ -754,6 +768,60 @@ fn combine_shifts(
         ShiftMode::LogicalRight => Plan::LshrBy(inner_value, total),
         ShiftMode::ArithmeticRight => Plan::AshrBy(inner_value, total),
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bitwise {
+    And,
+    Or,
+    Xor,
+}
+
+/// Merge `(x op c1) op c2` into one bitwise operation with a combined
+/// mask. The inner operation may stay alive for other users; nothing is
+/// added to the block in that case.
+fn combine_bitwise(func: &Function, result_ty: &Ty, a: Value, b: Value, mode: Bitwise) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    let (base, outer) = constant_and_base(func, bits, a, b)?;
+    let inst = def_inst(func, base)?;
+    let (value, inner) = match (&func.insts[inst].kind, mode) {
+        (InstKind::And(x, y), Bitwise::And) | (InstKind::Or(x, y), Bitwise::Or) | (InstKind::Xor(x, y), Bitwise::Xor) => constant_operand(func, *x, *y)?,
+        _ => return None,
+    };
+    let combined = wrap(
+        bits,
+        match mode {
+            Bitwise::And => outer & inner,
+            Bitwise::Or => outer | inner,
+            Bitwise::Xor => outer ^ inner,
+        },
+    );
+    if combined == 0 {
+        return match mode {
+            Bitwise::And => Some(Plan::Const(zero_const(result_ty)?)),
+            Bitwise::Or | Bitwise::Xor => Some(Plan::Value(value)),
+        };
+    }
+    if combined == -1 {
+        return match mode {
+            Bitwise::And => Some(Plan::Value(value)),
+            Bitwise::Or => Some(Plan::Const(all_ones_const(result_ty)?)),
+            Bitwise::Xor => Some(Plan::Inst(InstKind::Not(value))),
+        };
+    }
+    Some(match mode {
+        Bitwise::And => Plan::AndConst(value, combined),
+        Bitwise::Or => Plan::OrConst(value, combined),
+        Bitwise::Xor => Plan::XorConst(value, combined),
+    })
+}
+
+fn constant_operand(func: &Function, lhs: Value, rhs: Value) -> Option<(Value, i128)> {
+    if let Some((_, value)) = int_const(func, rhs) {
+        Some((lhs, value))
+    } else {
+        int_const(func, lhs).map(|(_, value)| (rhs, value))
+    }
 }
 
 /// The shift amount for a positive power-of-two constant.
@@ -1315,6 +1383,64 @@ mod tests {
         match &func.insts[inst].kind {
             InstKind::Shl(lhs, _) => assert_eq!(*lhs, inner),
             other => panic!("expected shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bitwise_constant_chains_combine() {
+        for (build, left, right, combined, result) in [
+            (InstKind::And as fn(Value, Value) -> InstKind, 0xF0, 0x3C, 0x30, "and"),
+            (InstKind::Or as fn(Value, Value) -> InstKind, 0xFFFF0000, 0xFFFF, -1, "or"),
+            (InstKind::Xor as fn(Value, Value) -> InstKind, 0xF0, 0x3C, 0xCC, "xor"),
+        ] {
+            let (mut func, entry, x) = int_func();
+            let first = iconst(&mut func, 32, left);
+            let second = iconst(&mut func, 32, right);
+            let inner = emit(&mut func, entry, build(x, first), Ty::int(32));
+            let outer = emit(&mut func, entry, build(inner, second), Ty::int(32));
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+            assert!(run(&mut func), "{result}");
+            let out = returned(&func);
+            if combined == -1 {
+                assert_eq!(func.const_value(out), Some(&Const::Int { bits: 32, value: -1 }), "{result}");
+                continue;
+            }
+            let inst = def_inst(&func, out).expect("rebuilt bitwise op");
+            match (&func.insts[inst].kind, result) {
+                (InstKind::And(lhs, rhs), "and") | (InstKind::Or(lhs, rhs), "or") | (InstKind::Xor(lhs, rhs), "xor") => {
+                    assert_eq!(*lhs, x);
+                    assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: combined }), "{result}");
+                }
+                (other, _) => panic!("expected {result}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn and_chain_with_disjoint_masks_folds_to_zero() {
+        let (mut func, entry, x) = int_func();
+        let high = iconst(&mut func, 32, 0xF0);
+        let low = iconst(&mut func, 32, 0x0F);
+        let inner = emit(&mut func, entry, InstKind::And(x, high), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::And(inner, low), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(run(&mut func));
+        assert_eq!(func.const_value(returned(&func)), Some(&Const::Int { bits: 32, value: 0 }));
+    }
+
+    #[test]
+    fn xor_chain_with_all_ones_becomes_not() {
+        let (mut func, entry, x) = int_func();
+        let high = iconst(&mut func, 32, 0xFFFFFF00);
+        let rest = iconst(&mut func, 32, 0xFF);
+        let inner = emit(&mut func, entry, InstKind::Xor(x, high), Ty::int(32));
+        let outer = emit(&mut func, entry, InstKind::Xor(inner, rest), Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(outer) });
+        assert!(run(&mut func));
+        let inst = def_inst(&func, returned(&func)).expect("rebuilt negation");
+        match &func.insts[inst].kind {
+            InstKind::Not(operand) => assert_eq!(*operand, x),
+            other => panic!("expected not, got {other:?}"),
         }
     }
 
