@@ -7626,6 +7626,34 @@ mod tests {
         assert_eq!(jit_run_main(module), -7);
     }
 
+    /// Signed division and remainder by a positive power of two become
+    /// shifts and masks. Check the rounding cases, including `INT_MIN`.
+    #[test]
+    fn optimized_pipeline_rewrites_signed_power_of_two_division() {
+        let src = "int q(int x) { return x / 4; }\n\
+                   int r(int x) { return x % 4; }\n\
+                   int main() {\n\
+                       if (q(-7) != -1 || r(-7) != -3) return 1;\n\
+                       if (q(7) != 1 || r(7) != 3) return 2;\n\
+                       if (q(-2147483647 - 1) != -536870912) return 3;\n\
+                       if (r(-2147483647 - 1) != 0) return 4;\n\
+                       return 0;\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        let divides = module.funcs.iter().any(|f| {
+            f.blocks.iter().flat_map(|b| b.insts.iter()).any(|inst| {
+                matches!(
+                    f.insts[*inst].kind,
+                    mir::InstKind::Sdiv(..) | mir::InstKind::Srem(..)
+                )
+            })
+        });
+        assert!(!divides, "signed power-of-two division survived:\n{dump}");
+        assert_eq!(jit_run_main(module), 0);
+    }
+
     /// Lowering materializes one constant per literal occurrence, so
     /// `const-merge` must unify them before `cse` can recognize
     /// repeated expressions — in one block (`local`) and across a

@@ -105,6 +105,13 @@ enum Plan {
     BoolNot(Value),
     /// Compare `v` against zero (`Eq` when `equal`, otherwise `Ne`).
     CompareZero { value: Value, equal: bool },
+    /// Signed division (or remainder when `remainder`) by a positive
+    /// power of two, rounded toward zero.
+    SignedPow2 {
+        value: Value,
+        shift: u32,
+        remainder: bool,
+    },
 }
 
 /// Choose a rewrite for `inst`, whose result must have uses.
@@ -171,6 +178,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             }
         }
         InstKind::Sdiv(a, b) if is_int_one(func, *b) => Some(Plan::Value(*a)),
+        InstKind::Sdiv(a, b) => signed_pow2(func, result_ty, *a, *b, false),
         InstKind::Urem(a, b) => {
             if is_int_one(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
@@ -179,6 +187,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             }
         }
         InstKind::Srem(_, b) if is_int_one(func, *b) => Some(Plan::Const(zero_const(result_ty)?)),
+        InstKind::Srem(a, b) => signed_pow2(func, result_ty, *a, *b, true),
         InstKind::And(a, b) => {
             if is_int_zero(func, *a) || is_int_zero(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
@@ -320,6 +329,48 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
     }
 }
 
+/// Signed division rounds toward zero; adding `2^shift - 1` only for
+/// negative dividends before the arithmetic shift gets that rounding.
+fn signed_pow2(func: &Function, result_ty: &Ty, value: Value, divisor: Value, remainder: bool) -> Option<Plan> {
+    let bits = arith_bits(result_ty)?;
+    if bits < 2 {
+        return None;
+    }
+    let shift = int_pow2(func, divisor)?;
+    if shift == 0 || shift >= bits {
+        return None;
+    }
+    Some(Plan::SignedPow2 {
+        value,
+        shift,
+        remainder,
+    })
+}
+
+fn push_temp(
+    func: &mut Function,
+    block: Block,
+    kind: InstKind,
+    ty: Ty,
+    loc: Option<crate::debug::Location>,
+    out: &mut Vec<Inst>,
+) -> Value {
+    let next = Inst::from_usize(func.insts.len());
+    let value = func.values.push(ValueData {
+        ty,
+        def: Def::Inst(next),
+    });
+    let inst = func.insts.push(InstData {
+        block,
+        kind,
+        result: Some(value),
+        loc,
+    });
+    func.values[value].def = Def::Inst(inst);
+    out.push(inst);
+    value
+}
+
 /// Materialize a plan: create the replacement value, and the rebuilt
 /// instruction when the plan needs one.
 fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Plan, out: &mut Vec<Inst>) -> Value {
@@ -412,6 +463,25 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             func.values[replacement].def = Def::Inst(new);
             out.push(new);
             replacement
+        }
+        Plan::SignedPow2 { value, shift, remainder } => {
+            let ty = func.values[result].ty.clone();
+            let bits = int_ty_bits(&ty).expect("signed integer division");
+            let loc = func.insts[inst].loc.clone();
+            let sign_amount = push_int_const(func, &ty, i128::from(bits - 1));
+            let sign = push_temp(func, block, InstKind::AShr(value, sign_amount), ty.clone(), loc.clone(), out);
+            let bias_amount = push_int_const(func, &ty, i128::from(bits - shift));
+            let bias = push_temp(func, block, InstKind::LShr(sign, bias_amount), ty.clone(), loc.clone(), out);
+            let adjusted = push_temp(func, block, InstKind::Add(value, bias), ty.clone(), loc.clone(), out);
+            let shift_amount = push_int_const(func, &ty, i128::from(shift));
+            let quotient =
+                push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc.clone(), out);
+            if remainder {
+                let scaled = push_temp(func, block, InstKind::Shl(quotient, shift_amount), ty.clone(), loc.clone(), out);
+                push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
+            } else {
+                quotient
+            }
         }
         Plan::BoolNot(_)
         | Plan::ShlBy(..)
@@ -1290,6 +1360,27 @@ mod tests {
                 assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 1 }));
             }
             other => panic!("expected shift, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signed_power_of_two_division_avoids_division() {
+        for remainder in [false, true] {
+            let (mut func, entry, x) = int_func();
+            let four = iconst(&mut func, 32, 4);
+            let kind = if remainder {
+                InstKind::Srem(x, four)
+            } else {
+                InstKind::Sdiv(x, four)
+            };
+            let out = emit(&mut func, entry, kind, Ty::int(32));
+            func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+            assert!(run(&mut func));
+            assert!(!func.blocks[entry].insts.iter().any(|inst| matches!(
+                func.insts[*inst].kind,
+                InstKind::Sdiv(..) | InstKind::Srem(..)
+            )));
+            assert!(crate::verify::verify_func(&func).is_empty());
         }
     }
 
