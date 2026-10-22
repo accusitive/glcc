@@ -674,13 +674,13 @@ fn collect_copy_leaves(ty: &Ty, path: &mut Vec<GepIndex>, out: &mut Vec<(Vec<Gep
             out.push((path.clone(), ty.clone()));
             true
         }
-        Ty::Struct { fields, offsets, size } => {
+        Ty::Struct { fields, offsets, .. } => {
             if fields.len() != offsets.len() {
                 return false;
             }
             let mut end = 0;
             for (index, (field, offset)) in fields.iter().zip(offsets).enumerate() {
-                if *offset != end {
+                if *offset < end {
                     return false;
                 }
                 path.push(GepIndex::Field(index as u32));
@@ -688,12 +688,12 @@ fn collect_copy_leaves(ty: &Ty, path: &mut Vec<GepIndex>, out: &mut Vec<(Vec<Gep
                     return false;
                 }
                 path.pop();
-                end = match end.checked_add(field.size_bytes()) {
+                end = match offset.checked_add(field.size_bytes()) {
                     Some(end) => end,
                     None => return false,
                 };
             }
-            end == *size
+            true
         }
         Ty::Array { elem, len } => {
             for index in 0..*len {
@@ -917,14 +917,14 @@ fn build_aggregate_value(
             rebuilt.push(load_inst);
             Some(loaded)
         }
-        Ty::Struct { fields, offsets, size } => {
+        Ty::Struct { fields, offsets, .. } => {
             if fields.len() != offsets.len() {
                 return None;
             }
             let mut end = 0;
             let mut aggregate = undef_value(func, ty, undefs);
             for (index, (field, offset)) in fields.iter().zip(offsets).enumerate() {
-                if *offset != end {
+                if *offset < end {
                     return None;
                 }
                 path.push(GepIndex::Field(index as u32));
@@ -942,9 +942,9 @@ fn build_aggregate_value(
                 );
                 rebuilt.push(insert);
                 aggregate = next;
-                end = end.checked_add(field.size_bytes())?;
+                end = offset.checked_add(field.size_bytes())?;
             }
-            (end == *size).then_some(aggregate)
+            Some(aggregate)
         }
         Ty::Array { elem, len } => {
             let mut aggregate = undef_value(func, ty, undefs);
@@ -3662,6 +3662,41 @@ mod tests {
             .insts
             .iter()
             .any(|inst| matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
+
+        let mut sroa = Sroa;
+        let mut mem2reg = Mem2Reg;
+        assert!(sroa.run(&mut func));
+        assert!(mem2reg.run(&mut func));
+        assert!(!has_memory_ops(&func));
+        assert!(crate::verify::verify_func(&func).is_empty());
+    }
+
+    #[test]
+    fn expands_padded_aggregate_copies_for_sroa() {
+        let ty = Ty::Struct {
+            fields: vec![Ty::int(32), Ty::int(32)],
+            offsets: vec![0, 8],
+            size: 16,
+        };
+        let (mut func, entry) = Function::new("padded", Signature::new(vec![], Ty::int(32)));
+        let dst = stack_slot(&mut func, entry, ty.clone());
+        let src = stack_slot(&mut func, entry, ty);
+        let copy = push_unit(&mut func, entry, InstKind::Memcpy { dst, src, len: 16 });
+        let field = push_value(
+            &mut func,
+            entry,
+            InstKind::GetElementPtr {
+                base: dst,
+                indices: [crate::ty::GepIndex::Field(1)].into_iter().collect(),
+            },
+            Ty::ptr(Ty::int(32)),
+        );
+        let loaded = push_scalar_load(&mut func, entry, field, Ty::int(32));
+        func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+        let mut forward = ForwardAggregateCopy;
+        assert!(forward.run(&mut func));
+        assert!(!func.blocks[entry].insts.contains(&copy));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;

@@ -10108,6 +10108,18 @@ mod tests {
             run_main("int f(int v){int a[4] = {0}; a[2] = v; return a[0] + a[1] + a[2] + a[3];} int main(){return f(5);}"),
             5
         );
+        assert_eq!(
+            run_main(
+                "struct P{int x; double y;}; struct P id(struct P p){return p;} int main(){struct P p = {3, 4.0}; struct P q = id(p); return q.x + (int)q.y;}"
+            ),
+            7
+        );
+        assert_eq!(
+            run_main(
+                "struct P{int x; double y;}; int main(){struct P p = {0}; p.x = 5; p.y = 2.0; return p.x + (int)p.y;}"
+            ),
+            7
+        );
     }
 
     #[test]
