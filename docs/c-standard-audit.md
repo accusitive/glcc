@@ -90,6 +90,8 @@ _Imaginary float x;      /* error: `_Imaginary` is not supported */
 ```
 
 `_Complex` works, so this only affects the optional imaginary types.
+Annex G is optional; glcc deliberately keeps the clear diagnostic rather
+than implementing a partial imaginary-type library.
 
 **`<tgmath.h>` does not work in any mode.** The clang header depends on
 `__attribute__((__overloadable__))`, which glcc parses as a conflicting
