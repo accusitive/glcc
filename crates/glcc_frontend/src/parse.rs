@@ -220,6 +220,16 @@ pub struct Parser<'a> {
     /// Counter for the unique spellings local labels intern under
     /// (spellings cannot collide: identifiers have no dots).
     pub(crate) label_gen: u64,
+    /// Names attached to the loop or switch currently being parsed, for
+    /// C2y `break`/`continue` label lookup. A label chain (`a: b: for`)
+    /// contributes every name to the same entry.
+    named_loops: Vec<NamedLoop>,
+    /// Labels seen immediately before the statement being parsed. The
+    /// loop/switch arms consume them; any other statement discards them.
+    pending_loop_labels: Vec<SymbolU32>,
+    /// Labels that actually named an already-parsed loop or switch. Used
+    /// to mark `Stmt::Label` for lowering's named-jump targets.
+    claimed_loop_labels: Vec<SymbolU32>,
     /// Structured diagnostics collected during lexing, parsing, and
     /// checking, in source order. Recovery records **one** error per
     /// construct: `failed` latches until the enclosing loop
@@ -445,6 +455,19 @@ pub(crate) enum DeclEnd {
     SelectionHeader,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NamedLoopKind {
+    Loop,
+    Switch,
+}
+
+/// One enclosing loop or switch and the labels immediately naming it
+/// (C2y N3355).
+struct NamedLoop {
+    labels: Vec<SymbolU32>,
+    kind: NamedLoopKind,
+}
+
 impl<'a> Parser<'a> {
     pub fn new(source: &str, tokens: TokenStream, sema: &'a mut Sema, interner: &'a mut Interner) -> Self {
         let diagnostics: Vec<CompileError> = tokens.diagnostics().to_vec();
@@ -495,6 +518,9 @@ impl<'a> Parser<'a> {
             pending_gotos: Vec::new(),
             label_scopes: Vec::new(),
             label_gen: 0,
+            named_loops: Vec::new(),
+            pending_loop_labels: Vec::new(),
+            claimed_loop_labels: Vec::new(),
             diagnostics: RefCell::new(diagnostics),
             failed: Cell::new(false),
             error_count: Cell::new(0),
@@ -1316,6 +1342,9 @@ impl<'a> Parser<'a> {
             // drop any left by an earlier aborted parse on a reused
             // parser (tests catch panics and keep going).
             self.pending_gotos.clear();
+            self.pending_loop_labels.clear();
+            self.claimed_loop_labels.clear();
+            self.named_loops.clear();
             let mut block = self.parse_compound_statement(&ret);
             // VLA parameter bounds evaluate on entry (C17 §6.7.6.2p6):
             // the parameter decayed to a pointer, but `int a[n++]`
@@ -1965,6 +1994,22 @@ impl<'a> Parser<'a> {
         self.intern.get_or_intern(&spelling)
     }
 
+    /// The optional identifier after `break`/`continue` (C2y N3355).
+    fn parse_jump_label(&mut self) -> (Option<SymbolU32>, Option<Span>) {
+        if !(self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang) {
+            return (None, None);
+        }
+        match self.tokens.peek_val() {
+            Some(Token::Identifier(sym)) => {
+                let name = self.resolve_label(*sym);
+                let span = self.peek_span();
+                self.tokens.advance();
+                (Some(name), Some(span))
+            }
+            _ => (None, None),
+        }
+    }
+
     /// A decoded string literal inside an `asm` statement (template,
     /// constraint, or clobber).
     fn parse_asm_string(&mut self, what: &str) -> String {
@@ -2002,6 +2047,19 @@ impl<'a> Parser<'a> {
         // lone annotation statement (`__attribute__((fallthrough));`
         // in `switch`es): skipped, leaving `;` for the Empty arm.
         self.skip_gnu_suffixes();
+        // Pending label names carry through a chain of labels and into
+        // the loop/switch they immediately prefix. Anything else ends
+        // the chain, so a loop nested in a labeled compound is not
+        // named by that outer label.
+        let starts_label = matches!(self.tokens.peek_val(), Some(Token::Identifier(_)))
+            && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon)));
+        let starts_loop_or_switch = matches!(
+            self.tokens.peek_val(),
+            Some(Token::Keyword(Keyword::While | Keyword::Do | Keyword::For | Keyword::Switch))
+        );
+        if !starts_label && !starts_loop_or_switch {
+            self.pending_loop_labels.clear();
+        }
         match self.tokens.peek_val() {
             // GNU `__label__ name[, name]*;` declares block-local
             // labels: each binds to a unique symbol in the enclosing
@@ -2088,10 +2146,14 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::While)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
+                let labels = mem::take(&mut self.pending_loop_labels);
                 let cond = self.parse_expression();
                 let cond = self.checked_condition(&cond);
                 self.expect_punct(Punctuator::RParen);
+                self.claimed_loop_labels.extend(labels.iter().copied());
+                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
                 let body = self.parse_statement(ret);
+                self.named_loops.pop();
                 Stmt::While {
                     cond,
                     body: Box::new(body),
@@ -2100,7 +2162,11 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Keyword(Keyword::Do)) => {
                 self.tokens.advance();
+                let labels = mem::take(&mut self.pending_loop_labels);
+                self.claimed_loop_labels.extend(labels.iter().copied());
+                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
                 let body = self.parse_statement(ret);
+                self.named_loops.pop();
                 self.expect_keyword(Keyword::While);
                 self.expect_punct(Punctuator::LParen);
                 let cond = self.parse_expression();
@@ -2116,6 +2182,7 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::For)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
+                let labels = mem::take(&mut self.pending_loop_labels);
                 // The initializer lives in its own scope with the rest
                 // of the loop (C99 onwards).
                 self.sema.push_scope();
@@ -2147,7 +2214,10 @@ impl<'a> Parser<'a> {
                     Some(expr)
                 };
                 self.expect_punct(Punctuator::RParen);
+                self.claimed_loop_labels.extend(labels.iter().copied());
+                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
                 let body = self.parse_statement(ret);
+                self.named_loops.pop();
                 self.sema.pop_scope();
                 Stmt::For {
                     init,
@@ -2160,13 +2230,17 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::Switch)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
+                let labels = mem::take(&mut self.pending_loop_labels);
                 if self.selection_declarations_enabled() && self.selection_header_starts_declaration() {
                     self.sema.push_scope();
                     self.label_scopes.push(HashMap::new());
                     let (ids, cond, decl_span) = self.parse_selection_header_declaration();
                     let cond = self.checked_integer_expr(&cond, "switch controlling expression");
                     self.expect_punct(Punctuator::RParen);
+                    self.claimed_loop_labels.extend(labels.iter().copied());
+                    self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Switch });
                     let body = self.parse_statement(ret);
+                    self.named_loops.pop();
                     self.check_switch_cases(&cond, &body);
                     let span = self.span_since(start);
                     let stmt = Stmt::Switch {
@@ -2184,7 +2258,10 @@ impl<'a> Parser<'a> {
                     let cond = self.parse_expression();
                     let cond = self.checked_integer_expr(&cond, "switch controlling expression");
                     self.expect_punct(Punctuator::RParen);
+                    self.claimed_loop_labels.extend(labels.iter().copied());
+                    self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Switch });
                     let body = self.parse_statement(ret);
+                    self.named_loops.pop();
                     self.check_switch_cases(&cond, &body);
                     Stmt::Switch {
                         cond,
@@ -2210,13 +2287,32 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Keyword(Keyword::Break)) => {
                 self.tokens.advance();
+                let (label, label_span) = self.parse_jump_label();
                 self.expect_punct(Punctuator::Semi);
-                Stmt::Break { span: self.span_since(start) }
+                if let Some(name) = label {
+                    let target = self.named_loops.iter().rev().find(|target| target.labels.contains(&name));
+                    if target.is_none() {
+                        self.fail::<()>(label_span.unwrap_or_else(|| self.span_since(start)), "break label does not name an enclosing loop or switch");
+                    }
+                }
+                Stmt::Break { label, span: self.span_since(start) }
             }
             Some(Token::Keyword(Keyword::Continue)) => {
                 self.tokens.advance();
+                let (label, label_span) = self.parse_jump_label();
                 self.expect_punct(Punctuator::Semi);
-                Stmt::Continue { span: self.span_since(start) }
+                if let Some(name) = label {
+                    match self.named_loops.iter().rev().find(|target| target.labels.contains(&name)) {
+                        None => {
+                            self.fail::<()>(label_span.unwrap_or_else(|| self.span_since(start)), "continue label does not name an enclosing loop");
+                        }
+                        Some(target) if target.kind == NamedLoopKind::Switch => {
+                            self.fail::<()>(label_span.unwrap_or_else(|| self.span_since(start)), "continue label refers to a switch statement");
+                        }
+                        Some(_) => {}
+                    }
+                }
+                Stmt::Continue { label, span: self.span_since(start) }
             }
             Some(Token::Keyword(Keyword::Goto)) => {
                 self.tokens.advance();
@@ -2300,9 +2396,14 @@ impl<'a> Parser<'a> {
                 // gotos agree on them without extra context.
                 let next = self.sema.label_ids.len() as u64;
                 self.sema.label_ids.entry(name).or_insert(next);
+                let depth = self.pending_loop_labels.len();
+                self.pending_loop_labels.push(name);
                 let body = self.parse_label_body(ret, start);
+                let names_loop = self.claimed_loop_labels.contains(&name);
+                self.pending_loop_labels.truncate(depth);
                 Stmt::Label {
                     name,
+                    names_loop,
                     stmt: Box::new(body),
                     span: self.span_since(start),
                 }
@@ -2578,12 +2679,12 @@ impl<'a> Parser<'a> {
                     self.check_vla_entry(dispatch, case_scope, case_seq, case_span, fv);
                 }
             }
-            Stmt::Break { span } => {
+            Stmt::Break { span, .. } => {
                 if !ctx.in_loop && !ctx.in_switch {
                     return self.fail(*span, "break statement not within loop or switch");
                 }
             }
-            Stmt::Continue { span } => {
+            Stmt::Continue { span, .. } => {
                 if !ctx.in_loop {
                     return self.fail(*span, "continue statement not within a loop");
                 }
@@ -2602,7 +2703,7 @@ impl<'a> Parser<'a> {
                     fv.record_goto(*label, asm.span);
                 }
             }
-            Stmt::Label { name, stmt, span } => {
+            Stmt::Label { name, stmt, span, .. } => {
                 if let Some((_, prev)) = labels.iter().find(|(defined, _)| defined == name) {
                     let text = self.intern.resolve(*name).unwrap_or("?");
                     return self.fail_secondary(*span, format!("duplicate label '{text}'"), *prev, "previous definition here");
@@ -8428,9 +8529,13 @@ pub enum Stmt {
         span: Span,
     },
     Break {
+        /// C2y named-loop target (N3355).
+        label: Option<SymbolU32>,
         span: Span,
     },
     Continue {
+        /// C2y named-loop target (N3355).
+        label: Option<SymbolU32>,
         span: Span,
     },
     Goto {
@@ -8445,6 +8550,9 @@ pub enum Stmt {
     },
     Label {
         name: SymbolU32,
+        /// Whether this label (possibly through a label chain) names
+        /// the immediately following loop or switch.
+        names_loop: bool,
         stmt: Box<Stmt>,
         span: Span,
     },
@@ -8473,8 +8581,8 @@ impl HasSpan for Stmt {
             | Stmt::DoWhile { span, .. }
             | Stmt::For { span, .. }
             | Stmt::Switch { span, .. }
-            | Stmt::Break { span }
-            | Stmt::Continue { span }
+            | Stmt::Break { span, .. }
+            | Stmt::Continue { span, .. }
             | Stmt::Goto { span, .. }
             | Stmt::GotoComputed { span, .. }
             | Stmt::Label { span, .. }

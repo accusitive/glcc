@@ -106,8 +106,11 @@ struct Frame {
     /// every emitted instruction.
     loc: Option<mir::Location>,
     loops: Vec<LoopTarget>,
-    breaks: Vec<mir::Block>,
+    breaks: Vec<BreakTarget>,
     switches: Vec<SwitchTarget>,
+    /// Labels immediately prefixing the loop or switch being lowered
+    /// (C2y N3355), consumed by that loop's target push.
+    pending_loop_labels: Vec<string_interner::symbol::SymbolU32>,
     labels: HashMap<string_interner::symbol::SymbolU32, mir::Block>,
     /// The computed-goto dispatch block and its target-id parameter,
     /// created on the first `goto *expr` and filled in once the whole
@@ -126,6 +129,12 @@ struct Frame {
 
 struct LoopTarget {
     cont: mir::Block,
+    labels: Vec<string_interner::symbol::SymbolU32>,
+}
+
+struct BreakTarget {
+    block: mir::Block,
+    labels: Vec<string_interner::symbol::SymbolU32>,
 }
 
 /// One open `switch`: the promoted controlling type both sides
@@ -453,6 +462,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                     loops: Vec::new(),
                     breaks: Vec::new(),
                     switches: Vec::new(),
+                    pending_loop_labels: Vec::new(),
                     labels: HashMap::new(),
                     computed_goto: None,
                     alloca_head: None,
@@ -520,6 +530,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                 loops: Vec::new(),
                 breaks: Vec::new(),
                 switches: Vec::new(),
+                pending_loop_labels: Vec::new(),
                 labels: HashMap::new(),
                 computed_goto: None,
                 alloca_head: None,
@@ -1972,7 +1983,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         match stmt {
             fe::parse::Stmt::Expr { expr, .. } => Some(self.expr_value(module, func, frame, funcs, externs, globals, expr)),
-            fe::parse::Stmt::Label { name, stmt, .. } => {
+            fe::parse::Stmt::Label { name, names_loop, stmt, .. } => {
                 let target = match frame.labels.get(name) {
                     Some(block) => *block,
                     None => {
@@ -1985,7 +1996,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     self.branch(func, frame, target, vec![]);
                 }
                 frame.current = Some(target);
-                self.lower_value_stmt(module, func, frame, funcs, externs, globals, stmt)
+                let depth = frame.pending_loop_labels.len();
+                if *names_loop {
+                    frame.pending_loop_labels.push(*name);
+                }
+                let value = self.lower_value_stmt(module, func, frame, funcs, externs, globals, stmt);
+                frame.pending_loop_labels.truncate(depth);
+                value
             }
             _ => {
                 self.lower_stmt(module, func, frame, funcs, externs, globals, stmt);
@@ -2080,6 +2097,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.join(func, frame, merge, live);
             }
             fe::parse::Stmt::While { cond, body, .. } => {
+                let labels = core::mem::take(&mut frame.pending_loop_labels);
                 let header = func.push_block(vec![]);
                 let loop_body = func.push_block(vec![]);
                 let exit = func.push_block(vec![]);
@@ -2097,8 +2115,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         else_args: Default::default(),
                     },
                 );
-                frame.loops.push(LoopTarget { cont: header });
-                frame.breaks.push(exit);
+                frame.loops.push(LoopTarget { cont: header, labels: labels.clone() });
+                frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
                 frame.breaks.pop();
@@ -2109,12 +2127,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 frame.current = Some(exit);
             }
             fe::parse::Stmt::DoWhile { body, cond, .. } => {
+                let labels = core::mem::take(&mut frame.pending_loop_labels);
                 let loop_body = func.push_block(vec![]);
                 let check = func.push_block(vec![]);
                 let exit = func.push_block(vec![]);
                 self.branch(func, frame, loop_body, vec![]);
-                frame.loops.push(LoopTarget { cont: check });
-                frame.breaks.push(exit);
+                frame.loops.push(LoopTarget { cont: check, labels: labels.clone() });
+                frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
                 frame.breaks.pop();
@@ -2138,6 +2157,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 frame.current = Some(exit);
             }
             fe::parse::Stmt::For { init, cond, step, body, .. } => {
+                let labels = core::mem::take(&mut frame.pending_loop_labels);
                 match init {
                     fe::parse::ForInit::Decl(ids) => {
                         for id in ids {
@@ -2173,8 +2193,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     None => self.branch(func, frame, loop_body, vec![]),
                 }
-                frame.loops.push(LoopTarget { cont: step_block });
-                frame.breaks.push(exit);
+                frame.loops.push(LoopTarget { cont: step_block, labels: labels.clone() });
+                frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
                 frame.breaks.pop();
@@ -2194,18 +2214,37 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 frame.current = Some(exit);
             }
-            fe::parse::Stmt::Break { .. } => {
+            fe::parse::Stmt::Break { label, .. } => {
                 // Loops and `switch`es share one stack so `break`
                 // takes whichever encloses most tightly; the checker
                 // rejects strays, so an empty stack is a lowering bug.
-                let target = frame.breaks.last().copied().expect("break outside a loop or switch");
+                let target = match label {
+                    Some(name) => frame
+                        .breaks
+                        .iter()
+                        .rev()
+                        .find(|target| target.labels.contains(name))
+                        .map(|target| target.block)
+                        .expect("break label target missing"),
+                    None => frame.breaks.last().map(|target| target.block).expect("break outside a loop or switch"),
+                };
                 self.branch(func, frame, target, vec![]);
             }
-            fe::parse::Stmt::Continue { .. } => {
-                let target = frame.loops.last().expect("continue outside a loop").cont;
+            fe::parse::Stmt::Continue { label, .. } => {
+                let target = match label {
+                    Some(name) => frame
+                        .loops
+                        .iter()
+                        .rev()
+                        .find(|target| target.labels.contains(name))
+                        .map(|target| target.cont)
+                        .expect("continue label target missing"),
+                    None => frame.loops.last().expect("continue outside a loop").cont,
+                };
                 self.branch(func, frame, target, vec![]);
             }
             fe::parse::Stmt::Switch { cond, body, .. } => {
+                let labels = core::mem::take(&mut frame.pending_loop_labels);
                 // C compares in the promoted controlling type, and the
                 // checker's duplicate-`case` detection ran in exactly
                 // that type: promote the scrutinee explicitly (the
@@ -2225,7 +2264,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     ranges: Vec::new(),
                     default: None,
                 });
-                frame.breaks.push(exit);
+                frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(body_entry);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
                 frame.breaks.pop();
@@ -2333,7 +2372,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.branch(func, frame, dispatch, vec![value]);
             }
-            fe::parse::Stmt::Label { name, stmt, .. } => {
+            fe::parse::Stmt::Label { name, names_loop, stmt, .. } => {
                 // Execution falls through into a label; only an
                 // already-terminated path (after `return`/`goto`)
                 // arrives solely by jump.
@@ -2349,7 +2388,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     self.branch(func, frame, target, vec![]);
                 }
                 frame.current = Some(target);
+                let depth = frame.pending_loop_labels.len();
+                if *names_loop {
+                    frame.pending_loop_labels.push(*name);
+                }
                 self.lower_stmt(module, func, frame, funcs, externs, globals, stmt);
+                frame.pending_loop_labels.truncate(depth);
             }
             fe::parse::Stmt::Case { expr, hi, stmt, .. } => {
                 // Like a label, but recorded into the innermost open
@@ -10781,6 +10825,57 @@ mod tests {
                 .iter()
                 .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
             "the empty literal keeps its terminator"
+        );
+    }
+
+    #[test]
+    fn named_loops_lower() {
+        assert_eq!(
+            run_main(
+                "int main(){int r = 0; \
+                 outer: for (int i = 0; i < 3; i++) { \
+                   for (int j = 0; j < 3; j++) { \
+                     if (i == 1 && j == 1) continue outer; \
+                     if (i == 2) break outer; \
+                     r++; \
+                   } \
+                   r += 100; \
+                 } return r;}"
+            ),
+            104
+        );
+        assert_eq!(
+            run_main(
+                "int main(){int r = 0; \
+                 a: b: for (int i = 0; i < 3; i++) { \
+                   for (int j = 0; j < 3; j++) { \
+                     if (j == 1) continue b; \
+                     r++; \
+                   } \
+                 } return r;}"
+            ),
+            3
+        );
+        // A selection declaration does not break the label-to-switch link.
+        assert_eq!(
+            run_main(
+                "int main(){int r = 0; \
+                 a: switch (int x = 1; x) { \
+                   case 1: for (int j = 0; j < 3; j++) { r++; break a; } \
+                   r = 99; \
+                 } return r;}"
+            ),
+            1
+        );
+        // Header loops must not steal the label of the loop they are in.
+        assert_eq!(
+            run_main(
+                "int main(){int r = 0; \
+                 a: for (({ for (;;) { break; } }); r < 1; ) { \
+                   r++; if (r == 1) break a; \
+                 } return r;}"
+            ),
+            1
         );
     }
 

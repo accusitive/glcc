@@ -3239,6 +3239,52 @@ fn compound_literal_direct_sizeof_operand() {
 }
 
 #[test]
+fn named_loops_resolve_enclosing_targets() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "int f(void) { int r = 0; outer: for (int i = 0; i < 3; i++) { \
+         for (int j = 0; j < 3; j++) { if (j == 1) continue outer; r++; } } return r; }",
+        c2y
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang(
+        "int f(int x) { int r = 0; a: switch (x) { case 1: break a; } return r; }",
+        c2y
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang(
+        "int f(void) { int r = 0; a: b: do { if (r++) continue b; break a; } while (1); return r; }",
+        c2y
+    )
+    .is_empty());
+    // A label names only the loop or switch it immediately prefixes.
+    let diags = tu_diagnostics_with_lang("int f(int x) { a: if (x) { break a; } return 0; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("does not name an enclosing loop")), "{diags:#?}");
+    let diags = tu_diagnostics_with_lang("int f(int x) { a: switch (x) { case 0: continue a; } return 0; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("switch statement")), "{diags:#?}");
+    let diags = tu_diagnostics_with_lang("int f(int x) { a: { while (x) break a; } return 0; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("does not name an enclosing loop")), "{diags:#?}");
+    // Break in a loop header's statement expression is outside the loop.
+    let diags = tu_diagnostics_with_lang("int f(void) { a: while (({ break a; })) { } return 0; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("does not name an enclosing loop")), "{diags:#?}");
+    // Strict C17 has no labelled jumps; permissive GNU mode does.
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(!tu_diagnostics_with_lang("int f(void) { a: while (0) { break a; } return 0; }", c17).is_empty());
+    assert!(tu_diagnostics("int f(void) { a: while (0) { break a; } return 0; }").is_empty());
+}
+
+#[test]
 fn selection_declarations_scope_over_branches() {
     use crate::lang::Std;
     let c2y = LangOpts {
