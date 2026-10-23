@@ -336,6 +336,17 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             }
             format!("(generic [{}] {} :{})", index, parts.join(" "), t)
         }
+        CheckedExprKind::GenericTy { ty, index, assocs } => {
+            let mut parts = Vec::new();
+            for (ty, expr) in assocs {
+                let label = match ty {
+                    Some(ty) => dump_ty(ty, sema, interner),
+                    None => "default".to_string(),
+                };
+                parts.push(format!("({} {})", label, dump_ex(expr, sema, interner)));
+            }
+            format!("(generic-ty {} [{}] {} :{})", dump_ty(ty, sema, interner), index, parts.join(" "), t)
+        }
         CheckedExprKind::VaArg { ap, ty } => format!("(va-arg {} {} :{})", dump_ex(ap, sema, interner), dump_ty(ty, sema, interner), t),
         CheckedExprKind::StmtExpr { items } => {
             let mut parts = Vec::new();

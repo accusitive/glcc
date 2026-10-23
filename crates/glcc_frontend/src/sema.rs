@@ -1199,6 +1199,11 @@ fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initiali
                 remap_expr_ident(expr, inits, map);
             }
         }
+        CheckedExprKind::GenericTy { assocs, .. } => {
+            for (_, expr) in assocs {
+                remap_expr_ident(expr, inits, map);
+            }
+        }
         CheckedExprKind::StmtExpr { items } => remap_block_items(items, inits, map),
         CheckedExprKind::CompoundLiteral { init, .. } => remap_init_ident(init, inits, map),
     }

@@ -322,6 +322,12 @@ pub enum CheckedExprKind {
         index: usize,
         assocs: Vec<(Option<Ty>, CheckedExpr)>,
     },
+    /// `_Generic` whose controlling operand is a type-name (C2y).
+    GenericTy {
+        ty: Ty,
+        index: usize,
+        assocs: Vec<(Option<Ty>, CheckedExpr)>,
+    },
     VaArg {
         ap: Box<CheckedExpr>,
         ty: Ty,
@@ -948,6 +954,13 @@ impl Sema {
                     *arm = self.decay_checked(arm.clone());
                 }
                 CheckedExprKind::Generic { ctrl, index, assocs }
+            }
+            CheckedExprKind::GenericTy { ty, index, assocs } => {
+                let mut assocs = assocs;
+                if let Some((_, arm)) = assocs.get_mut(index) {
+                    *arm = self.decay_checked(arm.clone());
+                }
+                CheckedExprKind::GenericTy { ty, index, assocs }
             }
             kind => kind,
         };
@@ -2168,6 +2181,7 @@ impl Sema {
             Expr::Member { base, field, arrow, .. } => self.check_member(base, *field, *arrow, interner, span),
             Expr::Cast { ty, expr: operand, .. } => self.check_cast(ty, operand, interner, span),
             Expr::Generic { ctrl, assocs, .. } => self.check_generic(ctrl, assocs, interner, span),
+            Expr::GenericTy { ty, assocs, .. } => self.check_generic_ty(ty, assocs, interner, span),
             Expr::VaArg { ap, ty, .. } => {
                 let ap = self.decay_checked(self.check_expr(ap, interner)?);
                 // MSVC's `va_list` is a plain `char *` (and the backend
@@ -4128,6 +4142,47 @@ impl Sema {
     /// selected expression's type and is never an lvalue.
     fn check_generic(&self, ctrl: &Expr, assocs: &[GenericAssoc], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
         let ctrl = self.decay_checked(self.check_expr(ctrl, interner)?);
+        let (index, checked) = self.check_generic_assocs(&ctrl.ty, assocs, interner, span)?;
+        let ty = checked[index].1.ty.clone();
+        Ok(CheckedExpr {
+            ty,
+            span,
+            kind: CheckedExprKind::Generic {
+                ctrl: Box::new(ctrl),
+                index,
+                assocs: checked,
+            },
+        })
+    }
+
+    /// C2y `_Generic ( type-name , ... )`: the type operand replaces the
+    /// controlling expression, so no lvalue conversion or evaluation is
+    /// involved.
+    fn check_generic_ty(&self, ty: &Ty, assocs: &[GenericAssoc], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+        let (index, checked) = self.check_generic_assocs(ty, assocs, interner, span)?;
+        let selected_ty = checked[index].1.ty.clone();
+        Ok(CheckedExpr {
+            ty: selected_ty,
+            span,
+            kind: CheckedExprKind::GenericTy {
+                ty: ty.clone(),
+                index,
+                assocs: checked,
+            },
+        })
+    }
+
+    /// Resolve the selected association for a controlling type. The
+    /// first compatible type-name wins, else `default` (which must
+    /// exist). Duplicate type-names and a second `default` are
+    /// constraint violations.
+    fn check_generic_assocs(
+        &self,
+        ctrl_ty: &Ty,
+        assocs: &[GenericAssoc],
+        interner: &Interner,
+        span: Span,
+    ) -> Result<(usize, Vec<(Option<Ty>, CheckedExpr)>), CompileError> {
         let mut checked: Vec<(Option<Ty>, CheckedExpr)> = Vec::with_capacity(assocs.len());
         let mut default = None;
         let mut selected = None;
@@ -4147,7 +4202,7 @@ impl Sema {
                     {
                         return Err(CompileError::new("duplicate type in `_Generic`", assoc.span));
                     }
-                    if selected.is_none() && (types_compatible(&ctrl.ty, ty) || self.enum_repr_pair(&ctrl.ty, ty)) {
+                    if selected.is_none() && (types_compatible(ctrl_ty, ty) || self.enum_repr_pair(ctrl_ty, ty)) {
                         selected = Some(checked.len());
                     }
                 }
@@ -4155,16 +4210,7 @@ impl Sema {
             checked.push((assoc.ty.clone(), expr));
         }
         let index = selected.or(default).ok_or_else(|| CompileError::new("no matching generic association", span))?;
-        let ty = checked[index].1.ty.clone();
-        Ok(CheckedExpr {
-            ty,
-            span,
-            kind: CheckedExprKind::Generic {
-                ctrl: Box::new(ctrl),
-                index,
-                assocs: checked,
-            },
-        })
+        Ok((index, checked))
     }
 
     /// Byte offset of a `__builtin_offsetof(TYPE, .a.b[i])` designator

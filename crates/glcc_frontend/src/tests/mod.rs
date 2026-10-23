@@ -5708,6 +5708,24 @@ fn generic_selection_resolves() {
 }
 
 #[test]
+fn generic_type_operand_selects_without_decay() {
+    assert_eq!(enum_value_of("enum { N = _Generic(int, int: 5, default: 6) };", "N"), 5);
+    assert_eq!(enum_value_of("enum { N = _Generic(int *, int *: 5, default: 6) };", "N"), 5);
+    // A type operand is not lvalue-converted: qualifiers stay part of
+    // the controlling type.
+    assert_eq!(enum_value_of("enum { N = _Generic(const int, int: 5, default: 6) };", "N"), 6);
+    // An expression operand still decays, unlike the type spelling.
+    assert_eq!(
+        enum_value_of("int a[3]; enum { N = _Generic(a, int *: 5, default: 6) };", "N"),
+        5
+    );
+    assert_eq!(
+        enum_value_of("enum { N = _Generic(int[3], int[3]: 5, default: 6) };", "N"),
+        5
+    );
+}
+
+#[test]
 fn generic_without_match_or_default_panics() {
     let mut sema = Sema::new();
     let mut interner = Interner::new();

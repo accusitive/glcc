@@ -3377,6 +3377,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.expr_value(module, func, frame, funcs, externs, globals, chosen)
             }
+            fe::check::CheckedExprKind::GenericTy { index, assocs, .. } => {
+                let Some((_, chosen)) = assocs.get(*index) else {
+                    panic!("generic association index out of range");
+                };
+                self.expr_value(module, func, frame, funcs, externs, globals, chosen)
+            }
             fe::check::CheckedExprKind::ConstantP(b) => self.iconst(func, int_bits(&mir_ty), i128::from(*b)),
             fe::check::CheckedExprKind::ClassifyType(code) => self.iconst(func, int_bits(&mir_ty), i128::from(*code)),
             fe::check::CheckedExprKind::FpClass { op, arg } => {
@@ -10776,6 +10782,12 @@ mod tests {
                 .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
             "the empty literal keeps its terminator"
         );
+    }
+
+    #[test]
+    fn generic_type_operand_lowers_selected_arm() {
+        assert_eq!(run_main("int main(){return _Generic(int, int: 3, default: 0);}"), 3);
+        assert_eq!(run_main("int main(){return _Generic(long, int: 3, default: 4);}"), 4);
     }
 
     #[test]

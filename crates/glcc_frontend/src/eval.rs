@@ -938,6 +938,11 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
                 .get(*index)
                 .and_then(|(_, expr)| eval_const(expr, sema, interner))
         }
+        CheckedExprKind::GenericTy { index, assocs, .. } => {
+            assocs
+                .get(*index)
+                .and_then(|(_, expr)| eval_const(expr, sema, interner))
+        }
         // Folded at check time from the member layout.
         CheckedExprKind::Offsetof { offset, .. } => Some(Value::Int(*offset as i128)),
         // Folded at check time from the operand's constness.

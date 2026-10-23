@@ -2665,6 +2665,11 @@ impl<'a> Parser<'a> {
                     self.check_flow_expr(expr, labels, gotos, scope, fv);
                 }
             }
+            CheckedExprKind::GenericTy { assocs, .. } => {
+                for (_, expr) in assocs {
+                    self.check_flow_expr(expr, labels, gotos, scope, fv);
+                }
+            }
             CheckedExprKind::CompoundLiteral { init, .. } => {
                 self.check_flow_init(init, gotos, scope, fv);
             }
@@ -6569,8 +6574,24 @@ impl<'a> Parser<'a> {
         let start = self.mark();
         self.tokens.advance();
         self.expect_punct(Punctuator::LParen);
-        let ctrl = self.parse_assignment_expression();
+        let ctrl_ty = if self.token_starts_type_name(self.tokens.peek_val()) {
+            Some(self.parse_type_name())
+        } else {
+            None
+        };
+        let ctrl = if ctrl_ty.is_some() { None } else { Some(Box::new(self.parse_assignment_expression())) };
         self.expect_punct(Punctuator::Comma);
+        let assocs = self.parse_generic_associations();
+        self.expect_punct(Punctuator::RParen);
+        match ctrl_ty {
+            Some(ty) => Expr::GenericTy { ty, assocs, span: self.span_since(start) },
+            None => Expr::Generic { ctrl: ctrl.expect("expression controlling operand"), assocs, span: self.span_since(start) },
+        }
+    }
+
+    /// The comma-separated association list of a `_Generic` selection.
+    /// The caller consumes the closing parenthesis.
+    fn parse_generic_associations(&mut self) -> Vec<GenericAssoc> {
         let mut assocs = Vec::new();
         loop {
             let assoc_start = self.mark();
@@ -6593,12 +6614,7 @@ impl<'a> Parser<'a> {
             }
             break;
         }
-        self.expect_punct(Punctuator::RParen);
-        Expr::Generic {
-            ctrl: Box::new(ctrl),
-            assocs,
-            span: self.span_since(start),
-        }
+        assocs
     }
     /// Member designators for `__builtin_offsetof(TYPE, ...)`: a field
     /// first (with an optional leading dot — both `offsetof(S, x)` and
@@ -7828,6 +7844,12 @@ pub enum Expr {
         assocs: Vec<GenericAssoc>,
         span: Span,
     },
+    /// C2y `_Generic` with a type-name controlling operand.
+    GenericTy {
+        ty: Ty,
+        assocs: Vec<GenericAssoc>,
+        span: Span,
+    },
     /// `va_arg(ap, TYPE)`: like a call, but the second operand is a
     /// type-name, so it parses separately (C17 §7.16.1.1).
     VaArg {
@@ -7908,6 +7930,7 @@ impl HasSpan for Expr {
             | Expr::Member { span, .. }
             | Expr::Cast { span, .. }
             | Expr::Generic { span, .. }
+            | Expr::GenericTy { span, .. }
             | Expr::Offsetof { span, .. }
             | Expr::StmtExpr { span, .. }
             | Expr::VaArg { span, .. }
