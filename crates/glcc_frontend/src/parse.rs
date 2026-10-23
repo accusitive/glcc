@@ -1716,7 +1716,7 @@ impl<'a> Parser<'a> {
         if self.peek_msvc_operator("__pragma") {
             self.skip_msvc_operator();
         }
-        if self.peek_is_static_assert() {
+        if self.peek_is_static_assert() && self.static_assert_is_declaration() {
             return BlockItem::Stmt(self.parse_static_assert());
         }
         if self.can_start_declaration() {
@@ -2753,7 +2753,8 @@ impl<'a> Parser<'a> {
             | CheckedExprKind::Offsetof { .. }
             | CheckedExprKind::SizeofTy(_)
             | CheckedExprKind::CountofTy(_)
-            | CheckedExprKind::AlignofTy(_) => {}
+            | CheckedExprKind::AlignofTy(_)
+            | CheckedExprKind::StaticAssert => {}
             // Taking a label's address is a use of it, checked exactly
             // like a `goto`: the label must exist in this function.
             CheckedExprKind::LabelAddr(name) => gotos.push((*name, expr.span)),
@@ -5450,12 +5451,43 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `_Static_assert ( constant-expression , string-literal ) ;`
-    /// (C11 §6.7.10): checked here and discarded — it declares nothing.
-    /// A false or non-integer-constant condition is an error; the
-    /// message only feeds the diagnostic. The C23 single-argument form
-    /// parses too, liberally.
-    fn parse_static_assert(&mut self) -> Stmt {
+    /// A `static_assert` in a block is a declaration when the token
+    /// after its closing `)` is `;` (C2y N3715); otherwise it is the
+    /// void expression operator.
+    fn static_assert_is_declaration(&self) -> bool {
+        match self.balanced_paren_end(1) {
+            Some(end) => matches!(self.tokens.peek_nth(end).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Semi))),
+            // Malformed input: let the declaration parser report it.
+            None => true,
+        }
+    }
+
+    /// Whether the current token can begin the C2y static-assert
+    /// expression operator. `_Static_assert` is also accepted as an
+    /// extension in permissive pre-C2y dialects; the bare spelling
+    /// keeps its pre-C2y meaning there (it is not a keyword before C23).
+    fn peek_is_static_assert_expression(&self) -> bool {
+        let Some(sym) = self.tokens.peek_val().and_then(|token| match token {
+            Token::Identifier(sym) => Some(*sym),
+            _ => None,
+        }) else {
+            return false;
+        };
+        match self.intern.resolve(sym) {
+            Some("static_assert") => self.sema.lang.standard_includes(Std::C2y),
+            Some("_Static_assert") => {
+                self.sema.lang.standard_includes(Std::C2y)
+                    || ((self.sema.lang.gnu || self.sema.lang.clang) && self.sema.lang.standard_includes(Std::C11))
+            }
+            _ => false,
+        }
+    }
+
+    /// The common core of a static-assert declaration and expression:
+    /// `( constant-expression [, string-literal] )`. The condition must
+    /// be a nonzero integer constant expression; the message only feeds
+    /// the diagnostic.
+    fn parse_static_assert_condition(&mut self) -> Span {
         let start = self.mark();
         self.tokens.advance();
         self.expect_punct(Punctuator::LParen);
@@ -5464,7 +5496,9 @@ impl<'a> Parser<'a> {
         let value = crate::eval::eval_const(&checked, self.sema, &self.intern);
         let msg = if self.eat_punct(Punctuator::Comma) {
             let Some(Token::StringLiteral(lit)) = self.tokens.peek_val() else {
-                return self.fail(self.peek_span(), "`_Static_assert` needs a string literal message");
+                let span = self.peek_span();
+                self.fail::<()>(span, "`_Static_assert` needs a string literal message");
+                return self.span_since(start);
             };
             let lit = *lit;
             self.tokens.advance();
@@ -5474,18 +5508,29 @@ impl<'a> Parser<'a> {
         };
         self.expect_punct(Punctuator::RParen);
         let span = self.span_since(start);
-        self.expect_punct(Punctuator::Semi);
         match value {
             Some(crate::eval::Value::Int(0)) => {
                 if msg.is_empty() {
-                    self.fail(span, "static assertion failed")
+                    self.fail::<()>(span, "static assertion failed");
                 } else {
-                    self.fail(span, format!("static assertion failed: {msg}"))
+                    self.fail::<()>(span, format!("static assertion failed: {msg}"));
                 }
             }
-            Some(crate::eval::Value::Int(_)) => Stmt::Empty { span },
-            _ => self.fail(span, "`_Static_assert` needs an integer constant expression"),
+            Some(crate::eval::Value::Int(_)) => {}
+            _ => {
+                self.fail::<()>(span, "`_Static_assert` needs an integer constant expression");
+            }
         }
+        span
+    }
+
+    /// `_Static_assert ( constant-expression , string-literal ) ;`
+    /// (C11 §6.7.10): checked here and discarded — it declares nothing.
+    /// The C23 single-argument form parses too, liberally.
+    fn parse_static_assert(&mut self) -> Stmt {
+        let span = self.parse_static_assert_condition();
+        self.expect_punct(Punctuator::Semi);
+        Stmt::Empty { span }
     }
 
     /// Whether the next token is an `_Alignas`/`alignas` specifier
@@ -5745,10 +5790,21 @@ impl<'a> Parser<'a> {
             None
         };
         self.skip_gnu_suffixes();
-        let fixed = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon))) {
+        // In a `_Generic` association the colon after `enum E` is the
+        // association separator, not a fixed underlying type. A fixed
+        // type always begins with a type-name token, so `enum E: 1`
+        // leaves the colon for the caller.
+        let has_fixed_colon = matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon)))
+            && self.token_starts_type_name(self.tokens.peek_nth(1).map(|located| &located.val));
+        let fixed = if has_fixed_colon {
             self.tokens.advance();
             let span = self.peek_span();
             let ty = self.parse_type_name().unqualified().clone();
+            if matches!(ty, Ty::BitInt { .. })
+                && !(self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang)
+            {
+                return self.fail(span, "bit-precise enum underlying types require C2y");
+            }
             if !Self::is_enum_underlying_type(&ty) {
                 return self.fail(span, "enum underlying type must be an integer type");
             }
@@ -5814,6 +5870,7 @@ impl<'a> Parser<'a> {
                 | Ty::UnsignedLongLong
                 | Ty::Int128
                 | Ty::UnsignedInt128
+                | Ty::BitInt { .. }
         )
     }
 
@@ -5821,6 +5878,14 @@ impl<'a> Parser<'a> {
         let ty = ty.unqualified();
         if matches!(ty, Ty::Bool) {
             return matches!(value, 0 | 1);
+        }
+        if let Ty::BitInt { width, signed } = ty {
+            return if *signed {
+                let bound = 1i128 << (*width - 1);
+                value >= -bound && value < bound
+            } else {
+                value >= 0 && (value as u128) < (1u128 << *width)
+            };
         }
         let Some(size) = crate::check::int_type_size(ty, &self.sema.target) else {
             return false;
@@ -6552,6 +6617,10 @@ impl<'a> Parser<'a> {
                     span: self.span_since(start),
                 };
             }
+        }
+        if self.peek_is_static_assert_expression() {
+            let span = self.parse_static_assert_condition();
+            return Expr::StaticAssert { span };
         }
         let is_countof = match self.tokens.peek_val() {
             Some(Token::Identifier(sym)) => {
@@ -8165,6 +8234,11 @@ pub enum Expr {
         ty: Ty,
         span: Span,
     },
+    /// C2y `static_assert(...)` in expression position. It has type
+    /// void and produces no runtime code (N3715).
+    StaticAssert {
+        span: Span,
+    },
     /// GNU `__alignof__` / C11 `_Alignof`, in expression and type
     /// form: the operand's required alignment, as a `size_t` constant.
     AlignofExpr {
@@ -8209,6 +8283,7 @@ impl HasSpan for Expr {
             | Expr::SizeofExpr { span, .. }
             | Expr::CountofExpr { span, .. }
             | Expr::CountofTy { span, .. }
+            | Expr::StaticAssert { span }
             | Expr::AlignofExpr { span, .. }
             | Expr::AlignofTy { span, .. }
             | Expr::SizeofTy { span, .. }

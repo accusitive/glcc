@@ -1135,6 +1135,7 @@ fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initiali
         | CheckedExprKind::SizeofTy(_)
         | CheckedExprKind::CountofTy(_)
         | CheckedExprKind::AlignofTy(_)
+        | CheckedExprKind::StaticAssert
         | CheckedExprKind::LabelAddr(_) => {}
         CheckedExprKind::Unary(_, e)
         | CheckedExprKind::Await(e)

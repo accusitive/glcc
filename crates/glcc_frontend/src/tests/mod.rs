@@ -3239,6 +3239,73 @@ fn compound_literal_direct_sizeof_operand() {
 }
 
 #[test]
+fn c2y_static_assert_expressions() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c2y).is_empty());
+    assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1); static_assert(1), 0; }", c2y).is_empty());
+    assert!(tu_diagnostics_with_lang("void f(void) { if (1) static_assert(1); }", c2y).is_empty());
+    let diags = tu_diagnostics_with_lang("int f(void) { return (static_assert(0), 5); }", c2y);
+    assert!(diags.iter().any(|d| d.is_error() && d.message.contains("static assertion failed")), "{diags:#?}");
+    let diags = tu_diagnostics_with_lang("int f(int n) { return (static_assert(n), 5); }", c2y);
+    assert!(
+        diags.iter().any(|d| d.is_error() && d.message.contains("needs an integer constant expression")),
+        "{diags:#?}"
+    );
+    assert!(!tu_diagnostics_with_lang("int f(void) { return sizeof(static_assert(1)); }", c2y).is_empty());
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(!tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c23).is_empty());
+    // `_Static_assert` remains a declaration in pre-C2y permissive modes.
+    assert!(tu_diagnostics("void f(void) { _Static_assert(1); }").is_empty());
+}
+
+#[test]
+fn c2y_bit_precise_enum_underlying_types() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "enum E : _BitInt(5) { E_MIN = -16, E_MAX = 15 };
+         enum U : unsigned _BitInt(5) { U_MAX = 31 };
+         int f(void) { enum E e = E_MAX; return sizeof(e) + _Generic((enum E)0, enum E: 1, default: 0); }",
+        c2y
+    )
+    .is_empty());
+    let diags = tu_diagnostics_with_lang("enum A : _BitInt(5) { A0 = 16 };", c2y);
+    assert!(
+        diags.iter().any(|d| d.is_error() && d.message.contains("does not fit the fixed underlying type")),
+        "{diags:#?}"
+    );
+    let diags = tu_diagnostics_with_lang("enum B : unsigned _BitInt(5) { B0 = 32 };", c2y);
+    assert!(
+        diags.iter().any(|d| d.is_error() && d.message.contains("does not fit the fixed underlying type")),
+        "{diags:#?}"
+    );
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    let diags = tu_diagnostics_with_lang("enum E : _BitInt(8) { A = 1 };", c23);
+    assert!(diags.iter().any(|d| d.is_error() && d.message.contains("require C2y")), "{diags:#?}");
+}
+
+#[test]
 fn named_loops_resolve_enclosing_targets() {
     use crate::lang::Std;
     let c2y = LangOpts {

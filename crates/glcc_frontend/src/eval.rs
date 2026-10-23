@@ -1031,7 +1031,9 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         | CheckedExprKind::Member { .. }
         | CheckedExprKind::CompoundLiteral { .. }
         | CheckedExprKind::Assign(..)
-        | CheckedExprKind::CompoundAssign { .. } => None,
+        | CheckedExprKind::CompoundAssign { .. }
+        // A static assertion has type void and no value.
+        | CheckedExprKind::StaticAssert => None,
         // `sizeof` folds when layout knows the size (complete types,
         // string literals included); variable-length arrays and opaque
         // builtins never fold.

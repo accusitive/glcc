@@ -328,6 +328,9 @@ pub enum CheckedExprKind {
         index: usize,
         assocs: Vec<(Option<Ty>, CheckedExpr)>,
     },
+    /// C2y static assertion in expression position: type void, no
+    /// runtime effect.
+    StaticAssert,
     VaArg {
         ap: Box<CheckedExpr>,
         ty: Ty,
@@ -2301,6 +2304,11 @@ impl Sema {
                     kind: CheckedExprKind::CountofTy(ty.clone()),
                 })
             }
+            Expr::StaticAssert { .. } => Ok(CheckedExpr {
+                ty: Ty::Void,
+                span,
+                kind: CheckedExprKind::StaticAssert,
+            }),
             Expr::AlignofTy { ty, .. } => {
                 self.check_alignof_operand(ty, span)?;
                 Ok(CheckedExpr {

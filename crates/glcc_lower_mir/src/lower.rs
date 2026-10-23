@@ -2517,7 +2517,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// (8/16/32/64), so arithmetic on a 33..63-bit value must mask
     /// here to wrap at N bits rather than at the storage width.
     fn normalize_bitint(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, ty: &fe::parse::Ty) -> mir::Value {
-        let fe::parse::Ty::BitInt { width, signed } = ty.unqualified() else {
+        let ty = match ty.unqualified() {
+            fe::parse::Ty::Enum(id) => self.sema.enums[id.0 as usize].repr.unqualified(),
+            other => other,
+        };
+        let fe::parse::Ty::BitInt { width, signed } = ty else {
             return value;
         };
         let mir_ty = lower_ty(ty, self.sema, self.interner);
@@ -3407,6 +3411,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
+            fe::check::CheckedExprKind::StaticAssert => self.iconst(func, 32, 0),
             fe::check::CheckedExprKind::CountofTy(ty) => {
                 self.countof_value(module, func, frame, funcs, externs, globals, ty, None, &expr.ty)
             }
@@ -8318,6 +8323,17 @@ mod tests {
         lower_translation_unit(&sema, &interner, &tu)
     }
 
+    /// `lower_module` for C2y sources.
+    fn lower_module_c2y(src: &str) -> mir::Module {
+        let mut interner = fe::lexer::Interner::new();
+        let mut sema = fe::sema::Sema::new();
+        sema.lang.std = fe::lang::Std::C2y;
+        let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
+        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let tu = parser.parse_translation_unit();
+        lower_translation_unit(&sema, &interner, &tu)
+    }
+
     /// `lower_module` for C23 sources.
     fn lower_module_c23(src: &str) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
@@ -10826,6 +10842,35 @@ mod tests {
                 .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
             "the empty literal keeps its terminator"
         );
+    }
+
+    #[test]
+    fn c2y_static_assert_expressions_lower() {
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) { int x = (static_assert(1), 42); static_assert(1); return x; }"
+            )),
+            42
+        );
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) { return (static_assert(1), _Static_assert(1), 7); }"
+            )),
+            7
+        );
+    }
+
+    #[test]
+    fn c2y_bit_precise_enums_lower() {
+        let src = "enum E : _BitInt(5) { E_MAX = 15, E_MIN = -16 };\n\
+                   enum U : unsigned _BitInt(5) { U_MAX = 31 };\n\
+                   int main(void) {\n\
+                       enum E e = E_MAX; e = e + 1;\n\
+                       enum U u = U_MAX; u = u + 1;\n\
+                       return (e == -16) + 2 * (u == 0) + 4 * (sizeof(e) == 1)\n\
+                           + 8 * _Generic((enum E)0, enum E: 1, default: 0);\n\
+                   }";
+        assert_eq!(jit_run_main(lower_module_c2y(src)), 15);
     }
 
     #[test]
