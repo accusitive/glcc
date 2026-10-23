@@ -10785,6 +10785,16 @@ mod tests {
     }
 
     #[test]
+    fn delimited_escapes_lower() {
+        assert_eq!(
+            run_main("int main(){char s[] = \"\\o{110}\\x{65}llo\"; return s[0] + s[4];}"),
+            ('H' as i32) + ('o' as i32)
+        );
+        assert_eq!(run_main("int main(){return (int)sizeof(\"\\u{2021}\");}"), 4);
+        assert_eq!(run_main("int main(){return L\"\\u{2021}\"[0] == 0x2021;}"), 1);
+    }
+
+    #[test]
     fn generic_type_operand_lowers_selected_arm() {
         assert_eq!(run_main("int main(){return _Generic(int, int: 3, default: 0);}"), 3);
         assert_eq!(run_main("int main(){return _Generic(long, int: 3, default: 4);}"), 4);

@@ -1171,6 +1171,16 @@ impl<'a> Lexer<'a> {
             }
         };
         buf.push(if small { 'u' } else { 'U' });
+        if self.peek_char(0) == Some('{') {
+            let Some(value) = self.lex_braced_digits(buf, 16, start, "universal character name") else {
+                return char::REPLACEMENT_CHARACTER;
+            };
+            let Some(c) = char::from_u32(value) else {
+                self.error(start, self.loc, format!("universal character name \\u{{{value:X}}} is not a valid character"));
+                return char::REPLACEMENT_CHARACTER;
+            };
+            return c;
+        }
         let digits = if small { 4 } else { 8 };
         let mut value = 0u32;
         for _ in 0..digits {
@@ -1186,6 +1196,62 @@ impl<'a> Lexer<'a> {
             return char::REPLACEMENT_CHARACTER;
         };
         c
+    }
+
+    /// Consume a `\x{...}` or `\o{...}` body (the escape letter is
+    /// already in `buf`). The braces delimit an arbitrary digit run.
+    fn lex_delimited_numeric_into(&mut self, buf: &mut String, radix: u32, start: Location) {
+        self.lex_braced_digits(buf, radix, start, "escape sequence");
+    }
+
+    /// Consume the `{digits}` part of a delimited escape starting at the
+    /// current `{`. Returns the value, or `None` after reporting a
+    /// malformed or out-of-range sequence.
+    fn lex_braced_digits(&mut self, buf: &mut String, radix: u32, start: Location, what: &str) -> Option<u32> {
+        buf.push(self.bump().expect("lex_braced_digits starts at `{`"));
+        let mut value = 0u32;
+        let mut digits = 0usize;
+        let mut overflow = false;
+        loop {
+            match self.peek_char(0) {
+                Some('}') => {
+                    buf.push(self.bump().unwrap());
+                    break;
+                }
+                Some(c) if c.to_digit(radix).is_some() => {
+                    buf.push(self.bump().unwrap());
+                    digits += 1;
+                    let d = c.to_digit(radix).unwrap();
+                    match value.checked_mul(radix).and_then(|v| v.checked_add(d)) {
+                        Some(v) => value = v,
+                        None => overflow = true,
+                    }
+                }
+                Some(c) => {
+                    self.error(start, self.loc, format!("invalid digit `{c}` in {what}"));
+                    while let Some(next) = self.peek_char(0) {
+                        self.bump_into(buf);
+                        if next == '}' {
+                            break;
+                        }
+                    }
+                    return None;
+                }
+                None => {
+                    self.error(start, self.loc, format!("unterminated {what}"));
+                    return None;
+                }
+            }
+        }
+        if digits == 0 {
+            self.error(start, self.loc, format!("delimited {what} cannot be empty"));
+            return None;
+        }
+        if overflow {
+            self.error(start, self.loc, format!("delimited {what} is out of range"));
+            return None;
+        }
+        Some(value)
     }
 
     /// Consume a universal character name whose backslash is the current
@@ -1597,6 +1663,11 @@ impl<'a> Lexer<'a> {
                         Some('u' | 'U') => {
                             self.lex_ucn_into(&mut buf);
                         }
+                        Some(c @ ('x' | 'o')) if self.peek_char(1) == Some('{') => {
+                            let escape_start = self.loc;
+                            buf.push(self.bump().unwrap());
+                            self.lex_delimited_numeric_into(&mut buf, if c == 'x' { 16 } else { 8 }, escape_start);
+                        }
                         Some(_) => self.bump_into(&mut buf),
                         None => {
                             self.error(start, self.loc, format!("unterminated character constant in {buf:?}"));
@@ -1668,6 +1739,11 @@ impl<'a> Lexer<'a> {
                     match self.peek_char(0) {
                         Some('u' | 'U') => {
                             self.lex_ucn_into(&mut buf);
+                        }
+                        Some(c @ ('x' | 'o')) if self.peek_char(1) == Some('{') => {
+                            let escape_start = self.loc;
+                            buf.push(self.bump().unwrap());
+                            self.lex_delimited_numeric_into(&mut buf, if c == 'x' { 16 } else { 8 }, escape_start);
                         }
                         Some(_) => self.bump_into(&mut buf),
                         None => {

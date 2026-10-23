@@ -450,6 +450,9 @@ pub(crate) fn escape_value(chars: &[char]) -> (u32, usize) {
             (value, used)
         }
         'x' => {
+            if let Some((value, used)) = delimited_escape(rest, 16) {
+                return (value, used + 1);
+            }
             let mut value = 0u32;
             let mut used = 1;
             for c in rest.iter() {
@@ -462,9 +465,18 @@ pub(crate) fn escape_value(chars: &[char]) -> (u32, usize) {
             }
             (value, used)
         }
+        'o' => {
+            if let Some((value, used)) = delimited_escape(rest, 8) {
+                return (value, used + 1);
+            }
+            (first as u32, 1)
+        }
         // `\uXXXX` / `\UXXXXXXXX` name a code point (C17 §6.4.3); the
         // lexer has already validated the spelling and range.
         'u' | 'U' => {
+            if let Some((value, used)) = delimited_escape(rest, 16) {
+                return (value, used + 1);
+            }
             let digits = if first == 'u' { 4 } else { 8 };
             let mut value = 0u32;
             let mut used = 1;
@@ -480,6 +492,25 @@ pub(crate) fn escape_value(chars: &[char]) -> (u32, usize) {
         }
         _ => (first as u32, 1),
     }
+}
+
+/// Decode a delimited escape body after its `u`, `U`, `x`, or `o`
+/// prefix: `{digits}` in `radix`, returning the value and the number of
+/// characters consumed after the prefix. Empty bodies and malformed
+/// digits yield `None` (the lexer diagnoses them).
+fn delimited_escape(rest: &[char], radix: u32) -> Option<(u32, usize)> {
+    if rest.first() != Some(&'{') {
+        return None;
+    }
+    let mut value = 0u32;
+    for (i, &c) in rest[1..].iter().enumerate() {
+        if c == '}' {
+            return (i > 0).then_some((value, i + 2));
+        }
+        let d = c.to_digit(radix)?;
+        value = value.wrapping_mul(radix).wrapping_add(d);
+    }
+    None
 }
 
 /// Whether the characters after a backslash begin a universal character

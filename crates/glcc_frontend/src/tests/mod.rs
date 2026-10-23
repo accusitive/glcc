@@ -5073,6 +5073,36 @@ fn string_contents_decodes() {
 }
 
 #[test]
+fn delimited_escapes_decode() {
+    use crate::lexer::{StringLiteral, StringPrefix};
+    use crate::sema::string_contents;
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let parser = test_parser("", &mut sema, &mut interner);
+    let a = parser.intern.get_or_intern("\"\\o{110}\\x{65}llo\"");
+    let parts = vec![StringLiteral {
+        spelling: a,
+        prefix: StringPrefix::None,
+    }];
+    assert_eq!(string_contents(&parts, &parser.intern).unwrap(), "Hello");
+    let u = parser.intern.get_or_intern("\"\\u{2021}\"");
+    let parts = vec![StringLiteral {
+        spelling: u,
+        prefix: StringPrefix::None,
+    }];
+    assert_eq!(string_contents(&parts, &parser.intern).unwrap(), "‡");
+
+    assert_eq!(enum_value_of("enum { N = '\\x{41}' };", "N"), 65);
+    assert_eq!(enum_value_of("enum { N = '\\o{101}' };", "N"), 65);
+    assert_eq!(enum_value_of("enum { N = '\\u{41}' };", "N"), 65);
+    assert_eq!(enum_value_of("enum { N = L'\\u{2021}' };", "N"), 0x2021);
+
+    assert_diag_contains(&lex_diagnostics("\"\\u{}\""), "cannot be empty");
+    assert_diag_contains(&lex_diagnostics("\"\\x{g}\""), "invalid digit");
+    assert_diag_contains(&lex_diagnostics("\"\\o{8}\""), "invalid digit");
+}
+
+#[test]
 fn incomplete_array_completes_from_initializer() {
     // C17 §6.7.9p22: the outermost dimension takes its size from the
     // initializer — which makes `sizeof` fold (dwm's static assertion
