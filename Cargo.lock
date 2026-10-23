@@ -444,6 +444,8 @@ dependencies = [
 name = "glcc_frontend"
 version = "0.1.0"
 dependencies = [
+ "bitflags 2.13.2",
+ "bumpalo",
  "codespan-reporting",
  "hashbrown 0.16.1",
  "peekmore",

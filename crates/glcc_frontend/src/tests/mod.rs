@@ -6,7 +6,7 @@ use crate::layout::StructLayout;
 use crate::lexer::{CharLiteral, CharPrefix, Constant, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, Lexer, Punctuator, Radix, StringPrefix, Token};
 use crate::parse::{
     ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, DirectBase, DirectSuffix, Expr, ExternalDeclaration, GnuAttributes, Initializer, Parser, PtrSize, Stmt, Ty,
-    TypeQualifier, UnaryOp, resolve_type_specifiers,
+    TypeQualifier, TypeQualifiers, UnaryOp, resolve_type_specifiers,
 };
 use crate::sema::Sema;
 use crate::span::{CompileError, Severity, Span, byte_range};
@@ -725,8 +725,8 @@ fn declarator_plain_identifier() {
 fn declarator_pointers_with_qualifiers() {
     let d = parse_one_declarator("* const * volatile p");
     assert_eq!(d.pointer.len(), 2);
-    assert!(matches!(d.pointer[0].qualifiers.as_slice(), [TypeQualifier::Const]));
-    assert!(matches!(d.pointer[1].qualifiers.as_slice(), [TypeQualifier::Volatile]));
+    assert_eq!(d.pointer[0].qualifiers, TypeQualifiers::CONST);
+    assert_eq!(d.pointer[1].qualifiers, TypeQualifiers::VOLATILE);
     assert!(d.direct.suffixes.is_empty());
 }
 
@@ -778,7 +778,7 @@ fn declarator_array_sizes() {
     let d = parse_one_declarator("a[static const 3]");
     let [DirectSuffix::Array(a)] = d.direct.suffixes.as_slice() else { panic!("{d:?}") };
     assert!(a.is_static);
-    assert!(matches!(a.qualifiers.as_slice(), [TypeQualifier::Const]));
+    assert_eq!(a.qualifiers, TypeQualifiers::CONST);
     assert_eq!(a.bound, Some(ArrayBound::Fixed(3)));
 
     // Bounds are full assignment expressions over declared names, and
@@ -829,7 +829,7 @@ fn function_parameter_names_and_types_parse() {
     assert_eq!(
         f.params[1].ty,
         Ty::Pointer {
-            qualifiers: vec![],
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
             pointee: Box::new(Ty::Char),
         }
@@ -917,7 +917,7 @@ fn spec_to_ty_pointers_nest_outside_in() {
 fn spec_to_ty_keeps_pointer_qualifiers() {
     let ty = lower_to_ty("* const p");
     let Ty::Pointer { qualifiers, .. } = &ty else { panic!("{ty:?}") };
-    assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Const]));
+    assert!(qualifiers.contains(TypeQualifiers::CONST));
 }
 
 #[test]
@@ -949,7 +949,7 @@ fn spec_to_ty_carries_parameter_types() {
             params: vec![
                 Ty::Int,
                 Ty::Pointer {
-                    qualifiers: vec![],
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 },
@@ -1010,7 +1010,7 @@ fn array_parameter_decays_to_pointer() {
     let [Ty::Pointer { qualifiers, pointee, .. }] = params.as_slice() else {
         panic!("{params:?}")
     };
-    assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Const]));
+    assert!(qualifiers.contains(TypeQualifiers::CONST));
     assert_eq!(**pointee, Ty::Int);
 }
 
@@ -1320,12 +1320,12 @@ fn typeof_specifier_takes_expression_or_type_name() {
     let c = parse_decl(&mut parser);
     let d = parse_decl(&mut parser);
     assert_eq!(parser.sema.decls[a.0 as usize].ty, Ty::Int);
-    assert_eq!(parser.sema.decls[b.0 as usize].ty, Ty::qualified(vec![TypeQualifier::Const], Ty::Int));
+    assert_eq!(parser.sema.decls[b.0 as usize].ty, Ty::qualified(TypeQualifiers::CONST, Ty::Int));
     assert_eq!(
         parser.sema.decls[c.0 as usize].ty,
         Ty::Array {
             elem: Box::new(Ty::Char),
-            quals: Vec::new(),
+            quals: TypeQualifiers::empty(),
             bound: Some(ArrayBound::Fixed(3)),
         }
     );
@@ -1333,7 +1333,7 @@ fn typeof_specifier_takes_expression_or_type_name() {
         parser.sema.decls[d.0 as usize].ty,
         Ty::Array {
             elem: Box::new(Ty::Int),
-            quals: Vec::new(),
+            quals: TypeQualifiers::empty(),
             bound: Some(ArrayBound::Fixed(5)),
         }
     );
@@ -1630,7 +1630,7 @@ fn ptr_size_attributes_set_pointer_width() {
     let q = parse_decl(&mut parser);
     let r = parse_decl(&mut parser);
     let ptr_ty = |size| Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size,
         pointee: Box::new(Ty::Int),
     };
@@ -1664,7 +1664,7 @@ fn unaligned_qualifier_is_erased() {
     let p = parse_decl(&mut parser);
     let q = parse_decl(&mut parser);
     let plain = Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
         pointee: Box::new(Ty::UnsignedShort),
     };
@@ -1692,7 +1692,7 @@ fn c23_typeof_unqual_strips_top_level_qualifiers() {
     assert_eq!(
         decl_ty("typeof_unqual(int *const) a;"),
         Ty::Pointer {
-            qualifiers: Vec::new(),
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
             pointee: Box::new(Ty::Int),
         }
@@ -1700,9 +1700,9 @@ fn c23_typeof_unqual_strips_top_level_qualifiers() {
     assert_eq!(
         decl_ty("typeof_unqual(const int *) a;"),
         Ty::Pointer {
-            qualifiers: Vec::new(),
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
-            pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Int)),
+            pointee: Box::new(Ty::qualified(TypeQualifiers::CONST, Ty::Int)),
         }
     );
     let Ty::Array { elem, quals, bound } = decl_ty("typeof_unqual(const int[3]) a;") else {
@@ -2505,7 +2505,7 @@ fn gnu_qualifier_spellings_parse() {
     let Ty::Pointer { qualifiers, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected a pointer")
     };
-    assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Restrict]));
+    assert!(qualifiers.contains(TypeQualifiers::RESTRICT));
 
     // `__const` in specifiers qualifies the base type; `inline` counts
     // as a function specifier.
@@ -2513,7 +2513,7 @@ fn gnu_qualifier_spellings_parse() {
     let mut interner = Interner::new();
     let mut parser = test_parser("__const int c;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
-    assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::qualified(vec![TypeQualifier::Const], Ty::Int));
+    assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::qualified(TypeQualifiers::CONST, Ty::Int));
 
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -3003,7 +3003,7 @@ fn msvc_spellings_and_annotations_parse() {
         parser.sema.decls[id.0 as usize].ty,
         Ty::Func {
             ret: Box::new(Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(Ty::UnsignedLongLong)
             }),
@@ -4154,7 +4154,7 @@ fn type_sizes_and_aligns() {
     assert_eq!(
         (
             size(&Ty::Pointer {
-                qualifiers: vec![],
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(Ty::Char),
             }),
@@ -6819,9 +6819,9 @@ fn func_name_identifiers_expand() {
         assert_eq!(
             expr.ty,
             Ty::Pointer {
-                qualifiers: vec![],
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
-                pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Char)),
+                pointee: Box::new(Ty::qualified(TypeQualifiers::CONST, Ty::Char)),
             }
         );
         let CheckedExprKind::Convert { expr, .. } = &expr.kind else {
@@ -6866,7 +6866,7 @@ fn const_qualified_spellings_keep_qualifiers() {
     let id = parse_decl(&mut parser);
     assert_eq!(
         parser.sema.decls[id.0 as usize].ty,
-        Ty::qualified(vec![TypeQualifier::Const, TypeQualifier::Volatile], Ty::Int)
+        Ty::qualified(TypeQualifiers::CONST | TypeQualifiers::VOLATILE, Ty::Int)
     );
     // `const char *p` is a pointer to const char (the dwm shape).
     let mut sema = Sema::new();
@@ -6876,7 +6876,7 @@ fn const_qualified_spellings_keep_qualifiers() {
     let Ty::Pointer { pointee, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected a pointer");
     };
-    assert_eq!(**pointee, Ty::qualified(vec![TypeQualifier::Const], Ty::Char));
+    assert_eq!(**pointee, Ty::qualified(TypeQualifiers::CONST, Ty::Char));
     // ... while `char *const p` is a const pointer instead.
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -6885,7 +6885,7 @@ fn const_qualified_spellings_keep_qualifiers() {
     let Ty::Pointer { qualifiers, pointee, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected a pointer");
     };
-    assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Const]));
+    assert!(qualifiers.contains(TypeQualifiers::CONST));
     assert_eq!(**pointee, Ty::Char);
 }
 
@@ -6904,7 +6904,7 @@ fn typedef_const_distributes() {
     let Ty::Array { elem, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected an array");
     };
-    assert_eq!(**elem, Ty::qualified(vec![TypeQualifier::Const], Ty::Int));
+    assert_eq!(**elem, Ty::qualified(TypeQualifiers::CONST, Ty::Int));
 
     let mut sema = Sema::new();
     let mut interner = Interner::new();
@@ -7041,9 +7041,9 @@ fn ternary_pointer_mix_composes_const() {
     assert_eq!(
         checked.ty,
         Ty::Pointer {
-            qualifiers: vec![],
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
-            pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Char)),
+            pointee: Box::new(Ty::qualified(TypeQualifiers::CONST, Ty::Char)),
         }
     );
 }
@@ -7053,14 +7053,14 @@ fn ternary_void_ptr_mix_composes_silently() {
     // `void *` mixes compose to `void *` (qualifiers unioned) with no
     // "pointer type mismatch" warning, like GCC (C17 §6.5.15).
     let void_ptr = Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
         pointee: Box::new(Ty::Void),
     };
     let const_void_ptr = Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
-        pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Void)),
+        pointee: Box::new(Ty::qualified(TypeQualifiers::CONST, Ty::Void)),
     };
     let cases: &[(&[&str], &str, Ty)] = &[
         (&["void *v;", "int *p;", "int c;"], "c ? v : p", void_ptr.clone()),
@@ -7099,14 +7099,14 @@ fn ternary_null_constant_keeps_the_other_pointer_type() {
     // before any `void *` composition; tcctest.c's
     // `(i == 0 ? (void *)0 : s)->i` needs this.
     let int_ptr = Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
         pointee: Box::new(Ty::Int),
     };
     let const_void_ptr = Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
-        pointee: Box::new(Ty::qualified(vec![TypeQualifier::Const], Ty::Void)),
+        pointee: Box::new(Ty::qualified(TypeQualifiers::CONST, Ty::Void)),
     };
     let decls = &["int *q;", "int c;"];
     for (expr_src, want) in [
@@ -7213,7 +7213,7 @@ fn restrict_on_pointer_parses() {
     let Ty::Pointer { qualifiers, .. } = &parser.sema.decls[id.0 as usize].ty else {
         panic!("expected a pointer");
     };
-    assert!(matches!(qualifiers.as_slice(), [TypeQualifier::Restrict]));
+    assert!(qualifiers.contains(TypeQualifiers::RESTRICT));
 }
 
 // ---- multiple declarators flatten ----
@@ -7285,7 +7285,7 @@ fn function_declaration_lowers_parameters() {
         &vec![
             Ty::Int,
             Ty::Pointer {
-                qualifiers: vec![],
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(Ty::Char),
             },
@@ -7333,7 +7333,7 @@ fn function_pointer_member_with_parameters_parses() {
     assert!(!*variadic);
     let [param] = params.as_slice() else { panic!("{params:?}") };
     // The `const` of `const void *` qualifies the pointee.
-    assert!(matches!(param, Ty::Pointer { pointee, .. } if **pointee == Ty::qualified(vec![TypeQualifier::Const], Ty::Void)));
+    assert!(matches!(param, Ty::Pointer { pointee, .. } if **pointee == Ty::qualified(TypeQualifiers::CONST, Ty::Void)));
 }
 
 #[test]
@@ -9036,7 +9036,7 @@ fn array_types_lower() {
     let Ty::Array { quals, .. } = lower_to_ty("a[const 3]") else {
         panic!("expected an array")
     };
-    assert!(matches!(quals.as_slice(), [TypeQualifier::Const]));
+    assert_eq!(quals, TypeQualifiers::CONST);
 
     // Nesting goes inside out: `a[2][3]` is an array of arrays.
     let Ty::Array { elem, bound, .. } = lower_to_ty("a[2][3]") else {
@@ -9425,7 +9425,7 @@ fn check_unary_forms() {
     assert_eq!(
         check_with(&["int x;"], "&x").ty,
         Ty::Pointer {
-            qualifiers: Vec::new(),
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
             pointee: Box::new(Ty::Int),
         }
@@ -9786,7 +9786,7 @@ fn asm_statement_parses_operands() {
         panic!("expected a declaration and an asm statement, got {items:?}");
     };
     assert_eq!(asm.template, "");
-    assert!(!asm.is_volatile && !asm.is_goto);
+    assert!(!asm.is_volatile() && !asm.is_goto());
     let [output] = asm.outputs.as_slice() else { panic!("expected one output") };
     assert_eq!(output.constraint, "=r");
     assert_eq!(output.name, None);
@@ -9805,14 +9805,14 @@ fn asm_basic_form_is_the_no_colon_one() {
     let [BlockItem::Stmt(Stmt::Asm(basic)), BlockItem::Stmt(Stmt::Asm(volatile_basic))] = items.as_slice() else {
         panic!("expected two asm statements, got {items:?}");
     };
-    assert!(basic.is_basic);
-    assert!(volatile_basic.is_volatile && volatile_basic.is_basic);
+    assert!(basic.is_basic());
+    assert!(volatile_basic.is_volatile() && volatile_basic.is_basic());
     // An empty operand list after a colon is still the extended form.
     let items = body_of_f("void f(void){ asm(\"mov %eax, %ecx\" : : : \"memory\"); }");
     let [BlockItem::Stmt(Stmt::Asm(extended))] = items.as_slice() else {
         panic!("expected an asm statement, got {items:?}");
     };
-    assert!(!extended.is_basic);
+    assert!(!extended.is_basic());
 }
 
 #[test]
@@ -9821,7 +9821,7 @@ fn asm_qualifiers_and_named_operands() {
     let [BlockItem::Decl { .. }, BlockItem::Stmt(Stmt::Asm(asm))] = items.as_slice() else {
         panic!("expected a declaration and an asm statement, got {items:?}");
     };
-    assert!(asm.is_volatile && !asm.is_goto);
+    assert!(asm.is_volatile() && !asm.is_goto());
     assert!(asm.outputs[0].name.is_some());
     assert!(asm.inputs[0].name.is_some());
 }
@@ -9842,7 +9842,7 @@ fn asm_goto_labels_recorded() {
     let [BlockItem::Stmt(Stmt::Asm(asm)), BlockItem::Stmt(Stmt::Label { .. })] = items.as_slice() else {
         panic!("expected asm goto then a label, got {items:?}");
     };
-    assert!(asm.is_goto);
+    assert!(asm.is_goto());
     assert_eq!(asm.labels.len(), 1);
 }
 
@@ -9876,7 +9876,7 @@ fn asm_goto_template_accepted() {
     let [BlockItem::Stmt(Stmt::Asm(asm)), ..] = items.as_slice() else {
         panic!("expected asm goto first, got {items:?}");
     };
-    assert!(asm.is_goto);
+    assert!(asm.is_goto());
     assert_eq!(asm.template, "testl %0, %0; jnz %l[lab]");
     assert_eq!(asm.labels.len(), 1);
 }
@@ -10234,7 +10234,7 @@ fn atomic_erases_to_its_base_type() {
     assert_eq!(
         base_of("_Atomic(int *)"),
         Ty::Pointer {
-            qualifiers: vec![],
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
             pointee: Box::new(Int),
         }

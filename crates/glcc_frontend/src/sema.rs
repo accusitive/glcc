@@ -11,7 +11,7 @@ use crate::eval::escape_value;
 use crate::lang::LangOpts;
 use crate::layout::StructLayout;
 use crate::lexer::{Interner, StringLiteral, StringPrefix};
-use crate::parse::{ArrayBound, BlockItem, Designator, ForInit, FuncBody, Initializer, PtrSize, Stmt, Ty};
+use crate::parse::{ArrayBound, BlockItem, Designator, ForInit, FuncBody, Initializer, PtrSize, Stmt, Ty, TypeQualifiers};
 use crate::span::{CompileError, HasSpan, Span};
 use crate::target::Target;
 
@@ -406,7 +406,7 @@ impl Sema {
             return ty;
         }
         let ptr = || Ty::Pointer {
-            qualifiers: vec![],
+            qualifiers: TypeQualifiers::empty(),
             size: PtrSize::Default,
             pointee: Box::new(Ty::Void),
         };
@@ -955,7 +955,7 @@ fn unqualified_param_ty(ty: &Ty) -> Ty {
     match ty {
         Ty::Qualified { inner, .. } => inner.unqualified().clone(),
         Ty::Pointer { pointee, size, .. } => Ty::Pointer {
-            qualifiers: Vec::new(),
+            qualifiers: TypeQualifiers::empty(),
             size: *size,
             pointee: pointee.clone(),
         },
@@ -1039,8 +1039,8 @@ pub fn composite_type(a: Ty, b: Ty) -> Ty {
             // Compatible qualified types (checked by the caller) merge
             // qualifier sets — equal here, kept as-is — and compose
             // the inner types.
-            let mut quals = qa.clone();
-            quals.extend(qb.iter().copied());
+            let mut quals = qa;
+            quals |= qb;
             Ty::qualified(quals, composite_type(*ia, *ib))
         }
         (Ty::Array { elem: ea, quals: qa, bound: ba }, Ty::Array { elem: eb, bound: bb, .. }) => Ty::Array {

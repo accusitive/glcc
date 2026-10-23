@@ -24,7 +24,7 @@ use string_interner::symbol::SymbolU32;
 
 use crate::{
     lexer::{CharPrefix, FloatSuffix, Interner},
-    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, Ty, TypeQualifier, UnaryOp},
+    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, StdAttributes, Ty, TypeQualifier, TypeQualifiers, UnaryOp},
     sema::{Binding, BindingKind, Member, Sema, StructId, types_compatible},
     span::{CompileError, HasSpan, Span},
     target::{Arch, Os},
@@ -495,18 +495,18 @@ fn is_void_ptr(ty: &Ty) -> bool {
 /// Qualifiers on what a pointer points to (`const` in `const int *`);
 /// empty for unqualified pointees. Only the outermost pointee level
 /// matters for the `void *` composite below.
-fn pointer_pointee_quals(ty: &Ty) -> Vec<TypeQualifier> {
+fn pointer_pointee_quals(ty: &Ty) -> TypeQualifiers {
     let mut pointee = ty;
     while let Ty::Qualified { inner, .. } = pointee {
         pointee = inner;
     }
     if let Ty::Pointer { pointee, .. } = pointee {
         match &**pointee {
-            Ty::Qualified { quals, .. } => quals.clone(),
-            _ => Vec::new(),
+            Ty::Qualified { quals, .. } => *quals,
+            _ => TypeQualifiers::empty(),
         }
     } else {
-        Vec::new()
+        TypeQualifiers::empty()
     }
 }
 
@@ -515,15 +515,9 @@ fn pointer_pointee_quals(ty: &Ty) -> Vec<TypeQualifier> {
 /// `cond ? void_ptr : const_int_ptr` is `const void *` like GCC.
 /// Outer pointer qualifiers drop (rvalues), matching GCC.
 fn void_ptr_composite(a: &Ty, b: &Ty) -> Ty {
-    let mut quals = pointer_pointee_quals(a);
-    for q in pointer_pointee_quals(b) {
-        if !quals.contains(&q) {
-            quals.push(q);
-        }
-    }
-    quals.sort_by_key(|q| *q as u8);
+    let quals = pointer_pointee_quals(a) | pointer_pointee_quals(b);
     Ty::Pointer {
-        qualifiers: Vec::new(),
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
         pointee: Box::new(Ty::qualified(quals, Ty::Void)),
     }
@@ -941,7 +935,7 @@ impl Sema {
                 pointee: elem.clone(),
             },
             Ty::Func { .. } => Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(self.as_callable_ty(expr.ty.clone(), &expr.kind)),
             },
@@ -1052,7 +1046,7 @@ impl Sema {
             Ty::Pointer { pointee, size, .. } => {
                 let (span, kind) = (expr.span, expr.kind);
                 CheckedExpr {
-                    ty: Ty::Pointer { qualifiers: Vec::new(), size, pointee },
+                    ty: Ty::Pointer { qualifiers: TypeQualifiers::empty(), size, pointee },
                     span,
                     kind,
                 }
@@ -2099,7 +2093,7 @@ impl Sema {
                     let text = interner.resolve(*name).unwrap_or("?");
                     return Err(CompileError::new(format!("typedef name '{text}' used as a value"), span));
                 }
-                if self.std_attrs.get(&id).is_some_and(|attrs| attrs.deprecated) {
+                if self.std_attrs.get(&id).is_some_and(|attrs| attrs.contains(StdAttributes::DEPRECATED)) {
                     let text = interner.resolve(*name).unwrap_or("?");
                     self.warnings
                         .borrow_mut()
@@ -2168,7 +2162,7 @@ impl Sema {
             Expr::Str { parts, .. } => Ok(CheckedExpr {
                 ty: Ty::Array {
                     elem: Box::new(self.string_elem_ty(parts).unwrap_or(Ty::Char)),
-                    quals: Vec::new(),
+                    quals: TypeQualifiers::empty(),
                     bound: crate::eval::string_length(parts, interner).map(|len| ArrayBound::Fixed(len + 1)),
                 },
                 span,
@@ -2329,7 +2323,7 @@ impl Sema {
             }
             Expr::LabelAddr { label, .. } => Ok(CheckedExpr {
                 ty: Ty::Pointer {
-                    qualifiers: Vec::new(),
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(Ty::Void),
                 },
@@ -2484,7 +2478,7 @@ impl Sema {
                 }
                 self.note_address_taken(&operand);
                 let ty = Ty::Pointer {
-                    qualifiers: Vec::new(),
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(self.as_callable_ty(operand.ty.clone(), &operand.kind)),
                 };
@@ -2535,7 +2529,7 @@ impl Sema {
                 // member of one: `__real__ cx = 1` fails for const `cx`.
                 let mut ty = *inner;
                 if is_const {
-                    ty = Ty::qualified(vec![TypeQualifier::Const], ty);
+                    ty = Ty::qualified(TypeQualifiers::CONST, ty);
                 }
                 Ok(CheckedExpr {
                     ty,
@@ -3891,7 +3885,7 @@ impl Sema {
         let size = self.convert_for_assignment(&self.target.size_type(), size, interner)?;
         Ok(CheckedExpr {
             ty: Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(Ty::Void),
             },
@@ -3919,7 +3913,7 @@ impl Sema {
         };
         Ok(CheckedExpr {
             ty: Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(Ty::Void),
             },
@@ -4080,7 +4074,7 @@ impl Sema {
         // (C17 §6.7.3p5): `const struct S s; s.x = 1;` fails, as does
         // `p->x = 1;` through a `const struct S *p`.
         if target_ty.is_const() {
-            ty = Ty::qualified(vec![TypeQualifier::Const], ty);
+            ty = Ty::qualified(TypeQualifiers::CONST, ty);
         }
         Ok(CheckedExpr {
             ty,

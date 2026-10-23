@@ -773,7 +773,7 @@ impl<'a> Parser<'a> {
         let Some(id) = self.sema.lookup_symbol(*name) else {
             return;
         };
-        if self.sema.std_attrs.get(&id).is_some_and(|attrs| attrs.nodiscard) {
+        if self.sema.std_attrs.get(&id).is_some_and(|attrs| attrs.contains(StdAttributes::NODISCARD)) {
             let text = self.intern.resolve(*name).unwrap_or("?");
             self.warn(expr.span(), format!("ignoring return value of '{text}', declared with attribute 'nodiscard'"));
         }
@@ -1225,7 +1225,7 @@ impl<'a> Parser<'a> {
             Ty::Func { ret, .. } => (**ret).clone(),
             _ => return self.fail(def_span, "function definition without function type"),
         };
-        let is_async = attrs.is_async || specifiers.attrs.is_async;
+        let is_async = attrs.is_async() || specifiers.attrs.is_async();
         if is_async {
             if matches!(&ty, Ty::Func { variadic: true, .. }) {
                 return self.fail(def_span, "async function cannot be variadic");
@@ -1242,7 +1242,7 @@ impl<'a> Parser<'a> {
         // afterwards.
         self.function_return = Some(ret.clone());
         self.function_name = Some(symbol);
-        let naked = attrs.naked || specifiers.attrs.naked;
+        let naked = attrs.is_naked() || specifiers.attrs.is_naked();
         if is_async && naked {
             return self.fail(def_span, "async function cannot be naked");
         }
@@ -1267,12 +1267,12 @@ impl<'a> Parser<'a> {
                 // driver (vague linkage for EDG-lowered COMDAT inline
                 // functions, which lose their `extern` on the
                 // definition); see `Sema::weak_extern_inline`.
-                weak: attrs.weak || specifiers.attrs.weak || (self.sema.weak_extern_inline && specifiers.is_inline() && !specifiers.has_storage(StorageClass::Static)),
+                weak: attrs.is_weak() || specifiers.attrs.is_weak() || (self.sema.weak_extern_inline && specifiers.is_inline() && !specifiers.has_storage(StorageClass::Static)),
                 alias: None,
                 naked,
                 is_async,
                 inline: specifiers.is_inline(),
-                noinline: attrs.noinline || specifiers.attrs.noinline,
+                noinline: attrs.is_noinline() || specifiers.attrs.is_noinline(),
                 align: attrs.aligned.or(specifiers.attrs.aligned),
                 section,
                 asm_label: attrs.asm_label.or(specifiers.attrs.asm_label),
@@ -1551,7 +1551,7 @@ impl<'a> Parser<'a> {
             }
             if matches!(ty, Ty::Func { .. }) {
                 ty = Ty::Pointer {
-                    qualifiers: Vec::new(),
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(ty),
                 };
@@ -1887,9 +1887,13 @@ impl<'a> Parser<'a> {
             inputs,
             clobbers,
             labels,
-            is_volatile,
-            is_goto,
-            is_basic: !saw_colon,
+            flags: {
+                let mut flags = AsmFlags::empty();
+                if is_volatile { flags.insert(AsmFlags::VOLATILE); }
+                if is_goto { flags.insert(AsmFlags::GOTO); }
+                if !saw_colon { flags.insert(AsmFlags::BASIC); }
+                flags
+            },
             span,
         })))
     }
@@ -3240,7 +3244,7 @@ impl<'a> Parser<'a> {
             Some("__builtin_nanf") => (
                 Ty::Float,
                 vec![Ty::Pointer {
-                    qualifiers: vec![],
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 }],
@@ -3253,7 +3257,7 @@ impl<'a> Parser<'a> {
                     Ty::Double
                 },
                 vec![Ty::Pointer {
-                    qualifiers: vec![],
+                    qualifiers: TypeQualifiers::empty(),
                     size: PtrSize::Default,
                     pointee: Box::new(Ty::Char),
                 }],
@@ -3703,7 +3707,7 @@ impl<'a> Parser<'a> {
                     return self.fail(self.peek_span(), "`auto` initializer must be an expression");
                 };
                 let mut ty = self.sema.auto_deduced_type(expr);
-                if specifiers.type_qualifier.iter().any(|q| matches!(q, TypeQualifier::Restrict)) && !matches!(ty, Ty::Pointer { .. }) {
+                if specifiers.type_qualifier.contains(TypeQualifiers::RESTRICT) && !matches!(ty, Ty::Pointer { .. }) {
                     return self.fail(specifiers.span, "invalid use of 'restrict'");
                 }
                 ty = Ty::qualified(specifiers.type_qualifier.clone(), ty);
@@ -4006,9 +4010,9 @@ impl<'a> Parser<'a> {
         if alias.is_some() && has_init {
             return self.fail(span, "alias attribute on a definition with an initializer");
         }
-        let naked = kind == BindingKind::Func && (suffix.naked || specifiers.attrs.naked);
-        let is_async = kind == BindingKind::Func && (suffix.is_async || specifiers.attrs.is_async);
-        if kind != BindingKind::Func && (suffix.is_async || specifiers.attrs.is_async) {
+        let naked = kind == BindingKind::Func && (suffix.is_naked() || specifiers.attrs.is_naked());
+        let is_async = kind == BindingKind::Func && (suffix.is_async() || specifiers.attrs.is_async());
+        if kind != BindingKind::Func && (suffix.is_async() || specifiers.attrs.is_async()) {
             self.warn(span, "attribute `async` only applies to functions");
         }
         if is_async {
@@ -4041,12 +4045,12 @@ impl<'a> Parser<'a> {
                 // the extern prototype usually carries the attribute.
                 constructor: if kind == BindingKind::Func { suffix.constructor } else { None },
                 destructor: if kind == BindingKind::Func { suffix.destructor } else { None },
-                weak: suffix.weak || specifiers.attrs.weak,
+                weak: suffix.is_weak() || specifiers.attrs.is_weak(),
                 alias,
                 naked,
                 is_async,
                 inline: kind == BindingKind::Func && specifiers.is_inline(),
-                noinline: kind == BindingKind::Func && (suffix.noinline || specifiers.attrs.noinline),
+                noinline: kind == BindingKind::Func && (suffix.is_noinline() || specifiers.attrs.is_noinline()),
                 align: suffix.aligned.or(specifiers.attrs.aligned),
                 section,
                 asm_label: suffix.asm_label.or(specifiers.attrs.asm_label),
@@ -4364,7 +4368,7 @@ impl<'a> Parser<'a> {
                 Some(Token::Punctuator(Punctuator::Star)) => {
                     let start = self.mark();
                     self.tokens.advance();
-                    let mut qualifiers = Vec::new();
+                    let mut qualifiers = TypeQualifiers::empty();
                     let mut size = PtrSize::Default;
                     loop {
                         if let Some(s) = self.peek_ms_ptr_size() {
@@ -4372,9 +4376,9 @@ impl<'a> Parser<'a> {
                             self.tokens.advance();
                             continue;
                         }
-                        let before = qualifiers.len();
-                        qualifiers.extend(self.parse_type_qualifier_list());
-                        if qualifiers.len() == before {
+                        let before = qualifiers;
+                        qualifiers |= self.parse_type_qualifier_list();
+                        if qualifiers == before {
                             break;
                         }
                     }
@@ -4764,7 +4768,7 @@ impl<'a> Parser<'a> {
         // function (C17 §6.7.6.3p8).
         if matches!(ty, Ty::Func { .. }) {
             ty = Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: PtrSize::Default,
                 pointee: Box::new(ty),
             };
@@ -4786,8 +4790,8 @@ impl<'a> Parser<'a> {
             proto: None,
         }
     }
-    pub fn parse_type_qualifier_list(&mut self) -> Vec<TypeQualifier> {
-        let mut qualifiers = Vec::new();
+    pub fn parse_type_qualifier_list(&mut self) -> TypeQualifiers {
+        let mut qualifiers = TypeQualifiers::empty();
         loop {
             // `__unaligned` modifies pointer types too; its effect is
             // erased (see `peek_ms_unaligned`).
@@ -4796,13 +4800,13 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if let Some(q) = self.peek_gnu_qualifier() {
-                qualifiers.push(q);
+                qualifiers.insert_qualifier(q);
                 self.tokens.advance();
                 continue;
             }
             match self.tokens.peek().map(|x| &x.val) {
                 Some(Token::Keyword(tq @ pat_type_qualifier!())) => {
-                    qualifiers.push(match tq {
+                    qualifiers.insert_qualifier(match tq {
                         Keyword::Const => TypeQualifier::Const,
                         Keyword::Restrict => TypeQualifier::Restrict,
                         Keyword::Volatile => TypeQualifier::Volatile,
@@ -4886,7 +4890,7 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if let Some(q) = self.peek_gnu_qualifier() {
-                ds.type_qualifier.push(q);
+                ds.type_qualifier.insert_qualifier(q);
                 self.tokens.advance();
                 continue;
             }
@@ -4939,7 +4943,7 @@ impl<'a> Parser<'a> {
                 // from <vadefs.h> instead of conflicting.
                 let ty = if self.sema.target.os == crate::target::Os::Windows {
                     Ty::Pointer {
-                        qualifiers: Vec::new(),
+                        qualifiers: TypeQualifiers::empty(),
                         size: PtrSize::Default,
                         pointee: Box::new(Ty::Char),
                     }
@@ -5070,7 +5074,7 @@ impl<'a> Parser<'a> {
             }
             if self.peek_c23_keyword("constexpr") {
                 ds.constexpr = true;
-                ds.type_qualifier.push(TypeQualifier::Const);
+                ds.type_qualifier.insert(TypeQualifiers::CONST);
                 self.tokens.advance();
                 continue;
             }
@@ -5167,7 +5171,7 @@ impl<'a> Parser<'a> {
                     ds.type_specifier.push(TypeSpecifier::TypedefName(ty));
                 }
                 Some(Token::Keyword(tq @ pat_type_qualifier!())) => {
-                    ds.type_qualifier.push(match tq {
+                    ds.type_qualifier.insert_qualifier(match tq {
                         Keyword::Const => TypeQualifier::Const,
                         Keyword::Restrict => TypeQualifier::Restrict,
                         Keyword::Volatile => TypeQualifier::Volatile,
@@ -5247,7 +5251,7 @@ impl<'a> Parser<'a> {
         // before any layout query, but clear the memo anyway.
         {
             let def = &mut self.sema.structs[id.0 as usize];
-            if attrs.packed {
+            if attrs.is_packed() {
                 def.packed = true;
             }
             if let Some(n) = attrs.aligned {
@@ -5387,13 +5391,13 @@ impl<'a> Parser<'a> {
                 });
                 if enabled {
                     match name.as_str() {
-                        "deprecated" => out.deprecated = true,
-                        "fallthrough" => out.fallthrough = true,
-                        "maybe_unused" => out.maybe_unused = true,
-                        "nodiscard" => out.nodiscard = true,
-                        "noreturn" => out.noreturn = true,
-                        "reproducible" => out.reproducible = true,
-                        "unsequenced" => out.unsequenced = true,
+                        "deprecated" => out.insert(StdAttributes::DEPRECATED),
+                        "fallthrough" => out.insert(StdAttributes::FALLTHROUGH),
+                        "maybe_unused" => out.insert(StdAttributes::MAYBE_UNUSED),
+                        "nodiscard" => out.insert(StdAttributes::NODISCARD),
+                        "noreturn" => out.insert(StdAttributes::NORETURN),
+                        "reproducible" => out.insert(StdAttributes::REPRODUCIBLE),
+                        "unsequenced" => out.insert(StdAttributes::UNSEQUENCED),
                         _ => {}
                     }
                 }
@@ -5609,7 +5613,7 @@ impl<'a> Parser<'a> {
     /// silently compiles as something other than what it asked for.
     fn set_async_attr(&self, out: &mut GnuAttributes, span: Span) {
         if self.sema.async_enabled {
-            out.is_async = true;
+            out.flags.insert(GnuAttrFlags::ASYNC);
         } else {
             self.warn(span, "attribute `async` ignored (the glcc async extension needs -fglcc-async)");
         }
@@ -5661,13 +5665,13 @@ impl<'a> Parser<'a> {
                     // codegen (`weak("alias")` names an alias target
                     // we do not implement); skip whatever follows.
                     self.skip_balanced_parens();
-                    out.weak = true;
+                    out.flags.insert(GnuAttrFlags::WEAK);
                 } else if normalized == "naked" {
                     self.skip_balanced_parens();
-                    out.naked = true;
+                    out.flags.insert(GnuAttrFlags::NAKED);
                 } else if normalized == "noinline" {
                     self.skip_balanced_parens();
-                    out.noinline = true;
+                    out.flags.insert(GnuAttrFlags::NOINLINE);
                 } else if normalized == "async" {
                     self.skip_balanced_parens();
                     self.set_async_attr(&mut out, name_span);
@@ -5750,13 +5754,13 @@ impl<'a> Parser<'a> {
                     self.skip_balanced_parens();
                 }
             } else if normalized == "packed" {
-                out.packed = true;
+                out.flags.insert(GnuAttrFlags::PACKED);
             } else if normalized == "weak" || normalized == "weakref" {
-                out.weak = true;
+                out.flags.insert(GnuAttrFlags::WEAK);
             } else if normalized == "naked" {
-                out.naked = true;
+                out.flags.insert(GnuAttrFlags::NAKED);
             } else if normalized == "noinline" {
-                out.noinline = true;
+                out.flags.insert(GnuAttrFlags::NOINLINE);
             } else if normalized == "async" {
                 self.set_async_attr(&mut out, name_span);
             } else if normalized == "aligned" {
@@ -6204,7 +6208,7 @@ impl<'a> Parser<'a> {
                     name,
                     ty,
                     bitfield,
-                    packed: member_attrs.packed,
+                    packed: member_attrs.is_packed(),
                     align_override: member_attrs.aligned,
                     span: member_span,
                 });
@@ -6439,8 +6443,8 @@ impl<'a> Parser<'a> {
         let mut storage = CompoundStorage::default();
         while self.compound_storage_at(0) {
             match self.tokens.peek_val() {
-                Some(Token::Keyword(Keyword::Static)) => storage.static_storage = true,
-                _ => storage.thread_local = true,
+                Some(Token::Keyword(Keyword::Static)) => storage.insert(CompoundStorage::STATIC),
+                _ => storage.insert(CompoundStorage::THREAD_LOCAL),
             }
             self.tokens.advance();
         }
@@ -7273,8 +7277,8 @@ impl<'a> Parser<'a> {
             }
             match &d.direct.base {
                 DirectBase::Ident(_) | DirectBase::Abstract => {
-                    if specs.type_qualifier.iter().any(|q| matches!(q, TypeQualifier::Restrict))
-                        && !matches!(&ty, Ty::Pointer { qualifiers, .. } if qualifiers.contains(&TypeQualifier::Restrict))
+                    if specs.type_qualifier.contains(TypeQualifiers::RESTRICT)
+                        && !matches!(&ty, Ty::Pointer { qualifiers, .. } if qualifiers.contains(TypeQualifiers::RESTRICT))
                     {
                         return self.fail(span, "invalid use of 'restrict'");
                     }
@@ -7400,26 +7404,36 @@ impl FlowVla {
 /// Standard C23 `[[...]]` attributes with a frontend effect (or a
 /// diagnostic the frontend can honor). Unknown attributes validate
 /// structurally and are ignored.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StdAttributes {
-    pub deprecated: bool,
-    pub fallthrough: bool,
-    pub maybe_unused: bool,
-    pub nodiscard: bool,
-    pub noreturn: bool,
-    pub reproducible: bool,
-    pub unsequenced: bool,
+bitflags::bitflags! {
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct StdAttributes: u8 {
+        const DEPRECATED = 1 << 0;
+        const FALLTHROUGH = 1 << 1;
+        const MAYBE_UNUSED = 1 << 2;
+        const NODISCARD = 1 << 3;
+        const NORETURN = 1 << 4;
+        const REPRODUCIBLE = 1 << 5;
+        const UNSEQUENCED = 1 << 6;
+    }
 }
 
 impl StdAttributes {
     pub fn merge(&mut self, other: StdAttributes) {
-        self.deprecated |= other.deprecated;
-        self.fallthrough |= other.fallthrough;
-        self.maybe_unused |= other.maybe_unused;
-        self.nodiscard |= other.nodiscard;
-        self.noreturn |= other.noreturn;
-        self.reproducible |= other.reproducible;
-        self.unsequenced |= other.unsequenced;
+        self.insert(other);
+    }
+}
+
+bitflags::bitflags! {
+    /// Boolean GNU attribute effects, packed together: the only flags
+    /// the frontend models. The options (`aligned`, `alias`, ...) stay
+    /// separate because they carry payloads.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct GnuAttrFlags: u8 {
+        const PACKED = 1 << 0;
+        const NOINLINE = 1 << 1;
+        const WEAK = 1 << 2;
+        const NAKED = 1 << 3;
+        const ASYNC = 1 << 4;
     }
 }
 
@@ -7431,30 +7445,18 @@ impl StdAttributes {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct GnuAttributes {
     pub std: StdAttributes,
-    pub packed: bool,
+    pub flags: GnuAttrFlags,
+    /// `__attribute__((aligned(n)))`: a minimum alignment.
     pub aligned: Option<u64>,
-    /// `__attribute__((noinline))`: hard opt-out of call-site inlining.
-    pub noinline: bool,
     /// `__attribute__((constructor[(prio)]))`: startup hook priority
     /// (`None` = absent; bare attributes are 65535, like GCC).
     pub constructor: Option<u64>,
     /// `__attribute__((destructor[(prio)]))`: shutdown hook priority.
     pub destructor: Option<u64>,
-    /// `__attribute__((weak))`: emit as a weak symbol (ELF `STB_WEAK`),
-    /// so duplicate definitions across TUs and archives link instead
-    /// of erroring. EDG marks every COMDAT-group entity this way.
-    pub weak: bool,
     /// `__attribute__((alias("name")))`: the declared entity is the
     /// named one's storage; the spelling is resolved to the target's
     /// declaration when the declaration is registered.
     pub alias: Option<SymbolU32>,
-    /// `__attribute__((naked))`: the function has no compiler-generated
-    /// prologue/epilogue; its body must be basic asm statements, which
-    /// the backend emits as a whole function.
-    pub naked: bool,
-    /// `__attribute__((async))` (glcc extension): the function compiles
-    /// as a stackless coroutine that returns a `_Future(T)` handle.
-    pub is_async: bool,
     /// `__attribute__((section("name")))`: place the object (or a naked
     /// function) in that section; the linker script decides where the
     /// section lands.
@@ -7467,20 +7469,32 @@ pub(crate) struct GnuAttributes {
 }
 
 impl GnuAttributes {
+    pub fn is_packed(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::PACKED)
+    }
+    pub fn is_noinline(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::NOINLINE)
+    }
+    pub fn is_weak(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::WEAK)
+    }
+    pub fn is_naked(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::NAKED)
+    }
+    pub fn is_async(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::ASYNC)
+    }
+
     fn merge(&mut self, other: GnuAttributes) {
         self.std.merge(other.std);
-        self.packed |= other.packed;
+        self.flags |= other.flags;
         self.aligned = match (self.aligned, other.aligned) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
         self.constructor = self.constructor.or(other.constructor);
         self.destructor = self.destructor.or(other.destructor);
-        self.weak |= other.weak;
         self.alias = self.alias.or(other.alias);
-        self.naked |= other.naked;
-        self.noinline |= other.noinline;
-        self.is_async |= other.is_async;
         self.section = self.section.or(other.section);
         self.asm_label = self.asm_label.or(other.asm_label);
     }
@@ -7599,7 +7613,7 @@ fn push_escaped(out: &mut String, s: &str) {
 /// argument conversion add them.
 fn ptr(pointee: Ty) -> Ty {
     Ty::Pointer {
-        qualifiers: vec![],
+        qualifiers: TypeQualifiers::empty(),
         size: PtrSize::Default,
         pointee: Box::new(pointee),
     }
@@ -7862,6 +7876,43 @@ pub enum TypeQualifier {
     Restrict,
     Volatile,
 }
+
+bitflags::bitflags! {
+    /// The qualifier set on a type or declarator, packed into one byte.
+    /// Equal sets compare equal regardless of spelling order, which is
+    /// exactly `Ty`'s structural-equality requirement.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+    pub struct TypeQualifiers: u8 {
+        const CONST = 1 << 0;
+        const RESTRICT = 1 << 1;
+        const VOLATILE = 1 << 2;
+    }
+}
+
+impl TypeQualifiers {
+    pub fn from_qualifier(q: TypeQualifier) -> Self {
+        match q {
+            TypeQualifier::Const => TypeQualifiers::CONST,
+            TypeQualifier::Restrict => TypeQualifiers::RESTRICT,
+            TypeQualifier::Volatile => TypeQualifiers::VOLATILE,
+        }
+    }
+
+    pub fn insert_qualifier(&mut self, q: TypeQualifier) {
+        self.insert(Self::from_qualifier(q));
+    }
+
+    /// Qualifiers in canonical order, for diagnostics and dumps.
+    pub fn iter_qualifiers(self) -> impl Iterator<Item = TypeQualifier> {
+        [
+            (TypeQualifiers::CONST, TypeQualifier::Const),
+            (TypeQualifiers::RESTRICT, TypeQualifier::Restrict),
+            (TypeQualifiers::VOLATILE, TypeQualifier::Volatile),
+        ]
+        .into_iter()
+        .filter_map(move |(flag, q)| self.contains(flag).then_some(q))
+    }
+}
 /// MSVC's pointer-size attributes (`__ptr32`/`__ptr64`). They select the
 /// width of the pointer itself, not of its pointee.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -7886,7 +7937,7 @@ impl PtrSize {
 pub struct DeclarationSpecifiers {
     class: Vec<StorageClass>,
     pub(crate) type_specifier: Vec<TypeSpecifier>,
-    type_qualifier: Vec<TypeQualifier>,
+    type_qualifier: TypeQualifiers,
     function_specifier: usize, // only option is Inline
     /// C11 `_Noreturn` function specifier: like `inline`, only a hint
     /// and only valid on functions, so it is tracked separately and
@@ -7963,7 +8014,7 @@ impl HasSpan for Declarator {
 }
 #[derive(Debug, Default)]
 pub struct Pointer {
-    pub(crate) qualifiers: Vec<TypeQualifier>,
+    pub(crate) qualifiers: TypeQualifiers,
     pub(crate) size: PtrSize,
     pub span: Span,
 }
@@ -7999,7 +8050,7 @@ pub enum DirectSuffix {
 }
 #[derive(Debug, Default)]
 pub struct ArrayDeclarator {
-    pub(crate) qualifiers: Vec<TypeQualifier>,
+    pub(crate) qualifiers: TypeQualifiers,
     pub(crate) is_static: bool,
     /// `None` for `[]`, `Star` for `[*]`, or the bound expression.
     pub(crate) bound: Option<ArrayBound>,
@@ -8110,18 +8161,20 @@ impl HasSpan for Param {
 // covers statement/condition positions while `parse_assignment_expression`
 // (and below) serve positions where commas separate instead.
 
-/// Storage class written on a C23 compound literal:
-/// `(static T){...}`, `(thread_local T){...}`. The default is the
-/// automatic object C17 gives every block-scope compound literal.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CompoundStorage {
-    pub static_storage: bool,
-    pub thread_local: bool,
+bitflags::bitflags! {
+    /// Storage classes written on a C23 compound literal:
+    /// `(static T){...}`, `(thread_local T){...}`. The default is the
+    /// automatic object C17 gives every block-scope compound literal.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct CompoundStorage: u8 {
+        const STATIC = 1 << 0;
+        const THREAD_LOCAL = 1 << 1;
+    }
 }
 
 impl CompoundStorage {
     pub fn is_automatic(&self) -> bool {
-        !self.static_storage && !self.thread_local
+        self.is_empty()
     }
 }
 
@@ -8559,6 +8612,20 @@ impl AsmOperand {
 /// A parsed `asm`/`__asm__` statement
 /// (`asm [volatile|inline|goto] ( template [: outputs [: inputs [: clobbers
 /// [: goto-labels]]]] )`).
+bitflags::bitflags! {
+    /// `asm` statement modifiers, packed into one byte.
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+    pub struct AsmFlags: u8 {
+        const VOLATILE = 1 << 0;
+        const GOTO = 1 << 1;
+        /// Basic asm: the statement has no colon, so the template is not
+        /// parsed for operand references and `%` is literal (`%eax`). GCC
+        /// splits the two forms at the first colon, which this mirrors;
+        /// `asm volatile ("...")` with no colon is still basic.
+        const BASIC = 1 << 2;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AsmStmt {
     pub template: String,
@@ -8566,14 +8633,20 @@ pub struct AsmStmt {
     pub inputs: Vec<AsmOperand>,
     pub clobbers: Vec<String>,
     pub labels: Vec<SymbolU32>,
-    pub is_volatile: bool,
-    pub is_goto: bool,
-    /// Basic asm: the statement has no colon, so the template is not
-    /// parsed for operand references and `%` is literal (`%eax`). GCC
-    /// splits the two forms at the first colon, which this mirrors;
-    /// `asm volatile ("...")` with no colon is still basic.
-    pub is_basic: bool,
+    pub flags: AsmFlags,
     pub span: Span,
+}
+
+impl AsmStmt {
+    pub fn is_volatile(&self) -> bool {
+        self.flags.contains(AsmFlags::VOLATILE)
+    }
+    pub fn is_goto(&self) -> bool {
+        self.flags.contains(AsmFlags::GOTO)
+    }
+    pub fn is_basic(&self) -> bool {
+        self.flags.contains(AsmFlags::BASIC)
+    }
 }
 
 /// Statements (C17 §6.8). Labels carry their sub-statement so nesting
@@ -8796,7 +8869,7 @@ pub enum Ty {
     /// Twice the component's size, same alignment.
     Complex(Box<Ty>),
     Pointer {
-        qualifiers: Vec<TypeQualifier>,
+        qualifiers: TypeQualifiers,
         size: PtrSize,
         pointee: Box<Ty>,
     },
@@ -8818,7 +8891,7 @@ pub enum Ty {
         elem: Box<Ty>,
         // Qualifiers from inside the brackets (`[const 3]`); like
         // `Pointer`, they participate in compatibility.
-        quals: Vec<TypeQualifier>,
+        quals: TypeQualifiers,
         // `None` for `[]`, `Star` for `[*]`, else the bound expression.
         // Bounds compare structurally: `a[3]` and a later `a[3]` merge,
         // but `a[1+1]` against `a[2]` conflicts (no constant folding
@@ -8848,7 +8921,7 @@ pub enum Ty {
     /// through via `unqualified`, and conversions compare qualifier
     /// sets instead of erasing them.
     Qualified {
-        quals: Vec<TypeQualifier>,
+        quals: TypeQualifiers,
         inner: Box<Ty>,
     },
 }
@@ -8861,9 +8934,7 @@ impl Ty {
     /// int), into a pointer's own set (`typedef int *P; const P p;` is
     /// a const pointer), and off function types entirely (a qualifier
     /// on a function type is meaningless, silently like GCC).
-    pub fn qualified(mut quals: Vec<TypeQualifier>, inner: Ty) -> Ty {
-        quals.sort_by_key(|q| *q as u8);
-        quals.dedup();
+    pub fn qualified(quals: TypeQualifiers, inner: Ty) -> Ty {
         if quals.is_empty() {
             return inner;
         }
@@ -8873,18 +8944,17 @@ impl Ty {
                 quals: aq,
                 bound,
             },
-            Ty::Pointer { mut qualifiers, size, pointee } => {
-                qualifiers.extend(quals);
-                qualifiers.sort_by_key(|q| *q as u8);
-                qualifiers.dedup();
-                Ty::Pointer { qualifiers, size, pointee }
-            }
+            Ty::Pointer { qualifiers, size, pointee } => Ty::Pointer {
+                qualifiers: qualifiers | quals,
+                size,
+                pointee,
+            },
             Ty::Func { .. } => inner,
             Ty::Qualified {
                 quals: mut inner_q,
                 inner: inner_i,
             } => {
-                inner_q.extend(quals);
+                inner_q |= quals;
                 Ty::qualified(inner_q, *inner_i)
             }
             _ => Ty::Qualified { quals, inner: Box::new(inner) },
@@ -8907,13 +8977,13 @@ impl Ty {
         match self {
             Ty::Qualified { inner, .. } => inner.unqualified_owned(),
             Ty::Pointer { size, pointee, .. } => Ty::Pointer {
-                qualifiers: Vec::new(),
+                qualifiers: TypeQualifiers::empty(),
                 size: *size,
                 pointee: pointee.clone(),
             },
             Ty::Array { elem, bound, .. } => Ty::Array {
                 elem: Box::new(elem.unqualified_owned()),
-                quals: Vec::new(),
+                quals: TypeQualifiers::empty(),
                 bound: bound.clone(),
             },
             ty => ty.clone(),
@@ -8922,7 +8992,7 @@ impl Ty {
     /// Whether the type itself is `const`-qualified (looking only at
     /// its own qualifier set, not through pointers or arrays).
     pub fn is_const(&self) -> bool {
-        matches!(self, Ty::Qualified { quals, .. } if quals.contains(&TypeQualifier::Const))
+        matches!(self, Ty::Qualified { quals, .. } if quals.contains(TypeQualifiers::CONST))
     }
 
     /// Whether an integer type is unsigned: `_Bool` and the `unsigned`

@@ -1917,12 +1917,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             outputs: asm.outputs.len() as u32,
             clobbers: asm.clobbers.clone(),
             labels,
-            is_volatile: asm.is_volatile,
-            is_basic: asm.is_basic,
+            is_volatile: asm.is_volatile(),
+            is_basic: asm.is_basic(),
         };
         // `asm goto` needs the wrapper's selector as an instruction
         // result; plain asm ignores it.
-        let selector = if asm.is_goto {
+        let selector = if asm.is_goto() {
             Some(self.emit(func, frame, mir::InstKind::InlineAsm { block: Box::new(block) }, mir::Ty::int(64)))
         } else {
             self.emit_unit(func, frame, mir::InstKind::InlineAsm { block: Box::new(block) });
@@ -5762,7 +5762,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // anonymous object for the whole program (or thread),
                 // not a fresh temporary on each evaluation.
                 let target = self.materialize_global_compound(module, funcs, externs, globals, ty, init);
-                if storage.thread_local {
+                if storage.contains(fe::parse::CompoundStorage::THREAD_LOCAL) {
                     module.module.globals[target].tls = true;
                 }
                 let addr = self.emit(
@@ -6362,7 +6362,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         } else {
             let array_ty = fe::parse::Ty::Array {
                 elem: Box::new(elem_ty.clone()),
-                quals: vec![],
+                quals: fe::parse::TypeQualifiers::empty(),
                 bound: None,
             };
             self.init_addr(func, frame, slot, array_ty, &item.designators)
@@ -7476,11 +7476,12 @@ fn float_kind(ty: &mir::Ty) -> mir::FloatKind {
 /// `Ty::qualified` distributes qualifiers onto what they qualify, so
 /// the outermost level is exactly the accessed object's own.
 fn ty_is_volatile(ty: &fe::parse::Ty) -> bool {
-    const VOL: fe::parse::TypeQualifier = fe::parse::TypeQualifier::Volatile;
+    use fe::parse::TypeQualifiers;
+    const VOL: TypeQualifiers = TypeQualifiers::VOLATILE;
     match ty {
-        fe::parse::Ty::Qualified { quals, .. } => quals.contains(&VOL),
-        fe::parse::Ty::Pointer { qualifiers, .. } => qualifiers.contains(&VOL),
-        fe::parse::Ty::Array { quals, .. } => quals.contains(&VOL),
+        fe::parse::Ty::Qualified { quals, .. } => quals.contains(VOL),
+        fe::parse::Ty::Pointer { qualifiers, .. } => qualifiers.contains(VOL),
+        fe::parse::Ty::Array { quals, .. } => quals.contains(VOL),
         _ => false,
     }
 }

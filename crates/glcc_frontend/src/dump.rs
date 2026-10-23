@@ -480,7 +480,7 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
                 crate::parse::PtrSize::Ptr32 => " __ptr32",
                 crate::parse::PtrSize::Ptr64 => " __ptr64",
             };
-            format!("*{}{}{}", size, quals(qualifiers), dump_ty(pointee, sema, interner))
+            format!("*{}{}{}", size, quals(*qualifiers), dump_ty(pointee, sema, interner))
         }
         Ty::Func {
             ret,
@@ -504,7 +504,7 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
                 Some(crate::parse::ArrayBound::Fixed(n)) => n.to_string(),
                 Some(crate::parse::ArrayBound::Vla(_)) => "vla".to_string(),
             };
-            format!("{}{}[{}]", quals(array_quals), dump_ty(elem, sema, interner), bound)
+            format!("{}{}[{}]", quals(*array_quals), dump_ty(elem, sema, interner), bound)
         }
         Ty::Struct(id) => match sema.structs.get(id.0 as usize).and_then(|d| d.tag) {
             Some(tag) => format!("struct {}", name(interner, tag)),
@@ -517,14 +517,14 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
         Ty::BuiltinVaList => "va_list".to_string(),
         Ty::Float128 => "__float128".to_string(),
         Ty::Qualified { quals: q, inner } => {
-            format!("{}({})", quals(q).trim_end(), dump_ty(inner, sema, interner))
+            format!("{}({})", quals(*q).trim_end(), dump_ty(inner, sema, interner))
         }
     }
 }
 
-fn quals(quals: &[crate::parse::TypeQualifier]) -> String {
+fn quals(quals: crate::parse::TypeQualifiers) -> String {
     let mut out = String::new();
-    for q in quals {
+    for q in quals.iter_qualifiers() {
         out.push_str(match q {
             crate::parse::TypeQualifier::Const => "const ",
             crate::parse::TypeQualifier::Restrict => "restrict ",

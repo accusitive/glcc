@@ -298,7 +298,7 @@ fn lower_ty_debug(
     // first (`const int` is const-of-int).
     if let Ty::Qualified { quals, inner } = ty {
         let mut id = lower_ty_debug(cache, module, sema, interner, inner)?;
-        for q in quals {
+        for q in quals.iter_qualifiers() {
             let qualifier = match q {
                 fe::parse::TypeQualifier::Const => mir::Qualifier::Const,
                 fe::parse::TypeQualifier::Volatile => mir::Qualifier::Volatile,
@@ -324,7 +324,7 @@ fn lower_ty_debug(
                 _ => lower_ty_debug(cache, module, sema, interner, pointee),
             };
             let mut id = push_type(module, mir::DebugType::Pointer { pointee: pointee_id });
-            for q in qualifiers {
+            for q in qualifiers.iter_qualifiers() {
                 let qualifier = match q {
                     fe::parse::TypeQualifier::Const => mir::Qualifier::Const,
                     fe::parse::TypeQualifier::Volatile => mir::Qualifier::Volatile,
