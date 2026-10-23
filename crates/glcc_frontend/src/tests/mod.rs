@@ -1,3 +1,5 @@
+mod conformance;
+
 use crate::check::{CheckedExpr, CheckedExprKind};
 use crate::lang::{LangOpts, Std};
 use crate::layout::StructLayout;
