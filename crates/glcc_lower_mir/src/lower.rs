@@ -3363,6 +3363,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 };
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
+            fe::check::CheckedExprKind::CountofTy(ty) => {
+                self.countof_value(module, func, frame, funcs, externs, globals, ty, None, &expr.ty)
+            }
+            fe::check::CheckedExprKind::CountofExpr(inner) => {
+                let cached = self.vla_cached_extents(frame, inner);
+                self.countof_value(module, func, frame, funcs, externs, globals, &inner.ty, cached.as_ref(), &expr.ty)
+            }
             fe::check::CheckedExprKind::Offsetof { offset, .. } => self.iconst(func, int_bits(&mir_ty), *offset as i128),
             fe::check::CheckedExprKind::Generic { index, assocs, .. } => {
                 let Some((_, chosen)) = assocs.get(*index) else {
@@ -4173,6 +4180,36 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 _ => return None,
             }
+        }
+    }
+
+    /// The element count of an array type: a constant for a fixed
+    /// extent, otherwise the cached or freshly evaluated VLA extent.
+    #[allow(clippy::too_many_arguments)]
+    fn countof_value(
+        &self,
+        module: &mut mir::ModuleBuilder,
+        func: &mut mir::Function,
+        frame: &mut Frame,
+        funcs: &HashMap<fe::sema::DeclId, mir::Func>,
+        externs: &HashMap<fe::sema::DeclId, mir::Extern>,
+        globals: &HashMap<fe::sema::DeclId, mir::Global>,
+        ty: &fe::parse::Ty,
+        cached: Option<&HashMap<u32, mir::Value>>,
+        result_ty: &fe::parse::Ty,
+    ) -> mir::Value {
+        match ty.unqualified() {
+            fe::parse::Ty::Array { bound: Some(fe::parse::ArrayBound::Fixed(n)), .. } => {
+                let mir_ty = lower_ty(result_ty, self.sema, self.interner);
+                self.iconst(func, int_bits(&mir_ty), *n as i128)
+            }
+            fe::parse::Ty::Array { bound: Some(fe::parse::ArrayBound::Vla(id)), .. } => {
+                let value = cached
+                    .and_then(|map| map.get(id).copied())
+                    .unwrap_or_else(|| self.vla_extent(module, func, frame, funcs, externs, globals, *id));
+                self.convert(func, frame, value, &fe::parse::Ty::LongLong, result_ty)
+            }
+            _ => panic!("`_Countof` operand without an array extent"),
         }
     }
 
@@ -8437,6 +8474,14 @@ mod tests {
         assert_eq!(run_main("int main(){int n = 4; int a[n]; n = 99; return sizeof a;}"), 16);
         // `sizeof` on a type-name evaluates the bounds where it is used.
         assert_eq!(run_main("int main(){int n = 6; typedef int t[n]; return sizeof(t);}"), 24);
+        // `_Countof` reads fixed and variable top-level extents; it does
+        // not re-evaluate a captured VLA bound or the operand.
+        assert_eq!(run_main("int main(){int a[7]; return _Countof(a);}"), 7);
+        assert_eq!(run_main("int main(){int n = 5; int a[n]; return _Countof(a);}"), 5);
+        assert_eq!(run_main("int main(){int n = 4; int a[3][n]; return _Countof(a) * 10 + _Countof(*a);}"), 34);
+        assert_eq!(run_main("int main(){int n = 4; int a[n]; n = 99; return _Countof(a);}"), 4);
+        assert_eq!(run_main("int main(){int a[3]; int n = 0; return _Countof(a) + n;}"), 3);
+        assert_eq!(run_main("int main(){return _Countof(int[3][4]);}"), 3);
         // Through a pointer-to-VLA the bound re-evaluates: both the row
         // stride and `sizeof *a` read the parameter.
         assert_eq!(

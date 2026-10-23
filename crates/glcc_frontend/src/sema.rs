@@ -1133,6 +1133,7 @@ fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initiali
         | CheckedExprKind::ClassifyType(_)
         | CheckedExprKind::Offsetof { .. }
         | CheckedExprKind::SizeofTy(_)
+        | CheckedExprKind::CountofTy(_)
         | CheckedExprKind::AlignofTy(_)
         | CheckedExprKind::LabelAddr(_) => {}
         CheckedExprKind::Unary(_, e)
@@ -1140,6 +1141,7 @@ fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initiali
         | CheckedExprKind::Cast { expr: e, .. }
         | CheckedExprKind::Convert { expr: e, .. }
         | CheckedExprKind::SizeofExpr(e)
+        | CheckedExprKind::CountofExpr(e)
         | CheckedExprKind::AlignofExpr(e)
         | CheckedExprKind::VaArg { ap: e, .. }
         | CheckedExprKind::Member { base: e, .. } => remap_expr_ident(e, inits, map),

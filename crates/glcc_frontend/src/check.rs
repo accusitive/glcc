@@ -346,6 +346,8 @@ pub enum CheckedExprKind {
     },
     SizeofExpr(Box<CheckedExpr>),
     SizeofTy(Ty),
+    CountofExpr(Box<CheckedExpr>),
+    CountofTy(Ty),
     AlignofExpr(Box<CheckedExpr>),
     AlignofTy(Ty),
     /// GNU label address `&&label`: typed `void *`; the label it names
@@ -2268,6 +2270,23 @@ impl Sema {
                     kind: CheckedExprKind::SizeofTy(ty.clone()),
                 })
             }
+            Expr::CountofExpr { expr: operand, .. } => {
+                let operand = self.check_expr(operand, interner)?;
+                self.check_countof_operand(&operand.ty, operand.span)?;
+                Ok(CheckedExpr {
+                    ty: self.target.size_type(),
+                    span,
+                    kind: CheckedExprKind::CountofExpr(Box::new(operand)),
+                })
+            }
+            Expr::CountofTy { ty, .. } => {
+                self.check_countof_operand(ty, span)?;
+                Ok(CheckedExpr {
+                    ty: self.target.size_type(),
+                    span,
+                    kind: CheckedExprKind::CountofTy(ty.clone()),
+                })
+            }
             Expr::AlignofTy { ty, .. } => {
                 self.check_alignof_operand(ty, span)?;
                 Ok(CheckedExpr {
@@ -2320,6 +2339,18 @@ impl Sema {
             return Err(CompileError::new("invalid application of `sizeof` to an incomplete type", span));
         }
         Ok(())
+    }
+
+    /// Validate a `_Countof` operand: a complete array type, with a
+    /// known or variable top-level extent (but not `[]` or `[*]`).
+    fn check_countof_operand(&self, ty: &Ty, span: Span) -> Result<(), CompileError> {
+        match ty.unqualified() {
+            Ty::Array { bound: Some(ArrayBound::Fixed(_) | ArrayBound::Vla(_)), .. } => Ok(()),
+            Ty::Array { bound: Some(ArrayBound::Star) | None, .. } => {
+                Err(CompileError::new("invalid application of `_Countof` to an incomplete type", span))
+            }
+            _ => Err(CompileError::new("`_Countof` requires an argument of array type", span)),
+        }
     }
 
     /// Validate a `__alignof__` operand's type: functions have no

@@ -35,7 +35,7 @@ use rustc_apfloat::{
 use crate::{
     check::{CheckedExpr, CheckedExprKind, corresponding_real, int_rank, int_type_size, is_complex, is_signed_int_in},
     lexer::{CharLiteral, CharPrefix, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, StringLiteral, StringPrefix},
-    parse::{BinaryOp, Initializer, Ty, UnaryOp},
+    parse::{ArrayBound, BinaryOp, Initializer, Ty, UnaryOp},
     sema::{BindingKind, Sema},
     target::{LongDoubleKind, Target},
 };
@@ -796,6 +796,15 @@ pub fn sizeof_of(sema: &Sema, ty: &Ty, interner: &Interner) -> Option<u64> {
     sema.type_size(ty, interner)
 }
 
+/// The constant element count of an array type, if its top-level
+/// extent is fixed. Variable extents need runtime values.
+fn count_of(ty: &Ty) -> Option<u64> {
+    match ty.unqualified() {
+        Ty::Array { bound: Some(ArrayBound::Fixed(n)), .. } => Some(*n),
+        _ => None,
+    }
+}
+
 /// The alignment an `__alignof__` *expression* reports. An `aligned`
 /// attribute on the declaration sets it: for a function it is 1
 /// without one (like GCC), for an object the type's alignment applies
@@ -998,6 +1007,8 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             .map(|align| Value::Int(align as i128)),
         CheckedExprKind::SizeofExpr(operand) => sizeof_of(sema, &operand.ty, interner)
             .map(|size| Value::Int(size as i128)),
+        CheckedExprKind::CountofTy(ty) => count_of(ty).map(|n| Value::Int(n as i128)),
+        CheckedExprKind::CountofExpr(operand) => count_of(&operand.ty).map(|n| Value::Int(n as i128)),
         // A label address is only meaningful to `goto *`, and is
         // resolved at lowering, never folded.
         CheckedExprKind::LabelAddr(_) => None,

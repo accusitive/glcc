@@ -3239,6 +3239,39 @@ fn compound_literal_direct_sizeof_operand() {
 }
 
 #[test]
+fn countof_folds_complete_arrays() {
+    use crate::eval::Value;
+    let mut sema = Sema::new();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(
+        "int a[7]; int n = _Countof(a); int m = _Countof(int[3][4]); int s = _Countof(\"abcd\");",
+        &mut sema,
+        &mut interner,
+    );
+    let tu = parser.parse_translation_unit();
+    let mut values = Vec::new();
+    for decl in &tu.external_declarations {
+        let ExternalDeclaration::Var(id) = decl else {
+            panic!("expected a declaration, got {decl:?}")
+        };
+        let Some(Initializer::Expr(e)) = parser.sema.inits.get(id).cloned() else {
+            continue;
+        };
+        values.push(crate::eval::eval_const(&e, parser.sema, parser.intern));
+    }
+    assert_eq!(values, [Some(Value::Int(7)), Some(Value::Int(3)), Some(Value::Int(5))]);
+    assert!(parser.tokens.is_empty());
+}
+
+#[test]
+fn countof_rejects_non_arrays_and_incomplete_arrays() {
+    let diags = tu_diagnostics("int f(void) { int x; return _Countof(x); }");
+    assert!(diags.iter().any(|d| d.message.contains("requires an argument of array type")), "{diags:?}");
+    let diags = tu_diagnostics("extern int x[]; int f(void) { return _Countof(x); }");
+    assert!(diags.iter().any(|d| d.message.contains("incomplete type")), "{diags:?}");
+}
+
+#[test]
 fn compound_literal_unknown_array_completes() {
     // `(int[]){1, 2, 3}` completes to `int[3]` (C17 §6.5.2.5p3), so
     // `sizeof` folds to 12 on LP64.

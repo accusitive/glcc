@@ -364,6 +364,12 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::SizeofTy(ty) => {
             format!("(sizeof {} :{})", dump_ty(ty, sema, interner), t)
         }
+        CheckedExprKind::CountofExpr(expr) => {
+            format!("(_Countof {} :{})", dump_ex(expr, sema, interner), t)
+        }
+        CheckedExprKind::CountofTy(ty) => {
+            format!("(_Countof {} :{})", dump_ty(ty, sema, interner), t)
+        }
         CheckedExprKind::AlignofExpr(expr) => {
             format!("(alignof {} :{})", dump_ex(expr, sema, interner), t)
         }

@@ -2589,6 +2589,7 @@ impl<'a> Parser<'a> {
             | CheckedExprKind::ClassifyType(_)
             | CheckedExprKind::Offsetof { .. }
             | CheckedExprKind::SizeofTy(_)
+            | CheckedExprKind::CountofTy(_)
             | CheckedExprKind::AlignofTy(_) => {}
             // Taking a label's address is a use of it, checked exactly
             // like a `goto`: the label must exist in this function.
@@ -2598,6 +2599,7 @@ impl<'a> Parser<'a> {
             | CheckedExprKind::Cast { expr: operand, .. }
             | CheckedExprKind::Convert { expr: operand, .. }
             | CheckedExprKind::SizeofExpr(operand)
+            | CheckedExprKind::CountofExpr(operand)
             | CheckedExprKind::AlignofExpr(operand)
             | CheckedExprKind::VaArg { ap: operand, .. } => {
                 self.check_flow_expr(operand, labels, gotos, scope, fv);
@@ -6275,6 +6277,27 @@ impl<'a> Parser<'a> {
                 };
             }
         }
+        let is_countof = match self.tokens.peek_val() {
+            Some(Token::Identifier(sym)) => {
+                matches!(self.intern.resolve(*sym), Some("_Countof"))
+                    && (self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang)
+            }
+            _ => false,
+        };
+        if is_countof {
+            self.tokens.advance();
+            if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) && self.paren_starts_type_name() && !self.paren_starts_compound_literal() {
+                self.tokens.advance();
+                let ty = self.parse_type_name();
+                self.expect_punct(Punctuator::RParen);
+                return Expr::CountofTy { ty, span: self.span_since(start) };
+            }
+            let operand = self.parse_unary_expression();
+            return Expr::CountofExpr {
+                expr: Box::new(operand),
+                span: self.span_since(start),
+            };
+        }
         let is_alignof = match self.tokens.peek_val() {
             Some(Token::Identifier(sym)) => match self.intern.resolve(*sym) {
                 Some("__alignof__" | "__alignof" | "_Alignof") => true,
@@ -7839,6 +7862,16 @@ pub enum Expr {
         ty: Ty,
         span: Span,
     },
+    /// C2y `_Countof`: the number of elements of an array expression or
+    /// array type-name, as `size_t`.
+    CountofExpr {
+        expr: Box<Expr>,
+        span: Span,
+    },
+    CountofTy {
+        ty: Ty,
+        span: Span,
+    },
     /// GNU `__alignof__` / C11 `_Alignof`, in expression and type
     /// form: the operand's required alignment, as a `size_t` constant.
     AlignofExpr {
@@ -7880,6 +7913,8 @@ impl HasSpan for Expr {
             | Expr::VaArg { span, .. }
             | Expr::CompoundLiteral { span, .. }
             | Expr::SizeofExpr { span, .. }
+            | Expr::CountofExpr { span, .. }
+            | Expr::CountofTy { span, .. }
             | Expr::AlignofExpr { span, .. }
             | Expr::AlignofTy { span, .. }
             | Expr::SizeofTy { span, .. }
