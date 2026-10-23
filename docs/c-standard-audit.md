@@ -32,6 +32,36 @@ standard semantics; the false positives are listed below.
 holes, and a C23 compiler in name only. C17 comes for free because it adds
 no language features. C2y is not selectable at all.
 
+## Post-fix status (2026-10-22)
+
+The table and findings above are the pre-fix audit snapshot. The fixes in
+the conformance plan have since landed:
+
+* C2y is a selectable dialect (`-std=c2y`) with `__STDC_VERSION__`
+  `202400L`.
+* C23 declarations, literals, attributes, `_BitInt`, `constexpr`, `auto`,
+  `nullptr`, fixed enums, and the C23 headers are implemented.
+* C23 preprocessor features (`#warning`, `#elifdef`/`#elifndef`,
+  `__VA_OPT__`, `#embed`, truthful `__has_*`) are implemented.
+* Digraphs and trigraphs work; `<tgmath.h>` is glcc-owned and works in
+  C99 and later.
+* C2y `_Countof`, selection declarations, named loops, `_Generic` type
+  operands, delimited escapes, bit-precise enums, and expression
+  `static_assert` are implemented.
+* `-pedantic-errors` rejects implicit `int` and implicit function
+  declarations in C99 and later; the permissive default keeps the old
+  warning-only behavior.
+* `crates/glcc_frontend/src/tests/conformance.rs` carries table-driven
+  language probes for C99 through C2y.
+
+Known remaining gaps are deliberate or narrow: N3658 duplicate-label
+reuse is not in the C2y working draft yet; `_Imaginary` is optional Annex
+G and stays diagnosed as unsupported; `[[gnu::packed]]` does not pack;
+`deprecated` fires on identifier uses; `maybe_unused` is not enforced;
+bare `(thread_local T){...}` is accepted more liberally than GCC; TLS
+compound literals are not JIT-tested; and long-double complex foreign
+returns remain a documented MIR/CL ABI gap.
+
 ## Method
 
 * **Feature matrix.** 93 small probes (`/tmp/opencode/cstd-audit/run.sh`)
