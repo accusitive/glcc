@@ -434,6 +434,17 @@ macro_rules! pat_basic_type_specifier {
     };
 }
 
+/// How an init-declarator-list terminates. A normal declaration
+/// consumes its semicolon; a C2y selection header instead stops before
+/// `;` or `)` so the caller can choose between the
+/// declaration-plus-expression form and the simple-declaration form
+/// (N3356).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeclEnd {
+    Semicolon,
+    SelectionHeader,
+}
+
 impl<'a> Parser<'a> {
     pub fn new(source: &str, tokens: TokenStream, sema: &'a mut Sema, interner: &'a mut Interner) -> Self {
         let diagnostics: Vec<CompileError> = tokens.diagnostics().to_vec();
@@ -1059,7 +1070,7 @@ impl<'a> Parser<'a> {
         // Otherwise an init-declarator-list (`int a = 1, *b, f(void);`):
         // the first declarator is already parsed (it was needed for the
         // definition check above); the rest is shared bookkeeping.
-        let ids = self.parse_init_declarator_list(&specifiers, first, suffix);
+        let ids = self.parse_init_declarator_list(&specifiers, first, suffix, DeclEnd::Semicolon);
         self.emit_warnings();
         ids.into_iter()
             .filter(|id| id.0 != u32::MAX && (id.0 as usize) < self.sema.decls.len())
@@ -2027,22 +2038,51 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::If)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
-                let cond = self.parse_expression();
-                let cond = self.checked_condition(&cond);
-                self.expect_punct(Punctuator::RParen);
-                let mut then = self.parse_statement(ret);
-                let mut els = if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Else))) {
-                    self.tokens.advance();
-                    Some(Box::new(self.parse_statement(ret)))
+                if self.selection_declarations_enabled() && self.selection_header_starts_declaration() {
+                    self.sema.push_scope();
+                    self.label_scopes.push(HashMap::new());
+                    let (ids, cond, decl_span) = self.parse_selection_header_declaration();
+                    let cond = self.checked_condition(&cond);
+                    self.expect_punct(Punctuator::RParen);
+                    let mut then = self.parse_statement(ret);
+                    let mut els = if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Else))) {
+                        self.tokens.advance();
+                        Some(Box::new(self.parse_statement(ret)))
+                    } else {
+                        None
+                    };
+                    fold_constant_if(&cond, &mut then, &mut els, &self.sema, &self.intern);
+                    let span = self.span_since(start);
+                    let stmt = Stmt::If {
+                        cond,
+                        then: Box::new(then),
+                        els,
+                        span,
+                    };
+                    self.sema.pop_scope();
+                    self.label_scopes.pop();
+                    Stmt::Compound(Compound {
+                        span,
+                        items: vec![BlockItem::Decl { ids, span: decl_span }, BlockItem::Stmt(stmt)],
+                    })
                 } else {
-                    None
-                };
-                fold_constant_if(&cond, &mut then, &mut els, &self.sema, &self.intern);
-                Stmt::If {
-                    cond,
-                    then: Box::new(then),
-                    els,
-                    span: self.span_since(start),
+                    let cond = self.parse_expression();
+                    let cond = self.checked_condition(&cond);
+                    self.expect_punct(Punctuator::RParen);
+                    let mut then = self.parse_statement(ret);
+                    let mut els = if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Else))) {
+                        self.tokens.advance();
+                        Some(Box::new(self.parse_statement(ret)))
+                    } else {
+                        None
+                    };
+                    fold_constant_if(&cond, &mut then, &mut els, &self.sema, &self.intern);
+                    Stmt::If {
+                        cond,
+                        then: Box::new(then),
+                        els,
+                        span: self.span_since(start),
+                    }
                 }
             }
             Some(Token::Keyword(Keyword::While)) => {
@@ -2120,15 +2160,37 @@ impl<'a> Parser<'a> {
             Some(Token::Keyword(Keyword::Switch)) => {
                 self.tokens.advance();
                 self.expect_punct(Punctuator::LParen);
-                let cond = self.parse_expression();
-                let cond = self.checked_integer_expr(&cond, "switch controlling expression");
-                self.expect_punct(Punctuator::RParen);
-                let body = self.parse_statement(ret);
-                self.check_switch_cases(&cond, &body);
-                Stmt::Switch {
-                    cond,
-                    body: Box::new(body),
-                    span: self.span_since(start),
+                if self.selection_declarations_enabled() && self.selection_header_starts_declaration() {
+                    self.sema.push_scope();
+                    self.label_scopes.push(HashMap::new());
+                    let (ids, cond, decl_span) = self.parse_selection_header_declaration();
+                    let cond = self.checked_integer_expr(&cond, "switch controlling expression");
+                    self.expect_punct(Punctuator::RParen);
+                    let body = self.parse_statement(ret);
+                    self.check_switch_cases(&cond, &body);
+                    let span = self.span_since(start);
+                    let stmt = Stmt::Switch {
+                        cond,
+                        body: Box::new(body),
+                        span,
+                    };
+                    self.sema.pop_scope();
+                    self.label_scopes.pop();
+                    Stmt::Compound(Compound {
+                        span,
+                        items: vec![BlockItem::Decl { ids, span: decl_span }, BlockItem::Stmt(stmt)],
+                    })
+                } else {
+                    let cond = self.parse_expression();
+                    let cond = self.checked_integer_expr(&cond, "switch controlling expression");
+                    self.expect_punct(Punctuator::RParen);
+                    let body = self.parse_statement(ret);
+                    self.check_switch_cases(&cond, &body);
+                    Stmt::Switch {
+                        cond,
+                        body: Box::new(body),
+                        span: self.span_since(start),
+                    }
                 }
             }
             Some(Token::Keyword(Keyword::Return)) => {
@@ -2775,6 +2837,108 @@ impl<'a> Parser<'a> {
             _ => false,
         }
     }
+    /// C2y selection headers (N3356) are part of the permissive
+    /// GNU/Clang dialects as well as C2y itself.
+    fn selection_declarations_enabled(&self) -> bool {
+        self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang
+    }
+
+    /// Like `can_start_declaration`, but `__extension__` is ambiguous:
+    /// it can precede a declaration or an expression. Look past the
+    /// marker (and GNU attribute groups) before deciding.
+    fn selection_header_starts_declaration(&mut self) -> bool {
+        if !self.peek_is_gnu("__extension__") {
+            return self.can_start_declaration();
+        }
+        let mut n = 0;
+        loop {
+            match self.tokens.peek_nth(n).map(|located| &located.val) {
+                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("__extension__") => n += 1,
+                Some(Token::Identifier(sym))
+                    if matches!(self.intern.resolve(*sym), Some("__attribute__" | "__attribute"))
+                        && matches!(self.tokens.peek_nth(n + 1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen))) =>
+                {
+                    match self.balanced_paren_end(n + 1) {
+                        Some(end) => n = end,
+                        None => return false,
+                    }
+                }
+                tok => {
+                    return match tok {
+                        Some(Token::Keyword(
+                            pat_storage_class_specifier!()
+                            | pat_basic_type_specifier!()
+                            | pat_type_qualifier!()
+                            | pat_struct_or_union!()
+                            | Keyword::Enum
+                            | Keyword::Inline
+                            | Keyword::_Imaginary
+                            | Keyword::_Atomic
+                            | Keyword::_Noreturn,
+                        )) => true,
+                        Some(Token::Identifier(sym)) => {
+                            self.is_typedef_name(*sym)
+                                || self.is_gnu_type_keyword(*sym)
+                                || matches!(
+                                    self.intern.resolve(*sym),
+                                    Some("typeof_unqual" | "bool" | "constexpr" | "_BitInt" | "_Thread_local" | "__thread" | "thread_local")
+                                )
+                                || self.is_future_specifier(*sym)
+                        }
+                        _ => false,
+                    };
+                }
+            }
+        }
+    }
+
+    /// Parse the declaration part of a C2y `if`/`switch` selection
+    /// header, including an optional second expression clause. Returns
+    /// the declared ids, the controlling expression, and the declaration
+    /// span. The caller owns the enclosing scope and the closing `)`.
+    fn parse_selection_header_declaration(&mut self) -> (Vec<DeclId>, Expr, Span) {
+        let decl_start = self.mark();
+        let prefix = self.parse_gnu_annotations();
+        let mut specifiers = self.parse_declaration_specifiers();
+        specifiers.attrs.merge(prefix);
+        self.check_specifiers_block_scope(&specifiers);
+        let first = self.parse_declarator();
+        let first_span = first.span();
+        let suffix = self.parse_gnu_annotations();
+        let ids = self.parse_init_declarator_list(&specifiers, first, suffix, DeclEnd::SelectionHeader);
+        let decl_span = self.span_since(decl_start);
+        if self.failed() {
+            return (ids, Expr::recover(), decl_span);
+        }
+        let cond = match self.tokens.peek_val() {
+            Some(Token::Punctuator(Punctuator::Semi)) => {
+                self.tokens.advance();
+                self.parse_expression()
+            }
+            Some(Token::Punctuator(Punctuator::RParen)) => {
+                if ids.len() != 1 {
+                    let expr = self.fail::<Expr>(decl_span, "a selection declaration without a second clause must declare a single object");
+                    return (ids, expr, decl_span);
+                }
+                let id = ids[0];
+                if !self.sema.inits.contains_key(&id) {
+                    let expr = self.fail::<Expr>(decl_span, "a selection declaration without a second clause requires an initializer");
+                    return (ids, expr, decl_span);
+                }
+                let Some(name) = self.sema.decls.get(id.0 as usize).and_then(|decl| decl.name) else {
+                    let expr = self.fail::<Expr>(decl_span, "selection declaration does not name an object");
+                    return (ids, expr, decl_span);
+                };
+                Expr::Ident { name, span: first_span }
+            }
+            _ => {
+                let expr = self.fail::<Expr>(self.peek_span(), "expected `;` or `)` in selection header");
+                return (ids, expr, decl_span);
+            }
+        };
+        (ids, cond, decl_span)
+    }
+
     // Where an identifier could be read either as a typedef name or as
     // the name being declared, C takes it as the typedef
     // (C17 §6.7.6.3p11) — so this decides both whether a declaration
@@ -3355,7 +3519,7 @@ impl<'a> Parser<'a> {
         // helper handles the rest exactly as `parse_external_declaration`
         // does for non-definitions.
         let first = self.parse_declarator();
-        let ids = self.parse_init_declarator_list(&specifiers, first, GnuAttributes::default());
+        let ids = self.parse_init_declarator_list(&specifiers, first, GnuAttributes::default(), DeclEnd::Semicolon);
         self.emit_warnings();
         ids
     }
@@ -3370,7 +3534,13 @@ impl<'a> Parser<'a> {
     // the name scopes over its own initializer (C17 §6.2.1p4) and
     // over later declarators' (`int a = 1, b = a;` sees `a`).
     // Initializers parse into `Sema::inits`.
-    pub(crate) fn parse_init_declarator_list(&mut self, specifiers: &DeclarationSpecifiers, first: Declarator, first_suffix: GnuAttributes) -> Vec<DeclId> {
+    pub(crate) fn parse_init_declarator_list(
+        &mut self,
+        specifiers: &DeclarationSpecifiers,
+        first: Declarator,
+        first_suffix: GnuAttributes,
+        end: DeclEnd,
+    ) -> Vec<DeclId> {
         let mut ids = Vec::new();
         let mut next = Some((first, first_suffix));
         let mut is_first = true;
@@ -3508,7 +3678,7 @@ impl<'a> Parser<'a> {
             break;
         }
         // No body allowed for plain declarations.
-        if !self.cancelled() {
+        if end == DeclEnd::Semicolon && !self.cancelled() {
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
                 let span = self.peek_span();
                 return self.fail(span, "expected `;`");

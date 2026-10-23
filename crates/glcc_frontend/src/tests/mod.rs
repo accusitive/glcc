@@ -3239,6 +3239,62 @@ fn compound_literal_direct_sizeof_operand() {
 }
 
 #[test]
+fn selection_declarations_scope_over_branches() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(tu_diagnostics_with_lang(
+        "int f(void) { if (int x = 0) return x; else return x + 1; }",
+        c2y
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang(
+        "int f(void) { if (int x = 3; x > 2) return x; return 0; }",
+        c2y
+    )
+    .is_empty());
+    assert!(tu_diagnostics_with_lang(
+        "int f(int y) { switch (int x = y) { case 1: return x; } return 0; }",
+        c2y
+    )
+    .is_empty());
+    // The declaration's scope covers the else branch too, but not the
+    // statement after the selection.
+    assert!(tu_diagnostics_with_lang(
+        "int f(void) { int y = 0; if (int x = 0) y = x; else y = x; return y; }",
+        c2y
+    )
+    .is_empty());
+    assert!(!tu_diagnostics_with_lang(
+        "int f(void) { if (int x = 0) y = x; return x; }",
+        c2y
+    )
+    .is_empty());
+
+    let c17 = LangOpts {
+        std: Std::C17,
+        gnu: false,
+        ms: false,
+        clang: false,
+    };
+    assert!(!tu_diagnostics_with_lang("int f(void) { if (int x = 1) return x; return 0; }", c17).is_empty());
+    assert!(tu_diagnostics("int f(void) { if (int x = 1) return x; return 0; }").is_empty());
+    // `__extension__` can still prefix an ordinary condition expression.
+    assert!(tu_diagnostics("int f(void) { if (__extension__ 1) return 0; return 1; }").is_empty());
+    assert!(tu_diagnostics("int f(void) { if (__extension__ int x = 1) return x; return 0; }").is_empty());
+
+    let diags = tu_diagnostics_with_lang("int f(void) { if (int x) return 0; return 1; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("requires an initializer")), "{diags:#?}");
+    let diags = tu_diagnostics_with_lang("int f(void) { if (int x = 1, y = 2) return 0; return 1; }", c2y);
+    assert!(diags.iter().any(|d| d.message.contains("single object")), "{diags:#?}");
+    assert!(tu_diagnostics_with_lang("int f(void) { if (int x = 1, y = 2; y) return y; return 0; }", c2y).is_empty());
+}
+
+#[test]
 fn countof_folds_complete_arrays() {
     use crate::eval::Value;
     let mut sema = Sema::new();

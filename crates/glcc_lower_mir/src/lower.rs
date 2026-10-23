@@ -10785,6 +10785,27 @@ mod tests {
     }
 
     #[test]
+    fn selection_declarations_lower() {
+        assert_eq!(
+            run_main(
+                "int main(){int r = 0;                  if (int x = 0) r = 1; else r = x + 2;                  if (int y = 3; y > 2) r += y;                  switch (int z = 4) { case 4: r += z; break; default: r = 99; }                  switch (int w = 5; w) { case 5: r += w; }                  return r;}"
+            ),
+            14
+        );
+        // The declared object shadows an outer one and is gone after the
+        // selection statement.
+        assert_eq!(
+            run_main(
+                "int main(){int x = 100; if (int x = 0) { return 1; }                  else if (x == 0) { x = 7; } else { return 2; } return x;}"
+            ),
+            100
+        );
+        // Initialization still runs when the control expression folds
+        // away.
+        assert_eq!(run_main("int main(){int n = 0; if (int x = n++) {} return n;}"), 1);
+    }
+
+    #[test]
     fn delimited_escapes_lower() {
         assert_eq!(
             run_main("int main(){char s[] = \"\\o{110}\\x{65}llo\"; return s[0] + s[4];}"),
