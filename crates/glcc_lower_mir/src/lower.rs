@@ -7793,6 +7793,41 @@ mod tests {
         assert_eq!(jit_run_main(module), 9);
     }
 
+    /// The signed form of a boolean ternary sign-extends the one-bit
+    /// condition, so true becomes -1 even when the carrier grows to a
+    /// wider Clif type.
+    #[test]
+    fn optimized_pipeline_sign_extends_boolean_ternaries() {
+        let src = "__attribute__((noinline)) int yes(int x) { return (x > 0) ? -1 : 0; }\n\
+                   __attribute__((noinline)) int no(int x) { return (x > 0) ? 0 : -1; }\n\
+                   int main() {\n\
+                       int a = yes(5), b = yes(-1), c = no(5), d = no(-1);\n\
+                       return (a == -1) + 2 * (b == 0) + 4 * (c == 0) + 8 * (d == -1)\n\
+                           + 16 * (a + b + c + d == -2);\n\
+                   }";
+        let mut module = lower_module(src);
+        run_opt_pipeline(&mut module);
+        let dump = mir::display::dump_module(&module);
+        for name in ["yes", "no"] {
+            let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+            let kinds: Vec<&mir::InstKind> = func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .map(|inst| &func.insts[*inst].kind)
+                .collect();
+            assert!(
+                kinds.iter().any(|kind| matches!(kind, mir::InstKind::Sext(..))),
+                "{name} did not become a sign extension:\n{dump}"
+            );
+            assert!(
+                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
+                "{name} kept a select:\n{dump}"
+            );
+        }
+        assert_eq!(jit_run_main(module), 31);
+    }
+
     /// Comparisons against a constant narrow to the source width with
     /// the right signedness, and constants outside the source range
     /// collapse to a fixed truth value.

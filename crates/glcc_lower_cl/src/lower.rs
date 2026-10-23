@@ -2621,23 +2621,32 @@ enum IntConvert {
 /// is real; extend or reduce those on the MIR widths instead.
 fn convert_int(builder: &mut FunctionBuilder, v: ClifValue, to: Type, src_bits: u32, dst_bits: u32, convert: IntConvert) -> ClifValue {
     let from = builder.func.dfg.value_type(v);
-    if from != to {
-        return match convert {
-            IntConvert::Trunc => builder.ins().ireduce(to, v),
-            IntConvert::Zext => builder.ins().uextend(to, v),
-            IntConvert::Sext => builder.ins().sextend(to, v),
-        };
-    }
-    let clif_bits = to.bits();
-    match convert {
-        // The source is already canonical for its declared width.
-        IntConvert::Zext => v,
-        IntConvert::Sext if src_bits > 0 && src_bits < dst_bits && src_bits < clif_bits => {
-            let shift = builder.ins().iconst(to, i64::from(clif_bits - src_bits));
+    let from_bits = from.bits();
+    // Sign-extend a sub-width source (`Bool` or a small `Int`) to its
+    // Clif width first: Cranelift would otherwise sign-extend the
+    // carrier byte, turning a true boolean into 1 instead of -1.
+    let v = match convert {
+        IntConvert::Sext if src_bits > 0 && src_bits < from_bits => {
+            let shift = builder.ins().iconst(from, i64::from(from_bits - src_bits));
             let up = builder.ins().ishl(v, shift);
             builder.ins().sshr(up, shift)
         }
-        IntConvert::Trunc if dst_bits > 0 && dst_bits < src_bits && dst_bits < clif_bits && clif_bits <= 64 => {
+        _ => v,
+    };
+    let v = if from != to {
+        match convert {
+            IntConvert::Trunc => builder.ins().ireduce(to, v),
+            IntConvert::Zext => builder.ins().uextend(to, v),
+            IntConvert::Sext => builder.ins().sextend(to, v),
+        }
+    } else {
+        v
+    };
+    let to_bits = to.bits();
+    match convert {
+        // The source is already canonical for its declared width.
+        IntConvert::Zext => v,
+        IntConvert::Trunc if dst_bits > 0 && dst_bits < to_bits && to_bits <= 64 => {
             let mask = builder.ins().iconst(to, (1i64 << dst_bits) - 1);
             builder.ins().band(v, mask)
         }
@@ -3670,13 +3679,31 @@ mod tests {
         ret(&mut f, entry, Some(t));
         module.push_func(f);
 
+        // A Clif width change still starts from the MIR width: `sext`
+        // from a one-bit boolean must produce -1, not 1.
+        let (mut f, entry) = mir::Function::new("s32", mir::Signature::new(vec![mir::Ty::Bool], mir::Ty::int(32)));
+        let x = param(&mut f, entry, mir::Ty::Bool, 0);
+        let s = emit(&mut f, entry, mir::InstKind::Sext(x), mir::Ty::int(32));
+        ret(&mut f, entry, Some(s));
+        module.push_func(f);
+
+        let (mut f, entry) = mir::Function::new("s64", mir::Signature::new(vec![mir::Ty::Bool], mir::Ty::int(64)));
+        let x = param(&mut f, entry, mir::Ty::Bool, 0);
+        let s = emit(&mut f, entry, mir::InstKind::Sext(x), mir::Ty::int(64));
+        ret(&mut f, entry, Some(s));
+        module.push_func(f);
+
         let (jit, ids) = jit_module(&module);
         let zext: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 0)) };
         let sext: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 1)) };
         let trunc: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 2)) };
+        let sext32: extern "C" fn(i8) -> i32 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 3)) };
+        let sext64: extern "C" fn(i8) -> i64 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 4)) };
         assert_eq!((zext(0), zext(1)), (0, 1));
         assert_eq!((sext(0), sext(1)), (0, -1));
         assert_eq!((trunc(2), trunc(3)), (0, 1));
+        assert_eq!((sext32(0), sext32(1)), (0, -1));
+        assert_eq!((sext64(0), sext64(1)), (0, -1));
     }
 
     #[test]
