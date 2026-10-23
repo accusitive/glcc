@@ -417,6 +417,8 @@ pub struct Job {
     /// `-f[no-]clang-extensions`: clang-family spellings
     /// (`_Float32`/`_Float64`).
     pub ext_clang: Option<bool>,
+    /// `-pedantic-errors`: standard constraint violations are fatal.
+    pub pedantic_errors: bool,
     /// `-fglcc-async`: enables the async extension (`__attribute__((async))`,
     /// `_Future(T)`, `__builtin_await`). Off by default so no existing
     /// code can accidentally compile as coroutines.
@@ -479,6 +481,7 @@ pub fn language(job: &Job) -> LangOpts {
     if let Some(clang) = job.ext_clang {
         lang.clang = clang;
     }
+    lang.strict = job.pedantic_errors;
     lang
 }
 
@@ -516,6 +519,7 @@ impl Default for Job {
             ext_gnu: None,
             ext_ms: None,
             ext_clang: None,
+            pedantic_errors: false,
             pp_native: None,
             async_enabled: false,
             error_format: ErrorFormat::Human,
@@ -825,7 +829,8 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                 job.order.push(OrderItem::LinkArg(arg.clone()));
             }
             "-undef" | "-nostdinc" | "-nostdinc++" | "-H" | "-C" | "-CC" | "-P" | "-dM" | "-dD" | "-dN" | "-trigraphs" | "-no-trigraphs" => job.cpp.push(arg.clone()),
-            "-pedantic" | "-pedantic-errors" | "-w" | "-pipe" | "-time" | "-Q" => {}
+            "-pedantic" | "-w" | "-pipe" | "-time" | "-Q" => {}
+            "-pedantic-errors" => job.pedantic_errors = true,
             "-o" | "-x" | "-e" | "-u" | "-z" | "-T" | "-Xlinker" | "-Xpreprocessor" | "-MF" | "-MT" | "-MQ" | "-include" | "-imacros" | "-isystem" | "-idirafter" | "-iquote"
             | "-l" | "-L" | "-I" | "-D" | "-U" => {
                 let flag = s.into_owned();
@@ -2860,6 +2865,17 @@ mod tests {
         let job = parse(&["-c", "-std=c2x", "a.c"]);
         assert_eq!(job.lang_std, Some(Std::C23));
         assert!(language(&job).gnu, "flag doesn't imply the GNU gate");
+    }
+
+    #[test]
+    fn pedantic_errors_reach_lang_opts() {
+        let job = parse(&["-c", "-pedantic-errors", "a.c"]);
+        assert!(job.pedantic_errors);
+        assert!(language(&job).strict);
+
+        let job = parse(&["-c", "-pedantic", "a.c"]);
+        assert!(!job.pedantic_errors);
+        assert!(!language(&job).strict);
     }
 
     #[test]

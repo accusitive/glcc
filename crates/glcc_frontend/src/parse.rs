@@ -744,6 +744,23 @@ impl<'a> Parser<'a> {
         self.report_warning(CompileError::warning(msg.to_string(), span));
     }
 
+    /// Report a strict-mode constraint violation without latching the
+    /// current construct: the parser can fill in the C89 default and
+    /// keep checking, but compilation still fails.
+    fn strict_error(&self, span: Span, msg: impl fmt::Display) {
+        self.report_warning(CompileError::new(msg.to_string(), span));
+    }
+
+    /// Diagnose a missing type specifier. C89 fills in `int`; C99 and
+    /// later removed that default, so `-pedantic-errors` makes it fatal.
+    fn implicit_int(&self, span: Span) {
+        if self.sema.lang.rejects_implicit() {
+            self.strict_error(span, "missing type specifier; ISO C99 and later do not support implicit `int`");
+        } else {
+            self.warn(span, "missing type specifier; C89 implicit `int` assumed");
+        }
+    }
+
     /// Warn when an expression statement discards a direct call to a
     /// function declared `[[nodiscard]]`.
     fn warn_discarded_call(&self, expr: &Expr) {
@@ -1045,7 +1062,7 @@ impl<'a> Parser<'a> {
             // handles the shape; only the missing specifier is filled
             // in here.
             let span = self.peek_span();
-            self.warn(span, "missing type specifier; C89 implicit `int` assumed");
+            self.implicit_int(span);
             DeclarationSpecifiers {
                 type_specifier: vec![TypeSpecifier::Int],
                 span,
@@ -3359,7 +3376,14 @@ impl<'a> Parser<'a> {
             None => (Ty::Int, vec![], false, false, "C89 `extern int` assumed"),
         };
         if !text.starts_with("__glccrt_") {
-            self.warn(span, format!("implicit declaration of function '{text}'; {assumption}"));
+            if self.sema.lang.rejects_implicit() {
+                self.strict_error(
+                    span,
+                    format!("implicit declaration of function '{text}'; ISO C99 and later do not support implicit function declarations"),
+                );
+            } else {
+                self.warn(span, format!("implicit declaration of function '{text}'; {assumption}"));
+            }
         }
         let declared = self.sema.declare_global(
             *name,
@@ -5133,7 +5157,7 @@ impl<'a> Parser<'a> {
                             break;
                         }
                         let span = self.peek_span();
-                        self.warn(span, "missing type specifier; C89 implicit `int` assumed");
+                        self.implicit_int(span);
                         ds.type_specifier.push(TypeSpecifier::Int);
                         break;
                     }

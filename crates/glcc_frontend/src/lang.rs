@@ -98,6 +98,10 @@ pub struct LangOpts {
     pub ms: bool,
     /// clang-family spellings: `_Float32`/`_Float64` and friends.
     pub clang: bool,
+    /// `-pedantic-errors`: make standard constraint violations fatal.
+    /// Currently used for the C89 implicit `int` and implicit function
+    /// declarations that C99 removed.
+    pub strict: bool,
 }
 
 impl Default for LangOpts {
@@ -109,6 +113,7 @@ impl Default for LangOpts {
             gnu: true,
             ms: true,
             clang: true,
+            strict: false,
         }
     }
 }
@@ -118,6 +123,13 @@ impl LangOpts {
     /// selected level reaches `min`.
     pub fn standard_includes(self, min: Std) -> bool {
         self.std.level() >= min.level()
+    }
+
+    /// Whether C99's removal of implicit `int` and implicit function
+    /// declarations is enforced. C89 still permits both, even in
+    /// pedantic mode.
+    pub fn rejects_implicit(self) -> bool {
+        self.strict && self.standard_includes(Std::C99)
     }
 }
 

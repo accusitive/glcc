@@ -608,12 +608,14 @@ fn c23_u8_literals_are_unsigned_char() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let c17 = LangOpts {
         std: Std::C17,
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "_Static_assert(_Generic(u8\"x\"[0], unsigned char: 1, default: 0), \"string\");\n\
@@ -1675,6 +1677,7 @@ fn c23_typeof_unqual_strips_top_level_qualifiers() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let decl_ty = |src: &str| {
         let mut sema = gated_sema(c23);
@@ -2075,6 +2078,48 @@ fn bit_field_width_must_be_integer() {
 }
 
 #[test]
+fn pedantic_errors_reject_implicit_int_and_functions() {
+    use crate::lang::Std;
+    let c89 = LangOpts {
+        std: Std::C89,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: true,
+    };
+    let c99 = LangOpts {
+        std: Std::C99,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: true,
+    };
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: true,
+    };
+    assert!(!tu_diagnostics_with_lang("main(){ return 0; }", c89).iter().any(|d| d.is_error()));
+    assert!(!tu_diagnostics_with_lang("int f(void){ return foo(); }", c89).iter().any(|d| d.is_error()));
+    for lang in [c99, c23] {
+        let diags = tu_diagnostics_with_lang("main(){ return 0; }", lang);
+        assert!(
+            diags.iter().any(|d| d.is_error() && d.message.contains("implicit `int`")),
+            "{diags:#?}"
+        );
+        let diags = tu_diagnostics_with_lang("int f(void){ return foo(); }", lang);
+        assert!(
+            diags.iter().any(|d| d.is_error() && d.message.contains("implicit declaration of function 'foo'")),
+            "{diags:#?}"
+        );
+    }
+    // The permissive default keeps the historical warning-only behavior.
+    assert!(!tu_diagnostics("main(){ return 0; }").iter().any(|d| d.is_error()));
+}
+
+#[test]
 fn implicit_int_function_definition() {
     // A storage class may precede the implicit `int` (`static inline
     // fu (unsigned short data)` in alias-3 / pr79043); the identifier
@@ -2252,6 +2297,7 @@ fn enum_fixed_underlying_type_sizes_and_types() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let src = "enum A : unsigned char { A0 = 1, A1 = 255 };\n\
                enum B : long long { B0 = -1, B1 = 0x100000000LL };\n\
@@ -2285,6 +2331,7 @@ fn enum_fixed_underlying_type_rejects_bad_values_and_types() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     for src in [
         "enum A : unsigned char { A0 = 256 };",
@@ -2303,6 +2350,7 @@ fn enum_fixed_underlying_type_redeclaration_checks() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     for src in [
         "enum E : int; enum E { A };",
@@ -3246,6 +3294,7 @@ fn c2y_static_assert_expressions() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c2y).is_empty());
     assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1); static_assert(1), 0; }", c2y).is_empty());
@@ -3263,6 +3312,7 @@ fn c2y_static_assert_expressions() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c23).is_empty());
     // `_Static_assert` remains a declaration in pre-C2y permissive modes.
@@ -3277,6 +3327,7 @@ fn c2y_bit_precise_enum_underlying_types() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "enum E : _BitInt(5) { E_MIN = -16, E_MAX = 15 };
@@ -3300,6 +3351,7 @@ fn c2y_bit_precise_enum_underlying_types() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let diags = tu_diagnostics_with_lang("enum E : _BitInt(8) { A = 1 };", c23);
     assert!(diags.iter().any(|d| d.is_error() && d.message.contains("require C2y")), "{diags:#?}");
@@ -3313,6 +3365,7 @@ fn named_loops_resolve_enclosing_targets() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "int f(void) { int r = 0; outer: for (int i = 0; i < 3; i++) { \
@@ -3346,6 +3399,7 @@ fn named_loops_resolve_enclosing_targets() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { a: while (0) { break a; } return 0; }", c17).is_empty());
     assert!(tu_diagnostics("int f(void) { a: while (0) { break a; } return 0; }").is_empty());
@@ -3359,6 +3413,7 @@ fn selection_declarations_scope_over_branches() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "int f(void) { if (int x = 0) return x; else return x + 1; }",
@@ -3393,6 +3448,7 @@ fn selection_declarations_scope_over_branches() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { if (int x = 1) return x; return 0; }", c17).is_empty());
     assert!(tu_diagnostics("int f(void) { if (int x = 1) return x; return 0; }").is_empty());
@@ -3529,6 +3585,7 @@ fn c23_compound_literal_storage_classes() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let ok = "int *f(void) { return &(static int){ 7 }; }\n\
               int *g(void) { return &(static thread_local int){ 7 }; }\n\
@@ -3548,6 +3605,7 @@ fn c23_compound_literal_storage_classes() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let diagnostics = tu_diagnostics_with_lang("int main(void) { int *p = &(static int){ 1 }; return *p; }", c17);
     assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
@@ -3858,6 +3916,7 @@ fn c23_bare_static_assert() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang("static_assert(1);", c23).is_empty());
     assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1, \"ok\"); }", c23).is_empty());
@@ -5395,12 +5454,14 @@ fn c23_labels_before_declarations_and_at_block_end() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let c17 = LangOpts {
         std: Std::C17,
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "int main(void) { goto L; L: int x = 1; return x; }",
@@ -5419,6 +5480,7 @@ fn c23_bool_true_false() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "_Static_assert(sizeof(bool) == 1, \"bool\");\n\
@@ -5438,6 +5500,7 @@ fn c23_nullptr() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "_Static_assert(sizeof(nullptr) == sizeof(void *), \"size\");\n\
@@ -5479,6 +5542,7 @@ fn c23_auto_deduces_from_initializer() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let src = "int main(void) {\n\
                    auto x = 2.5;\n\
@@ -5506,6 +5570,7 @@ fn c23_constexpr_values_fold_in_constant_contexts() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let src = "constexpr int n = 3;\n\
                int a[n];\n\
@@ -5531,6 +5596,7 @@ fn c23_constexpr_rejects_nonconstant_initializers_and_writes() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     for (src, expected) in [
         ("constexpr int x;", "requires an initializer"),
@@ -5553,6 +5619,7 @@ fn c23_attributes_parse_and_drive_warnings() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let src = "[[nodiscard]] int f(void);\n\
                [[deprecated]] int old(void);\n\
@@ -5585,6 +5652,7 @@ fn c23_attributes_parse_and_drive_warnings() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     let diagnostics = tu_diagnostics_with_lang("[[deprecated]] int x;", c17);
     assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
@@ -5597,6 +5665,7 @@ fn c23_auto_rejects_bad_declarations() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     for (src, expected) in [
         ("int main(void) { auto x; return 0; }", "requires an initializer"),
@@ -5618,6 +5687,7 @@ fn c23_bitint_types_and_suffixes() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics_with_lang(
         "_Static_assert(sizeof(_BitInt(8)) == 1, \"8-bit storage\");\n\
@@ -5669,6 +5739,7 @@ fn c23_bare_alignof() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert_eq!(enum_value_of_with_lang("enum { N = alignof(long long) };", "N", c23), 8);
     assert_eq!(enum_value_of_with_lang("int x; enum { N = alignof x };", "N", c23), 4);
@@ -5696,6 +5767,7 @@ fn alignas_opens_a_declaration_at_file_and_block_scope() {
         gnu: false,
         ms: false,
         clang: false,
+        strict: false,
     };
     assert!(tu_diagnostics("_Alignas(16) int x;").is_empty());
     assert!(tu_diagnostics("void f(void) { _Alignas(16) int y; (void)y; }").is_empty());
