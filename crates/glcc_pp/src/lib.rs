@@ -1444,6 +1444,7 @@ mod tests {
         let mut o = opts();
         o.include_paths.push(header_dir);
         o.include_paths.extend(native_include_paths(None, Some("-std=c17")));
+        o.predefined = native_predefines(None, Some("-std=c17"));
         let src = "#include <tgmath.h>\ndouble f(float x, long double y) { return sqrt(x) + sqrt(y); }\n";
         let got = preprocess(src, "t.c", &o).unwrap();
         assert!(got.contains("sqrtf"), "was: {got}");
