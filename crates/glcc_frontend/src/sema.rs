@@ -11,7 +11,7 @@ use crate::eval::escape_value;
 use crate::lang::LangOpts;
 use crate::layout::StructLayout;
 use crate::lexer::{Interner, StringLiteral, StringPrefix};
-use crate::parse::{ArrayBound, BlockItem, Designator, ForInit, FuncBody, Initializer, PtrSize, Stmt, Ty, TypeQualifiers};
+use crate::parse::{ArrayBound, AsmOperand, AsmStmt, BlockItem, Compound, Designator, ForInit, FuncBody, InitItem, Initializer, PtrSize, Stmt, Ty, TypeQualifiers};
 use crate::span::{CompileError, HasSpan, Span};
 use crate::target::Target;
 
@@ -31,13 +31,14 @@ pub struct StructId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EnumId(pub u32);
 
-// One enumeration constant: the optional `= value` expression, checked
-// as integer-typed but not constant-evaluated (like array bounds).
-// Uses of the constant check with type `int` (C17 §6.4.4.3).
+// One enumeration constant: its `= value` folded while parsing, or
+// `None` to continue the sequence. Uses of the constant check with type
+// `int` (C17 §6.4.4.3).
 #[derive(Debug)]
 pub struct Enumerator {
     pub name: SymbolU32,
-    pub value: Option<CheckedExpr>,
+    /// Explicit value, already folded; `None` continues the sequence.
+    pub value: Option<i128>,
     pub span: Span,
 }
 
@@ -73,17 +74,16 @@ impl HasSpan for EnumDef {
 
 /// One member of a struct/union. `name` is `None` for anonymous
 /// struct/union members (whose own members promote for access) and for
-/// unnamed bit-fields (`int : 3;`, `unsigned : 0;`). `bitfield` carries
-/// the checked width expression when a `:` width is present; widths
-/// fold at parse time (see the member parser) and layout re-derives
-/// them from these expressions. GNU `packed`/`aligned` on the member
-/// adjust layout (see `crate::layout`); all other attributes are
-/// ignored at parse.
+/// unnamed bit-fields (`int : 3;`, `unsigned : 0;`). `bitfield` is the
+/// width in bits, folded and range-checked while parsing (see the member
+/// parser). GNU `packed`/`aligned` on the member adjust layout (see
+/// `crate::layout`); all other attributes are ignored at parse.
 #[derive(Debug, Clone)]
 pub struct Member {
     pub name: Option<SymbolU32>,
     pub ty: Ty,
-    pub bitfield: Option<CheckedExpr>,
+    /// Bit-field width in bits, already folded and range-checked.
+    pub bitfield: Option<u64>,
     /// `__attribute__((packed))` on this member: no padding before it.
     pub packed: bool,
     /// `__attribute__((aligned(n)))` on this member: a minimum
@@ -246,7 +246,11 @@ impl HasSpan for Binding {
 }
 
 #[derive(Debug)]
-pub struct Sema {
+pub struct Sema<'a> {
+    /// Bump arena owning every parsed and checked syntax node. The
+    /// driver creates it before the `Sema` and keeps it alive for the
+    /// whole frontend run.
+    pub arena: &'a bumpalo::Bump,
     pub decls: Vec<Binding>,
     pub structs: Vec<StructDef>,
     pub enums: Vec<EnumDef>,
@@ -287,11 +291,11 @@ pub struct Sema {
     pub(crate) warnings: RefCell<Vec<CompileError>>,
     /// Parsed function bodies by function `DeclId`. Only definitions
     /// (`defined`) have entries.
-    pub bodies: HashMap<DeclId, FuncBody>,
+    pub bodies: HashMap<DeclId, FuncBody<'a>>,
     /// Object initializers by object `DeclId`: the *checked* form
     /// (implicit conversions inserted), which later phases consume.
     /// Only definitions with `= ...` have entries.
-    pub inits: HashMap<DeclId, Initializer>,
+    pub inits: HashMap<DeclId, Initializer<'a>>,
     /// C23 `constexpr` values, usable in constant expressions such as
     /// array bounds even though they live in objects.
     pub constexprs: HashMap<DeclId, crate::eval::Value>,
@@ -311,7 +315,7 @@ pub struct Sema {
     /// a runtime size is needed. Bounds checked in prototype scope may
     /// reference prototype bindings — a definition remaps those to its
     /// parameters (see `remap_vla_idents`).
-    pub vla_bounds: Vec<CheckedExpr>,
+    pub vla_bounds: Vec<CheckedExpr<'a>>,
     /// Declarations whose address is ever taken with `&`: populated
     /// during checking (`check_unary`'s `AddrOf` case walks the
     /// operand's lvalue base to its `Ident`). Interior mutability
@@ -368,13 +372,41 @@ pub struct Scope {
     // resolves to its own definition table.
     pub enum_tags: HashMap<SymbolU32, EnumId>,
 }
-impl Sema {
-    pub fn new() -> Self {
-        Self::with_target(Target::LP64)
+impl Sema<'static> {
+    /// A test-only `Sema` whose arena lives for the rest of the process.
+    #[doc(hidden)]
+    pub fn leak_for_tests() -> Self {
+        Self::leak_with_target_for_tests(Target::LP64)
+    }
+
+    /// A test-only `Sema` for another target.
+    #[doc(hidden)]
+    pub fn leak_with_target_for_tests(target: Target) -> Self {
+        let arena: &'static bumpalo::Bump = Box::leak(Box::new(bumpalo::Bump::new()));
+        Self::with_target(target, arena)
+    }
+}
+
+impl<'a> Sema<'a> {
+    /// Move a checked node into the shared arena.
+    pub(crate) fn alloc<T>(&self, value: T) -> &'a T {
+        self.arena.alloc(value)
+    }
+
+    /// Freeze an iterator of nodes into an arena slice.
+    pub(crate) fn alloc_slice<T>(&self, items: impl IntoIterator<Item = T>) -> &'a [T] {
+        let mut out = bumpalo::collections::Vec::new_in(self.arena);
+        out.extend(items);
+        out.into_bump_slice()
+    }
+
+    pub fn new(arena: &'a bumpalo::Bump) -> Self {
+        Self::with_target(Target::LP64, arena)
     }
     /// A `Sema` for another target (layout and `sizeof` follow it).
-    pub fn with_target(target: Target) -> Self {
+    pub fn with_target(target: Target, arena: &'a bumpalo::Bump) -> Self {
         Self {
+            arena,
             decls: vec![],
             structs: vec![],
             enums: vec![],
@@ -617,10 +649,11 @@ impl Sema {
         if map.is_empty() {
             return;
         }
-        let (bounds, inits) = (&mut self.vla_bounds, &mut self.inits);
-        for bound in bounds.iter_mut() {
-            remap_expr_ident(bound, inits, map);
+        let mut bounds = Vec::with_capacity(self.vla_bounds.len());
+        for bound in &self.vla_bounds {
+            bounds.push(remap_expr_ident(bound, self.arena, &mut self.inits, map));
         }
+        self.vla_bounds = bounds;
     }
     /// Declare a compiler builtin (GCC's `__builtin_va_start` and
     /// friends) at file scope, no matter where the use sits: builtins
@@ -1118,214 +1151,345 @@ pub fn string_contents(parts: &[StringLiteral], interner: &Interner) -> Option<S
 /// already walks). Declarations nested in GNU statement expressions
 /// keep their bindings; only their initializers' expression nodes are
 /// rewritten, via `inits`.
-fn remap_expr_ident(expr: &mut CheckedExpr, inits: &mut HashMap<DeclId, Initializer>, map: &HashMap<DeclId, DeclId>) {
-    match &mut expr.kind {
-        CheckedExprKind::Ident(id) => {
-            if let Some(to) = map.get(id) {
-                *id = *to;
-            }
+fn remap_expr_ident<'a>(
+    expr: &CheckedExpr<'a>,
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> CheckedExpr<'a> {
+    let kind = match &expr.kind {
+        CheckedExprKind::Ident(id) => CheckedExprKind::Ident(map.get(id).copied().unwrap_or(*id)),
+        CheckedExprKind::Int(lit) => CheckedExprKind::Int(lit.clone()),
+        CheckedExprKind::Float(lit) => CheckedExprKind::Float(lit.clone()),
+        CheckedExprKind::Char(lit) => CheckedExprKind::Char(lit.clone()),
+        CheckedExprKind::Str(parts) => CheckedExprKind::Str(parts),
+        CheckedExprKind::ConstantP(value) => CheckedExprKind::ConstantP(*value),
+        CheckedExprKind::ClassifyType(code) => CheckedExprKind::ClassifyType(*code),
+        CheckedExprKind::Offsetof { ty, offset } => CheckedExprKind::Offsetof { ty: ty.clone(), offset: *offset },
+        CheckedExprKind::SizeofTy(ty) => CheckedExprKind::SizeofTy(ty.clone()),
+        CheckedExprKind::CountofTy(ty) => CheckedExprKind::CountofTy(ty.clone()),
+        CheckedExprKind::AlignofTy(ty) => CheckedExprKind::AlignofTy(ty.clone()),
+        CheckedExprKind::StaticAssert => CheckedExprKind::StaticAssert,
+        CheckedExprKind::LabelAddr(label) => CheckedExprKind::LabelAddr(*label),
+        CheckedExprKind::FrameAddress { level, returns_address } => {
+            CheckedExprKind::FrameAddress { level: *level, returns_address: *returns_address }
         }
-        CheckedExprKind::Int(_)
-        | CheckedExprKind::Float(_)
-        | CheckedExprKind::Char(_)
-        | CheckedExprKind::Str(_)
-        | CheckedExprKind::ConstantP(_)
-        | CheckedExprKind::ClassifyType(_)
-        | CheckedExprKind::Offsetof { .. }
-        | CheckedExprKind::SizeofTy(_)
-        | CheckedExprKind::CountofTy(_)
-        | CheckedExprKind::AlignofTy(_)
-        | CheckedExprKind::StaticAssert
-        | CheckedExprKind::LabelAddr(_) => {}
-        CheckedExprKind::Unary(_, e)
-        | CheckedExprKind::Await(e)
-        | CheckedExprKind::Cast { expr: e, .. }
-        | CheckedExprKind::Convert { expr: e, .. }
-        | CheckedExprKind::SizeofExpr(e)
-        | CheckedExprKind::CountofExpr(e)
-        | CheckedExprKind::AlignofExpr(e)
-        | CheckedExprKind::VaArg { ap: e, .. }
-        | CheckedExprKind::Member { base: e, .. } => remap_expr_ident(e, inits, map),
-        CheckedExprKind::Binary(_, l, r) | CheckedExprKind::Assign(_, l, r) | CheckedExprKind::Subscript { base: l, index: r } => {
-            remap_expr_ident(l, inits, map);
-            remap_expr_ident(r, inits, map);
+        CheckedExprKind::Unary(op, e) => CheckedExprKind::Unary(*op, arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        CheckedExprKind::Await(e) => CheckedExprKind::Await(arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        CheckedExprKind::Cast { ty, expr: e } => CheckedExprKind::Cast {
+            ty: ty.clone(),
+            expr: arena.alloc(remap_expr_ident(e, arena, inits, map)),
+        },
+        CheckedExprKind::Convert { expr: e, ty } => CheckedExprKind::Convert {
+            expr: arena.alloc(remap_expr_ident(e, arena, inits, map)),
+            ty: ty.clone(),
+        },
+        CheckedExprKind::SizeofExpr(e) => {
+            CheckedExprKind::SizeofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
         }
-        CheckedExprKind::CompoundAssign { lhs: l, rhs: r, .. } => {
-            remap_expr_ident(l, inits, map);
-            remap_expr_ident(r, inits, map);
+        CheckedExprKind::CountofExpr(e) => {
+            CheckedExprKind::CountofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
         }
-        CheckedExprKind::Ternary { cond, then, els } => {
-            remap_expr_ident(cond, inits, map);
-            remap_expr_ident(then, inits, map);
-            remap_expr_ident(els, inits, map);
+        CheckedExprKind::AlignofExpr(e) => {
+            CheckedExprKind::AlignofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
         }
-        CheckedExprKind::Elvis { cond, els } => {
-            remap_expr_ident(cond, inits, map);
-            remap_expr_ident(els, inits, map);
+        CheckedExprKind::VaArg { ap, ty } => CheckedExprKind::VaArg {
+            ap: arena.alloc(remap_expr_ident(ap, arena, inits, map)),
+            ty: ty.clone(),
+        },
+        CheckedExprKind::Member { base, path, arrow, offset, bitfield, decl_ty } => CheckedExprKind::Member {
+            base: arena.alloc(remap_expr_ident(base, arena, inits, map)),
+            path,
+            arrow: *arrow,
+            offset: *offset,
+            bitfield: *bitfield,
+            decl_ty: decl_ty.clone(),
+        },
+        CheckedExprKind::Binary(op, l, r) => CheckedExprKind::Binary(
+            *op,
+            arena.alloc(remap_expr_ident(l, arena, inits, map)),
+            arena.alloc(remap_expr_ident(r, arena, inits, map)),
+        ),
+        CheckedExprKind::Assign(op, l, r) => CheckedExprKind::Assign(
+            *op,
+            arena.alloc(remap_expr_ident(l, arena, inits, map)),
+            arena.alloc(remap_expr_ident(r, arena, inits, map)),
+        ),
+        CheckedExprKind::Subscript { base, index } => CheckedExprKind::Subscript {
+            base: arena.alloc(remap_expr_ident(base, arena, inits, map)),
+            index: arena.alloc(remap_expr_ident(index, arena, inits, map)),
+        },
+        CheckedExprKind::CompoundAssign { op, lhs, rhs, op_ty, rhs_ty } => CheckedExprKind::CompoundAssign {
+            op: *op,
+            lhs: arena.alloc(remap_expr_ident(lhs, arena, inits, map)),
+            rhs: arena.alloc(remap_expr_ident(rhs, arena, inits, map)),
+            op_ty: op_ty.clone(),
+            rhs_ty: rhs_ty.clone(),
+        },
+        CheckedExprKind::Ternary { cond, then, els } => CheckedExprKind::Ternary {
+            cond: arena.alloc(remap_expr_ident(cond, arena, inits, map)),
+            then: arena.alloc(remap_expr_ident(then, arena, inits, map)),
+            els: arena.alloc(remap_expr_ident(els, arena, inits, map)),
+        },
+        CheckedExprKind::Elvis { cond, els } => CheckedExprKind::Elvis {
+            cond: arena.alloc(remap_expr_ident(cond, arena, inits, map)),
+            els: arena.alloc(remap_expr_ident(els, arena, inits, map)),
+        },
+        CheckedExprKind::Call { func, args } => CheckedExprKind::Call {
+            func: arena.alloc(remap_expr_ident(func, arena, inits, map)),
+            args: remap_expr_slice(args, arena, inits, map),
+        },
+        CheckedExprKind::Atomic { op, args } => CheckedExprKind::Atomic {
+            op: *op,
+            args: remap_expr_slice(args, arena, inits, map),
+        },
+        CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => CheckedExprKind::Overflow {
+            op: *op,
+            lhs: arena.alloc(remap_expr_ident(lhs, arena, inits, map)),
+            rhs: arena.alloc(remap_expr_ident(rhs, arena, inits, map)),
+            res: arena.alloc(remap_expr_ident(res, arena, inits, map)),
+            res_ty: res_ty.clone(),
+        },
+        CheckedExprKind::Alloca { size } => {
+            CheckedExprKind::Alloca { size: arena.alloc(remap_expr_ident(size, arena, inits, map)) }
         }
-        CheckedExprKind::Call { func, args } => {
-            remap_expr_ident(func, inits, map);
-            for arg in args {
-                remap_expr_ident(arg, inits, map);
-            }
+        CheckedExprKind::Clz { ctz, arg, fallback } => CheckedExprKind::Clz {
+            ctz: *ctz,
+            arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
+            fallback: fallback.map(|e| &*arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        },
+        CheckedExprKind::FpClass { op, arg } => CheckedExprKind::FpClass {
+            op: *op,
+            arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
+        },
+        CheckedExprKind::FpClassify { codes, arg } => CheckedExprKind::FpClassify {
+            codes: core::array::from_fn(|i| &*arena.alloc(remap_expr_ident(codes[i], arena, inits, map))),
+            arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
+        },
+        CheckedExprKind::Generic { ctrl, index, assocs } => CheckedExprKind::Generic {
+            ctrl: arena.alloc(remap_expr_ident(ctrl, arena, inits, map)),
+            index: *index,
+            assocs: remap_assocs(assocs, arena, inits, map),
+        },
+        CheckedExprKind::GenericTy { ty, index, assocs } => CheckedExprKind::GenericTy {
+            ty: ty.clone(),
+            index: *index,
+            assocs: remap_assocs(assocs, arena, inits, map),
+        },
+        CheckedExprKind::StmtExpr { items } => CheckedExprKind::StmtExpr {
+            items: remap_block_items(items, arena, inits, map),
+        },
+        CheckedExprKind::CompoundLiteral { ty, init, storage } => CheckedExprKind::CompoundLiteral {
+            ty: ty.clone(),
+            init: arena.alloc(remap_init_ident(init, arena, inits, map)),
+            storage: *storage,
+        },
+    };
+    CheckedExpr { ty: expr.ty.clone(), span: expr.span, kind }
+}
+
+fn remap_expr_slice<'a>(
+    exprs: &'a [CheckedExpr<'a>],
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> &'a [CheckedExpr<'a>] {
+    let mut out = bumpalo::collections::Vec::new_in(arena);
+    for expr in exprs {
+        out.push(remap_expr_ident(expr, arena, inits, map));
+    }
+    out.into_bump_slice()
+}
+
+fn remap_assocs<'a>(
+    assocs: &'a [(Option<Ty>, CheckedExpr<'a>)],
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> &'a [(Option<Ty>, CheckedExpr<'a>)] {
+    let mut out = bumpalo::collections::Vec::new_in(arena);
+    for (ty, expr) in assocs {
+        out.push((ty.clone(), remap_expr_ident(expr, arena, inits, map)));
+    }
+    out.into_bump_slice()
+}
+
+fn remap_inits<'a>(
+    ids: &[DeclId],
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) {
+    for id in ids {
+        if let Some(init) = inits.remove(id) {
+            let init = remap_init_ident(&init, arena, inits, map);
+            inits.insert(*id, init);
         }
-        CheckedExprKind::Atomic { args, .. } => {
-            for arg in args {
-                remap_expr_ident(arg, inits, map);
-            }
-        }
-        CheckedExprKind::Overflow { lhs, rhs, res, .. } => {
-            remap_expr_ident(lhs, inits, map);
-            remap_expr_ident(rhs, inits, map);
-            remap_expr_ident(res, inits, map);
-        }
-        CheckedExprKind::Alloca { size } => remap_expr_ident(size, inits, map),
-        CheckedExprKind::FrameAddress { .. } => {}
-        CheckedExprKind::Clz { arg, fallback, .. } => {
-            remap_expr_ident(arg, inits, map);
-            if let Some(fallback) = fallback {
-                remap_expr_ident(fallback, inits, map);
-            }
-        }
-        CheckedExprKind::FpClass { arg, .. } => remap_expr_ident(arg, inits, map),
-        CheckedExprKind::FpClassify { codes, arg } => {
-            for code in codes {
-                remap_expr_ident(code, inits, map);
-            }
-            remap_expr_ident(arg, inits, map);
-        }
-        CheckedExprKind::Generic { ctrl, assocs, .. } => {
-            remap_expr_ident(ctrl, inits, map);
-            for (_, expr) in assocs {
-                remap_expr_ident(expr, inits, map);
-            }
-        }
-        CheckedExprKind::GenericTy { assocs, .. } => {
-            for (_, expr) in assocs {
-                remap_expr_ident(expr, inits, map);
-            }
-        }
-        CheckedExprKind::StmtExpr { items } => remap_block_items(items, inits, map),
-        CheckedExprKind::CompoundLiteral { init, .. } => remap_init_ident(init, inits, map),
     }
 }
 
 /// Rewrite across an initializer: the expression form plus every
 /// nested list item, drilling through designators into their index
 /// expressions.
-fn remap_init_ident(init: &mut Initializer, inits: &mut HashMap<DeclId, Initializer>, map: &HashMap<DeclId, DeclId>) {
+fn remap_init_ident<'a>(
+    init: &Initializer<'a>,
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> Initializer<'a> {
     match init {
-        Initializer::Expr(expr) => remap_expr_ident(expr, inits, map),
-        Initializer::List { items, .. } => {
-            for item in items {
-                for designator in &mut item.designators {
-                    if let Designator::Index { index, .. } = designator {
-                        remap_expr_ident(index, inits, map);
-                    }
+        Initializer::Expr(expr) => Initializer::Expr(remap_expr_ident(expr, arena, inits, map)),
+        Initializer::List { items, span } => {
+            let mut out = bumpalo::collections::Vec::new_in(arena);
+            for item in *items {
+                let mut designators = bumpalo::collections::Vec::new_in(arena);
+                for designator in item.designators {
+                    designators.push(match designator {
+                        Designator::Field { name, span } => Designator::Field { name: *name, span: *span },
+                        Designator::AnonField { index, span } => Designator::AnonField { index: *index, span: *span },
+                        Designator::Index { index, span } => Designator::Index {
+                            index: remap_expr_ident(index, arena, inits, map),
+                            span: *span,
+                        },
+                    });
                 }
-                remap_init_ident(&mut item.init, inits, map);
+                out.push(InitItem {
+                    designators: designators.into_bump_slice(),
+                    init: arena.alloc(remap_init_ident(item.init, arena, inits, map)),
+                    span: item.span,
+                });
             }
+            Initializer::List { items: out.into_bump_slice(), span: *span }
         }
     }
 }
 
 /// Rewrite across block items: statements plus the initializers of
 /// declarations nested in GNU statement expressions.
-fn remap_block_items(items: &mut [BlockItem], inits: &mut HashMap<DeclId, Initializer>, map: &HashMap<DeclId, DeclId>) {
+fn remap_block_items<'a>(
+    items: &'a [BlockItem<'a>],
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> &'a [BlockItem<'a>] {
+    let mut out = bumpalo::collections::Vec::new_in(arena);
     for item in items {
-        match item {
-            BlockItem::Decl { ids, .. } => {
-                for id in ids {
-                    // `get_mut` plus recursion would double-borrow
-                    // `inits`, so move the entry aside instead (an
-                    // initializer never names its own object, so no
-                    // entry goes missing mid-walk).
-                    if let Some(mut init) = inits.remove(id) {
-                        remap_init_ident(&mut init, inits, map);
-                        inits.insert(*id, init);
-                    }
-                }
+        out.push(match item {
+            BlockItem::Decl { ids, span } => {
+                remap_inits(ids, arena, inits, map);
+                BlockItem::Decl { ids, span: *span }
             }
-            BlockItem::Stmt(stmt) => remap_stmt_ident(stmt, inits, map),
-        }
+            BlockItem::Stmt(stmt) => BlockItem::Stmt(remap_stmt_ident(stmt, arena, inits, map)),
+        });
     }
+    out.into_bump_slice()
 }
 
 /// Rewrite across a statement: every expression position plus `for`
 /// initializers.
-fn remap_stmt_ident(stmt: &mut Stmt, inits: &mut HashMap<DeclId, Initializer>, map: &HashMap<DeclId, DeclId>) {
+fn remap_stmt_ident<'a>(
+    stmt: &Stmt<'a>,
+    arena: &'a bumpalo::Bump,
+    inits: &mut HashMap<DeclId, Initializer<'a>>,
+    map: &HashMap<DeclId, DeclId>,
+) -> Stmt<'a> {
     match stmt {
-        Stmt::Compound(compound) => remap_block_items(&mut compound.items, inits, map),
-        Stmt::Decl { ids, .. } => {
-            for id in ids {
-                if let Some(mut init) = inits.remove(id) {
-                    remap_init_ident(&mut init, inits, map);
-                    inits.insert(*id, init);
-                }
-            }
+        Stmt::Compound(compound) => Stmt::Compound(Compound {
+            span: compound.span,
+            items: remap_block_items(compound.items, arena, inits, map),
+        }),
+        Stmt::Decl { ids, span } => {
+            remap_inits(ids, arena, inits, map);
+            Stmt::Decl { ids, span: *span }
         }
-        Stmt::Empty { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Goto { .. } => {}
-        Stmt::GotoComputed { expr, .. } => remap_expr_ident(expr, inits, map),
-        Stmt::Expr { expr, .. } => remap_expr_ident(expr, inits, map),
+        Stmt::Empty { span } => Stmt::Empty { span: *span },
+        Stmt::Break { label, span } => Stmt::Break { label: *label, span: *span },
+        Stmt::Continue { label, span } => Stmt::Continue { label: *label, span: *span },
+        Stmt::Goto { label, span } => Stmt::Goto { label: *label, span: *span },
+        Stmt::GotoComputed { expr, span } => Stmt::GotoComputed {
+            expr: remap_expr_ident(expr, arena, inits, map),
+            span: *span,
+        },
+        Stmt::Expr { expr, span } => Stmt::Expr {
+            expr: remap_expr_ident(expr, arena, inits, map),
+            span: *span,
+        },
         Stmt::Asm(asm) => {
-            for op in asm.outputs.iter_mut().chain(&mut asm.inputs) {
-                remap_expr_ident(&mut op.expr, inits, map);
-            }
-        }
-        Stmt::Return { expr, .. } => {
-            if let Some(expr) = expr {
-                remap_expr_ident(expr, inits, map);
-            }
-        }
-        Stmt::If { cond, then, els, .. } => {
-            remap_expr_ident(cond, inits, map);
-            remap_stmt_ident(then, inits, map);
-            if let Some(els) = els {
-                remap_stmt_ident(els, inits, map);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            remap_expr_ident(cond, inits, map);
-            remap_stmt_ident(body, inits, map);
-        }
-        Stmt::DoWhile { body, cond, .. } => {
-            remap_stmt_ident(body, inits, map);
-            remap_expr_ident(cond, inits, map);
-        }
-        Stmt::For { init, cond, step, body, .. } => {
-            match init {
-                ForInit::Decl(ids) => {
-                    for id in ids {
-                        if let Some(mut init) = inits.remove(id) {
-                            remap_init_ident(&mut init, inits, map);
-                            inits.insert(*id, init);
-                        }
-                    }
+            let mut remap_operands = |ops: &'a [AsmOperand<'a>]| {
+                let mut out = bumpalo::collections::Vec::new_in(arena);
+                for op in ops {
+                    out.push(AsmOperand {
+                        name: op.name,
+                        constraint: op.constraint.clone(),
+                        expr: remap_expr_ident(&op.expr, arena, inits, map),
+                        span: op.span,
+                    });
                 }
-                ForInit::Expr(expr) => remap_expr_ident(expr, inits, map),
-                ForInit::Empty => {}
-            }
-            if let Some(cond) = cond {
-                remap_expr_ident(cond, inits, map);
-            }
-            if let Some(step) = step {
-                remap_expr_ident(step, inits, map);
-            }
-            remap_stmt_ident(body, inits, map);
+                out.into_bump_slice()
+            };
+            Stmt::Asm(AsmStmt {
+                template: asm.template.clone(),
+                outputs: remap_operands(asm.outputs),
+                inputs: remap_operands(asm.inputs),
+                clobbers: asm.clobbers,
+                labels: asm.labels,
+                flags: asm.flags,
+                span: asm.span,
+            })
         }
-        Stmt::Switch { cond, body, .. } => {
-            remap_expr_ident(cond, inits, map);
-            remap_stmt_ident(body, inits, map);
-        }
-        Stmt::Label { stmt, .. } => remap_stmt_ident(stmt, inits, map),
-        Stmt::Case { expr, hi, stmt, .. } => {
-            if let Some(expr) = expr {
-                remap_expr_ident(expr, inits, map);
+        Stmt::Return { expr, span } => Stmt::Return {
+            expr: expr.as_ref().map(|e| remap_expr_ident(e, arena, inits, map)),
+            span: *span,
+        },
+        Stmt::If { cond, then, els, span } => Stmt::If {
+            cond: remap_expr_ident(cond, arena, inits, map),
+            then: arena.alloc(remap_stmt_ident(then, arena, inits, map)),
+            els: els.map(|e| &*arena.alloc(remap_stmt_ident(e, arena, inits, map))),
+            span: *span,
+        },
+        Stmt::While { cond, body, span } => Stmt::While {
+            cond: remap_expr_ident(cond, arena, inits, map),
+            body: arena.alloc(remap_stmt_ident(body, arena, inits, map)),
+            span: *span,
+        },
+        Stmt::DoWhile { body, cond, span } => Stmt::DoWhile {
+            body: arena.alloc(remap_stmt_ident(body, arena, inits, map)),
+            cond: remap_expr_ident(cond, arena, inits, map),
+            span: *span,
+        },
+        Stmt::For { init, cond, step, body, span } => {
+            let init = match init {
+                ForInit::Decl(ids) => {
+                    remap_inits(ids, arena, inits, map);
+                    ForInit::Decl(ids)
+                }
+                ForInit::Expr(expr) => ForInit::Expr(remap_expr_ident(expr, arena, inits, map)),
+                ForInit::Empty => ForInit::Empty,
+            };
+            Stmt::For {
+                init,
+                cond: cond.as_ref().map(|e| remap_expr_ident(e, arena, inits, map)),
+                step: step.as_ref().map(|e| remap_expr_ident(e, arena, inits, map)),
+                body: arena.alloc(remap_stmt_ident(body, arena, inits, map)),
+                span: *span,
             }
-            if let Some(hi) = hi {
-                remap_expr_ident(hi, inits, map);
-            }
-            remap_stmt_ident(stmt, inits, map);
         }
+        Stmt::Switch { cond, body, span } => Stmt::Switch {
+            cond: remap_expr_ident(cond, arena, inits, map),
+            body: arena.alloc(remap_stmt_ident(body, arena, inits, map)),
+            span: *span,
+        },
+        Stmt::Label { name, names_loop, stmt, span } => Stmt::Label {
+            name: *name,
+            names_loop: *names_loop,
+            stmt: arena.alloc(remap_stmt_ident(stmt, arena, inits, map)),
+            span: *span,
+        },
+        Stmt::Case { expr, hi, stmt, span } => Stmt::Case {
+            expr: expr.as_ref().map(|e| remap_expr_ident(e, arena, inits, map)),
+            hi: hi.as_ref().map(|e| remap_expr_ident(e, arena, inits, map)),
+            stmt: arena.alloc(remap_stmt_ident(stmt, arena, inits, map)),
+            span: *span,
+        },
     }
 }

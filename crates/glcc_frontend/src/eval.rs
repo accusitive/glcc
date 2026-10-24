@@ -1294,7 +1294,7 @@ fn eval_binary(op: BinaryOp, lhs: &CheckedExpr, rhs: &CheckedExpr, sema: &Sema, 
     }
     let l = eval_const_in(lhs, sema, interner, addr_conds)?;
     let r = eval_const_in(rhs, sema, interner, addr_conds)?;
-    let common = Sema::uac_common_type_in(&promoted(&lhs.ty), &promoted(&rhs.ty), &sema.target);
+    let common = Sema::<'_>::uac_common_type_in(&promoted(&lhs.ty), &promoted(&rhs.ty), &sema.target);
     let cs = sema.target.char_signed;
     let ld = sema.target.long_double;
     match op {

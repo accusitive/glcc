@@ -84,7 +84,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             decl: self.debug_location(module, binding.span),
             ..Default::default()
         };
-        for param_id in &body.params {
+        for param_id in body.params {
             if let Some(var) = self.var_debug(module, slots, globals, *param_id) {
                 debug.params.push(var);
             }
@@ -392,20 +392,16 @@ fn lower_ty_debug(
                 };
                 let name = interner.resolve(sym).map(str::to_string);
                 let location = match member.bitfield {
-                    Some(ref width_expr) => {
-                        let type_bits = sema.type_size(&member.ty, interner).unwrap_or(0) * 8;
-                        let width = sema.bit_width(width_expr, type_bits, interner);
-                        match (by_name.get(&sym), width) {
-                            (Some(ml), Some(width)) => {
-                                let bit = ml.bit.unwrap_or(0);
-                                mir::MemberLocation::Bit {
-                                    offset: ml.offset * 8 + u64::from(bit),
-                                    size: width,
-                                }
+                    Some(width) => match by_name.get(&sym) {
+                        Some(ml) => {
+                            let bit = ml.bit.unwrap_or(0);
+                            mir::MemberLocation::Bit {
+                                offset: ml.offset * 8 + u64::from(bit),
+                                size: width,
                             }
-                            _ => mir::MemberLocation::Byte(layout.member_offsets[i]),
                         }
-                    }
+                        None => mir::MemberLocation::Byte(layout.member_offsets[i]),
+                    },
                     None => {
                         let offset = by_name.get(&sym).map(|m| m.offset).unwrap_or(layout.member_offsets[i]);
                         mir::MemberLocation::Byte(offset)
@@ -447,11 +443,8 @@ fn lower_ty_debug(
             let mut enumerators = Vec::new();
             let mut prev: Option<i128> = None;
             for e in &def.enumerators {
-                let value = match &e.value {
-                    Some(expr) => match fe::eval::eval_const(expr, sema, interner) {
-                        Some(fe::eval::Value::Int(n)) => n,
-                        _ => continue,
-                    },
+                let value = match e.value {
+                    Some(value) => value,
                     None => prev.map(|p| p.wrapping_add(1)).unwrap_or(0),
                 };
                 prev = Some(value);

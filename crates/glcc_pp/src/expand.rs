@@ -2511,9 +2511,10 @@ fn eval_frontend_int(text: &str, target: Option<glcc_frontend::target::Target>) 
         use glcc_frontend::sema::Sema;
         let target = target.unwrap_or_else(glcc_frontend::target::Target::native);
         let mut interner = Interner::new();
-        let mut sema = Sema::with_target(target);
+        let arena = glcc_frontend::bumpalo::Bump::new();
+        let mut sema = Sema::with_target(target, &arena);
         let tokens = Lexer::new(text, &mut interner).lex_all();
-        let mut parser = Parser::new(text, tokens, &mut sema, &mut interner);
+        let mut parser = Parser::new(text, tokens, &arena, &mut sema, &mut interner);
         let parsed = parser.parse_expression();
         let checked = sema.check_expr(&parsed, &interner).ok()?;
         match eval_const(&checked, &sema, &interner)? {
@@ -2535,9 +2536,10 @@ fn eval_frontend_text(text: &str, target: Option<glcc_frontend::target::Target>)
         use glcc_frontend::sema::Sema;
         let target = target.unwrap_or_else(glcc_frontend::target::Target::native);
         let mut interner = Interner::new();
-        let mut sema = Sema::with_target(target);
+        let arena = glcc_frontend::bumpalo::Bump::new();
+        let mut sema = Sema::with_target(target, &arena);
         let tokens = Lexer::new(text, &mut interner).lex_all();
-        let mut parser = Parser::new(text, tokens, &mut sema, &mut interner);
+        let mut parser = Parser::new(text, tokens, &arena, &mut sema, &mut interner);
         let parsed = parser.parse_expression();
         let checked = sema.check_expr(&parsed, &interner).ok()?;
         eval_const(&checked, &sema, &interner).map(|v| truthy(&v))

@@ -50,7 +50,7 @@ fn split_global_relocs(relocs: GlobalRelocs) -> (Vec<(u64, mir::DataReloc)>, Vec
 /// Everything else (the MIR function under construction and its frame)
 /// threads through as explicit arguments, so nothing aliases.
 pub struct Lowerer<'s, 'i> {
-    pub(crate) sema: &'s fe::sema::Sema,
+    pub(crate) sema: &'s fe::sema::Sema<'s>,
     pub(crate) interner: &'i fe::lexer::Interner,
     /// Unique suffix for synthesized anonymous globals (strings,
     /// compound literals).
@@ -167,7 +167,7 @@ struct BitfieldTarget {
 enum AddrRoot<'a> {
     Decl(fe::sema::DeclId),
     Str(&'a [fe::lexer::StringLiteral]),
-    Compound(&'a fe::parse::Ty, &'a fe::parse::Initializer),
+    Compound(&'a fe::parse::Ty, &'a fe::parse::Initializer<'a>),
 }
 
 /// Assembler text for `__attribute__((naked))` definitions: their
@@ -209,7 +209,7 @@ pub fn naked_asm_text(sema: &fe::sema::Sema, interner: &fe::lexer::Interner, tu:
         out.push_str(", @function\n");
         out.push_str(&name);
         out.push_str(":\n");
-        for item in &body.block.items {
+        for item in body.block.items {
             match item {
                 fe::parse::BlockItem::Stmt(fe::parse::Stmt::Asm(asm)) => {
                     out.push_str(&asm.template);
@@ -853,7 +853,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     at + self.designated_extent(&member.ty, rest, init)
                 }
                 (fe::parse::Ty::Array { elem, .. }, fe::parse::Designator::Index { index, .. }) => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
                         return 0;
                     };
                     let elem_size = self.sema.type_size(elem, self.interner).unwrap_or(0);
@@ -951,9 +951,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::parse::Initializer::List { items, .. } => {
                 let mut len = 0u64;
                 let mut cursor = 0u64;
-                for item in items {
+                for item in *items {
                     match item.designators.first() {
-                        Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
+                        Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(&index, self.sema, self.interner) {
                             Some(fe::eval::Value::Int(k)) => {
                                 len = len.max((k as u64) + 1);
                                 cursor = (k as u64) + 1;
@@ -1168,7 +1168,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 (fe::parse::Ty::Array { .. }, mir::Ty::Array { .. }) => {
                     let mut cursor = 0u64;
-                    for item in items {
+                    for item in *items {
                         let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
                         self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
@@ -1176,7 +1176,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 (fe::parse::Ty::Struct(_), mir::Ty::Struct { .. }) => {
                     let mut cursor = 0u64;
-                    for item in items {
+                    for item in *items {
                         let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
                         self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
@@ -1185,7 +1185,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // Unions overlay at offset zero; the blob holds bytes.
                 (fe::parse::Ty::Struct(id), mir::Ty::Array { .. }) if self.sema.structs[id.0 as usize].is_union => {
                     let mut cursor = 0u64;
-                    for item in items {
+                    for item in *items {
                         let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
                         cursor = next;
                         self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
@@ -1200,7 +1200,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// See through assignment-inserted conversions to a string literal.
-    fn peek_global_str(e: &fe::check::CheckedExpr) -> Option<&[fe::lexer::StringLiteral]> {
+    fn peek_global_str<'a>(e: &'a fe::check::CheckedExpr<'a>) -> Option<&'a [fe::lexer::StringLiteral]> {
         let mut cur = e;
         loop {
             match &cur.kind {
@@ -1253,7 +1253,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         };
         Some(match pointee.unqualified() {
             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-            _ => self.sema.type_size(pointee, self.interner)? as i128,
+            _ => self.sema.type_size(&pointee, self.interner)? as i128,
         })
     }
 
@@ -1344,8 +1344,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // `&x + c` / `&x - c` (and decayed equivalents): one
                 // side is an address, the other a folded integer.
                 let (addr_side, const_side, neg) = match op {
-                    fe::parse::BinaryOp::Add => (lhs.as_ref(), rhs.as_ref(), false),
-                    fe::parse::BinaryOp::Sub => (lhs.as_ref(), rhs.as_ref(), true),
+                    fe::parse::BinaryOp::Add => (*lhs, *rhs, false),
+                    fe::parse::BinaryOp::Sub => (*lhs, *rhs, true),
                     _ => panic!("non-constant global initializer"),
                 };
                 let c = match fe::eval::eval_const(const_side, self.sema, self.interner) {
@@ -1353,7 +1353,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     _ => panic!("non-constant global initializer"),
                 };
                 let elem = match addr_side.ty.unqualified() {
-                    fe::parse::Ty::Pointer { pointee, .. } => self.sema.type_size(pointee, self.interner).unwrap() as i128,
+                    fe::parse::Ty::Pointer { pointee, .. } => self.sema.type_size(&pointee, self.interner).unwrap() as i128,
                     _ => 1,
                 };
                 let addend = if neg { -c * elem } else { c * elem };
@@ -1385,9 +1385,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::CheckedExprKind::Binary(op, lhs, rhs) if matches!(op, fe::parse::BinaryOp::Add | fe::parse::BinaryOp::Sub) => {
                 let neg = matches!(op, fe::parse::BinaryOp::Sub);
                 let (ptr, int) = if matches!(lhs.ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
-                    (lhs.as_ref(), rhs.as_ref())
+                    (*lhs, *rhs)
                 } else {
-                    (rhs.as_ref(), lhs.as_ref())
+                    (*rhs, *lhs)
                 };
                 let k = match fe::eval::eval_const(int, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => n,
@@ -1403,7 +1403,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (root, disp + *offset as i64)
             }
             fe::check::CheckedExprKind::Subscript { base, index } => {
-                let i = match fe::eval::eval_const(index, self.sema, self.interner) {
+                let i = match fe::eval::eval_const(&index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => n,
                     _ => panic!("non-constant global initializer"),
                 };
@@ -1501,7 +1501,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // to a pointer; the element then comes from the
                 // pointee. Multi-dimensional arrays recurse: each level
                 // strides by its own element.
-                let i = match fe::eval::eval_const(index, self.sema, self.interner) {
+                let i = match fe::eval::eval_const(&index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => n,
                     _ => panic!("non-constant global initializer"),
                 };
@@ -1701,10 +1701,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
         compound: &fe::parse::Compound,
     ) {
-        for item in &compound.items {
+        for item in compound.items {
             match item {
                 fe::parse::BlockItem::Decl { ids, .. } => {
-                    for id in ids {
+                    for id in *ids {
                         self.lower_local(module, func, frame, funcs, externs, globals, *id);
                     }
                 }
@@ -1781,7 +1781,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         asm: &fe::parse::AsmStmt,
     ) {
         let mut values = Vec::with_capacity(asm.inputs.len());
-        for input in &asm.inputs {
+        for input in asm.inputs {
             let arch = self.sema.target.arch;
             let value = if fe::check::memory_only_constraint(&input.constraint, arch) {
                 self.place(module, func, frame, funcs, externs, globals, &input.expr).0
@@ -1822,7 +1822,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let mut operands = Vec::with_capacity(asm.outputs.len() + asm.inputs.len());
         let mut conversion: Vec<(fe::parse::Ty, Option<fe::parse::Ty>)> = Vec::with_capacity(asm.outputs.len());
         let mut bitfield_outs: Vec<BitfieldOut> = Vec::new();
-        for output in &asm.outputs {
+        for output in asm.outputs {
             let (addr, _) = self.place(module, func, frame, funcs, externs, globals, &output.expr);
             let name = output.name.and_then(|sym| self.interner.resolve(sym)).map(str::to_string);
             let bitfield = match &output.expr.kind {
@@ -1915,7 +1915,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             template: asm.template.clone(),
             operands,
             outputs: asm.outputs.len() as u32,
-            clobbers: asm.clobbers.clone(),
+            clobbers: asm.clobbers.to_vec(),
             labels,
             is_volatile: asm.is_volatile(),
             is_basic: asm.is_basic(),
@@ -2026,7 +2026,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         match stmt {
             fe::parse::Stmt::Decl { ids, .. } => {
-                for id in ids {
+                for id in *ids {
                     self.lower_local(module, func, frame, funcs, externs, globals, *id);
                 }
             }
@@ -2160,7 +2160,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let labels = core::mem::take(&mut frame.pending_loop_labels);
                 match init {
                     fe::parse::ForInit::Decl(ids) => {
-                        for id in ids {
+                        for id in *ids {
                             self.lower_local(module, func, frame, funcs, externs, globals, *id);
                         }
                     }
@@ -3364,7 +3364,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 for (i, item) in items.iter().enumerate() {
                     match item {
                         fe::parse::BlockItem::Decl { ids, .. } => {
-                            for id in ids {
+                            for id in *ids {
                                 self.lower_local(module, func, frame, funcs, externs, globals, *id);
                             }
                         }
@@ -3726,7 +3726,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         funcs: &HashMap<fe::sema::DeclId, mir::Func>,
         externs: &HashMap<fe::sema::DeclId, mir::Extern>,
         globals: &HashMap<fe::sema::DeclId, mir::Global>,
-        codes: &[Box<fe::check::CheckedExpr>; 5],
+        codes: &[&fe::check::CheckedExpr; 5],
         arg: &fe::check::CheckedExpr,
         mir_ty: &mir::Ty,
     ) -> mir::Value {
@@ -4293,7 +4293,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn pointee_size(&self, pointee: &fe::parse::Ty) -> u64 {
         match pointee.unqualified() {
             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-            _ => self.sema.type_size(pointee, self.interner).unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
+            _ => self.sema.type_size(&pointee, self.interner).unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
         }
     }
 
@@ -5549,10 +5549,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn bitfield_target_of(&self, id: fe::sema::StructId, index: usize) -> Option<BitfieldTarget> {
         let def = &self.sema.structs[id.0 as usize];
         let member = def.members.get(index)?;
-        let width_expr = member.bitfield.as_ref()?;
+        let width = member.bitfield?;
         let layout = self.sema.struct_layout(id, self.interner)?;
-        let decl_size = self.sema.type_size(&member.ty, self.interner)?;
-        let width = self.sema.bit_width(width_expr, decl_size * 8, self.interner)?;
         let name = member.name?;
         let ml = layout.members.iter().find(|m| m.name == name)?;
         Some(BitfieldTarget {
@@ -5671,8 +5669,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     return (addr, obj);
                 }
                 let (mut addr, mut obj) = self.place(module, func, frame, funcs, externs, globals, base);
-                for field in path {
-                    let (next, ty) = self.gep(func, frame, addr, &obj, vec![mir::GepIndex::Field(*field as u32)]);
+                for &field in *path {
+                    let (next, ty) = self.gep(func, frame, addr, &obj, vec![mir::GepIndex::Field(field as u32)]);
                     addr = next;
                     obj = ty;
                 }
@@ -5755,7 +5753,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let mir_ty = lower_ty(ty, self.sema, self.interner);
                 if storage.is_automatic() {
                     let slot = self.alloca(func, frame, mir_ty.clone());
-                    self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, init.as_ref());
+                    self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, *init);
                     return (slot, mir_ty);
                 }
                 // A static or thread-local compound literal is one
@@ -6191,13 +6189,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 match fe_ty.unqualified() {
                     fe::parse::Ty::Array { elem, .. } => {
                         let mut index = 0u64;
-                        for item in items {
+                        for item in *items {
                             index = self.array_init_item(module, func, frame, funcs, externs, globals, slot, elem, item, index);
                         }
                     }
                     fe::parse::Ty::Struct(id) => {
                         let mut field = 0usize;
-                        for item in items {
+                        for item in *items {
                             field = self.struct_init_item(module, func, frame, funcs, externs, globals, slot, *id, item, field);
                         }
                     }
@@ -6321,7 +6319,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe_ty = self.sema.structs[id.0 as usize].members[index as usize].ty.clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     let fe::parse::Ty::Array { elem, .. } = fe_ty.unqualified() else {
@@ -6372,7 +6370,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, &item.init),
         }
         match item.designators.first() {
-            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
+            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(&index, self.sema, self.interner) {
                 Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
                 _ => cursor,
             },
@@ -6598,7 +6596,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mi = fields[slot].clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     // A flexible array member decays to a pointer in
@@ -6623,7 +6621,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         let next = if designators.len() == 1 {
             match &designators[0] {
-                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(index, self.sema, self.interner) {
+                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(&index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
                     _ => cursor,
                 },
@@ -7156,7 +7154,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // pointees step by one byte.
             let scale = match pointee.unqualified() {
                 fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-                _ => self.sema.type_size(pointee, self.interner).expect("sized pointee"),
+                _ => self.sema.type_size(&pointee, self.interner).expect("sized pointee"),
             };
             let (index, index_ty) = if matches!(op, fe::parse::AssignOp::Sub) {
                 (self.pointer_sub_index(func, frame, y, rhs_ty), fe::parse::Ty::LongLong)
@@ -8351,10 +8349,10 @@ mod tests {
     /// `lower_module` for an explicit target.
     fn lower_module_for(src: &str, target: fe::target::Target) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         sema.target = target;
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         lower_translation_unit(&sema, &interner, &tu)
     }
@@ -8362,10 +8360,10 @@ mod tests {
     /// `lower_module` for C2y sources.
     fn lower_module_c2y(src: &str) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         sema.lang.std = fe::lang::Std::C2y;
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         lower_translation_unit(&sema, &interner, &tu)
     }
@@ -8373,10 +8371,10 @@ mod tests {
     /// `lower_module` for C23 sources.
     fn lower_module_c23(src: &str) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         sema.lang.std = fe::lang::Std::C23;
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         lower_translation_unit(&sema, &interner, &tu)
     }
@@ -8384,10 +8382,10 @@ mod tests {
     /// `lower_module` with MS extensions on, for `__ptr32`/`__ptr64`.
     fn lower_module_ms(src: &str) -> mir::Module {
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         sema.lang = fe::lang::LangOpts { ms: true, ..Default::default() };
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         lower_translation_unit(&sema, &interner, &tu)
     }
@@ -8429,9 +8427,9 @@ mod tests {
     /// `(MIR module, assembler text)` for `src`.
     fn lower_with_asm(src: &str) -> (mir::Module, String) {
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         let module = lower_translation_unit(&sema, &interner, &tu);
         (module, naked_asm_text(&sema, &interner, &tu))
@@ -9300,7 +9298,7 @@ mod tests {
         // Built below the parser (which rejects by-value recursion with
         // its own diagnostic): the lowering backstop still fires.
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         let tag = interner.get_or_intern("S");
         let span = fe::span::Span::dummy();
         let id = sema.define_tag(tag, false, span).unwrap();
@@ -10479,9 +10477,9 @@ mod tests {
             ("static __inline__ int f(void){return 1;} int main(){return f();}", "f", true),
         ] {
             let mut interner = fe::lexer::Interner::new();
-            let mut sema = fe::sema::Sema::new();
+            let mut sema = fe::sema::Sema::leak_for_tests();
             let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-            let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+            let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
             let tu = parser.parse_translation_unit();
             drop(parser);
             let module = lower_translation_unit(&sema, &interner, &tu);
@@ -10511,9 +10509,9 @@ mod tests {
             "volatile int v; int main(){v = 1; return v;}",
         ] {
             let mut interner = fe::lexer::Interner::new();
-            let mut sema = fe::sema::Sema::new();
+            let mut sema = fe::sema::Sema::leak_for_tests();
             let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-            let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+            let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
             let tu = parser.parse_translation_unit();
             drop(parser);
             let mut module = lower_translation_unit(&sema, &interner, &tu);
@@ -10539,9 +10537,9 @@ mod tests {
         // The non-volatile cases leave no spill traffic behind.
         let src = "int f(int x){int y = x; return y+1;} int main(){return f(41);}";
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         drop(parser);
         let mut module = lower_translation_unit(&sema, &interner, &tu);
@@ -10558,9 +10556,9 @@ mod tests {
         // ...while a volatile global access keeps its memory traffic.
         let src = "volatile int v; int main(){v = 1; return v;}";
         let mut interner = fe::lexer::Interner::new();
-        let mut sema = fe::sema::Sema::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
         let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
-        let mut parser = fe::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
         drop(parser);
         let mut module = lower_translation_unit(&sema, &interner, &tu);

@@ -1,7 +1,7 @@
-//! Expression checking: annotate `parse::Expr` with types.
+//! Expression checking: annotate `parse::Expr<'a>` with types.
 //!
 //! [`Sema::check_expr`] elaborates a parsed expression into a
-//! [`CheckedExpr`], inserting [`CheckedExprKind::Convert`] nodes wherever
+//! [`CheckedExpr<'a>`], inserting [`CheckedExprKind::Convert`] nodes wherever
 //! C requires an implicit conversion (the `Promote` analogue this design
 //! is adapted from). Binary operators meet in
 //! [`Sema::usual_arithmetic_conversions`], which needs operand types from
@@ -24,7 +24,7 @@ use string_interner::symbol::SymbolU32;
 
 use crate::{
     lexer::{CharPrefix, FloatSuffix, Interner},
-    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, StdAttributes, Ty, TypeQualifier, TypeQualifiers, UnaryOp},
+    parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, StdAttributes, Ty, TypeQualifiers, UnaryOp},
     sema::{Binding, BindingKind, Member, Sema, StructId, types_compatible},
     span::{CompileError, HasSpan, Span},
     target::{Arch, Os},
@@ -36,13 +36,13 @@ use crate::{
 // Note: derived equality includes spans, so only span-erased trees (see
 // `erased`) may be compared — in practice just array bounds in `Ty`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckedExpr {
+pub struct CheckedExpr<'a> {
     pub ty: Ty,
     pub span: Span,
-    pub kind: CheckedExprKind,
+    pub kind: CheckedExprKind<'a>,
 }
 
-impl HasSpan for CheckedExpr {
+impl HasSpan for CheckedExpr<'_> {
     fn span(&self) -> Span {
         self.span
     }
@@ -172,16 +172,16 @@ enum PointeeConversion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckedExprKind {
+pub enum CheckedExprKind<'a> {
     /// A fully resolved variable or function: just its binding.
     Ident(crate::sema::DeclId),
     Int(crate::lexer::IntLiteral),
     Float(crate::lexer::FloatLiteral),
     Char(crate::lexer::CharLiteral),
-    Str(Vec<crate::lexer::StringLiteral>),
-    Unary(UnaryOp, Box<CheckedExpr>),
-    Binary(BinaryOp, Box<CheckedExpr>, Box<CheckedExpr>),
-    Assign(AssignOp, Box<CheckedExpr>, Box<CheckedExpr>),
+    Str(&'a [crate::lexer::StringLiteral]),
+    Unary(UnaryOp, &'a CheckedExpr<'a>),
+    Binary(BinaryOp, &'a CheckedExpr<'a>, &'a CheckedExpr<'a>),
+    Assign(AssignOp, &'a CheckedExpr<'a>, &'a CheckedExpr<'a>),
     /// `lhs op= rhs` with `op` other than `=`: the lvalue evaluates
     /// once (its address), its current value converts to `op_ty`,
     /// combines with the `rhs` (converted to `rhs_ty`), and the result
@@ -191,39 +191,39 @@ pub enum CheckedExprKind {
     /// effects.
     CompoundAssign {
         op: AssignOp,
-        lhs: Box<CheckedExpr>,
-        rhs: Box<CheckedExpr>,
+        lhs: &'a CheckedExpr<'a>,
+        rhs: &'a CheckedExpr<'a>,
         /// Boxed to keep the variant small: unboxed types would make
         /// it the largest variant and grow every checker frame.
         op_ty: Box<Ty>,
         rhs_ty: Box<Ty>,
     },
     Ternary {
-        cond: Box<CheckedExpr>,
-        then: Box<CheckedExpr>,
-        els: Box<CheckedExpr>,
+        cond: &'a CheckedExpr<'a>,
+        then: &'a CheckedExpr<'a>,
+        els: &'a CheckedExpr<'a>,
     },
     /// GNU `x ?: y`: the condition's value is the result when nonzero
     /// (evaluated once — the lowering keeps it in a slot), `els`
     /// otherwise.
     Elvis {
-        cond: Box<CheckedExpr>,
-        els: Box<CheckedExpr>,
+        cond: &'a CheckedExpr<'a>,
+        els: &'a CheckedExpr<'a>,
     },
     Call {
-        func: Box<CheckedExpr>,
-        args: Vec<CheckedExpr>,
+        func: &'a CheckedExpr<'a>,
+        args: &'a [CheckedExpr<'a>],
     },
     /// `__builtin_await(handle)` (glcc extension): suspend until the
     /// awaited future completes, yielding its result. The operand is a
     /// value of some `_Future(T)` handle type; this node's type is `T`.
-    Await(Box<CheckedExpr>),
+    Await(&'a CheckedExpr<'a>),
     /// A GCC atomic builtin call (`__atomic_load_n`, `__atomic_store_n`):
     /// the operation plus all checked operands (pointer first), since
     /// no declared function stands behind it.
     Atomic {
         op: AtomicOp,
-        args: Vec<CheckedExpr>,
+        args: &'a [CheckedExpr<'a>],
     },
     /// A GCC overflow builtin (`__builtin_mul_overflow` and friends):
     /// the operation, both operands, and the pointer receiving the
@@ -231,16 +231,16 @@ pub enum CheckedExprKind {
     /// and signedness; the operands keep their own types.
     Overflow {
         op: OverflowOp,
-        lhs: Box<CheckedExpr>,
-        rhs: Box<CheckedExpr>,
-        res: Box<CheckedExpr>,
+        lhs: &'a CheckedExpr<'a>,
+        rhs: &'a CheckedExpr<'a>,
+        res: &'a CheckedExpr<'a>,
         /// The pointed-to type the result converts to.
         res_ty: Ty,
     },
     /// `alloca`/`__builtin_alloca`: the requested byte count (already
     /// converted to `size_t`). The result is `void *`.
     Alloca {
-        size: Box<CheckedExpr>,
+        size: &'a CheckedExpr<'a>,
     },
     /// `__builtin_frame_address`/`__builtin_return_address`: the frame
     /// or return address of the `level`-th enclosing frame, as
@@ -255,8 +255,8 @@ pub enum CheckedExprKind {
     /// optional zero-fallback value (already converted to `int`).
     Clz {
         ctz: bool,
-        arg: Box<CheckedExpr>,
-        fallback: Option<Box<CheckedExpr>>,
+        arg: &'a CheckedExpr<'a>,
+        fallback: Option<&'a CheckedExpr<'a>>,
     },
     /// A folded `__builtin_constant_p(arg)`: whether `arg` is a
     /// compile-time constant. The argument is checked but discarded
@@ -274,7 +274,7 @@ pub enum CheckedExprKind {
     /// check time).
     FpClass {
         op: FpPredicate,
-        arg: Box<CheckedExpr>,
+        arg: &'a CheckedExpr<'a>,
     },
     /// `__builtin_fpclassify(nan, inf, normal, subnormal, zero, x)`: the
     /// `int` code for `x`'s category, supplied by the caller (the
@@ -282,20 +282,20 @@ pub enum CheckedExprKind {
     /// of `x`; the codes evaluate in order (they are constants in
     /// practice).
     FpClassify {
-        codes: [Box<CheckedExpr>; 5],
-        arg: Box<CheckedExpr>,
+        codes: [&'a CheckedExpr<'a>; 5],
+        arg: &'a CheckedExpr<'a>,
     },
     Subscript {
-        base: Box<CheckedExpr>,
-        index: Box<CheckedExpr>,
+        base: &'a CheckedExpr<'a>,
+        index: &'a CheckedExpr<'a>,
     },
     Member {
-        base: Box<CheckedExpr>,
+        base: &'a CheckedExpr<'a>,
         /// Path of member indices from the base struct: a direct field
         /// is one element; fields promoting through anonymous
         /// struct/union members append one index per level crossed.
         /// Codegen maps this through layout to an offset.
-        path: Vec<usize>,
+        path: &'a [usize],
         arrow: bool,
         /// Total byte offset of the member from the base object, summing
         /// each anonymous level's offset the way `codegen` lowers them.
@@ -314,29 +314,29 @@ pub enum CheckedExprKind {
     },
     Cast {
         ty: Ty,
-        expr: Box<CheckedExpr>,
+        expr: &'a CheckedExpr<'a>,
     },
     Generic {
-        ctrl: Box<CheckedExpr>,
+        ctrl: &'a CheckedExpr<'a>,
         /// Index of the selected association in `assocs`.
         index: usize,
-        assocs: Vec<(Option<Ty>, CheckedExpr)>,
+        assocs: &'a [(Option<Ty>, CheckedExpr<'a>)],
     },
     /// `_Generic` whose controlling operand is a type-name (C2y).
     GenericTy {
         ty: Ty,
         index: usize,
-        assocs: Vec<(Option<Ty>, CheckedExpr)>,
+        assocs: &'a [(Option<Ty>, CheckedExpr<'a>)],
     },
     /// C2y static assertion in expression position: type void, no
     /// runtime effect.
     StaticAssert,
     VaArg {
-        ap: Box<CheckedExpr>,
+        ap: &'a CheckedExpr<'a>,
         ty: Ty,
     },
     StmtExpr {
-        items: Vec<BlockItem>,
+        items: &'a [BlockItem<'a>],
     },
     /// A folded `offsetof`: the byte offset with the struct type kept
     /// for fidelity.
@@ -346,18 +346,18 @@ pub enum CheckedExprKind {
     },
     CompoundLiteral {
         ty: Ty,
-        init: Box<Initializer>,
+        init: &'a Initializer<'a>,
         storage: crate::parse::CompoundStorage,
     },
     Convert {
-        expr: Box<CheckedExpr>,
+        expr: &'a CheckedExpr<'a>,
         ty: Ty,
     },
-    SizeofExpr(Box<CheckedExpr>),
+    SizeofExpr(&'a CheckedExpr<'a>),
     SizeofTy(Ty),
-    CountofExpr(Box<CheckedExpr>),
+    CountofExpr(&'a CheckedExpr<'a>),
     CountofTy(Ty),
-    AlignofExpr(Box<CheckedExpr>),
+    AlignofExpr(&'a CheckedExpr<'a>),
     AlignofTy(Ty),
     /// GNU label address `&&label`: typed `void *`; the label it names
     /// is validated with the function's `goto`s and dispatched on at
@@ -408,7 +408,7 @@ pub(crate) fn is_signed_int_in(ty: &Ty, char_signed: bool) -> Option<bool> {
 /// the precision — a narrower field promotes to `int`, which drops it
 /// — and a binary operation with a non-bit-field operand lands in the
 /// common type's full precision. Shifts take the left operand's.
-pub fn bitfield_precision(expr: &CheckedExpr) -> Option<u32> {
+pub fn bitfield_precision<'a>(expr: &CheckedExpr<'a>) -> Option<u32> {
     use crate::parse::{BinaryOp, UnaryOp};
     match &expr.kind {
         CheckedExprKind::Member { bitfield: Some((_, width)), .. } if *width > 32 => Some(*width),
@@ -549,7 +549,7 @@ enum FieldHit {
 /// variables (never functions, typedefs, or enumeration constants),
 /// dereferences, subscripts, and members of lvalues (conversions look
 /// through to their operand).
-pub fn is_lvalue(expr: &CheckedExpr, decls: &[Binding]) -> bool {
+pub fn is_lvalue<'a>(expr: &CheckedExpr<'a>, decls: &[Binding]) -> bool {
     match &expr.kind {
         CheckedExprKind::Ident(id) => decls
             .get(id.0 as usize)
@@ -559,7 +559,7 @@ pub fn is_lvalue(expr: &CheckedExpr, decls: &[Binding]) -> bool {
         // (`__real__ x = 1.0`), like a struct member of one.
         CheckedExprKind::Unary(crate::parse::UnaryOp::Real, inner) | CheckedExprKind::Unary(crate::parse::UnaryOp::Imag, inner) => is_lvalue(inner, decls),
         CheckedExprKind::Subscript { .. } => true,
-        // Compound literals are lvalues (C17 §6.5.2.5p5).
+        // Compound<'a> literals are lvalues (C17 §6.5.2.5p5).
         CheckedExprKind::CompoundLiteral { .. } => true,
         CheckedExprKind::Member { base, arrow, .. } => *arrow || is_lvalue(base, decls),
         CheckedExprKind::Convert { expr, .. } => is_lvalue(expr, decls),
@@ -570,7 +570,7 @@ pub fn is_lvalue(expr: &CheckedExpr, decls: &[Binding]) -> bool {
 /// Whether `expr` designates a bit-field: a `Member` whose final field
 /// carries a width. Conversions wrap the value without changing what it
 /// designates, so they look through (like [`is_lvalue`]).
-pub fn designates_bitfield(expr: &CheckedExpr) -> bool {
+pub fn designates_bitfield<'a>(expr: &CheckedExpr<'a>) -> bool {
     match &expr.kind {
         CheckedExprKind::Member { bitfield, .. } => bitfield.is_some(),
         CheckedExprKind::Convert { expr, .. } => designates_bitfield(expr),
@@ -686,7 +686,7 @@ pub fn has_immediate_constraint(constraint: &str, arch: Arch) -> bool {
         .any(|letter| constraint_letter(arch, letter) == Some(LetterClass::Immediate))
 }
 
-impl Sema {
+impl<'a> Sema<'a> {
     // ---- usual arithmetic conversions (C17 §6.3.1.8) ----
 
     /// Promote a sub-`int` integer operand to `int` (or to `unsigned int`
@@ -696,7 +696,7 @@ impl Sema {
     /// (floats, pointers, structs) pass through untouched. Enums
     /// promote to their representation: plain `int` for ordinary
     /// enums, wider for sentinel values like `DW_CIE_ID_32`.
-    pub fn integer_promote(&self, expr: CheckedExpr) -> CheckedExpr {
+    pub fn integer_promote(&self, expr: CheckedExpr<'a>) -> CheckedExpr<'a> {
         // Complex over a sub-`int` component promotes component-wise
         // (`__complex__ char` computes as `__complex__ int`), mirroring
         // the scalar rule below.
@@ -744,7 +744,7 @@ impl Sema {
 
     /// Wrap `expr` in a conversion to `ty`, or return it unchanged when
     /// it already has that type.
-    pub fn convert(&self, expr: CheckedExpr, ty: Ty) -> CheckedExpr {
+    pub fn convert(&self, expr: CheckedExpr<'a>, ty: Ty) -> CheckedExpr<'a> {
         if expr.ty == ty {
             return expr;
         }
@@ -752,13 +752,13 @@ impl Sema {
         CheckedExpr {
             ty: ty.clone(),
             span,
-            kind: CheckedExprKind::Convert { expr: Box::new(expr), ty },
+            kind: CheckedExprKind::Convert { expr: self.alloc(expr), ty },
         }
     }
 
     /// Default argument promotions for unprototyped/variadic call
     /// arguments: decay plus integer promotions plus `float` → `double`.
-    fn default_arg_promote(&self, expr: CheckedExpr) -> CheckedExpr {
+    fn default_arg_promote(&self, expr: CheckedExpr<'a>) -> CheckedExpr<'a> {
         let expr = self.decay_checked(expr);
         let expr = self.integer_promote(expr);
         if expr.ty == Ty::Float { self.convert(expr, Ty::Double) } else { expr }
@@ -872,7 +872,7 @@ impl Sema {
 
     /// Promote both operands, convert each to their common type, and
     /// return the pair plus that type.
-    pub fn usual_arithmetic_conversions(&self, left: CheckedExpr, right: CheckedExpr) -> (CheckedExpr, CheckedExpr, Ty) {
+    pub fn usual_arithmetic_conversions(&self, left: CheckedExpr<'a>, right: CheckedExpr<'a>) -> (CheckedExpr<'a>, CheckedExpr<'a>, Ty) {
         let left = self.integer_promote(left);
         let right = self.integer_promote(right);
         let common = Self::uac_common_type_in(&left.ty, &right.ty, &self.target);
@@ -921,7 +921,7 @@ impl Sema {
     /// the un-decayed type. Qualification on array elements survives on
     /// the pointee (`const int[3]` decays to `const int *`); a
     /// qualifier on the array itself has no decayed form and drops.
-    fn decay_checked(&self, expr: CheckedExpr) -> CheckedExpr {
+    fn decay_checked(&self, expr: CheckedExpr<'a>) -> CheckedExpr<'a> {
         let CheckedExpr { ty, span, kind } = expr;
         let expr = CheckedExpr {
             ty: ty.unqualified().clone(),
@@ -946,17 +946,11 @@ impl Sema {
         // arm alongside the node so both carry one type.
         let kind = match kind {
             CheckedExprKind::Generic { ctrl, index, assocs } => {
-                let mut assocs = assocs;
-                if let Some((_, arm)) = assocs.get_mut(index) {
-                    *arm = self.decay_checked(arm.clone());
-                }
+                let assocs = self.decay_generic_assoc(assocs, index);
                 CheckedExprKind::Generic { ctrl, index, assocs }
             }
             CheckedExprKind::GenericTy { ty, index, assocs } => {
-                let mut assocs = assocs;
-                if let Some((_, arm)) = assocs.get_mut(index) {
-                    *arm = self.decay_checked(arm.clone());
-                }
+                let assocs = self.decay_generic_assoc(assocs, index);
                 CheckedExprKind::GenericTy { ty, index, assocs }
             }
             kind => kind,
@@ -964,9 +958,19 @@ impl Sema {
         CheckedExpr { ty, span, kind }
     }
 
+    /// Rebuild a `_Generic` association slice with the selected arm
+    /// decayed alongside the node (arena slices are immutable).
+    fn decay_generic_assoc(&self, assocs: &'a [(Option<Ty>, CheckedExpr<'a>)], index: usize) -> &'a [(Option<Ty>, CheckedExpr<'a>)] {
+        let mut rebuilt = assocs.to_vec();
+        if let Some((_, arm)) = rebuilt.get_mut(index) {
+            *arm = self.decay_checked(arm.clone());
+        }
+        self.alloc_slice(rebuilt)
+    }
+
     /// C23 `auto x = init`: the deduced type is the initializer's type
     /// after lvalue conversion (arrays and functions decay).
-    pub(crate) fn auto_deduced_type(&self, init: &CheckedExpr) -> Ty {
+    pub(crate) fn auto_deduced_type(&self, init: &CheckedExpr<'a>) -> Ty {
         self.decay_checked(init.clone()).ty
     }
 
@@ -974,7 +978,7 @@ impl Sema {
     /// variables (never functions, typedefs, or enumeration constants),
     /// dereferences, subscripts, and members of lvalues (conversions look
     /// through to their operand).
-    fn is_lvalue(&self, expr: &CheckedExpr) -> bool {
+    fn is_lvalue(&self, expr: &CheckedExpr<'a>) -> bool {
         is_lvalue(expr, &self.decls)
     }
 
@@ -982,7 +986,7 @@ impl Sema {
     /// field carries a width. Conversions wrap the value without
     /// changing what it designates, so they look through (like
     /// `is_lvalue`).
-    fn designates_bitfield(expr: &CheckedExpr) -> bool {
+    fn designates_bitfield(expr: &CheckedExpr<'a>) -> bool {
         designates_bitfield(expr)
     }
 
@@ -991,7 +995,7 @@ impl Sema {
     /// and `&a[i]` mark `s`/`a`). `&*p` marks nothing (it is just
     /// `p`), and compound literals have no declaration to mark.
     /// Callers check validity first; non-lvalue shapes are ignored.
-    fn note_address_taken(&self, expr: &CheckedExpr) {
+    fn note_address_taken(&self, expr: &CheckedExpr<'a>) {
         match &expr.kind {
             CheckedExprKind::Ident(id) => self.mark_address_taken(*id),
             CheckedExprKind::Unary(crate::parse::UnaryOp::Real, inner) | CheckedExprKind::Unary(crate::parse::UnaryOp::Imag, inner) => self.note_address_taken(inner),
@@ -1007,7 +1011,7 @@ impl Sema {
     /// forms like `1 - 1` all qualify — as does any of those cast to
     /// unqualified `void *` (`(void *)0`). A cast to a qualified
     /// `void *` does not count, matching GCC.
-    fn is_null_pointer_constant(&self, expr: &CheckedExpr, interner: &Interner) -> bool {
+    fn is_null_pointer_constant(&self, expr: &CheckedExpr<'a>, interner: &Interner) -> bool {
         if matches!(expr.ty.unqualified(), Ty::Nullptr) {
             return true;
         }
@@ -1026,7 +1030,7 @@ impl Sema {
     /// designators convert to their pointer types. One level of added
     /// pointer qualifiers is allowed (`char **` converts to
     /// `char *const *`, as `execvp` needs); anything else fails.
-    fn convert_for_assignment(&self, target: &Ty, expr: CheckedExpr, interner: &Interner) -> Result<CheckedExpr, CompileError> {
+    fn convert_for_assignment(&self, target: &Ty, expr: CheckedExpr<'a>, interner: &Interner) -> Result<CheckedExpr<'a>, CompileError> {
         let expr = self.decay_checked(expr);
         // Top-level qualifiers on the source rvalue are meaningless
         // (the value is copied): a `const char *const` member of a
@@ -1272,7 +1276,7 @@ impl Sema {
     /// The diagnostic for writing a `const`-qualified object: names
     /// the variable when the target is one (like GCC's
     /// "assignment of read-only variable 'x'"), else the location.
-    fn readonly_error(&self, expr: &CheckedExpr, interner: &Interner) -> CompileError {
+    fn readonly_error(&self, expr: &CheckedExpr<'a>, interner: &Interner) -> CompileError {
         match &expr.kind {
             CheckedExprKind::Ident(id) => {
                 let text = self.decls.get(id.0 as usize).and_then(|b| b.name).and_then(|n| interner.resolve(n)).unwrap_or("?");
@@ -1285,7 +1289,7 @@ impl Sema {
     /// Check a condition expression: valid and scalar (C17 §6.8.4.1,
     /// §6.8.5.2). Callers discard the tree; the diagnostics are the
     /// point.
-    pub fn check_condition(&self, expr: &Expr, interner: &Interner) -> Result<CheckedExpr, CompileError> {
+    pub fn check_condition(&self, expr: &Expr<'a>, interner: &Interner) -> Result<CheckedExpr<'a>, CompileError> {
         let checked = self.decay_checked(self.check_expr(expr, interner)?);
         if !is_scalar(&checked.ty) {
             return Err(CompileError::new("condition must have scalar type", checked.span));
@@ -1296,7 +1300,7 @@ impl Sema {
     /// Check an expression that must have integer type: `switch`
     /// controlling expressions and `case` labels (C17 §6.8.1p1,
     /// §6.8.4.2). `what` names the position for the message.
-    pub fn check_integer_expr(&self, expr: &Expr, interner: &Interner, what: &str) -> Result<CheckedExpr, CompileError> {
+    pub fn check_integer_expr(&self, expr: &Expr<'a>, interner: &Interner, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let checked = self.check_expr(expr, interner)?;
         if !is_integer(&checked.ty) {
             return Err(CompileError::new(format!("{what} must have integer type"), checked.span));
@@ -1308,11 +1312,11 @@ impl Sema {
     /// checked form: scalar expressions convert as if by assignment;
     /// brace lists check member-by-member in declaration order (offsets
     /// need no layout — only member types and positions).
-    pub fn check_initializer(&self, target: &Ty, init: &Initializer, interner: &Interner) -> Result<Initializer, CompileError> {
+    pub fn check_initializer(&self, target: &Ty, init: &Initializer<'a>, interner: &Interner) -> Result<Initializer<'a>, CompileError> {
         match init {
             // Values arrive already checked (parsers check inline, where
             // scopes are live); here they only convert to the target.
-            Initializer::Expr(expr) => {
+            Initializer::Expr (expr) => {
                 // `char s[] = "abc";` — a string literal initializes an
                 // array of its own character type directly (C17
                 // §6.7.9p14), with or without braces (the braced form
@@ -1326,7 +1330,7 @@ impl Sema {
                                 // braced path gets; only the fit check
                                 // differs.
                                 self.check_string_fit(parts, bound, expr.span(), interner);
-                                return Ok(Initializer::Expr(expr.clone()));
+                                return Ok(Initializer::Expr (expr.clone()));
                             }
                         }
                     }
@@ -1340,15 +1344,15 @@ impl Sema {
                 // converts directly).
                 if matches!(target.unqualified(), Ty::Struct(_)) && is_scalar(&expr.ty) && !matches!(&expr.kind, CheckedExprKind::Str(_)) {
                     let single = vec![InitItem {
-                        designators: Vec::new(),
-                        init: Box::new(Initializer::Expr(expr.clone())),
+                        designators: &[],
+                        init: self.alloc(Initializer::Expr (expr.clone())),
                         span: expr.span(),
                     }];
                     let span = expr.span();
-                    return self.check_initializer(target, &Initializer::List { items: single, span }, interner);
+                    return self.check_initializer(target, &Initializer::List { items: self.alloc_slice(single), span }, interner);
                 }
                 let converted = self.convert_for_assignment(target, expr.clone(), interner)?;
-                Ok(Initializer::Expr(converted))
+                Ok(Initializer::Expr (converted))
             }
             Initializer::List { items, span } => {
                 let items = self.check_init_list(target, items, interner)?;
@@ -1361,24 +1365,24 @@ impl Sema {
                 if let Ty::Array { elem, .. } = target.unqualified() {
                     if let [item] = items.as_slice() {
                         if item.designators.is_empty() {
-                            if let Initializer::Expr(expr) = &*item.init {
+                            if let Initializer::Expr (expr) = &*item.init {
                                 if let CheckedExprKind::Str(parts) = &expr.kind {
                                     if self.string_elem_ty(parts).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
-                                        return Ok(Initializer::Expr(expr.clone()));
+                                        return Ok(Initializer::Expr (expr.clone()));
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Ok(Initializer::List { items, span: *span })
+                Ok(Initializer::List { items: self.alloc_slice(items), span: *span })
             }
         }
     }
 
     /// Check a brace-enclosed list against `target`, resolving each item
     /// to the member or element type its designators (or position) select.
-    fn check_init_list(&self, target: &Ty, items: &[InitItem], interner: &Interner) -> Result<Vec<InitItem>, CompileError> {
+    fn check_init_list(&self, target: &Ty, items: &[InitItem<'a>], interner: &Interner) -> Result<Vec<InitItem<'a>>, CompileError> {
         // Qualification on the object itself never changes the
         // initializer shape (`const struct S s = {...}` initializes
         // like `struct S`).
@@ -1399,8 +1403,8 @@ impl Sema {
                 }
                 let checked = self.check_initializer(target, &item.init, interner)?;
                 Ok(vec![InitItem {
-                    designators: Vec::new(),
-                    init: Box::new(checked),
+                    designators: &[],
+                    init: self.alloc(checked),
                     span: item.span,
                 }])
             }
@@ -1424,7 +1428,7 @@ impl Sema {
     /// designated member. Unions reject a second *bare* item, but
     /// designated items may repeat. Array designator positions stay
     /// loose (checked integer-typed, not tracked).
-    fn check_struct_init(&self, id: StructId, items: &[InitItem], interner: &Interner) -> Result<Vec<InitItem>, CompileError> {
+    fn check_struct_init(&self, id: StructId, items: &[InitItem<'a>], interner: &Interner) -> Result<Vec<InitItem<'a>>, CompileError> {
         let def = &self.structs[id.0 as usize];
         if !def.complete {
             return Err(CompileError::new(
@@ -1471,11 +1475,11 @@ impl Sema {
                     if j > i {
                         let sub = items[i..j].to_vec();
                         let span = sub.first().map(|it| it.span).unwrap_or(item.span).merge(sub.last().map(|it| it.span).unwrap_or(item.span));
-                        let init = self.check_initializer(&member_ty, &Initializer::List { items: sub, span }, interner)?;
+                        let init = self.check_initializer(&member_ty, &Initializer::List { items: self.alloc_slice(sub), span }, interner)?;
                         self.advance_cursor(id, &mut cursor);
                         checked.push(InitItem {
-                            designators: Vec::new(),
-                            init: Box::new(init),
+                            designators: &[],
+                            init: self.alloc(init),
                             span: item.span,
                         });
                         i = j;
@@ -1485,8 +1489,8 @@ impl Sema {
                 let init = self.check_initializer(&member_ty, &item.init, interner)?;
                 self.advance_cursor(id, &mut cursor);
                 checked.push(InitItem {
-                    designators: Vec::new(),
-                    init: Box::new(init),
+                    designators: &[],
+                    init: self.alloc(init),
                     span: item.span,
                 });
                 i += 1;
@@ -1496,8 +1500,8 @@ impl Sema {
                 cursor = vec![outer + 1];
                 self.normalize_cursor(id, &mut cursor);
                 checked.push(InitItem {
-                    designators: expanded,
-                    init: Box::new(init),
+                    designators: self.alloc_slice(expanded),
+                    init: self.alloc(init),
                     span: item.span,
                 });
                 i += 1;
@@ -1510,8 +1514,8 @@ impl Sema {
     /// scalar expression where an array or struct sits. Nested lists
     /// recurse normally, and a string literal initializes a character
     /// array directly (no elision).
-    fn needs_elision(&self, member_ty: &Ty, init: &Initializer) -> bool {
-        let Initializer::Expr(expr) = init else {
+    fn needs_elision(&self, member_ty: &Ty, init: &Initializer<'a>) -> bool {
+        let Initializer::Expr (expr) = init else {
             return false;
         };
         match member_ty.unqualified() {
@@ -1540,7 +1544,7 @@ impl Sema {
     /// union takes only its first member's share. Stops at designators
     /// and braced items. The result is where the next member's items
     /// begin.
-    fn elision_span(&self, ty: &Ty, items: &[InitItem], i: usize) -> usize {
+    fn elision_span(&self, ty: &Ty, items: &[InitItem<'a>], i: usize) -> usize {
         let mut j = i;
         match ty.unqualified() {
             Ty::Array { elem, bound, .. } => {
@@ -1590,8 +1594,8 @@ impl Sema {
 
     /// Whether `items[j]` is a bare expression item: brace elision
     /// feeds only un-designated expression items to a member.
-    fn bare_item(items: &[InitItem], j: usize) -> bool {
-        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
+    fn bare_item(items: &[InitItem<'a>], j: usize) -> bool {
+        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr (_)))
     }
 
     /// Element type of a string literal under the selected dialect
@@ -1602,12 +1606,12 @@ impl Sema {
 
     /// Element type of the bare string-literal item at `items[j]`, if
     /// any: a string fills a whole character array as one item.
-    fn string_item(&self, items: &[InitItem], j: usize) -> Option<Ty> {
+    fn string_item(&self, items: &[InitItem<'a>], j: usize) -> Option<Ty> {
         let item = items.get(j)?;
         if !item.designators.is_empty() {
             return None;
         }
-        let Initializer::Expr(expr) = &*item.init else {
+        let Initializer::Expr (expr) = &*item.init else {
             return None;
         };
         let CheckedExprKind::Str(parts) = &expr.kind else {
@@ -1710,7 +1714,7 @@ impl Sema {
     /// Resolve a struct-initializer item's designators to the
     /// initialized type plus the outermost member index (where a
     /// following bare item continues).
-    fn resolve_designation(&self, id: StructId, designators: &[Designator], interner: &Interner) -> Result<(Ty, usize, Vec<Designator>), CompileError> {
+    fn resolve_designation(&self, id: StructId, designators: &[Designator<'a>], interner: &Interner) -> Result<(Ty, usize, Vec<Designator<'a>>), CompileError> {
         let (target, Some(outer), expanded) = self.walk_designation(Ty::Struct(id), designators, interner)? else {
             unreachable!("a designation always resolves an outermost member")
         };
@@ -1725,16 +1729,16 @@ impl Sema {
     /// array starts, where no member continues), and the chain with
     /// anonymous-member hops made explicit: the backend addresses
     /// members positionally and never searches by name.
-    fn walk_designation(&self, start: Ty, designators: &[Designator], interner: &Interner) -> Result<(Ty, Option<usize>, Vec<Designator>), CompileError> {
+    fn walk_designation(&self, start: Ty, designators: &[Designator<'a>], interner: &Interner) -> Result<(Ty, Option<usize>, Vec<Designator<'a>>), CompileError> {
         let mut target = start;
         let mut outer: Option<usize> = None;
-        let mut expanded: Vec<Designator> = Vec::with_capacity(designators.len());
+        let mut expanded: Vec<Designator<'a>> = Vec::with_capacity(designators.len());
         let mut visiting = Vec::new();
         for designator in designators {
             match (designator, target.unqualified()) {
                 (Designator::Field { name, span }, Ty::Struct(cid)) => {
                     let path = match self.find_field(*cid, *name, &mut visiting) {
-                        FieldHit::Found(path) => path,
+                        FieldHit::Found(path) => self.alloc_slice(path),
                         FieldHit::Miss => {
                             let text = interner.resolve(*name).unwrap_or("?");
                             return Err(CompileError::new(format!("no member named '{text}'"), *span));
@@ -1754,7 +1758,7 @@ impl Sema {
                         expanded.push(Designator::AnonField { index: index as u32, span: *span });
                     }
                     expanded.push(Designator::Field { name: *name, span: *span });
-                    for &index in &path {
+                    for &index in path {
                         let Ty::Struct(cur) = target.unqualified() else {
                             unreachable!("designator path crosses only structs")
                         };
@@ -1846,13 +1850,13 @@ impl Sema {
     /// (an overlong literal warns, like GCC). A variable-length array
     /// cannot be initialized — except with an empty brace list, which
     /// GCC accepts.
-    fn check_array_init(&self, target: &Ty, items: &[InitItem], interner: &Interner) -> Result<Vec<InitItem>, CompileError> {
+    fn check_array_init(&self, target: &Ty, items: &[InitItem<'a>], interner: &Interner) -> Result<Vec<InitItem<'a>>, CompileError> {
         let Ty::Array { elem, bound, .. } = target else {
             unreachable!("array initializer needs an array type")
         };
         if let [item] = items {
-            if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
-                if let Initializer::Expr(expr) = &*item.init {
+            if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr (expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
+                if let Initializer::Expr (expr) = &*item.init {
                     if let CheckedExprKind::Str(parts) = &expr.kind {
                         let lit_elem = self.string_elem_ty(parts);
                         if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
@@ -1884,7 +1888,7 @@ impl Sema {
             let mut pos = next;
             let mut designated = false;
             let mut target = elem.as_ref().clone();
-            let mut designators = item.designators.clone();
+            let mut designators = item.designators.to_vec();
             if let Some((first, rest)) = item.designators.split_first() {
                 let Designator::Index { index, span } = first else {
                     return Err(CompileError::new("field designator in array initializer", first.span()));
@@ -1936,10 +1940,10 @@ impl Sema {
                 if j > i {
                     let sub = items[i..j].to_vec();
                     let span = sub.first().map(|it| it.span).unwrap_or(item.span).merge(sub.last().map(|it| it.span).unwrap_or(item.span));
-                    let init = self.check_initializer(elem, &Initializer::List { items: sub, span }, interner)?;
+                    let init = self.check_initializer(elem, &Initializer::List { items: self.alloc_slice(sub), span }, interner)?;
                     checked.push(InitItem {
-                        designators: Vec::new(),
-                        init: Box::new(init),
+                        designators: &[],
+                        init: self.alloc(init),
                         span: item.span,
                     });
                     i = j;
@@ -1948,8 +1952,8 @@ impl Sema {
             }
             let init = self.check_initializer(&target, &item.init, interner)?;
             checked.push(InitItem {
-                designators,
-                init: Box::new(init),
+                designators: self.alloc_slice(designators),
+                init: self.alloc(init),
                 span: item.span,
             });
             i += 1;
@@ -1992,18 +1996,18 @@ impl Sema {
     /// outermost dimension completes, and only when every designator
     /// folds; anything else keeps the incomplete type for the caller
     /// to reject.
-    pub(crate) fn complete_compound_ty(&self, ty: &Ty, init: &Initializer, interner: &Interner) -> Ty {
+    pub(crate) fn complete_compound_ty(&self, ty: &Ty, init: &Initializer<'a>, interner: &Interner) -> Ty {
         let Ty::Array { elem, quals, bound: None } = ty else {
             return ty.clone();
         };
         // `(char[]){"ab"}`: the single string form sizes with its NUL.
-        // The braced shape collapses to the bare `Expr` one at check
+        // The braced shape collapses to the bare `Expr<'a>` one at check
         // time (see `check_initializer`), so accept either.
         let string = match init {
-            Initializer::Expr(expr) => Some(expr),
-            Initializer::List { items, .. } => match items.as_slice() {
+            Initializer::Expr (expr) => Some(expr),
+            Initializer::List { items, .. } => match items {
                 [item] if item.designators.is_empty() => match &*item.init {
-                    Initializer::Expr(expr) => Some(expr),
+                    Initializer::Expr (expr) => Some(expr),
                     _ => None,
                 },
                 _ => None,
@@ -2034,10 +2038,10 @@ impl Sema {
         // incomplete.
         let mut next: u64 = 0;
         let mut max: u64 = 0;
-        for item in items {
+        for item in items.iter() {
             let mut pos = next;
             let mut designated = false;
-            for designator in &item.designators {
+            for designator in item.designators {
                 match designator {
                     Designator::Index { index, .. } if !designated => {
                         designated = true;
@@ -2066,7 +2070,7 @@ impl Sema {
     /// type, converting as if by assignment. In a `void` function the
     /// value is legal only when it is itself `void` (`return f();`,
     /// C17 §6.8.6.4p1); anything else is a constraint violation.
-    pub fn check_return(&self, ret: &Ty, expr: &Expr, interner: &Interner) -> Result<CheckedExpr, CompileError> {
+    pub fn check_return(&self, ret: &Ty, expr: &Expr<'a>, interner: &Interner) -> Result<CheckedExpr<'a>, CompileError> {
         let checked = self.check_expr(expr, interner)?;
         if ret.unqualified() == &Ty::Void {
             if checked.ty.unqualified() == &Ty::Void {
@@ -2080,7 +2084,7 @@ impl Sema {
     /// Annotate an expression with types, inserting conversions. Takes the
     /// interner for identifier spellings in diagnostics; Sema itself
     /// stays interner-free.
-    pub fn check_expr(&self, expr: &Expr, interner: &Interner) -> Result<CheckedExpr, CompileError> {
+    pub fn check_expr(&self, expr: &Expr<'a>, interner: &Interner) -> Result<CheckedExpr<'a>, CompileError> {
         let span = expr.span();
         match expr {
             Expr::Ident { name, .. } => {
@@ -2166,7 +2170,7 @@ impl Sema {
                     bound: crate::eval::string_length(parts, interner).map(|len| ArrayBound::Fixed(len + 1)),
                 },
                 span,
-                kind: CheckedExprKind::Str(parts.clone()),
+                kind: CheckedExprKind::Str(*parts),
             }),
             Expr::Unary { op, operand, .. } => self.check_unary(*op, operand, interner, span),
             Expr::Binary { op, lhs, rhs, .. } => self.check_binary(*op, lhs, rhs, interner, span),
@@ -2203,7 +2207,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: ty.clone(),
                     span,
-                    kind: CheckedExprKind::VaArg { ap: Box::new(ap), ty: ty.clone() },
+                    kind: CheckedExprKind::VaArg { ap: self.alloc(ap), ty: ty.clone() },
                 })
             }
             Expr::Offsetof { ty, designators, .. } => {
@@ -2226,7 +2230,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::StmtExpr { items: items.clone() },
+                    kind: CheckedExprKind::StmtExpr { items: *items },
                 })
             }
             Expr::CompoundLiteral { ty, init, storage, .. } => {
@@ -2256,7 +2260,7 @@ impl Sema {
                     span,
                     kind: CheckedExprKind::CompoundLiteral {
                         ty: ty.clone(),
-                        init: Box::new(init),
+                        init: self.alloc(init),
                         storage: *storage,
                     },
                 })
@@ -2270,7 +2274,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: self.target.size_type(),
                     span,
-                    kind: CheckedExprKind::SizeofExpr(Box::new(operand)),
+                    kind: CheckedExprKind::SizeofExpr(self.alloc(operand)),
                 })
             }
             Expr::SizeofTy { ty, .. } => {
@@ -2287,7 +2291,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: self.target.size_type(),
                     span,
-                    kind: CheckedExprKind::CountofExpr(Box::new(operand)),
+                    kind: CheckedExprKind::CountofExpr(self.alloc(operand)),
                 })
             }
             Expr::CountofTy { ty, .. } => {
@@ -2318,7 +2322,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: self.target.size_type(),
                     span,
-                    kind: CheckedExprKind::AlignofExpr(Box::new(operand)),
+                    kind: CheckedExprKind::AlignofExpr(self.alloc(operand)),
                 })
             }
             Expr::LabelAddr { label, .. } => Ok(CheckedExpr {
@@ -2385,7 +2389,7 @@ impl Sema {
         Ok(())
     }
 
-    fn check_unary(&self, op: UnaryOp, operand: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_unary(&self, op: UnaryOp, operand: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         use UnaryOp::*;
         match op {
             Pos | Neg => {
@@ -2398,7 +2402,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             Not => {
@@ -2409,7 +2413,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: Ty::Int,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             BitNot => {
@@ -2421,7 +2425,7 @@ impl Sema {
                     return Ok(CheckedExpr {
                         ty,
                         span,
-                        kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                        kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                     });
                 }
                 if !is_integer(&operand.ty) {
@@ -2432,7 +2436,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             Deref => {
@@ -2443,7 +2447,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty: *pointee,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             AddrOf => {
@@ -2485,7 +2489,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             PreInc | PreDec | PostInc | PostDec => {
@@ -2515,7 +2519,7 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
             Real | Imag => {
@@ -2534,20 +2538,20 @@ impl Sema {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::Unary(op, Box::new(operand)),
+                    kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                 })
             }
         }
     }
 
-    fn check_binary(&self, op: BinaryOp, lhs: &Expr, rhs: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_binary(&self, op: BinaryOp, lhs: &Expr<'a>, rhs: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         use BinaryOp::*;
         let lhs = self.check_expr(lhs, interner)?;
         let rhs = self.check_expr(rhs, interner)?;
-        let build = |l: CheckedExpr, r: CheckedExpr, ty: Ty| CheckedExpr {
+        let build = |l: CheckedExpr<'a>, r: CheckedExpr<'a>, ty: Ty| CheckedExpr {
             ty,
             span,
-            kind: CheckedExprKind::Binary(op, Box::new(l), Box::new(r)),
+            kind: CheckedExprKind::Binary(op, self.alloc(l), self.alloc(r)),
         };
         match op {
             // Shifts promote independently; the result takes the
@@ -2685,7 +2689,7 @@ impl Sema {
 
     /// An `asm` output operand: a writable lvalue, like the left side of
     /// an assignment.
-    pub fn check_asm_output(&self, expr: &Expr, interner: &Interner) -> Result<CheckedExpr, CompileError> {
+    pub fn check_asm_output(&self, expr: &Expr<'a>, interner: &Interner) -> Result<CheckedExpr<'a>, CompileError> {
         let checked = self.check_expr(expr, interner)?;
         if !self.is_lvalue(&checked) {
             return Err(CompileError::new("asm output is not an lvalue", checked.span));
@@ -2696,7 +2700,7 @@ impl Sema {
         Ok(checked)
     }
 
-    fn check_assign(&self, op: AssignOp, lhs: &Expr, rhs: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_assign(&self, op: AssignOp, lhs: &Expr<'a>, rhs: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let l = self.check_expr(lhs, interner)?;
         if !self.is_lvalue(&l) {
             return Err(CompileError::new("assignment to a non-lvalue", l.span));
@@ -2712,7 +2716,7 @@ impl Sema {
             return Ok(CheckedExpr {
                 ty,
                 span,
-                kind: CheckedExprKind::Assign(op, Box::new(l), Box::new(r)),
+                kind: CheckedExprKind::Assign(op, self.alloc(l), self.alloc(r)),
             });
         }
         // `a op= b` ≡ `a = (a) op (b)`, with the operation itself under
@@ -2748,15 +2752,15 @@ impl Sema {
             span,
             kind: CheckedExprKind::CompoundAssign {
                 op,
-                lhs: Box::new(l),
-                rhs: Box::new(r_dec),
+                lhs: self.alloc(l),
+                rhs: self.alloc(r_dec),
                 op_ty: Box::new(op_l.ty.clone()),
                 rhs_ty: Box::new(op_r.ty.clone()),
             },
         })
     }
 
-    fn check_ternary(&self, cond: &Expr, then: &Expr, els: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_ternary(&self, cond: &Expr<'a>, then: &Expr<'a>, els: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         // Array and function operands decay (C17 §6.3.2.1), so
         // `cond ? array : pointer` and `cond ? f : g` compare as
         // pointers below.
@@ -2770,7 +2774,7 @@ impl Sema {
     /// itself, except that the condition is evaluated once (the
     /// lowering keeps its value in a slot). The result type comes from
     /// the same rules as the ternary's.
-    fn check_elvis(&self, cond: &Expr, els: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_elvis(&self, cond: &Expr<'a>, els: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let cond = self.decay_checked(self.check_expr(cond, interner)?);
         let els = self.decay_checked(self.check_expr(els, interner)?);
         let then = cond.clone();
@@ -2780,7 +2784,7 @@ impl Sema {
     /// The common tail of `?:`: the condition must be a scalar, and the
     /// arms convert to a shared result type. `elvis` picks the node
     /// shape (see [`Self::conditional_node`]).
-    fn check_conditional(&self, cond: CheckedExpr, then: CheckedExpr, els: CheckedExpr, interner: &Interner, span: Span, elvis: bool) -> Result<CheckedExpr, CompileError> {
+    fn check_conditional(&self, cond: CheckedExpr<'a>, then: CheckedExpr<'a>, els: CheckedExpr<'a>, interner: &Interner, span: Span, elvis: bool) -> Result<CheckedExpr<'a>, CompileError> {
         if !is_scalar(&cond.ty) {
             return Err(CompileError::new("ternary condition must have scalar type", cond.span));
         }
@@ -2865,23 +2869,23 @@ impl Sema {
     /// for `c ?: b` — where the condition's own value is the result, so
     /// the converted then-arm is dropped (the lowering re-converts the
     /// condition value it already holds).
-    fn conditional_node(&self, cond: CheckedExpr, then: CheckedExpr, els: CheckedExpr, ty: Ty, span: Span, elvis: bool) -> CheckedExpr {
+    fn conditional_node(&self, cond: CheckedExpr<'a>, then: CheckedExpr<'a>, els: CheckedExpr<'a>, ty: Ty, span: Span, elvis: bool) -> CheckedExpr<'a> {
         let kind = if elvis {
             CheckedExprKind::Elvis {
-                cond: Box::new(cond),
-                els: Box::new(els),
+                cond: self.alloc(cond),
+                els: self.alloc(els),
             }
         } else {
             CheckedExprKind::Ternary {
-                cond: Box::new(cond),
-                then: Box::new(then),
-                els: Box::new(els),
+                cond: self.alloc(cond),
+                then: self.alloc(then),
+                els: self.alloc(els),
             }
         };
         CheckedExpr { ty, span, kind }
     }
 
-    fn check_call(&self, func: &Expr, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_call(&self, func: &Expr<'a>, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         // GCC atomic builtins type-check against their arguments (the
         // types are generic over the pointed-to type), so they check
         // inline instead of resolving to a declared prototype.
@@ -3007,8 +3011,8 @@ impl Sema {
             ty: *ret,
             span,
             kind: CheckedExprKind::Call {
-                func: Box::new(callee),
-                args: checked,
+                func: self.alloc(callee),
+                args: self.alloc_slice(checked),
             },
         })
     }
@@ -3017,7 +3021,7 @@ impl Sema {
     /// to be a `_Future(T)` handle and yields a node of type `T`. Only
     /// valid inside an async function — elsewhere there is no
     /// coroutine to suspend, and the lowering rejects it anyway.
-    fn check_await(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_await(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         if !self.async_enabled {
             return Err(CompileError::new("`__builtin_await` requires the glcc async extension (-fglcc-async)", span));
         }
@@ -3034,7 +3038,7 @@ impl Sema {
         Ok(CheckedExpr {
             ty: result,
             span,
-            kind: CheckedExprKind::Await(Box::new(arg)),
+            kind: CheckedExprKind::Await(self.alloc(arg)),
         })
     }
 
@@ -3046,7 +3050,7 @@ impl Sema {
     /// `test_and_set`/`clear`. Memory orders take any integer (GCC
     /// further requires constants, which codegen ignores by mapping
     /// everything to seq-cst).
-    fn check_atomic(&self, name: &str, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic(&self, name: &str, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let rest = &name["__atomic_".len()..];
         let (base, sized) = match rest.rsplit_once('_') {
             Some((b, "1")) => (b, Some(1u8)),
@@ -3092,7 +3096,7 @@ impl Sema {
     /// suffix and `compare_exchange` drops the `weak` flag (strong vs
     /// weak is in the name), so each maps onto the checker for the
     /// corresponding GCC form.
-    fn check_c11_atomic(&self, name: &str, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_c11_atomic(&self, name: &str, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let base = &name["__c11_atomic_".len()..];
         match base {
             "load" => return self.check_atomic_load_n(args, interner, span, None, name),
@@ -3116,7 +3120,7 @@ impl Sema {
     /// C11 `void __c11_atomic_init(T *ptr, T val)`: like a store with
     /// no memory order. `_Atomic` erases to its base type, so `ptr` is
     /// an ordinary pointer to the object.
-    fn check_c11_atomic_init(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_c11_atomic_init(&self, args: &[Expr<'a>], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, val] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer and a value"), span));
         };
@@ -3131,7 +3135,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Init,
-                args: vec![ptr, val],
+                args: self.alloc_slice([ptr, val]),
             },
         })
     }
@@ -3139,7 +3143,7 @@ impl Sema {
     /// C11 `bool __c11_atomic_compare_exchange_strong|weak(T *ptr,
     /// T *expected, T desired, int success, int failure)`: like the GCC
     /// `_n` form without the `weak` flag (already in the name).
-    fn check_c11_atomic_cmpxchg(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_c11_atomic_cmpxchg(&self, args: &[Expr<'a>], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, expected, desired, success, failure] = args else {
             return Err(CompileError::new(
                 format!("`{what}` takes a pointer, an expected pointer, a desired value, and two memory orders"),
@@ -3167,12 +3171,12 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::CmpXchgN { sized: None },
-                args: vec![ptr, expected, desired, success, failure],
+                args: self.alloc_slice([ptr, expected, desired, success, failure]),
             },
         })
     }
 
-    fn check_atomic_order(&self, e: &Expr, interner: &Interner, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_order(&self, e: &Expr<'a>, interner: &Interner, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let order = self.decay_checked(self.check_expr(e, interner)?);
         if !is_integer(&order.ty) {
             return Err(CompileError::new(format!("`{what}` needs an integer memory order"), order.span));
@@ -3223,7 +3227,7 @@ impl Sema {
 
     /// `T __atomic_load_n(T *ptr, int order)` (and `__atomic_load_8`
     /// etc, which verify the size): the pointer gives the result type.
-    fn check_atomic_load_n(&self, args: &[Expr], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_load_n(&self, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer and a memory order"), span));
         };
@@ -3238,14 +3242,14 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::LoadN { sized },
-                args: vec![ptr, order],
+                args: self.alloc_slice([ptr, order]),
             },
         })
     }
 
     /// `void __atomic_store_n(T *ptr, T val, int order)`: the value
     /// converts to the pointed-to type as if by assignment.
-    fn check_atomic_store_n(&self, args: &[Expr], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_store_n(&self, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, val, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer, a value, and a memory order"), span));
         };
@@ -3261,14 +3265,14 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::StoreN { sized },
-                args: vec![ptr, val, order],
+                args: self.alloc_slice([ptr, val, order]),
             },
         })
     }
 
     /// `void __atomic_load(T *ptr, T *ret, int order)`: generic load
     /// through pointers; both point at the same-sized object.
-    fn check_atomic_load(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_load(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, ret, order] = args else {
             return Err(CompileError::new("`__atomic_load` takes a pointer, a result pointer, and a memory order", span));
         };
@@ -3286,13 +3290,13 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Load,
-                args: vec![ptr, ret, order],
+                args: self.alloc_slice([ptr, ret, order]),
             },
         })
     }
 
     /// `void __atomic_store(T *ptr, T *val, int order)`: generic store.
-    fn check_atomic_store(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_store(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, val, order] = args else {
             return Err(CompileError::new("`__atomic_store` takes a pointer, a value pointer, and a memory order", span));
         };
@@ -3310,7 +3314,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Store,
-                args: vec![ptr, val, order],
+                args: self.alloc_slice([ptr, val, order]),
             },
         })
     }
@@ -3324,7 +3328,7 @@ impl Sema {
 
     /// `T __atomic_exchange_n(T *ptr, T val, int order)`: returns the
     /// previous contents.
-    fn check_atomic_exchange_n(&self, args: &[Expr], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_exchange_n(&self, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, val, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer, a value, and a memory order"), span));
         };
@@ -3340,13 +3344,13 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::ExchangeN { sized },
-                args: vec![ptr, val, order],
+                args: self.alloc_slice([ptr, val, order]),
             },
         })
     }
 
     /// `void __atomic_exchange(T *ptr, T *val, T *ret, int order)`.
-    fn check_atomic_exchange(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_exchange(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, val, ret, order] = args else {
             return Err(CompileError::new(
                 "`__atomic_exchange` takes a pointer, a value pointer, a result pointer, and a memory order",
@@ -3372,7 +3376,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Exchange,
-                args: vec![ptr, val, ret, order],
+                args: self.alloc_slice([ptr, val, ret, order]),
             },
         })
     }
@@ -3380,7 +3384,7 @@ impl Sema {
     /// `bool __atomic_compare_exchange_n(T *ptr, T *expected, T desired,
     /// bool weak, int success, int failure)`: on failure writes the
     /// current value back to `*expected`.
-    fn check_atomic_cmpxchg_n(&self, args: &[Expr], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_cmpxchg_n(&self, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, expected, desired, weak, success, failure] = args else {
             return Err(CompileError::new(
                 format!("`{what}` takes a pointer, an expected pointer, a desired value, a weak flag, and two memory orders"),
@@ -3412,7 +3416,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::CmpXchgN { sized },
-                args: vec![ptr, expected, desired, weak, success, failure],
+                args: self.alloc_slice([ptr, expected, desired, weak, success, failure]),
             },
         })
     }
@@ -3422,7 +3426,7 @@ impl Sema {
     /// value directly (not a pointer) and returns the object's initial
     /// value. The pointer's pointee gives the operand type, so the
     /// `...8`/`16`/`64`/`Pointer` variants need no special casing.
-    fn check_interlocked_cmpxchg(&self, args: &[Expr], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_interlocked_cmpxchg(&self, args: &[Expr<'a>], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [ptr, exchange, comparand] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer, an exchange value, and a comparand"), span));
         };
@@ -3438,14 +3442,14 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::InterlockedCmpxchg,
-                args: vec![ptr, exchange, comparand],
+                args: self.alloc_slice([ptr, exchange, comparand]),
             },
         })
     }
 
     /// `bool __atomic_compare_exchange(T *ptr, T *expected, T *desired,
     /// bool weak, int success, int failure)`.
-    fn check_atomic_cmpxchg(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_cmpxchg(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let what = "__atomic_compare_exchange";
         let [ptr, expected, desired, weak, success, failure] = args else {
             return Err(CompileError::new(
@@ -3477,7 +3481,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::CmpXchg,
-                args: vec![ptr, expected, desired, weak, success, failure],
+                args: self.alloc_slice([ptr, expected, desired, weak, success, failure]),
             },
         })
     }
@@ -3486,7 +3490,7 @@ impl Sema {
     /// `T __atomic_add_fetch(T *ptr, T val, int order)` (new value),
     /// plus the sized spellings. Pointer targets act on `uintptr_t`
     /// (no scaling); `_Bool` targets are rejected like GCC.
-    fn check_atomic_rmw(&self, base: &str, fetch: bool, args: &[Expr], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_rmw(&self, base: &str, fetch: bool, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let op = match base {
             "fetch_add" | "add_fetch" => RmwOp::Add,
             "fetch_sub" | "sub_fetch" => RmwOp::Sub,
@@ -3533,14 +3537,14 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Rmw { op, fetch, sized },
-                args: vec![ptr, val, order],
+                args: self.alloc_slice([ptr, val, order]),
             },
         })
     }
 
     /// `void __atomic_thread_fence(int order)` /
     /// `void __atomic_signal_fence(int order)`.
-    fn check_atomic_fence(&self, args: &[Expr], interner: &Interner, span: Span, signal: bool, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_fence(&self, args: &[Expr<'a>], interner: &Interner, span: Span, signal: bool, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a memory order"), span));
         };
@@ -3550,7 +3554,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Fence { signal },
-                args: vec![order],
+                args: self.alloc_slice([order]),
             },
         })
     }
@@ -3559,7 +3563,7 @@ impl Sema {
     /// must be constant) and `bool __atomic_is_lock_free(...)` (may be
     /// dynamic; constant sizes fold here, dynamic ones lower to a size
     /// comparison).
-    fn check_atomic_lock_free(&self, args: &[Expr], interner: &Interner, span: Span, always: bool, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_lock_free(&self, args: &[Expr<'a>], interner: &Interner, span: Span, always: bool, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         if args.len() < 1 || args.len() > 2 {
             return Err(CompileError::new(format!("`{what}` takes a size and an optional pointer"), span));
         }
@@ -3598,13 +3602,13 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::LockFree { always },
-                args: checked,
+                args: self.alloc_slice(checked),
             },
         })
     }
 
     /// `bool __atomic_test_and_set(void *ptr, int order)`.
-    fn check_atomic_test_and_set(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_test_and_set(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let what = "__atomic_test_and_set";
         let [ptr, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer and a memory order"), span));
@@ -3619,13 +3623,13 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::TestAndSet,
-                args: vec![ptr, order],
+                args: self.alloc_slice([ptr, order]),
             },
         })
     }
 
     /// `void __atomic_clear(bool *ptr, int order)`.
-    fn check_atomic_clear(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_atomic_clear(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let what = "__atomic_clear";
         let [ptr, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer and a memory order"), span));
@@ -3640,7 +3644,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Atomic {
                 op: AtomicOp::Clear,
-                args: vec![ptr, order],
+                args: self.alloc_slice([ptr, order]),
             },
         })
     }
@@ -3652,7 +3656,7 @@ impl Sema {
     /// first argument yields the second (an `int`); with one, zero is
     /// undefined (like the fixed-width `clz`, which shares the
     /// backend lowering shape).
-    fn check_clzg(&self, args: &[Expr], interner: &Interner, span: Span, ctz: bool) -> Result<CheckedExpr, CompileError> {
+    fn check_clzg(&self, args: &[Expr<'a>], interner: &Interner, span: Span, ctz: bool) -> Result<CheckedExpr<'a>, CompileError> {
         let what = if ctz { "`__builtin_ctzg`" } else { "`__builtin_clzg`" };
         if args.len() < 1 || args.len() > 2 {
             return Err(CompileError::new(format!("{what} takes one unsigned argument and an optional `int` fallback"), span));
@@ -3666,7 +3670,7 @@ impl Sema {
             return Err(CompileError::new(format!("{what} requires an unsigned integer argument"), arg.span));
         }
         let fallback = match args.get(1) {
-            Some(fb) => Some(Box::new(self.convert_for_assignment(&Ty::Int, self.check_expr(fb, interner)?, interner)?)),
+            Some(fb) => Some(self.alloc(self.convert_for_assignment(&Ty::Int, self.check_expr(fb, interner)?, interner)?)),
             None => None,
         };
         Ok(CheckedExpr {
@@ -3674,7 +3678,7 @@ impl Sema {
             span,
             kind: CheckedExprKind::Clz {
                 ctz,
-                arg: Box::new(arg),
+                arg: self.alloc(arg),
                 fallback,
             },
         })
@@ -3685,7 +3689,7 @@ impl Sema {
     /// then discarded (GCC never evaluates it, side effects
     /// included); only the folded 0/1 remains, so the node itself is
     /// always constant.
-    fn check_constant_p(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_constant_p(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [arg] = args else {
             return Err(CompileError::new("`__builtin_constant_p` takes exactly one argument", span));
         };
@@ -3708,7 +3712,7 @@ impl Sema {
     /// NaN, infinite or subnormal, so they fold to `0` immediately
     /// (`signbit` is the exception: its `double` parameter makes the
     /// sign of `-1` count); anything non-arithmetic is rejected.
-    fn check_fp_class(&self, args: &[Expr], interner: &Interner, span: Span, op: FpPredicate, what: &str) -> Result<CheckedExpr, CompileError> {
+    fn check_fp_class(&self, args: &[Expr<'a>], interner: &Interner, span: Span, op: FpPredicate, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let [arg] = args else {
             return Err(CompileError::new(format!("`{what}` takes exactly one argument"), span));
         };
@@ -3733,7 +3737,7 @@ impl Sema {
         Ok(CheckedExpr {
             ty: Ty::Int,
             span,
-            kind: CheckedExprKind::FpClass { op, arg: Box::new(arg) },
+            kind: CheckedExprKind::FpClass { op, arg: self.alloc(arg) },
         })
     }
 
@@ -3745,20 +3749,20 @@ impl Sema {
     /// accepted here. The operand must be real floating point (GCC
     /// rejects integers and complex; integers would have a constant
     /// category) and evaluates once.
-    fn check_fpclassify(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_fpclassify(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [nan, inf, normal, subnormal, zero, arg] = args else {
             return Err(CompileError::new("`__builtin_fpclassify` takes five `int` codes and a floating-point operand", span));
         };
-        let code = |expr: &Expr| -> Result<CheckedExpr, CompileError> {
+        let code = |expr: &Expr<'a>| -> Result<CheckedExpr<'a>, CompileError> {
             let checked = self.check_expr(expr, interner)?;
             self.convert_for_assignment(&Ty::Int, checked, interner)
         };
         let codes = [
-            Box::new(code(nan)?),
-            Box::new(code(inf)?),
-            Box::new(code(normal)?),
-            Box::new(code(subnormal)?),
-            Box::new(code(zero)?),
+            self.alloc(code(nan)?),
+            self.alloc(code(inf)?),
+            self.alloc(code(normal)?),
+            self.alloc(code(subnormal)?),
+            self.alloc(code(zero)?),
         ];
         let arg = self.decay_checked(self.check_expr(arg, interner)?);
         if !is_real_float(&arg.ty) {
@@ -3767,7 +3771,7 @@ impl Sema {
         Ok(CheckedExpr {
             ty: Ty::Int,
             span,
-            kind: CheckedExprKind::FpClassify { codes, arg: Box::new(arg) },
+            kind: CheckedExprKind::FpClassify { codes, arg: self.alloc(arg) },
         })
     }
 
@@ -3775,7 +3779,7 @@ impl Sema {
     /// integer constant; the result is the chosen operand with its own
     /// type, and only that one is checked — GCC leaves the other
     /// unevaluated, so it need not even be valid.
-    fn check_choose_expr(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_choose_expr(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [cond, then_expr, else_expr] = args else {
             return Err(CompileError::new("`__builtin_choose_expr` takes three arguments", span));
         };
@@ -3790,7 +3794,7 @@ impl Sema {
     /// argument's type, folded to a constant. The argument is checked
     /// (undeclared names and type errors still surface) but never
     /// evaluated, like GCC documents.
-    fn check_classify_type(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_classify_type(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [arg] = args else {
             return Err(CompileError::new("`__builtin_classify_type` takes exactly one argument", span));
         };
@@ -3806,7 +3810,7 @@ impl Sema {
     /// only the address is kept (evaluated and dropped through a
     /// `void` cast); the access/locality arguments are checked and
     /// discarded, like GCC's constant-only ones.
-    fn check_prefetch(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_prefetch(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let Some((addr, rest)) = args.split_first() else {
             return Err(CompileError::new("`__builtin_prefetch` needs an address", span));
         };
@@ -3824,7 +3828,7 @@ impl Sema {
             ty: Ty::Void,
             span,
             kind: CheckedExprKind::Cast {
-                expr: Box::new(addr),
+                expr: self.alloc(addr),
                 ty: Ty::Void,
             },
         })
@@ -3838,7 +3842,7 @@ impl Sema {
     /// converts to; the operation itself is exact, and the builtin
     /// returns whether the exact value fit. A typed spelling pins the
     /// operand type, converting operands like prototyped parameters.
-    fn check_overflow(&self, op: OverflowOp, args: &[Expr], interner: &Interner, span: Span, operand_ty: Option<Ty>) -> Result<CheckedExpr, CompileError> {
+    fn check_overflow(&self, op: OverflowOp, args: &[Expr<'a>], interner: &Interner, span: Span, operand_ty: Option<Ty>) -> Result<CheckedExpr<'a>, CompileError> {
         let [lhs, rhs, res] = args else {
             return Err(CompileError::new("overflow builtin needs two operands and a result pointer", span));
         };
@@ -3866,9 +3870,9 @@ impl Sema {
             span,
             kind: CheckedExprKind::Overflow {
                 op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-                res: Box::new(res),
+                lhs: self.alloc(lhs),
+                rhs: self.alloc(rhs),
+                res: self.alloc(res),
                 res_ty,
             },
         })
@@ -3877,7 +3881,7 @@ impl Sema {
     /// `alloca`/`__builtin_alloca`: allocate `size` bytes that stay
     /// live until the enclosing function returns. The frontend only
     /// marks the call; the heap block and its cleanup lower in MIR.
-    fn check_alloca(&self, args: &[Expr], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_alloca(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let [size] = args else {
             return Err(CompileError::new("`alloca` needs exactly one argument", span));
         };
@@ -3890,7 +3894,7 @@ impl Sema {
                 pointee: Box::new(Ty::Void),
             },
             span,
-            kind: CheckedExprKind::Alloca { size: Box::new(size) },
+            kind: CheckedExprKind::Alloca { size: self.alloc(size) },
         })
     }
 
@@ -3899,7 +3903,7 @@ impl Sema {
     /// `level`-th enclosing frame. GCC requires the level to be a
     /// constant integer, so a non-constant one is rejected here;
     /// lowering walks the frame-pointer chain from the current frame.
-    fn check_frame_address(&self, args: &[Expr], interner: &Interner, span: Span, returns_address: bool) -> Result<CheckedExpr, CompileError> {
+    fn check_frame_address(&self, args: &[Expr<'a>], interner: &Interner, span: Span, returns_address: bool) -> Result<CheckedExpr<'a>, CompileError> {
         let what = if returns_address { "__builtin_return_address" } else { "__builtin_frame_address" };
         let [level] = args else {
             return Err(CompileError::new(format!("`{what}` needs exactly one argument"), span));
@@ -3962,7 +3966,7 @@ impl Sema {
         }
     }
 
-    fn check_subscript(&self, base: &Expr, index: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_subscript(&self, base: &Expr<'a>, index: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let base = self.decay_checked(self.check_expr(base, interner)?);
         let index = self.decay_checked(self.check_expr(index, interner)?);
         // Either side may be the pointer (`i[a]` is legal).
@@ -3981,13 +3985,13 @@ impl Sema {
             ty: *pointee,
             span,
             kind: CheckedExprKind::Subscript {
-                base: Box::new(ptr),
-                index: Box::new(idx),
+                base: self.alloc(ptr),
+                index: self.alloc(idx),
             },
         })
     }
 
-    fn check_member(&self, base: &Expr, field: SymbolU32, arrow: bool, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_member(&self, base: &Expr<'a>, field: SymbolU32, arrow: bool, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let mut checked = self.check_expr(base, interner)?;
         if arrow {
             checked = self.decay_checked(checked);
@@ -4042,8 +4046,7 @@ impl Sema {
             let member = &self.structs[cur.0 as usize].members[index];
             if level + 1 == path.len() {
                 if let Some(width_expr) = &member.bitfield {
-                    let decl_size = self.type_size(&member.ty, interner).expect("bit-field has a declared type");
-                    let w = self.bit_width(width_expr, decl_size * 8, interner).expect("bit-field width was checked to fit");
+                    let w = *width_expr;
                     // The unit byte this field starts in, relative to
                     // the containing struct: `member_offsets` holds the
                     // byte of the unit start, and `members` the exact
@@ -4080,8 +4083,8 @@ impl Sema {
             ty,
             span,
             kind: CheckedExprKind::Member {
-                base: Box::new(checked),
-                path,
+                base: self.alloc(checked),
+                path: self.alloc_slice(path),
                 arrow,
                 offset,
                 bitfield,
@@ -4142,7 +4145,7 @@ impl Sema {
     /// else `default` (which must exist). Duplicate type-names and a
     /// second `default` are constraint violations. The result has the
     /// selected expression's type and is never an lvalue.
-    fn check_generic(&self, ctrl: &Expr, assocs: &[GenericAssoc], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_generic(&self, ctrl: &Expr<'a>, assocs: &[GenericAssoc<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let ctrl = self.decay_checked(self.check_expr(ctrl, interner)?);
         let (index, checked) = self.check_generic_assocs(&ctrl.ty, assocs, interner, span)?;
         let ty = checked[index].1.ty.clone();
@@ -4150,9 +4153,9 @@ impl Sema {
             ty,
             span,
             kind: CheckedExprKind::Generic {
-                ctrl: Box::new(ctrl),
+                ctrl: self.alloc(ctrl),
                 index,
-                assocs: checked,
+                assocs: self.alloc_slice(checked),
             },
         })
     }
@@ -4160,7 +4163,7 @@ impl Sema {
     /// C2y `_Generic ( type-name , ... )`: the type operand replaces the
     /// controlling expression, so no lvalue conversion or evaluation is
     /// involved.
-    fn check_generic_ty(&self, ty: &Ty, assocs: &[GenericAssoc], interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_generic_ty(&self, ty: &Ty, assocs: &[GenericAssoc<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let (index, checked) = self.check_generic_assocs(ty, assocs, interner, span)?;
         let selected_ty = checked[index].1.ty.clone();
         Ok(CheckedExpr {
@@ -4169,7 +4172,7 @@ impl Sema {
             kind: CheckedExprKind::GenericTy {
                 ty: ty.clone(),
                 index,
-                assocs: checked,
+                assocs: self.alloc_slice(checked),
             },
         })
     }
@@ -4181,11 +4184,11 @@ impl Sema {
     fn check_generic_assocs(
         &self,
         ctrl_ty: &Ty,
-        assocs: &[GenericAssoc],
+        assocs: &[GenericAssoc<'a>],
         interner: &Interner,
         span: Span,
-    ) -> Result<(usize, Vec<(Option<Ty>, CheckedExpr)>), CompileError> {
-        let mut checked: Vec<(Option<Ty>, CheckedExpr)> = Vec::with_capacity(assocs.len());
+    ) -> Result<(usize, Vec<(Option<Ty>, CheckedExpr<'a>)>), CompileError> {
+        let mut checked: Vec<(Option<Ty>, CheckedExpr<'a>)> = Vec::with_capacity(assocs.len());
         let mut default = None;
         let mut selected = None;
         for assoc in assocs {
@@ -4220,7 +4223,7 @@ impl Sema {
     /// struct or union (anonymous members included), each `[i]` needs
     /// an integer constant index into a member array. Bit-fields have
     /// no addressable offset and are rejected, like GCC.
-    fn check_offsetof(&self, ty: &Ty, designators: &[Designator], interner: &Interner, span: Span) -> Result<u64, CompileError> {
+    fn check_offsetof(&self, ty: &Ty, designators: &[Designator<'a>], interner: &Interner, span: Span) -> Result<u64, CompileError> {
         let Ty::Struct(_) = ty.unqualified() else {
             return Err(CompileError::new("`offsetof` needs a struct or union type", span));
         };
@@ -4237,7 +4240,7 @@ impl Sema {
                         return Err(CompileError::new("invalid `.field` designator in `offsetof`", *span));
                     };
                     let path = match self.find_field(*cid, *name, &mut visiting) {
-                        FieldHit::Found(path) => path,
+                        FieldHit::Found(path) => self.alloc_slice(path),
                         FieldHit::Miss => {
                             let text = interner.resolve(*name).unwrap_or("?");
                             return Err(CompileError::new(format!("no member named '{text}'"), *span));
@@ -4249,7 +4252,7 @@ impl Sema {
                     };
                     let mut at = *cid;
                     let mut final_is_bitfield = false;
-                    for &index in &path {
+                    for &index in path {
                         let layout = self
                             .struct_layout(at, interner)
                             .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
@@ -4303,7 +4306,7 @@ impl Sema {
         Ok(offset)
     }
 
-    fn check_cast(&self, ty: &Ty, operand: &Expr, interner: &Interner, span: Span) -> Result<CheckedExpr, CompileError> {
+    fn check_cast(&self, ty: &Ty, operand: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let operand = self.decay_checked(self.check_expr(operand, interner)?);
         // `(void)e` discards the value: legal for any operand, including
         // a `void` one (EDG lowerings wrap `void` calls this way).
@@ -4313,7 +4316,7 @@ impl Sema {
                 span,
                 kind: CheckedExprKind::Cast {
                     ty: ty.clone(),
-                    expr: Box::new(operand),
+                    expr: self.alloc(operand),
                 },
             });
         }
@@ -4331,7 +4334,7 @@ impl Sema {
                 span,
                 kind: CheckedExprKind::Cast {
                     ty: ty.clone(),
-                    expr: Box::new(operand),
+                    expr: self.alloc(operand),
                 },
             });
         }
@@ -4344,7 +4347,7 @@ impl Sema {
                 span,
                 kind: CheckedExprKind::Cast {
                     ty: ty.clone(),
-                    expr: Box::new(operand),
+                    expr: self.alloc(operand),
                 },
             });
         }
@@ -4361,7 +4364,7 @@ impl Sema {
                 span,
                 kind: CheckedExprKind::Cast {
                     ty: ty.clone(),
-                    expr: Box::new(operand),
+                    expr: self.alloc(operand),
                 },
             });
         }
@@ -4374,7 +4377,7 @@ impl Sema {
                 span,
                 kind: CheckedExprKind::Cast {
                     ty: ty.clone(),
-                    expr: Box::new(operand),
+                    expr: self.alloc(operand),
                 },
             });
         }
@@ -4398,12 +4401,12 @@ impl Sema {
                     span,
                     kind: CheckedExprKind::CompoundLiteral {
                         ty: ty.clone(),
-                        init: Box::new(Initializer::List {
-                            items: vec![InitItem {
-                                designators: vec![Designator::Field { name, span }],
-                                init: Box::new(Initializer::Expr(operand)),
+                        init: self.alloc(Initializer::List {
+                            items: self.alloc_slice([InitItem {
+                                designators: self.alloc_slice([Designator::Field { name, span }]),
+                                init: self.alloc(Initializer::Expr (operand)),
                                 span,
-                            }],
+                            }]),
                             span,
                         }),
                         storage: crate::parse::CompoundStorage::default(),

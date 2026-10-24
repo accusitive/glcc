@@ -6,7 +6,7 @@ use crate::layout::StructLayout;
 use crate::lexer::{CharLiteral, CharPrefix, Constant, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, Lexer, Punctuator, Radix, StringPrefix, Token};
 use crate::parse::{
     ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, DirectBase, DirectSuffix, Expr, ExternalDeclaration, GnuAttributes, Initializer, Parser, PtrSize, Stmt, Ty,
-    TypeQualifier, TypeQualifiers, UnaryOp, resolve_type_specifiers,
+    TypeQualifiers, UnaryOp, resolve_type_specifiers,
 };
 use crate::sema::Sema;
 use crate::span::{CompileError, Severity, Span, byte_range};
@@ -14,9 +14,10 @@ use crate::span::{CompileError, Severity, Span, byte_range};
 /// Parse driver for unit tests, mirroring any real driver: the test
 /// owns the sema and the interner, builds the lexer, and hands the
 /// tokens to the parser.
-fn test_parser<'a>(src: &str, sema: &'a mut Sema, interner: &'a mut Interner) -> Parser<'a> {
+fn test_parser<'a, 'b>(src: &str, sema: &'b mut Sema<'a>, interner: &'b mut Interner) -> Parser<'a, 'b> {
     let tokens = Lexer::new(src, &mut *interner).lex_all();
-    Parser::new(src, tokens, sema, interner)
+    let arena = sema.arena;
+    Parser::new(src, tokens, arena, sema, interner)
 }
 
 /// Assert that `parser` recorded an error whose message contains
@@ -60,7 +61,7 @@ fn lex_diagnostics(src: &str) -> Vec<CompileError> {
 
 /// The diagnostics from parsing `src` as one expression.
 fn expr_diagnostics(src: &str) -> Vec<CompileError> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let _ = parser.parse_expression();
@@ -69,7 +70,7 @@ fn expr_diagnostics(src: &str) -> Vec<CompileError> {
 
 /// The diagnostics from parsing `src` as one declarator.
 fn declarator_diagnostics(src: &str) -> Vec<CompileError> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let _ = parser.parse_declarator();
@@ -83,7 +84,7 @@ fn tu_diagnostics(src: &str) -> Vec<CompileError> {
 
 /// Translation-unit diagnostics under a specific dialect.
 fn tu_diagnostics_with_lang(src: &str, lang: LangOpts) -> Vec<CompileError> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     sema.lang = lang;
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
@@ -94,7 +95,7 @@ fn tu_diagnostics_with_lang(src: &str, lang: LangOpts) -> Vec<CompileError> {
 /// The diagnostics from lowering `src` (a declarator after `int`) to a
 /// type, covering both parse-time and `resolve_type_specifiers` errors.
 fn lower_to_ty_diagnostics(src: &str) -> Vec<CompileError> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(&format!("int {src}"), &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
@@ -106,7 +107,7 @@ fn lower_to_ty_diagnostics(src: &str) -> Vec<CompileError> {
 /// Assert that resolving `src` as declaration specifiers reports an error
 /// containing `expected` (from the parser or `resolve_type_specifiers`).
 fn assert_base_error(src: &str, expected: &str) {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
@@ -125,7 +126,7 @@ fn assert_base_error(src: &str, expected: &str) {
 /// Lex `src` and collect every punctuator spelling; panics on any
 /// non-punctuator token so tests stay focused on punctuators.
 fn lex_puncts(src: &str) -> Vec<&'static str> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let mut out = Vec::new();
@@ -216,7 +217,7 @@ fn comments_are_skipped() {
 
 #[test]
 fn block_comment_newlines_advance_lines() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("/* a\nb */ x", &mut sema, &mut interner);
     let x = parser.tokens.advance().unwrap().clone();
@@ -247,7 +248,7 @@ fn non_linemarker_directives_are_skipped() {
 /// Lex `src` and collect int/float/char constants as `"i:<spelling>"` /
 /// `"f:<spelling>"` / `"c:<spelling>"`; panics on any other token.
 fn lex_lits(src: &str) -> Vec<String> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let mut out = Vec::new();
@@ -271,7 +272,7 @@ fn lex_lits(src: &str) -> Vec<String> {
 /// `i:`/`f:`/`c:` and string literals with `s:` so mixed
 /// constant/punctuator streams can be asserted.
 fn lex_raw(src: &str) -> Vec<String> {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     finish(&parser);
@@ -348,7 +349,7 @@ fn c23_binary_literals_and_digit_separators() {
 
 #[test]
 fn literal_metadata() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("42 017 0xF 42ull 1.5 .5f 1e3l 0x1p-2", &mut sema, &mut interner);
     let mut lits = Vec::new();
@@ -381,7 +382,7 @@ fn literal_metadata() {
 
 #[test]
 fn msvc_int_suffixes() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let source = "1i8 2i16 3i32 4i64 5ui8 6ui16 7ui32 8ui64 9I64 10UI64 11i";
     let mut parser = test_parser(source, &mut sema, &mut interner);
@@ -426,7 +427,7 @@ fn works_across_lines() {
 
 #[test]
 fn splice_inside_string() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("\"ab\\\ncd\"", &mut sema, &mut interner);
     let s = parser.tokens.advance().unwrap();
@@ -440,7 +441,7 @@ fn splice_inside_string() {
 
 #[test]
 fn splice_updates_location() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("ab\\\ncd 1.\\\n5", &mut sema, &mut interner);
     let ident = parser.tokens.advance().unwrap().clone();
@@ -470,7 +471,7 @@ fn splice_updates_location() {
 /// afterwards must still land on the right line/column.
 #[test]
 fn splice_then_partial_consume() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("1+\\\nx", &mut sema, &mut interner);
     let i = parser.tokens.advance().unwrap().clone();
@@ -515,7 +516,7 @@ fn char_prefixes() {
 #[test]
 fn char_prefix_metadata() {
     use crate::lexer::CharPrefix;
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("'a' L'a' u'a' U'a' u8'a'", &mut sema, &mut interner);
     let mut prefixes = Vec::new();
@@ -534,7 +535,7 @@ fn char_prefix_metadata() {
 #[test]
 fn prefixed_char_needs_adjacency() {
     // `L 'a'` is an identifier plus a plain char, not one prefixed char.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("L 'a'", &mut sema, &mut interner);
     match &parser.tokens.advance().unwrap().val {
@@ -548,7 +549,7 @@ fn prefixed_char_needs_adjacency() {
         other => panic!("{other:?}"),
     }
     // Plain identifiers starting with a prefix letter still lex as such.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("Long unsigned", &mut sema, &mut interner);
     match &parser.tokens.advance().unwrap().val {
@@ -590,7 +591,7 @@ fn string_prefixes() {
 
 #[test]
 fn string_prefix_metadata() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(r#""a" L"a" u"a" U"a" u8"a""#, &mut sema, &mut interner);
     let mut prefixes = Vec::new();
@@ -633,7 +634,7 @@ fn c23_u8_literals_are_unsigned_char() {
 #[test]
 fn prefixed_string_needs_adjacency() {
     // `L "a"` is an identifier plus a plain string, not one prefixed string.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("L \"a\"", &mut sema, &mut interner);
     match &parser.tokens.advance().unwrap().val {
@@ -647,7 +648,7 @@ fn prefixed_string_needs_adjacency() {
         other => panic!("{other:?}"),
     }
     // Same for `u8`: spacing breaks the prefix, and `u8x` is an identifier.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("u8 \"a\" u8x", &mut sema, &mut interner);
     match &parser.tokens.advance().unwrap().val {
@@ -678,7 +679,7 @@ fn string_rejects_raw_newline() {
 
 /// Parse `src` as a single declarator; panics if tokens remain.
 fn parse_one_declarator(src: &str) -> crate::parse::Declarator {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let d = parser.parse_declarator();
@@ -699,7 +700,7 @@ fn dollar_in_identifiers_lexes() {
     // GNU `$` in identifiers (EDG/linker-generated names like
     // `vec$I...`): lexed as one identifier, leading or not.
     for (src, want) in [("vec$IN3AST8Function3ArgEEE", "vec$IN3AST8Function3ArgEEE"), ("$lead", "$lead"), ("a$b$c", "a$b$c")] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         match &parser.tokens.advance().unwrap().val {
@@ -711,7 +712,7 @@ fn dollar_in_identifiers_lexes() {
 
 #[test]
 fn declarator_plain_identifier() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("a", &mut sema, &mut interner);
     let d = parser.parse_declarator();
@@ -738,7 +739,7 @@ fn declarator_arrays() {
 
     // `[*]` only parses in prototype scope: a bare declarator rejects
     // it (see `star_outside_prototype_panics`), so parse a prototype.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("(int a[*])", &mut sema, &mut interner);
     parser.tokens.advance();
@@ -764,7 +765,7 @@ fn declarator_array_sizes() {
     // not fold to a count — so it stays a VLA. `p` needs declaring
     // first, in block scope, since a runtime bound at file scope is a
     // variably modified type there.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *p; a[*p]", &mut sema, &mut interner);
     parser.sema.push_scope();
@@ -783,7 +784,7 @@ fn declarator_array_sizes() {
 
     // Bounds are full assignment expressions over declared names, and
     // fold when they can.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; a[n + 1]", &mut sema, &mut interner);
     parser.sema.push_scope();
@@ -815,7 +816,7 @@ fn declarator_function_params() {
 
 #[test]
 fn function_parameter_names_and_types_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("f(int a, char *s, ...)", &mut sema, &mut interner);
     let d = parser.parse_declarator();
@@ -854,7 +855,7 @@ fn typedef_name_beats_identifier_list() {
     // C17 §6.7.6.3p11: an identifier that could be a typedef name is
     // taken as one, so `f(T)` prototypes one unnamed parameter instead
     // of reading as an old-style identifier-list.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; f(T)", &mut sema, &mut interner);
     parser.parse_declaration();
@@ -894,7 +895,7 @@ fn declarator_abstract() {
 
 /// Parse `int <src>` specs + declarator and lower to a `Ty`.
 fn lower_to_ty(src: &str) -> Ty {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(&format!("int {src}"), &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
@@ -1039,7 +1040,7 @@ fn ellipsis_without_named_parameter_warns_not_fails() {
 
 /// Parse `src` as declaration specifiers and resolve them to one base type.
 fn base_of(src: &str) -> Ty {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
@@ -1199,7 +1200,7 @@ fn try_declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -
 #[test]
 fn sema_redeclare_same_type_merges() {
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let first = declare_var(&mut sema, &mut intern, "x", Ty::Int);
     let second = declare_var(&mut sema, &mut intern, "x", Ty::Int);
     assert_eq!(first, second);
@@ -1216,7 +1217,7 @@ fn sema_redeclare_same_type_merges() {
 #[test]
 fn sema_redeclare_conflicting_type_reports() {
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     try_declare_var(&mut sema, &mut intern, "x", Ty::Int).unwrap();
     let err = try_declare_var(&mut sema, &mut intern, "x", Ty::Float).unwrap_err();
     assert!(err.message.contains("conflicting redeclaration"), "{:?}", err.message);
@@ -1225,7 +1226,7 @@ fn sema_redeclare_conflicting_type_reports() {
 #[test]
 fn sema_inner_scope_shadows() {
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let outer = declare_var(&mut sema, &mut intern, "x", Ty::Int);
     sema.push_scope();
     // A block-scope object without `extern` has no linkage: it shadows
@@ -1270,7 +1271,7 @@ fn sema_inner_scope_shadows() {
 #[test]
 fn sema_lookup_miss() {
     let mut intern = Interner::new();
-    let sema = Sema::new();
+    let sema = Sema::leak_for_tests();
     let x = intern.get_or_intern("x");
     assert_eq!(sema.lookup_symbol(x), None);
     assert_eq!(sema.lookup_symbol_in_current_scope(x), None);
@@ -1278,7 +1279,7 @@ fn sema_lookup_miss() {
 
 #[test]
 fn parse_declaration_registers_and_defines() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1294,7 +1295,7 @@ fn parse_declaration_registers_and_defines() {
 
 #[test]
 fn parse_declaration_extern_stays_undefined() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1306,7 +1307,7 @@ fn typeof_specifier_takes_expression_or_type_name() {
     // `typeof(expr)` keeps the operand's type exactly — arrays and
     // qualifiers do not decay — and `typeof(type-name)` names it
     // directly. Both spell a whole type specifier.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int i; const int ci; typeof (i) a; typeof (ci) b; typeof (\"xy\") c; typeof (int[5]) d;",
@@ -1343,7 +1344,7 @@ fn typeof_specifier_takes_expression_or_type_name() {
 fn builtin_types_compatible_p_folds_to_int() {
     // Top-level qualifiers and array bounds are ignored; the result is
     // an integer constant expression, so it works as an array bound.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int a[__builtin_types_compatible_p (int, const int)]; int b[__builtin_types_compatible_p (int, long) + 1]; int c[__builtin_types_compatible_p (int[5], int[])]; int d[__builtin_types_compatible_p (char *, const char *)];",
@@ -1397,7 +1398,7 @@ fn builtin_choose_expr_skips_the_unchosen_arm() {
 fn stmt_case_ranges_parse_and_check() {
     // GNU `case lo ... hi:` records both bounds; a plain `case` and
     // `default` keep `hi` empty.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void f(int x) { switch (x) { case 1 ... 5: break; case 6: break; default: break; } }",
@@ -1405,11 +1406,11 @@ fn stmt_case_ranges_parse_and_check() {
         &mut interner,
     );
     let (_, body) = parse_one_body("case range", &mut parser);
-    let [BlockItem::Stmt(Stmt::Switch { body: switch_body, .. })] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(Stmt::Switch { body: switch_body, .. })] = body.block.items else {
         panic!("{body:?}")
     };
     let Stmt::Compound(inner) = &**switch_body else { panic!("{switch_body:?}") };
-    let [range, single, default] = inner.items.as_slice() else { panic!("{inner:?}") };
+    let [range, single, default] = inner.items else { panic!("{inner:?}") };
     let BlockItem::Stmt(Stmt::Case { expr: Some(_), hi: Some(_), .. }) = range else {
         panic!("{range:?}")
     };
@@ -1425,7 +1426,7 @@ fn stmt_case_ranges_parse_and_check() {
 fn stmt_case_range_endpoint_duplicate_reports() {
     // Both range endpoints count as covered values for the duplicate
     // check, so `case 5:` after `case 1 ... 5:` is caught.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x) { switch (x) { case 1 ... 5: break; case 5: break; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1434,7 +1435,7 @@ fn stmt_case_range_endpoint_duplicate_reports() {
 
 #[test]
 fn member_attributes_may_follow_bitfield_width() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct s { unsigned a : 16; unsigned long b : 32 __attribute__((packed)); } x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1445,15 +1446,15 @@ fn member_attributes_may_follow_bitfield_width() {
     assert_eq!(members.len(), 2);
     assert!(!members[0].packed);
     assert!(members[1].packed);
-    let width = members[1].bitfield.as_ref().expect("bit-field width");
-    assert_eq!(crate::eval::eval_const(width, parser.sema, &parser.intern), Some(crate::eval::Value::Int(32)));
+    let width = members[1].bitfield.expect("bit-field width");
+    assert_eq!(width, 32);
 }
 
 #[test]
 fn alignof_function_takes_its_alignment_attribute() {
     // A function designator's alignment is its `aligned` attribute (1
     // without one, like GCC); a function *type* aligns to 1 too.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void f(void) __attribute__((aligned(256))); void g(void); __alignof__(f) + __alignof__(g) + __alignof__(int (void))",
@@ -1472,7 +1473,7 @@ fn redeclared_restrict_params_merge() {
     // C17 §6.7.6.3p15: top-level parameter qualifiers don't affect
     // compatibility — `char **` vs `char **__restrict` merge into one
     // entity (tcc.h redeclares libc functions this way).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "extern float strtof(const char *, char **); extern float strtof(const char *, char **__restrict);",
@@ -1490,7 +1491,7 @@ fn redeclared_restrict_params_merge() {
 fn struct_variable_with_forward_declared_tag() {
     // The pattern in test.c: the tag and the variable share a spelling
     // but live in different namespaces.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct test test;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1506,7 +1507,7 @@ fn struct_variable_with_forward_declared_tag() {
 
 #[test]
 fn struct_forward_declarations_merge() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; struct S; struct S *p;", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1524,7 +1525,7 @@ fn struct_forward_declarations_merge() {
 
 #[test]
 fn struct_definition_completes_forward_declaration() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; struct S { int x; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1542,7 +1543,7 @@ fn struct_definition_completes_forward_declaration() {
 
 #[test]
 fn struct_can_reference_itself_in_body() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct Node { struct Node *next; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1559,7 +1560,7 @@ fn struct_can_reference_itself_in_body() {
 
 #[test]
 fn struct_embedding_itself_by_value_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct S v; int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1567,8 +1568,8 @@ fn struct_embedding_itself_by_value_panics() {
 }
 
 /// A `Sema` with one family (or the standard level) turned off.
-fn gated_sema(lang: LangOpts) -> Sema {
-    let mut sema = Sema::new();
+fn gated_sema(lang: LangOpts) -> Sema<'static> {
+    let mut sema = Sema::leak_for_tests();
     sema.lang = lang;
     sema
 }
@@ -1623,7 +1624,7 @@ fn ptr_size_requires_ms_extensions() {
 
 #[test]
 fn ptr_size_attributes_set_pointer_width() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int * __ptr32 p; int * __ptr64 q; int *r;", &mut sema, &mut interner);
     let p = parse_decl(&mut parser);
@@ -1753,7 +1754,7 @@ fn gnu_spellings_survive_at_standard_level() {
 
 #[test]
 fn struct_member_of_never_defined_type_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct T v; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1762,7 +1763,7 @@ fn struct_member_of_never_defined_type_panics() {
 
 #[test]
 fn mutually_recursive_structs_by_value_panic() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct A { struct B v; }; struct B { int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1771,7 +1772,7 @@ fn mutually_recursive_structs_by_value_panic() {
 
 #[test]
 fn union_embedding_itself_by_value_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { union U v; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1782,7 +1783,7 @@ fn union_embedding_itself_by_value_panics() {
 fn complete_member_types_keep_working() {
     // Pointers (including self-reference), by-value members of completed
     // types, and a trailing flexible array member are all legal C.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct P { int x; }; struct L { int v; struct L *n; struct P p; }; struct F { int n; char data[]; };",
@@ -1799,7 +1800,7 @@ fn complete_member_types_keep_working() {
 
 #[test]
 fn struct_members_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct P { int a, b; struct P *next; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1814,7 +1815,7 @@ fn struct_members_parse() {
 
 #[test]
 fn empty_struct_member_declarations_are_skipped() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct E { int a; ; int b; ; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1827,7 +1828,7 @@ fn empty_struct_member_declarations_are_skipped() {
 
 #[test]
 fn tag_and_ordinary_namespaces_are_separate() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct x; int x;", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1837,7 +1838,7 @@ fn tag_and_ordinary_namespaces_are_separate() {
     assert!(parser.sema.lookup_tag(x).is_some());
     assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::Int);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; struct x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1849,7 +1850,7 @@ fn tag_and_ordinary_namespaces_are_separate() {
 fn member_list_tags_reach_the_enclosing_scope() {
     // gcc and clang both let a tag declared in a member list outlive it
     // (verified against both compilers), so glcc does too.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct O { struct I { int x; } i; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1859,7 +1860,7 @@ fn member_list_tags_reach_the_enclosing_scope() {
 
 #[test]
 fn anonymous_struct_is_complete_and_unscoped() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct { int x; } a; struct { int x; } b;", &mut sema, &mut interner);
     let a = parse_decl(&mut parser);
@@ -1880,7 +1881,7 @@ fn anonymous_struct_is_complete_and_unscoped() {
 
 #[test]
 fn union_tag_parses() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { int a; float b; } u;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -1893,7 +1894,7 @@ fn union_tag_parses() {
 
 #[test]
 fn tag_only_declaration_declares_no_object() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S;", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -1913,7 +1914,7 @@ fn struct_specifier_cannot_mix_with_primitives() {
 
 #[test]
 fn struct_redefinition_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x; }; struct S { int y; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1922,7 +1923,7 @@ fn struct_redefinition_panics() {
 
 #[test]
 fn struct_union_kind_mismatch_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; union S;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1931,7 +1932,7 @@ fn struct_union_kind_mismatch_panics() {
 
 #[test]
 fn anonymous_struct_requires_a_name() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct { int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1940,7 +1941,7 @@ fn anonymous_struct_requires_a_name() {
 
 #[test]
 fn declaration_without_declarator_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1949,7 +1950,7 @@ fn declaration_without_declarator_panics() {
 
 #[test]
 fn anonymous_struct_needs_a_body() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1958,7 +1959,7 @@ fn anonymous_struct_needs_a_body() {
 
 #[test]
 fn storage_class_in_member_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { static int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1967,7 +1968,7 @@ fn storage_class_in_member_panics() {
 
 #[test]
 fn function_member_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int f(); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -1979,7 +1980,7 @@ fn anonymous_members_nest_and_promote_access() {
     // The <bits/sigcontext.h> shape: the anonymous union stays one
     // nameless member (so it overlaps in layout), while access to its
     // fields promotes through it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct R { __extension__ union { int a; float b; }; int y; }; int f(void) { struct R r; r.a = 1; r.b = 2.0; return r.y; }",
@@ -2022,7 +2023,7 @@ fn member_without_declarator_declares_nothing() {
     // A named definition, a bare tag, or an enum without a declarator
     // declares no member (gcc warns and accepts); only anonymous
     // struct/unions splice.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct O { struct I { int x; }; struct Q; enum { A }; int y; }; int z = A;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2036,7 +2037,7 @@ fn member_without_declarator_declares_nothing() {
 
 #[test]
 fn aggregate_bit_field_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { struct { int x; } : 3; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2045,7 +2046,7 @@ fn aggregate_bit_field_panics() {
 
 #[test]
 fn bit_field_members_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a : 3, b; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -2054,11 +2055,11 @@ fn bit_field_members_parse() {
     let def = &parser.sema.structs[tag.0 as usize];
     assert_eq!(def.members.len(), 2);
     assert!(def.members[0].bitfield.is_some());
-    assert!(matches!(def.members[0].bitfield.as_ref().unwrap().kind, CheckedExprKind::Int(_)));
+    assert!(def.members[0].bitfield.is_some());
     assert!(def.members[1].bitfield.is_none());
 
     // Unnamed widths (`unsigned : 0;`) declare no member name.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { unsigned : 0; int x : 1; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -2072,7 +2073,7 @@ fn bit_field_members_parse() {
 
 #[test]
 fn bit_field_width_must_be_integer() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a : 1.5; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2127,7 +2128,7 @@ fn implicit_int_function_definition() {
     // fu (unsigned short data)` in alias-3 / pr79043); the identifier
     // opens the declarator and the missing specifier defaults to
     // `int`, C89-style.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static inline fu (unsigned short data) { return data; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2138,7 +2139,7 @@ fn implicit_int_function_definition() {
 
 #[test]
 fn enum_constants_are_ints() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A, B, C }; int x = B; int y = A + C;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2159,7 +2160,7 @@ fn enum_constants_are_ints() {
 fn enum_explicit_values_and_trailing_comma() {
     // Explicit values check as integer-typed (later ones may use
     // earlier ones); a trailing comma is allowed.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A = 3, B = A + 1, C, };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2173,7 +2174,7 @@ fn enum_explicit_values_and_trailing_comma() {
 
 #[test]
 fn enum_tag_forward_and_define() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E; enum E { A }; enum E e;", &mut sema, &mut interner);
     let e = parser.intern.get_or_intern("E");
@@ -2194,7 +2195,7 @@ fn enum_tag_forward_and_define() {
 fn anonymous_enum_declares_no_object() {
     // The dwm.c shape: bare `enum { ... };` declares constants only,
     // contributing nothing to the translation unit.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A, B }; int a;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2203,7 +2204,7 @@ fn anonymous_enum_declares_no_object() {
 
 #[test]
 fn typedef_enum_is_usable_both_ways() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef enum { A } T; T x;", &mut sema, &mut interner);
     let t = parse_decl(&mut parser);
@@ -2218,7 +2219,7 @@ fn typedef_enum_is_usable_both_ways() {
 fn enum_values_flow_into_integer_positions() {
     // Enumerators in bounds, designators, case labels, calls, and
     // enum-typed objects passed where integers are expected.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "enum { A, B, Last }; int arr[Last]; int d[] = { [B] = 5 }; enum E { C }; enum E e; int f(int x); int y = f(e); int g(int x) { switch (x) { case A: return B; default: return C; } }",
@@ -2231,7 +2232,7 @@ fn enum_values_flow_into_integer_positions() {
 
 #[test]
 fn inner_enum_definition_shadows_outer() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E { A }; int f(void) { enum E { B }; return B; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2244,7 +2245,7 @@ fn inner_enum_definition_shadows_outer() {
 
 #[test]
 fn enum_struct_tag_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; enum S { A };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2253,7 +2254,7 @@ fn enum_struct_tag_conflict_panics() {
 
 #[test]
 fn struct_enum_tag_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E { A }; struct E;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2262,7 +2263,7 @@ fn struct_enum_tag_conflict_panics() {
 
 #[test]
 fn enum_redefinition_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum E { A }; enum E { B };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2271,7 +2272,7 @@ fn enum_redefinition_panics() {
 
 #[test]
 fn enumerator_redeclaration_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A }; enum { A };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2280,7 +2281,7 @@ fn enumerator_redeclaration_panics() {
 
 #[test]
 fn enumerator_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A }; int f(void) { A = 1; return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2369,7 +2370,7 @@ fn enum_fixed_underlying_type_redeclaration_checks() {
 #[test]
 fn inner_struct_definition_shadows_outer() {
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let s = intern.get_or_intern("S");
     let outer = sema.define_tag(s, false, Span::dummy()).unwrap();
     sema.complete_tag(outer, vec![]).unwrap();
@@ -2385,7 +2386,7 @@ fn inner_struct_definition_shadows_outer() {
 #[test]
 fn forward_reference_reuses_visible_tag() {
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let s = intern.get_or_intern("S");
     let outer = sema.define_tag(s, false, Span::dummy()).unwrap();
     sema.push_scope();
@@ -2403,7 +2404,7 @@ fn forward_reference_reuses_visible_tag() {
 
 #[test]
 fn typedef_struct_anonymous_declares_alias() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef struct { int i; } Arg; Arg a;", &mut sema, &mut interner);
     let arg = parse_decl(&mut parser);
@@ -2424,7 +2425,7 @@ fn typedef_struct_anonymous_declares_alias() {
 
 #[test]
 fn typedef_carries_primitive_type() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; T x;", &mut sema, &mut interner);
     let t = parse_decl(&mut parser);
@@ -2439,7 +2440,7 @@ fn typedef_carries_primitive_type() {
 fn typedef_tag_is_usable_both_ways() {
     // `typedef struct Monitor Monitor;` — same spelling as a tag and a
     // typedef name, no conflict.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef struct Monitor Monitor; Monitor *m;", &mut sema, &mut interner);
     let td = parse_decl(&mut parser);
@@ -2455,7 +2456,7 @@ fn typedef_tag_is_usable_both_ways() {
 
 #[test]
 fn typedef_redeclaration_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; typedef float T;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2464,7 +2465,7 @@ fn typedef_redeclaration_conflict_panics() {
 
 #[test]
 fn typedef_and_object_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; int T;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2475,19 +2476,19 @@ fn typedef_and_object_conflict_panics() {
 
 #[test]
 fn gnu_extension_marker_is_ignored() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__extension__ typedef long long int greg_t;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__extension__ int x;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { __extension__ int x; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -2498,7 +2499,7 @@ fn gnu_extension_marker_is_ignored() {
 
 #[test]
 fn gnu_qualifier_spellings_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *__restrict p;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -2509,13 +2510,13 @@ fn gnu_qualifier_spellings_parse() {
 
     // `__const` in specifiers qualifies the base type; `inline` counts
     // as a function specifier.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__const int c;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
     assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::qualified(TypeQualifiers::CONST, Ty::Int));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static __inline int f(void);", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -2524,7 +2525,7 @@ fn gnu_qualifier_spellings_parse() {
     // Leading GNU `inline` opens the declaration too (`__inline__ int
     // f();`, pervasive in system headers and EDG C output) — it must
     // not be misread as an implicit-int declarator named `__inline__`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__inline__ int f(void) { return 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2534,7 +2535,7 @@ fn gnu_qualifier_spellings_parse() {
 #[test]
 fn gnu_attribute_is_ignored() {
     // The <errno.h> shape: attributes after a function declarator.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "extern int *__errno_location (void) __attribute__ ((__nothrow__)) __attribute__ ((__const__));",
@@ -2549,31 +2550,31 @@ fn gnu_attribute_is_ignored() {
     assert_eq!(**pointee, Ty::Int);
 
     // Attributes on typedefs, members, parameters, and after a body.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T __attribute__ ((__mode__ (__SI__)));", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
     assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::Int);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x __attribute__ ((aligned (8))); };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x; } __attribute__ ((aligned (8))) v;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
     assert!(matches!(parser.sema.decls[id.0 as usize].ty, Ty::Struct(_)));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x __attribute__ ((unused)));", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
     assert!(matches!(parser.sema.decls[id.0 as usize].ty, Ty::Func { .. }));
 
     // A prefix annotation on its own line, as in <X11/Xlib.h>.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__ ((deprecated)) extern int old_fn(void);", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2582,7 +2583,7 @@ fn gnu_attribute_is_ignored() {
     // An annotation between the specifiers and the declarator, as in
     // sqlite (`static int __attribute__((noinline)) f(void);`), plus a
     // statement annotation (`__attribute__((fallthrough));`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "static int __attribute__ ((noinline)) f(void); int g __attribute__ ((unused)); int h(int x) { switch (x) { case 1: __attribute__ ((fallthrough)); default: return 0; } }",
@@ -2594,7 +2595,7 @@ fn gnu_attribute_is_ignored() {
 
     // Annotations interleave specifiers, even before a union body with
     // a nested-brace initializer (the sqlite `aMutex` shape).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct M { int t; }; union U { struct M m; char s[4]; }; static __attribute__ ((aligned (8))) union U u[] = { { .m = { 1 } } };",
@@ -2609,7 +2610,7 @@ fn gnu_attribute_is_ignored() {
 fn constructor_attributes_land_on_binding() {
     // Suffix attributes ride the binding (bare = 65535, explicit
     // priority kept).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void c(void) __attribute__((constructor(101))); void d(void) __attribute__((destructor)); void e(void) __attribute__((constructor));",
@@ -2635,7 +2636,7 @@ fn constructor_attributes_land_on_binding() {
 fn constructor_attribute_merges_from_prototype() {
     // EDG's shape: the extern prototype carries the attribute, the
     // definition is bare. First wins on merge.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern void s(void) __attribute__((__constructor__)); void s(void) {}", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2651,7 +2652,7 @@ fn constructor_attribute_merges_from_prototype() {
 fn weak_attribute_lands_on_binding() {
     // Suffix, prefix, and `__weak__` spellings all mark the symbol;
     // plain declarations stay strong.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void a(void) __attribute__((weak)); __attribute__((weak)) void b(void) {} __attribute__((__weak__)) int c;",
@@ -2665,7 +2666,7 @@ fn weak_attribute_lands_on_binding() {
         let id = parser.sema.lookup_symbol(sym).expect("declared");
         assert!(parser.sema.decls[id.0 as usize].weak, "{name} should be weak");
     }
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void d(void);", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2680,7 +2681,7 @@ fn alias_attribute_resolves_to_the_target_declaration() {
     // `alias("name")` denotes the named entity's storage: the binding
     // records the target's declaration, and the target's own binding is
     // untouched.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[10]; extern int b[10] __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     let a = parse_decl(&mut parser);
@@ -2689,7 +2690,7 @@ fn alias_attribute_resolves_to_the_target_declaration() {
     assert_eq!(parser.sema.decls[a.0 as usize].alias, None);
     // A later definition merges into the declaration the alias named,
     // so the target id stays stable.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[10]; extern int b[10] __attribute__((alias(\"a\"))); int a[10] = {1};", &mut sema, &mut interner);
     let a = parse_decl(&mut parser);
@@ -2702,7 +2703,7 @@ fn alias_attribute_resolves_to_the_target_declaration() {
 
 #[test]
 fn alias_target_must_be_declared() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int b __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     parser.parse_declaration();
@@ -2711,7 +2712,7 @@ fn alias_target_must_be_declared() {
 
 #[test]
 fn alias_target_type_must_match() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a; extern long b __attribute__((alias(\"a\")));", &mut sema, &mut interner);
     parser.parse_declaration();
@@ -2723,7 +2724,7 @@ fn alias_target_type_must_match() {
 fn weak_attribute_merges_from_prototype() {
     // EDG's shape: the extern prototype carries the attribute, the
     // definition is bare. Any declaration marks it (OR merge).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern __attribute__((__weak__)) void s(void); void s(void) {}", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2741,7 +2742,7 @@ fn extern_inline_weak_only_in_cpp_mode() {
     // inline` definition, which needs vague linkage. Plain C keeps
     // strong-standalone semantics.
     for (cpp_mode, expect_weak) in [(false, false), (true, true)] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         sema.weak_extern_inline = cpp_mode;
         let mut interner = Interner::new();
         let mut parser = test_parser("extern inline int f(void) { return 1; }", &mut sema, &mut interner);
@@ -2760,7 +2761,7 @@ fn plain_inline_definition_is_weak_in_cpp_mode() {
     // EDG's COMDAT inline definitions drop the `extern` on the
     // definition (`__inline__ ... { ... }`); they still need vague
     // linkage in C++ mode, while `static inline` stays internal.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     sema.weak_extern_inline = true;
     let mut interner = Interner::new();
     let mut parser = test_parser("inline int f(void) { return 1; } static inline int g(void) { return 2; }", &mut sema, &mut interner);
@@ -2780,7 +2781,7 @@ fn asm_labels_record_the_emitted_symbol() {
     // C spelling stays the declaration's lookup key. EDG emits these
     // for the C library overloads it mangles
     // (`_Z6strchrPci(...) __asm__("strchr")`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern char *strchr_(const char *, int) __asm__(\"strchr\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2795,7 +2796,7 @@ fn asm_label_from_a_prototype_rides_the_definition() {
     // First wins across declarations, like `section`: the extern
     // prototype usually carries the label while the definition omits
     // it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int f(int) __asm__(\"g\");\nint f(int x) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -2817,7 +2818,7 @@ fn inline_specifier_lands_on_binding() {
         "__inline int f(void) { return 1; }",
         "__forceinline int f(void) { return 1; }",
     ] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
@@ -2826,7 +2827,7 @@ fn inline_specifier_lands_on_binding() {
         let id = parser.sema.lookup_symbol(sym).unwrap();
         assert!(parser.sema.decls[id.0 as usize].inline, "{src} should be inline");
     }
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2840,7 +2841,7 @@ fn inline_specifier_lands_on_binding() {
 fn inline_merges_from_prototype() {
     // Any declaration may carry `inline` (OR merge, like `weak`):
     // a marked prototype marks the later definition and vice versa.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("inline int f(void); int f(void) { return 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2849,7 +2850,7 @@ fn inline_merges_from_prototype() {
     let id = parser.sema.lookup_symbol(sym).unwrap();
     assert!(parser.sema.decls[id.0 as usize].inline);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void); inline int f(void) { return 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2863,7 +2864,7 @@ fn inline_merges_from_prototype() {
 fn gnu_asm_label_is_ignored() {
     // The <stdio.h> `__REDIRECT` shape: an asm rename after the
     // declarator, before the `;`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "extern int scanf (const char *__restrict __format, ...) __asm__ (\"\" \"__isoc99_scanf\");",
@@ -2878,7 +2879,7 @@ fn gnu_asm_label_is_ignored() {
     assert_eq!(params.len(), 1);
 
     // A top-level assembler line declares nothing.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__asm__ (\".symver foo, foo@VERS\"); int x;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2889,7 +2890,7 @@ fn gnu_asm_label_is_ignored() {
 fn gnu_predefined_int128_typedefs() {
     // GCC predefines `__uint128_t`/`__int128_t` with no declaration
     // (used bare by sqlite).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__uint128_t r; __int128_t s;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -2902,7 +2903,7 @@ fn gnu_predefined_int128_typedefs() {
 #[test]
 fn gnu_int128_parses() {
     // The <linux/types.h> shape: `__int128` combines only with a sign.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef __signed__ __int128 __s128; typedef unsigned __int128 __u128; __s128 s; __u128 u;",
@@ -2918,7 +2919,7 @@ fn gnu_int128_parses() {
     let id = parser.sema.lookup_symbol(u).unwrap();
     assert_eq!(parser.sema.decls[id.0 as usize].ty, Ty::UnsignedInt128);
     // Sizes, ranks, and conversions follow 16-byte integers.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     assert_eq!(parser.sema.type_size(&Ty::Int128, &parser.intern), Some(16));
@@ -2933,7 +2934,7 @@ fn int128_with_long_panics() {
 #[test]
 fn gnu_signed_spelling_parses() {
     // The <asm-generic/int-ll64.h> shape.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef __signed__ char __s8;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -2944,7 +2945,7 @@ fn gnu_signed_spelling_parses() {
 #[test]
 fn builtin_va_list_is_a_type() {
     // The <stdio.h> shape: `va_list` built on the builtin type.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef __builtin_va_list __gnuc_va_list; typedef __gnuc_va_list va_list; int vfprintf(void *s, const char *f, va_list ap);",
@@ -2968,7 +2969,7 @@ fn windows_builtin_va_list_is_char_pointer() {
         "typedef __builtin_va_list va_list; typedef char* va_list;",
         "typedef char* va_list; typedef __builtin_va_list va_list;",
     ] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         sema.target = Target::WINDOWS_X86_64;
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
@@ -2988,7 +2989,7 @@ fn windows_builtin_va_list_is_char_pointer() {
 fn msvc_spellings_and_annotations_parse() {
     // The UCRT header shape: `__int64` spellings, calling-convention
     // keywords, `__declspec`, and `__pragma(pack(...))` around it all.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "__pragma(pack(push, 8)) __declspec(noinline) unsigned __int64* __cdecl f(void); __int32 g(__int16 x); __pragma(pack(pop))",
@@ -3018,7 +3019,7 @@ fn msvc_spellings_and_annotations_parse() {
 fn builtin_float128_is_a_type() {
     // The <bits/floatn.h> shape: an opaque quad-precision type that
     // names objects and parameters but takes part in nothing else yet.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef __float128 _Float128; extern __float128 acosf128(__float128);", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -3029,7 +3030,7 @@ fn builtin_float128_is_a_type() {
 
     // A bare builtin-typed parameter prototypes (it is not an
     // old-style identifier list).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(__float128);", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -3048,7 +3049,7 @@ fn builtin_type_cannot_combine() {
 
 #[test]
 fn string_literal_decays_for_pointer_targets() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "char *p = \"abc\"; int strcmp(const char *, const char *); int f(void) { return strcmp(p, \"-v\"); }",
@@ -3069,7 +3070,7 @@ fn string_literal_decays_for_pointer_targets() {
 fn function_designator_decays_for_pointer_targets() {
     // Storing a function in a function-pointer object (the
     // `Button.func = spawn` shape from dwm).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct Arg { int i; }; void spawn(const struct Arg *); void (*fp)(const struct Arg *) = spawn;",
@@ -3083,7 +3084,7 @@ fn function_designator_decays_for_pointer_targets() {
 #[test]
 fn function_designator_is_a_condition() {
     // `if (handler[i])` from dwm: a function value decays to a scalar.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void h(void); void (*handler[2])(void); int f(void) { if (handler[0]) return 1; if (h) return 2; return 0; }",
@@ -3098,7 +3099,7 @@ fn function_designator_is_a_condition() {
 fn pointer_qualifier_addition_in_assignment() {
     // The `execvp(file, argv)` shape from dwm's `spawn`: `char **`
     // converts to `char *const *`, and casts/subscripts feed it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void execvp(const char *, char *const *); void s(const void *v) { execvp(((char **)v)[0], (char **)v); }",
@@ -3113,7 +3114,7 @@ fn pointer_qualifier_addition_in_assignment() {
 fn dropping_pointer_qualifiers_warns_only() {
     // GCC/clang diagnose the dropped `volatile` (-Wdiscarded-qualifiers)
     // but still compile the assignment; `-w` silences it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("char *volatile *p; char **q; void f(void) { q = p; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -3125,7 +3126,7 @@ fn qualified_struct_assignment_accepted() {
     // Copying a struct ignores top-level qualifiers (mrustc
     // returns `const struct` by value): adding `const` to the
     // target, or copying from a qualified source, copies bytes.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct S { int x; }; const struct S f(struct S *p) { struct S t; t = (*(struct S *)p); return t; } const struct S g; const struct S h = g;",
@@ -3138,7 +3139,7 @@ fn qualified_struct_assignment_accepted() {
 
 #[test]
 fn distinct_struct_assignment_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct A { int x; }; struct B { int x; }; void f(void) { struct A a; struct B b; a = b; }",
@@ -3153,7 +3154,7 @@ fn distinct_struct_assignment_rejected() {
 fn ternary_decays_array_and_function_operands() {
     // The `ch.res_class ? ch.res_class : broken` shape from dwm: an
     // array and a pointer compare as pointers, as do two functions.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "char *p; char a[4]; void f(void); void g(void); void (*fp)(void); void h(int c) { p = c ? a : p; fp = c ? f : g; }",
@@ -3166,7 +3167,7 @@ fn ternary_decays_array_and_function_operands() {
 
 #[test]
 fn variadic_call_decays_and_promotes() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void h(const char *s, ...); void g(void) { h(\"a\", 1); }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -3175,7 +3176,7 @@ fn variadic_call_decays_and_promotes() {
 
 #[test]
 fn char_array_from_string_literal() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "char s[] = \"abc\"; static char d[2] = \"0\"; char *tags[] = { \"1\", ((void *)0) };",
@@ -3188,7 +3189,7 @@ fn char_array_from_string_literal() {
 
 #[test]
 fn string_literal_for_non_char_array_still_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[2] = \"ab\";", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3218,7 +3219,7 @@ fn compound_assignment_keeps_the_lvalue_once() {
 
 #[test]
 fn compound_literal_array_decays() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *p = (int[]){ 1, 2, 3 };", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -3234,7 +3235,7 @@ fn compound_literal_shcmd_shape() {
     // The `SHCMD` shape from dwm's config: an array of `const char *`
     // with a null terminator, used as an initializer and as a call
     // argument.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "char *cmd; void f(const char **); const char **p = (const char *[]){ \"/bin/sh\", \"-c\", cmd, ((void *)0) }; void g(void) { f((const char *[]){ \"a\" }); }",
@@ -3247,7 +3248,7 @@ fn compound_literal_shcmd_shape() {
 
 #[test]
 fn compound_literal_struct_with_designator() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct P { int x, y; }; struct P p = (struct P){ 1, 2 }; struct A { int i; }; struct A a = (struct A){ .i = 1 };",
@@ -3264,7 +3265,7 @@ fn compound_literal_direct_sizeof_operand() {
     // parenthesized type-name (tcctest.c: "and as direct sizeof
     // argument (as unary expression)"): the `{` after the closing
     // paren selects the operand branch.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int n = sizeof (struct { short i; short j; }){ 4, 5 }; int m = sizeof (int[2]){ 1, 2 }; int a = __alignof__ (int){ 1 };",
@@ -3468,7 +3469,7 @@ fn selection_declarations_scope_over_branches() {
 #[test]
 fn countof_folds_complete_arrays() {
     use crate::eval::Value;
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int a[7]; int n = _Countof(a); int m = _Countof(int[3][4]); int s = _Countof(\"abcd\");",
@@ -3502,7 +3503,7 @@ fn countof_rejects_non_arrays_and_incomplete_arrays() {
 fn compound_literal_unknown_array_completes() {
     // `(int[]){1, 2, 3}` completes to `int[3]` (C17 §6.5.2.5p3), so
     // `sizeof` folds to 12 on LP64.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n = sizeof((int[]){ 1, 2, 3 });", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -3513,7 +3514,7 @@ fn compound_literal_unknown_array_completes() {
     assert!(parser.tokens.is_empty());
     // The braced lone-string form completes too (tcctest.c's
     // `(char []){ "tralala3" }`), collapsing to the bare shape.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n = sizeof((char[]){ \"ab\" });", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -3529,7 +3530,7 @@ fn compound_literal_postfix_attaches_to_literal() {
     // A compound literal is a postfix expression (C17 §6.5.2.5p1):
     // subscripting and member access apply to the object itself,
     // not to a parenthesized group around it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct P { int x, y; }; int f(void) { return (int[]){ 0, 1, 2 }[2] + (struct P){ 1, 2 }.y; }",
@@ -3544,7 +3545,7 @@ fn compound_literal_postfix_attaches_to_literal() {
 #[test]
 fn compound_literal_is_assignable_lvalue() {
     // The literal names an object, so it accepts assignment like one.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { (int){ 3 } = 5; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -3554,7 +3555,7 @@ fn compound_literal_is_assignable_lvalue() {
 
 #[test]
 fn compound_literal_function_type_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int F(void); void f(void) { (F){ 0 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3563,7 +3564,7 @@ fn compound_literal_function_type_rejected() {
 
 #[test]
 fn compound_literal_vla_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { (int[n]){ 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3573,7 +3574,7 @@ fn compound_literal_vla_rejected() {
 #[test]
 fn compound_literal_uncompletable_rejected() {
     // A non-constant designator leaves `(int[])` without a size.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; void f(void) { (int[]){ [x] = 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3617,7 +3618,7 @@ fn c23_compound_literal_storage_classes() {
 fn builtin_va_start_end_declare_on_call() {
     // util.c's `die`: `va_start`/`va_end` expand to builtins declared
     // nowhere; calling them declares their prototypes.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef __builtin_va_list va_list; void vfprintf(void *, const char *, va_list); void die(const char *fmt, ...) { va_list ap; __builtin_va_start(ap, fmt); vfprintf(((void *)0), fmt, ap); __builtin_va_end(ap); }",
@@ -3639,8 +3640,8 @@ fn builtin_va_start_end_declare_on_call() {
 
 /// Parse one `= ...` declaration and return its stored initializer.
 
-fn checked_init(src: &str) -> Initializer {
-    let mut sema = Sema::new();
+fn checked_init(src: &str) -> Initializer<'_> {
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -3710,7 +3711,7 @@ fn literal_types_follow_values() {
 
 #[test]
 fn integer_constant_out_of_range_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 0x10000000000000000;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3741,7 +3742,7 @@ fn enumerator_values_fold() {
 
 #[test]
 fn enumerator_rejects_non_constant() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; enum { A = x };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3750,7 +3751,7 @@ fn enumerator_rejects_non_constant() {
 
 #[test]
 fn enumerator_rejects_division_by_zero() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { Z = 1 / 0 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3760,7 +3761,7 @@ fn enumerator_rejects_division_by_zero() {
 #[test]
 fn enumerator_rejects_bad_shift() {
     // Shifting by the width or more is undefined.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { S = 1 << 40 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3771,7 +3772,7 @@ fn enumerator_rejects_bad_shift() {
 fn enumerator_takes_smallest_fitting_type() {
     // C23 §6.7.2.2p4 ladder: `1ll << 40` needs `long`,
     // `0xffffffffU` needs `unsigned int`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A = 1ll << 40, B = 0xffffffffU };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3784,7 +3785,7 @@ fn enumerator_takes_smallest_fitting_type() {
 
 #[test]
 fn enumerator_rejects_beyond_unsigned_long() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { A = (unsigned __int128)1 << 100 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3793,7 +3794,7 @@ fn enumerator_rejects_beyond_unsigned_long() {
 
 #[test]
 fn float_enumerator_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("enum { F = 1.5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3804,7 +3805,7 @@ fn float_enumerator_rejected() {
 fn folded_zero_is_null() {
     // Any folded zero — not just a `0` spelling — is a null pointer
     // constant, including `'\\0'`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *p = 1 - 1; int *q = '\\0';", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -3897,7 +3898,7 @@ fn int_literal_values_llp64() {
 
 #[test]
 fn static_assert_checks_and_disappears() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let src = "int x;\n_Static_assert(sizeof(int) == 4, \"int is 4\");\nint f(void) { _Static_assert(1 == 1, \"one\"); return x; }";
     let mut parser = test_parser(src, &mut sema, &mut interner);
@@ -3906,7 +3907,7 @@ fn static_assert_checks_and_disappears() {
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [BlockItem::Stmt(Stmt::Empty { .. }), BlockItem::Stmt(_)] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(Stmt::Empty { .. }), BlockItem::Stmt(_)] = body.block.items else {
         panic!("expected the static assert to vanish, got {:?}", body.block.items)
     };
 }
@@ -3934,7 +3935,7 @@ fn c23_bare_static_assert() {
 
 #[test]
 fn static_assert_failure_reports_message() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { _Static_assert(0, \"boom\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -3943,7 +3944,7 @@ fn static_assert_failure_reports_message() {
 
 #[test]
 fn static_assert_rejects_non_constant() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { _Static_assert(n, \"var\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4069,7 +4070,7 @@ fn long_double_f80_bytes() {
 fn long_double_constant_folding() {
     use crate::eval::{FloatValue, Value, eval_const};
     fn fold(src: &str) -> Option<Value> {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         let expr = parser.parse_expression();
@@ -4108,7 +4109,7 @@ fn long_double_constant_folding() {
 fn layout_of(src: &str, tag: &str) -> (StructLayout, Interner) {
     // Member names in a layout are interned symbols, so the interner
     // has to be returned alongside it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4141,7 +4142,7 @@ fn layout_entries<'a>(parser_intern: &'a Interner, layout: &'a StructLayout) -> 
 
 #[test]
 fn type_sizes_and_aligns() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let size = |ty: &Ty| parser.sema.type_size(ty, &parser.intern);
@@ -4177,7 +4178,7 @@ fn type_sizes_and_aligns() {
 
 #[test]
 fn layout_plain_struct() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct P { char a; int b; double d; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4241,7 +4242,7 @@ fn layout_probed_bitfields() {
     // Offsets and bits within the packed shape: a bit-field records
     // the storage unit holding it (so accesses never overhang the
     // struct) and the bit index of its first bit within that unit.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct B { char c; int x : 3; int y : 5; char d; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4252,7 +4253,7 @@ fn layout_probed_bitfields() {
         layout_entries(&parser.intern, &layout),
         [("c", 0, None), ("x", 0, Some(8)), ("y", 0, Some(11)), ("d", 2, None)]
     );
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct H { char c; int x : 9; char d; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4265,7 +4266,7 @@ fn layout_probed_bitfields() {
 #[test]
 fn layout_unknown_without_hanging() {
     // Incomplete types have no layout ...
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4275,7 +4276,7 @@ fn layout_unknown_without_hanging() {
     assert_eq!(parser.sema.type_size(&Ty::Struct(id), &parser.intern), None);
     // ... nor do recursive types (rejected by the parser, but still
     // constructible below it — layout must not hang on them).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let s = interner.get_or_intern("S");
     let id = sema.define_tag(s, false, Span::dummy()).unwrap();
@@ -4303,7 +4304,7 @@ fn layout_follows_a_custom_target() {
         int_align: 2,
         ..Target::LP64
     };
-    let mut sema = Sema::with_target(target);
+    let mut sema = Sema::leak_with_target_for_tests(target);
     let mut interner = Interner::new();
     let mut parser = test_parser("struct P { char c; int x; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4346,7 +4347,7 @@ fn sizeof_folds_in_constants() {
 
 #[test]
 fn negative_bit_field_width_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : -1; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4355,7 +4356,7 @@ fn negative_bit_field_width_panics() {
 
 #[test]
 fn over_wide_bit_field_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { char c : 9; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4364,7 +4365,7 @@ fn over_wide_bit_field_panics() {
 
 #[test]
 fn named_zero_width_bit_field_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : 0; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4382,7 +4383,7 @@ fn abstract_function_declarators_parse() {
     // A `(` opening on specifiers is a parameter list, never grouping
     // (verified against gcc): abstract function declarators in
     // type-names, casts, and parameters.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef int T; int f(int (int)); int g(int (int *)); int h(int (void)); int k(int (T)); int e(int (int, char));",
@@ -4419,7 +4420,7 @@ fn abstract_function_declarators_parse() {
 fn attributes_between_pointer_and_declarator() {
     // GNU attributes may sit between pointer levels or between the
     // pointer list and the direct declarator (verified against gcc).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int * __attribute__((noinline)) f(void); int * __attribute__((x)) * __attribute__((y)) g(int t);",
@@ -4468,7 +4469,7 @@ fn parenthesized_declarator_parameters_parse() {
     // A redundant paren around a parameter's declarator is grouping,
     // not an empty parameter list: `void ((*f)())` declares a
     // function-pointer parameter (verified against gcc).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void q(void ((*f)()), void ((*g)(void)));", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4491,7 +4492,7 @@ fn parenthesized_declarator_parameters_parse() {
 fn sizeof_abstract_function_type_sizes_one() {
     // `sizeof(int (int))` parses as a function type (like gcc, which
     // warns and sizes it 1).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("unsigned long s = sizeof(int (int));", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4504,13 +4505,13 @@ fn sizeof_abstract_function_type_sizes_one() {
 fn designator_descends_into_anonymous_member() {
     // `.b` names a field of the anonymous union; the cursor continues
     // after it, so a following bare item takes the next member.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct R { union { int a; float b; }; int y; } r = { .b = 2.0, .y = 1 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct R { union { int a; float b; }; int y; } r = { .a = 1, 2 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4520,7 +4521,7 @@ fn designator_descends_into_anonymous_member() {
 #[test]
 fn brace_elision_crosses_anonymous_members() {
     // Flat items descend into anonymous struct members transparently.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct O { struct { int x; int y; }; int z; } o = { 1, 2, 3 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4529,14 +4530,14 @@ fn brace_elision_crosses_anonymous_members() {
     // An anonymous union is not transparent, matching GCC: one item
     // initializes the union, the next moves on to the following
     // member (`{ 1, 2 }` is `a = 1, c = 2`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct R { union { int a; int b; }; int c; } r = { 1, 2 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 
     // ... including nested anonymous structs.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct P { struct { struct { int x; } i; int y; }; int z; } p = { 1, 2, 3 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4547,17 +4548,17 @@ fn brace_elision_crosses_anonymous_members() {
 fn chained_and_array_designators() {
     // `.i.x` chains through a named member; `.arr[1]` selects into a
     // member array; the two compose.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct I { int x; }; struct O { struct I i; int y; } o = { .i.x = 5 };", &mut sema, &mut interner);
     assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int arr[3]; int y; } s = { .arr[1] = 5, .y = 6 };", &mut sema, &mut interner);
     assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct P { int x; }; struct S { struct P ps[2]; } s = { .ps[1].x = 7 };", &mut sema, &mut interner);
     assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1);
@@ -4572,7 +4573,7 @@ fn obsolete_colon_designators() {
         "union U { double d; int i[2]; } u = { d: -0.25 };",
         "struct T { int c[3]; } t = { c: {1, 2, 3} };",
     ] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1, "{src}");
@@ -4583,7 +4584,7 @@ fn obsolete_colon_designators() {
 fn union_designated_items_may_repeat() {
     // Designated union items never count as excess (only a second
     // *bare* item does).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { int a; float b; } u = { .a = 1, .b = 2.0 };", &mut sema, &mut interner);
     assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1);
@@ -4591,7 +4592,7 @@ fn union_designated_items_may_repeat() {
 
 #[test]
 fn union_second_bare_item_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("union U { int a; float b; } u = { 1, 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4600,7 +4601,7 @@ fn union_second_bare_item_panics() {
 
 #[test]
 fn too_many_bare_initializers_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a; } s = { 1, 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4610,7 +4611,7 @@ fn too_many_bare_initializers_panics() {
 #[test]
 fn brace_elision_into_array_member() {
     // Bare scalars fill an array member in order (C17 §6.7.9p20).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { char f1; int f2[2]; } object = {'X', 8, 9};", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4619,7 +4620,7 @@ fn brace_elision_into_array_member() {
 
 #[test]
 fn brace_elision_through_nested_struct() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct R { struct { long x; } a, b; } r = { 100, 200 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4630,7 +4631,7 @@ fn brace_elision_through_nested_struct() {
 fn brace_elision_into_array_elements() {
     // Each braced list is one element; bare scalars inside elide
     // through the element's array member.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { unsigned u[4]; } a[] = { { 1, 2, 3, 4 }, { 0 } };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4640,7 +4641,7 @@ fn brace_elision_into_array_elements() {
 #[test]
 fn brace_elision_single_scalar_into_array() {
     // One scalar initializes the first element, the rest zero-fill.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a[4]; } s = { 5 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4652,7 +4653,7 @@ fn braced_list_initializes_anonymous_member_itself() {
     // A braced list fills the anonymous aggregate's fields; it must
     // not descend to the first leaf (`{"1234", "567"}` is x and y,
     // not two initializers for x).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "union U { struct { char x[4]; char y[4]; }; struct { char z[8]; }; } u = {{\"1234\", \"567\"}};",
@@ -4665,7 +4666,7 @@ fn braced_list_initializes_anonymous_member_itself() {
 
 #[test]
 fn ambiguous_designator_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct O { union { int x; }; union { int x; }; } o = { .x = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4674,7 +4675,7 @@ fn ambiguous_designator_panics() {
 
 #[test]
 fn designator_into_array_without_index_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int arr[3]; } s = { .arr.x = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4683,7 +4684,7 @@ fn designator_into_array_without_index_panics() {
 
 #[test]
 fn designator_chain_selects_into_array_element() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct S { int bit; int other; }; struct S s[2] = { [1].bit = 4, [0].other = 3 };",
@@ -4696,7 +4697,7 @@ fn designator_chain_selects_into_array_element() {
 
 #[test]
 fn designator_chain_selects_into_nested_arrays() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int m[2][3] = { [1][2] = 5 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4708,7 +4709,7 @@ fn designator_chain_selects_into_nested_arrays() {
 #[test]
 fn negative_array_bound_panics() {
     // A folded negative bound is rejected ...
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[-1];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4718,7 +4719,7 @@ fn negative_array_bound_panics() {
 #[test]
 fn negative_folded_array_bound_panics() {
     // ... even when the negativity only shows after folding ...
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[1 - 2];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4728,7 +4729,7 @@ fn negative_folded_array_bound_panics() {
 #[test]
 fn non_constant_bound_stays_variable_length() {
     // ... while a non-constant bound stays a (runtime-sized) array.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int n) { int a[n]; return a[0]; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4739,7 +4740,7 @@ fn non_constant_bound_stays_variable_length() {
 fn zero_array_bound_accepted_as_extension() {
     // `int x[0]` is a constraint violation in strict C, but GCC
     // accepts it — and so do we.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x[0];", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4753,7 +4754,7 @@ fn prototype_params_scope_over_later_bounds() {
     // Parameter names live in prototype scope (C17 §6.2.1p4), so a
     // later bound sees an earlier parameter — the normal VLA prototype
     // shape.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n, int a[n]); void g(int n, int a[n]) { a[0] = n; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4763,7 +4764,7 @@ fn prototype_params_scope_over_later_bounds() {
 #[test]
 fn duplicate_prototype_param_names_panic() {
     // Verified against gcc ("redefinition of parameter").
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4772,7 +4773,7 @@ fn duplicate_prototype_param_names_panic() {
 
 #[test]
 fn file_scope_vla_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; int a[n];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4781,7 +4782,7 @@ fn file_scope_vla_panics() {
 
 #[test]
 fn file_scope_star_bound_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[*];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4790,7 +4791,7 @@ fn file_scope_star_bound_panics() {
 
 #[test]
 fn block_scope_star_bound_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a[*]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4799,7 +4800,7 @@ fn block_scope_star_bound_panics() {
 
 #[test]
 fn vla_struct_member_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; struct S { int a[n]; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4809,7 +4810,7 @@ fn vla_struct_member_panics() {
 #[test]
 fn star_struct_member_panics() {
     // `[*]` needs prototype scope wherever it appears.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a[*]; };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4820,7 +4821,7 @@ fn star_struct_member_panics() {
 fn vla_function_pointer_member_parses() {
     // The member is a plain pointer; the variably modified prototype
     // sits behind it, where prototypes may be variably modified.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int (*f)(int n, int a[n]); } s;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4829,7 +4830,7 @@ fn vla_function_pointer_member_parses() {
 
 #[test]
 fn vla_initializer_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { int a[n] = { 1 }; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4839,7 +4840,7 @@ fn vla_initializer_panics() {
 #[test]
 fn vla_empty_initializer_parses() {
     // GCC accepts an empty brace list on a VLA.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { int a[n] = {}; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4848,7 +4849,7 @@ fn vla_empty_initializer_parses() {
 
 #[test]
 fn vla_pointer_and_multidimensional_vla_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { int (*p)[n]; int b[2][n]; (void)p; (void)b; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4860,7 +4861,7 @@ fn vla_bound_expression_retained() {
     // A non-constant bound keeps its checked expression in
     // `Sema::vla_bounds` for runtime evaluation (allocation,
     // `sizeof`, strides).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { int a[n + 1]; (void)a; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4868,10 +4869,10 @@ fn vla_bound_expression_retained() {
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [BlockItem::Decl { ids, .. }, _] = body.block.items.as_slice() else {
+    let [BlockItem::Decl { ids, .. }, _] = body.block.items else {
         panic!("expected a declaration followed by a statement, got {:?}", body.block.items)
     };
-    let [a] = ids.as_slice() else { panic!("expected one declarator, got {ids:?}") };
+    let [a] = ids else { panic!("expected one declarator, got {ids:?}") };
     let Ty::Array {
         bound: Some(ArrayBound::Vla(slot)),
         ..
@@ -4891,7 +4892,7 @@ fn vla_param_bound_remapped_to_body_params() {
     // `a[n]` in a definition checks against the prototype-scope `n`;
     // the stored bound must reference the body's parameter instead,
     // or the backend would lower a dead `DeclId`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n, int a[2][n]) { a[0][0] = n; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4899,7 +4900,7 @@ fn vla_param_bound_remapped_to_body_params() {
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [n_id, a_id] = body.params.as_slice() else {
+    let [n_id, a_id] = body.params else {
         panic!("expected two params, got {:?}", body.params)
     };
     // The parameter decayed to a pointer to the `int[n]` row.
@@ -4923,7 +4924,7 @@ fn kr_vla_param_bound_remapped_to_body_params() {
     // truncated away: the stored bound must reference the body's
     // parameter. The rewrite is simultaneous — sequential rewrites
     // cascade when truncated ids are reused.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int get(m, n, a) int m, n; int a[m][n]; { return a[1][2]; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -4931,7 +4932,7 @@ fn kr_vla_param_bound_remapped_to_body_params() {
     let g = parser.intern.get_or_intern("get");
     let fid = parser.sema.lookup_symbol(g).expect("function declared");
     let body = parser.sema.bodies[&fid].clone();
-    let [m_id, n_id, a_id] = body.params.as_slice() else {
+    let [m_id, n_id, a_id] = body.params else {
         panic!("expected three params, got {:?}", body.params)
     };
     let Ty::Pointer { pointee, .. } = &parser.sema.decls[a_id.0 as usize].ty else {
@@ -4953,7 +4954,7 @@ fn kr_vla_param_bound_remapped_to_body_params() {
 fn fixed_array_to_vla_param_accepted() {
     // `int[n]` and `int[4]` are compatible (C17 §6.7.6.2p6), so a
     // fixed array reaches a VLA parameter.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int get(int m, int n, int a[m][n]) { return a[1][2]; } int main(void) { int b[3][4]; return get(3, 4, b); }",
@@ -4966,7 +4967,7 @@ fn fixed_array_to_vla_param_accepted() {
 
 #[test]
 fn vla_static_storage_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { static int a[n]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4975,7 +4976,7 @@ fn vla_static_storage_panics() {
 
 #[test]
 fn vla_linkage_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { extern int a[n]; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4987,7 +4988,7 @@ fn pointer_to_vla_with_static_storage_parses() {
     // Only the VLA type itself needs automatic storage (C17
     // §6.7.6.2p2): a `static` pointer to a VLA is a fixed-size object,
     // which GCC accepts (`static int (*starr)[h][w];` in tcctest.c).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { static int (*p)[n]; (void)p; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -4998,7 +4999,7 @@ fn nested_vla_type_static_storage_panics() {
     // An array whose element type is a VLA is itself a VLA type, so
     // static storage stays rejected even though the outer bound is
     // constant.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { static int a[3][n]; (void)a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5009,7 +5010,7 @@ fn nested_vla_type_static_storage_panics() {
 fn goto_over_vla_panics() {
     // Jumping past a VLA declaration into its scope would leave
     // storage unallocated (C11 §6.8.6.1p1).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { goto l; int a[n]; l:; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5019,7 +5020,7 @@ fn goto_over_vla_panics() {
 #[test]
 fn switch_over_vla_panics() {
     // The dispatch jumps over the declaration like a goto.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n, int x) { switch (x) { int a[n]; case 1: break; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5036,7 +5037,7 @@ fn goto_with_live_vla_parses() {
         "void f(int n) { int a[n]; { goto out; } out: (void)a; }",
         "void f(int n, int x) { switch (x) { case 1:; int a[n]; (void)a; break; } }",
     ] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         let tu = parser.parse_translation_unit();
@@ -5048,7 +5049,7 @@ fn goto_with_live_vla_parses() {
 
 #[test]
 fn array_initializer_exact_and_short_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3] = { 1, 2, 3 }; int b[3] = { 1 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5059,7 +5060,7 @@ fn array_initializer_exact_and_short_parse() {
 fn array_initializer_excess_warns_not_fails() {
     // GCC and clang warn (not error) on excess elements — and so the
     // parse succeeds; the warning renders to stderr.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3] = { 1, 2, 3, 4 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5069,7 +5070,7 @@ fn array_initializer_excess_warns_not_fails() {
 #[test]
 fn array_designator_out_of_range_panics() {
     // Out-of-range `[i]` is a hard error under both compilers.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3] = { [5] = 1 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5080,7 +5081,7 @@ fn array_designator_out_of_range_panics() {
 fn array_designators_track_positions() {
     // `[1]` then two bare items fills 1..3 exactly; a repeated
     // designator is fine.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3] = { [1] = 1, 2, 3 }; int b[2] = { [1] = 1, [0] = 2 };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5091,7 +5092,7 @@ fn array_designators_track_positions() {
 fn nested_array_excess_warns() {
     // The inner `{3, 4}` overflows the inner `[2]` (a warning, like
     // GCC), while the outer list fits.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[2][2] = { { 1, 2 }, { 3, 4, 5 } };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5102,7 +5103,7 @@ fn nested_array_excess_warns() {
 fn string_initializer_fit() {
     // Exact fit drops the NUL (valid C); short literals pad; `[]`
     // sizes to fit; escapes count as one byte each.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "char a[3] = \"abc\"; char b[4] = \"ab\"; char c[] = \"ab\"; char d[4] = \"a\\n\";",
@@ -5116,7 +5117,7 @@ fn string_initializer_fit() {
 #[test]
 fn string_initializer_too_long_warns_not_fails() {
     // A GCC warning, not an error — the parse succeeds.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("char s[3] = \"abcd\";", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5155,7 +5156,7 @@ fn string_bytes_decode_escapes() {
     // wide literals encode one little-endian element each.
     use crate::eval::string_bytes;
     use crate::lexer::{StringLiteral, StringPrefix};
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let a = parser.intern.get_or_intern("\"a\\n\\x41\"");
@@ -5190,7 +5191,7 @@ fn wide_literals_follow_the_target_wchar() {
     use crate::lexer::{StringLiteral, StringPrefix};
     use crate::target::{Target, WChar};
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let w = parser.intern.get_or_intern("L\"ab\"");
@@ -5213,7 +5214,7 @@ fn windows_wchar_sizes_and_wide_constant_type() {
     use crate::target::Target;
 
     fn enum_of(src: &str, name: &str, target: Target) -> i128 {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         sema.target = target;
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
@@ -5243,7 +5244,7 @@ fn non_utf8_source_bytes_survive_to_data() {
     use crate::decode_source;
     use crate::eval::string_bytes;
     use crate::lexer::{StringLiteral, StringPrefix};
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let decoded = decode_source(b"const char g[] = \"\0\xff\";");
@@ -5270,7 +5271,7 @@ fn string_contents_decodes() {
     // wide literals refused.
     use crate::lexer::{StringLiteral, StringPrefix};
     use crate::sema::string_contents;
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let a = parser.intern.get_or_intern("\"a\\n\\x41\"");
@@ -5306,7 +5307,7 @@ fn string_contents_decodes() {
 fn delimited_escapes_decode() {
     use crate::lexer::{StringLiteral, StringPrefix};
     use crate::sema::string_contents;
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("", &mut sema, &mut interner);
     let a = parser.intern.get_or_intern("\"\\o{110}\\x{65}llo\"");
@@ -5337,7 +5338,7 @@ fn incomplete_array_completes_from_initializer() {
     // C17 §6.7.9p22: the outermost dimension takes its size from the
     // initializer — which makes `sizeof` fold (dwm's static assertion
     // relies on exactly this).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[] = { 1, 2, 3 };", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -5359,7 +5360,7 @@ fn incomplete_array_completes_from_initializer() {
     assert_eq!(enum_value_of("char s[] = { \"ab\" }; enum { N = sizeof(s) };", "N"), 3);
     // The dwm static-assertion shape (the tag declaration itself
     // yields no external declaration).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "static const char *tags[] = { \"a\", \"b\" }; struct NumTags { char x[(sizeof(tags) / sizeof(tags[0])) > 31 ? -1 : 1]; };",
@@ -5372,7 +5373,7 @@ fn incomplete_array_completes_from_initializer() {
 
 #[test]
 fn incomplete_array_without_initializer_stays_incomplete() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[];", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -5417,7 +5418,7 @@ fn attribute_aligned_layout() {
 fn alignof_object_takes_its_alignment_attribute() {
     // An object's `aligned` attribute sets its alignment, raising or
     // lowering it (like GCC); without one the type's alignment applies.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "long tight __attribute__((aligned(1)));\
@@ -5788,7 +5789,7 @@ fn single_underscore_attribute_parses() {
 
 #[test]
 fn alignof_incomplete_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; int x = __alignof__(struct S);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5805,7 +5806,7 @@ fn attribute_forward_declaration_carries_nothing() {
 #[test]
 fn attribute_aligned_non_power_of_two_panics() {
     // Verified against gcc (a hard error there too).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct N { char c; int x __attribute__((aligned(3))); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5814,7 +5815,7 @@ fn attribute_aligned_non_power_of_two_panics() {
 
 #[test]
 fn attribute_aligned_non_constant_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; struct N { char c; int x __attribute__((aligned(n))); };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5824,7 +5825,7 @@ fn attribute_aligned_non_constant_panics() {
 #[test]
 fn attribute_aligned_zero_warns_not_fails() {
     // GCC warns and ignores `aligned(0)` — the parse succeeds.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct Z { char c; int x __attribute__((aligned(0))); };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -5836,7 +5837,7 @@ fn attribute_aligned_zero_warns_not_fails() {
 fn case_labels_fold() {
     // Labels accept any integer constant expression — literals,
     // enumerators, arithmetic, and `sizeof`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "enum { A = 3 }; int f(int x) { switch (x) { case A + 1: return 1; case sizeof(char): return 2; case 'a': return 3; default: return 0; } }",
@@ -5850,7 +5851,7 @@ fn case_labels_fold() {
 
 #[test]
 fn non_constant_case_label_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int y) { switch (x) { case y: return 1; default: return 0; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5861,7 +5862,7 @@ fn non_constant_case_label_panics() {
 fn switch_distinct_cases_accepted() {
     // Distinct values — including across nested switches, and labels
     // inside loops (Duff's device) — parse normally.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(int x, int y) { switch (x) { case 1: return 1; switch (y) { case 1: return 2; case 2: return 3; } case 2: return 4; } return 0; }",
@@ -5870,7 +5871,7 @@ fn switch_distinct_cases_accepted() {
     );
     assert_eq!(parser.parse_translation_unit().external_declarations.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(int x) { switch (x) { case 1: while (x) { case 2: x--; } return 1; } return 0; }",
@@ -5882,7 +5883,7 @@ fn switch_distinct_cases_accepted() {
 
 #[test]
 fn duplicate_case_value_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(int x) { switch (x) { case 1: return 1; case 1 + 0: return 2; } return 0; }",
@@ -5898,7 +5899,7 @@ fn duplicate_case_after_conversion_panics() {
     // Labels compare after conversion to the promoted controlling
     // type (verified against gcc): `-1` duplicates `4294967295u`
     // under `unsigned`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(unsigned x) { switch (x) { case -1: return 1; case 4294967295u: return 2; } return 0; }",
@@ -5911,7 +5912,7 @@ fn duplicate_case_after_conversion_panics() {
 
 #[test]
 fn duplicate_default_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(int x) { switch (x) { case 1: return 1; default: return 0; default: return 2; } }",
@@ -5926,7 +5927,7 @@ fn duplicate_default_panics() {
 fn builtin_va_arg_takes_a_type() {
     // `va_arg(ap, TYPE)` spells a call but parses a type-name second
     // (the sqlite shape: `*__builtin_va_arg(ap, int*) = val;`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef __builtin_va_list va_list; int sum(int n, ...) { va_list ap; __builtin_va_start(ap, n); int x = __builtin_va_arg(ap, int); double d = __builtin_va_arg(ap, double); int *p = __builtin_va_arg(ap, int *); __builtin_va_end(ap); return x; }",
@@ -5939,7 +5940,7 @@ fn builtin_va_arg_takes_a_type() {
 
 #[test]
 fn va_arg_without_va_list_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int x = __builtin_va_arg(0, int); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -5948,7 +5949,7 @@ fn va_arg_without_va_list_panics() {
 
 #[test]
 fn va_arg_with_void_type_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef __builtin_va_list va_list; void f(va_list ap) { __builtin_va_arg(ap, void); }",
@@ -6000,7 +6001,7 @@ fn generic_type_operand_selects_without_decay() {
 
 #[test]
 fn generic_without_match_or_default_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = _Generic(0L, int: 1);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6009,7 +6010,7 @@ fn generic_without_match_or_default_panics() {
 
 #[test]
 fn generic_duplicate_default_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = _Generic(0, default: 1, default: 2);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6021,7 +6022,7 @@ fn function_returning_function_pointer_defines_params() {
     // The sqlite shape: `f` is a function of `(int, char *)`
     // returning a function pointer — the *inner* suffix declares the
     // definition's parameters.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static void (*f(int n, char *s))(void) { (void)n; (void)s; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6035,7 +6036,7 @@ fn function_returning_function_pointer_defines_params() {
 #[test]
 fn builtin_sync_synchronize_declares_on_call() {
     // sqlite's memory barrier: an undeclared nullary builtin call.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static void sqlite3MemoryBarrier(void) { __sync_synchronize(); }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6047,7 +6048,7 @@ fn libc_builtins_rewrite_to_libc_calls() {
     // `__builtin_X()` for libc X calls X: the builtin name never
     // reaches checking (which would error), `abort`/`strlen` declare
     // implicitly instead.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void f(void) { __builtin_abort(); __builtin_strlen(\"abc\"); __builtin_memcpy(((void *)0), ((void *)0), 0); }",
@@ -6069,7 +6070,7 @@ fn libc_builtins_rewrite_to_libc_calls() {
 fn runtime_builtins_rewrite_to_runtime_calls() {
     // The setjmp builtins are calls into the assembly runtime,
     // declared with their real prototypes.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void *b) { if (__builtin_setjmp(b)) __builtin_longjmp(b, 1); }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6138,7 +6139,7 @@ fn builtin_clzg_checks_inline() {
 fn builtin_unreachable_rewrites_to_abort() {
     // Abnormal termination if ever reached: the builtin name never
     // reaches checking, `abort` declares implicitly instead.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { if (x) return 1; __builtin_unreachable(); return 0; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6183,7 +6184,7 @@ fn builtin_math_calls_rewrite_to_libc_names() {
     // counterparts: the callee rewrites, and the implicit declaration
     // carries the real prototype (the `l` form returns `long double`,
     // not `int`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "double f(double x){return __builtin_log10(x);}\
@@ -6501,7 +6502,7 @@ fn c11_atomic_min_on_pointer_panics() {
 fn declared_name_scopes_over_its_initializer() {
     // `int *p = malloc(sizeof(*p))` sees `p` (C17 §6.2.1p4: scope
     // starts after the declarator) — the sqlite idiom.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "typedef unsigned long size_t; void *malloc(size_t); struct S { int x; }; struct S *p = (struct S *)malloc(sizeof(*p)); int x = x + 0;",
@@ -6527,7 +6528,7 @@ fn builtin_offsetof_folds() {
 
 #[test]
 fn offsetof_bit_field_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x : 3; }; int y = __builtin_offsetof(struct S, x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6547,7 +6548,7 @@ fn statement_expression_value_is_last_item() {
     assert_eq!(first_value_type_of("int f(void) { return ({ l: 42; }); }"), Ty::Int);
     assert_eq!(first_value_type_of("void f(void) { ({ a: b: (char)42; }); }"), Ty::Char);
     // Declarations inside stay scoped.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return ({ int y = 1; }), y; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6556,7 +6557,7 @@ fn statement_expression_value_is_last_item() {
 
 #[test]
 fn file_scope_statement_expression_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ({ 1; });", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6567,7 +6568,7 @@ fn file_scope_statement_expression_panics() {
 
 #[test]
 fn goto_and_labels_resolve() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { goto done; x++; done: return x; } void g(void) { goto l; l: ; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6576,7 +6577,7 @@ fn goto_and_labels_resolve() {
 
 #[test]
 fn label_named_like_a_typedef_resolves_as_label() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int t; int f(void) { t x = 1; t: x++; if (x < 3) goto t; return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6585,7 +6586,7 @@ fn label_named_like_a_typedef_resolves_as_label() {
 
 #[test]
 fn undefined_label_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { goto missing; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6594,7 +6595,7 @@ fn undefined_label_panics() {
 
 #[test]
 fn duplicate_label_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { l: goto l; l: ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6603,11 +6604,11 @@ fn duplicate_label_panics() {
 
 #[test]
 fn label_address_and_computed_goto_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { void *p = &&l; goto *p; l: ; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("label-addr", &mut parser);
-    let [BlockItem::Decl { ids, .. }, BlockItem::Stmt(goto), BlockItem::Stmt(label)] = body.block.items.as_slice() else {
+    let [BlockItem::Decl { ids, .. }, BlockItem::Stmt(goto), BlockItem::Stmt(label)] = body.block.items else {
         panic!("{body:?}")
     };
     assert!(matches!(goto, Stmt::GotoComputed { .. }));
@@ -6620,7 +6621,7 @@ fn label_address_and_computed_goto_parse() {
 
 #[test]
 fn label_ids_run_in_definition_order() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { a: b: c: ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6633,7 +6634,7 @@ fn label_ids_run_in_definition_order() {
 fn label_inside_statement_expression_resolves() {
     // A statement expression is its own label scope: a `goto` to a
     // label defined beside it resolves inside, and does not escape.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { ({ l: goto l; }); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6643,7 +6644,7 @@ fn label_inside_statement_expression_resolves() {
 fn label_inside_statement_expression_is_local() {
     // Jumping into a statement expression from outside resolves to
     // nothing, like GCC.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { goto l; ({ l: ; }); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6652,18 +6653,18 @@ fn label_inside_statement_expression_is_local() {
 
 #[test]
 fn gnu_label_declaration_is_consumed() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { __label__ a, b; a: goto a; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("gnu-label", &mut parser);
-    let [empty, label] = body.block.items.as_slice() else { panic!("{body:?}") };
+    let [empty, label] = body.block.items else { panic!("{body:?}") };
     assert!(matches!(empty, BlockItem::Stmt(Stmt::Empty { .. })));
     assert!(matches!(label, BlockItem::Stmt(Stmt::Label { .. })));
 }
 
 #[test]
 fn break_outside_loop_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { if (1) break; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6673,7 +6674,7 @@ fn break_outside_loop_panics() {
 #[test]
 fn continue_outside_loop_panics() {
     // ... including directly in a `switch` (which is not a loop).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { switch (x) { case 1: continue; default: return 0; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6682,7 +6683,7 @@ fn continue_outside_loop_panics() {
 
 #[test]
 fn break_in_switch_and_loops_parses() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(int x) { while (x) { if (x > 2) break; else continue; } switch (x) { case 1: break; default: break; } return x; }",
@@ -6695,7 +6696,7 @@ fn break_in_switch_and_loops_parses() {
 
 #[test]
 fn case_outside_switch_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { case 1: ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6706,14 +6707,14 @@ fn case_outside_switch_panics() {
 fn statement_expression_jumps_stay_scoped() {
     // Jumping out of a statement expression resolves outside (like
     // GCC); jumping in has no visible label and fails.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { int y = ({ if (x) goto out; 0; }); return y; out: return 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
 
     // `break` still binds a `switch` inside the expression.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "int f(void) { int y = ({ switch (1) { case 1: break; default: break; } 0; }); return y; }",
@@ -6725,7 +6726,7 @@ fn statement_expression_jumps_stay_scoped() {
 
 #[test]
 fn jump_into_statement_expression_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { goto inner; int y = ({ inner: 1; 0; }); return y; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6737,7 +6738,7 @@ fn jump_into_statement_expression_panics() {
 /// shapes need function context, since braced groups are rejected
 /// outside functions.
 fn first_value_type_of(src: &str) -> Ty {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6745,7 +6746,7 @@ fn first_value_type_of(src: &str) -> Ty {
         panic!("expected one function");
     };
     let body = parser.sema.bodies.get(id).expect("body recorded");
-    for item in &body.block.items {
+    for item in body.block.items {
         if let BlockItem::Stmt(Stmt::Return { expr: Some(expr), .. }) = item {
             return expr.ty.clone();
         }
@@ -6762,7 +6763,7 @@ fn constant_if_drops_the_untaken_branch() {
     // A constant condition removes the branch that can never run, so
     // dead calls (`link_error()` in the torture suite) vanish. A
     // branch holding a label stays: `goto` can jump into it.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void f(int x) { if (0) x = 1; else x = 2; if (1) x = 3; else x = 4; if (0) { lbl: x = 5; } goto lbl; }",
@@ -6774,7 +6775,7 @@ fn constant_if_drops_the_untaken_branch() {
     let f = parser.intern.get_or_intern("f");
     let id = parser.sema.lookup_symbol(f).expect("f declared");
     let body = parser.sema.bodies.get(&id).expect("body recorded");
-    let [BlockItem::Stmt(t0), BlockItem::Stmt(t1), BlockItem::Stmt(t2), ..] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(t0), BlockItem::Stmt(t1), BlockItem::Stmt(t2), ..] = body.block.items else {
         panic!("expected three ifs, got {:?}", body.block.items)
     };
     // The never-taken then empties; the else stays the else.
@@ -6797,7 +6798,7 @@ fn func_name_identifiers_expand() {
     use crate::parse::{BlockItem, Stmt};
     // `__func__` (and friends) expand to the enclosing function's name
     // as a string literal; outside a function they stay undeclared.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "const char *f(void) { return __func__; } const char *g(void) { return __PRETTY_FUNCTION__; }",
@@ -6810,7 +6811,7 @@ fn func_name_identifiers_expand() {
         let f = parser.intern.get_or_intern(fname);
         let id = parser.sema.lookup_symbol(f).unwrap();
         let body = parser.sema.bodies.get(&id).expect("body recorded");
-        let [BlockItem::Stmt(Stmt::Return { expr: Some(expr), .. })] = body.block.items.as_slice() else {
+        let [BlockItem::Stmt(Stmt::Return { expr: Some(expr), .. })] = body.block.items else {
             panic!("expected a single return");
         };
         // The array decays to a pointer, then converts to the `const`
@@ -6844,7 +6845,7 @@ fn const_object_initializes_and_reads() {
     // Initialization is not assignment: `const` objects initialize
     // normally and read through every shape (members, pointers,
     // subscripts, calls).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "const int x = 5; struct S { int m; }; const struct S s = { 1 }; const int a[3] = { 1, 2, 3 }; const char *p = \"ab\"; int f(void) { return x + s.m + a[1] + p[0]; }",
@@ -6860,7 +6861,7 @@ fn const_object_initializes_and_reads() {
 fn const_qualified_spellings_keep_qualifiers() {
     // `__const`/`const`/`volatile` wrap the base type (sorted,
     // deduplicated); declarator operators build outside.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const volatile int x;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -6869,7 +6870,7 @@ fn const_qualified_spellings_keep_qualifiers() {
         Ty::qualified(TypeQualifiers::CONST | TypeQualifiers::VOLATILE, Ty::Int)
     );
     // `const char *p` is a pointer to const char (the dwm shape).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const char *p;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -6878,7 +6879,7 @@ fn const_qualified_spellings_keep_qualifiers() {
     };
     assert_eq!(**pointee, Ty::qualified(TypeQualifiers::CONST, Ty::Char));
     // ... while `char *const p` is a const pointer instead.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("char *const p;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -6894,7 +6895,7 @@ fn typedef_const_distributes() {
     // `const` on an array typedef qualifies the elements, on a
     // pointer typedef the pointer itself — and on a function typedef
     // it vanishes, silently like GCC.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int A[3]; const A a;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -6906,13 +6907,13 @@ fn typedef_const_distributes() {
     };
     assert_eq!(**elem, Ty::qualified(TypeQualifiers::CONST, Ty::Int));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int *P; const P p = (void *)0; int x; void f(void) { *p = x; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 4);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef void F(void); const F f;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -6921,7 +6922,7 @@ fn typedef_const_distributes() {
 
 #[test]
 fn const_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x = 6; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6930,7 +6931,7 @@ fn const_assignment_panics() {
 
 #[test]
 fn const_compound_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x += 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6939,7 +6940,7 @@ fn const_compound_assignment_panics() {
 
 #[test]
 fn const_increment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x = 5; void f(void) { x++; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6949,7 +6950,7 @@ fn const_increment_panics() {
 #[test]
 fn array_increment_panics() {
     // Arrays decay to pointers but are never modifiable lvalues.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; void f(void) { a++; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6958,7 +6959,7 @@ fn array_increment_panics() {
 
 #[test]
 fn const_pointer_target_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int *p; void f(void) { *p = 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6967,7 +6968,7 @@ fn const_pointer_target_assignment_panics() {
 
 #[test]
 fn const_struct_member_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int m; }; const struct S s = { 1 }; void f(void) { s.m = 2; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6976,7 +6977,7 @@ fn const_struct_member_assignment_panics() {
 
 #[test]
 fn const_struct_pointer_member_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int m; }; void f(const struct S *p) { p->m = 2; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6985,7 +6986,7 @@ fn const_struct_pointer_member_assignment_panics() {
 
 #[test]
 fn const_array_element_assignment_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int a[3] = { 1, 2, 3 }; void f(void) { a[0] = 5; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -6995,7 +6996,7 @@ fn const_array_element_assignment_panics() {
 #[test]
 fn volatile_reads_and_writes() {
     // `volatile` never blocks access (unlike `const`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("volatile int v; int f(void) { v = 1; return v; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7016,7 +7017,7 @@ fn pointer_qualifier_conversion_adds_silently() {
 fn pointer_qualifier_conversion_deep_add_warns() {
     // Adding qualifiers below the top level is a GCC warning — the
     // parse succeeds (warnings render to stderr).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("char **p; const char **q = p;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7027,7 +7028,7 @@ fn pointer_qualifier_conversion_deep_add_warns() {
 fn pointer_qualifier_drop_warns_not_fails() {
     // Dropping `const` (`char *` from `const char *`) is a GCC warning,
     // accepted like the torture suite (built with `-w`) expects.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *p; const int *q = p; void f(void) { p = q; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7071,7 +7072,7 @@ fn ternary_void_ptr_mix_composes_silently() {
         (&["void *v;", "const int *p;", "int c;"], "c ? p : v", const_void_ptr.clone()),
     ];
     for (decls, expr_src, want) in cases {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let src = format!("{} {expr_src}", decls.join(" "));
         let mut parser = test_parser(&src, &mut sema, &mut interner);
@@ -7142,7 +7143,7 @@ fn enum_pointer_mixes_with_its_repr() {
 #[test]
 fn const_function_parameter_is_readonly() {
     // Parameters carry qualifiers like any object.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(const int x) { x = 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7152,7 +7153,7 @@ fn const_function_parameter_is_readonly() {
 #[test]
 fn const_return_value_reads() {
     // A `const`-qualified return converts like any value.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int f(void); int g(void) { return f() + 1; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7169,7 +7170,7 @@ fn generic_qualified_control_selects_unqualified() {
 
 #[test]
 fn file_scope_vla_typedef_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int n; typedef int B[n];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7178,7 +7179,7 @@ fn file_scope_vla_typedef_panics() {
 
 #[test]
 fn block_scope_vla_typedef_parses() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int n) { typedef int B[n]; B x; (void)x; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7188,7 +7189,7 @@ fn block_scope_vla_typedef_parses() {
 #[test]
 fn const_qualifier_mismatch_redeclaration_panics() {
     // Verified against gcc ("conflicting type qualifiers").
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("const int x; int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7197,7 +7198,7 @@ fn const_qualifier_mismatch_redeclaration_panics() {
 
 #[test]
 fn restrict_on_base_type_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("restrict int *p;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7206,7 +7207,7 @@ fn restrict_on_base_type_panics() {
 
 #[test]
 fn restrict_on_pointer_parses() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *restrict p;", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -7223,7 +7224,7 @@ fn multiple_declarators_flatten_into_one_each() {
     // `int a, b, *c;` must be indistinguishable from
     // `int a; int b; int *c;` — one `Var` per declarator, and the `*`
     // binds to `c` only.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a, b, *c;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7247,7 +7248,7 @@ fn multiple_declarators_flatten_into_one_each() {
 fn tag_only_declarations_yield_no_external_declaration() {
     // The tag lives in `Sema`; a specifier-only declaration contributes
     // nothing to the translation unit's declaration list.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S; int a;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7257,7 +7258,7 @@ fn tag_only_declarations_yield_no_external_declaration() {
 
 #[test]
 fn struct_definition_with_declarator_list_yields_one_var_each() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x; } a, b;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7272,7 +7273,7 @@ fn struct_definition_with_declarator_list_yields_one_var_each() {
 
 #[test]
 fn function_declaration_lowers_parameters() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int, char *);", &mut sema, &mut interner);
     let id = parse_decl(&mut parser);
@@ -7297,7 +7298,7 @@ fn function_declaration_lowers_parameters() {
 fn function_redeclaration_compares_parameter_types_only() {
     // Parameter *names* are not part of the type: `int f(int x);`
     // redeclares `int f(int);`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(int x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7307,7 +7308,7 @@ fn function_redeclaration_compares_parameter_types_only() {
 
 #[test]
 fn function_parameter_type_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(float);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7319,7 +7320,7 @@ fn function_pointer_member_with_parameters_parses() {
     // The shape of `Button.func` in test.c: a member that is a pointer
     // to a function taking a pointer, so the parameter list must parse
     // before the member can be typed.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct B { void (*f)(const void *p); };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -7353,7 +7354,7 @@ fn representative_prototypes_parse() {
         "void nothing();",
         "void v(void);",
     ] {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         let ids = parser.parse_declaration();
@@ -7387,7 +7388,7 @@ enum ExternalDeclarationKind {
 
 #[test]
 fn function_prototype_yields_func_binding() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int);", &mut sema, &mut interner);
     let (id, kind) = parse_one_external("int f(int);", &mut parser);
@@ -7402,7 +7403,7 @@ fn function_prototype_yields_func_binding() {
 
 #[test]
 fn unprototyped_declaration_is_unprototyped() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f();", &mut sema, &mut interner);
     let (id, kind) = parse_one_external("int f();", &mut parser);
@@ -7416,7 +7417,7 @@ fn unprototyped_declaration_is_unprototyped() {
 #[test]
 fn unprototyped_merges_with_prototype() {
     // C17 §6.2.7p4: the composite takes the prototyped side.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(); int f(int);", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7428,7 +7429,7 @@ fn unprototyped_merges_with_prototype() {
     assert!(*prototyped && params == &vec![Ty::Int]);
 
     // And the other order keeps the prototype too.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f();", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7441,7 +7442,7 @@ fn unprototyped_merges_with_prototype() {
 
 #[test]
 fn prototyped_arity_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void); int f(int);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7450,7 +7451,7 @@ fn prototyped_arity_conflict_panics() {
 
 #[test]
 fn prototyped_variadic_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(int, ...);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7460,7 +7461,7 @@ fn prototyped_variadic_conflict_panics() {
 #[test]
 fn unprototyped_merges_with_variadic() {
     // Unspecified parameters match anything, including `...`.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(); int f(int, ...);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7469,7 +7470,7 @@ fn unprototyped_merges_with_variadic() {
 
 #[test]
 fn function_definition_defines() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return 0; }", &mut sema, &mut interner);
     let (id, kind) = parse_one_external("int f(void) {}", &mut parser);
@@ -7482,7 +7483,7 @@ fn function_definition_defines() {
 #[test]
 fn parse_function_definition_works_standalone() {
     // specs + declarator in, defined `DeclId` out, body consumed.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static int f(void) { return 0; }", &mut sema, &mut interner);
     let specs = parser.parse_declaration_specifiers();
@@ -7498,7 +7499,7 @@ fn parse_function_definition_works_standalone() {
 
 #[test]
 fn declaration_then_definition_merges() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(int x) { return x; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -7514,7 +7515,7 @@ fn declaration_then_definition_merges() {
 
 #[test]
 fn two_definitions_panic() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) {} int f(void) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7523,7 +7524,7 @@ fn two_definitions_panic() {
 
 #[test]
 fn definition_with_conflicting_prototype_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) {} int f(int);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7533,7 +7534,7 @@ fn definition_with_conflicting_prototype_panics() {
 #[test]
 fn static_extern_linkage_merges() {
     // `extern` inherits prior internal linkage (C17 §6.2.2p4).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static int f(void); extern int f(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7541,7 +7542,7 @@ fn static_extern_linkage_merges() {
     assert_eq!(parser.sema.decls[0].linkage, Linkage::Internal);
 
     // `static` definition then a plain declaration adopts internal.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static int f(void) {} int f(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7552,7 +7553,7 @@ fn static_extern_linkage_merges() {
 
 #[test]
 fn extern_then_static_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int f(void); static int f(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7561,7 +7562,7 @@ fn extern_then_static_panics() {
 
 #[test]
 fn old_style_definition_parses_and_defines() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     // K&R definitions rewrite to modern prototypes: the
     // declaration-list supplies the parameter types, missing entries
@@ -7587,7 +7588,7 @@ fn old_style_definition_parses_and_defines() {
 #[test]
 fn old_style_prototype_panics() {
     // Identifier-lists are definitions only.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7596,7 +7597,7 @@ fn old_style_prototype_panics() {
 
 #[test]
 fn kr_missing_param_defaults_to_int() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b) int a; { return a + b; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-missing", &mut parser);
@@ -7609,7 +7610,7 @@ fn kr_missing_param_defaults_to_int() {
 
 #[test]
 fn kr_parameters_promote_in_the_signature_only() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(c, s, h) char c; short s; float h; { return 0; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-promote", &mut parser);
@@ -7629,7 +7630,7 @@ fn kr_parameters_promote_in_the_signature_only() {
 
 #[test]
 fn kr_array_and_function_decay() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, p) int a[]; int (*p)(void); { return 0; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-decay", &mut parser);
@@ -7644,7 +7645,7 @@ fn kr_array_and_function_decay() {
 
 #[test]
 fn kr_multi_declarator_list() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, b) int a, b; { return a + b; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-multi", &mut parser);
@@ -7657,7 +7658,7 @@ fn kr_multi_declarator_list() {
 
 #[test]
 fn kr_register_allowed() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) register int a; { return a; }", &mut sema, &mut interner);
     let (id, _) = parse_one_external("kr-register", &mut parser);
@@ -7670,7 +7671,7 @@ fn kr_register_allowed() {
 
 #[test]
 fn kr_merges_with_prior_prototype() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int, int); int f(a, b) int a, b; { return a + b; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7685,7 +7686,7 @@ fn kr_merges_with_prior_prototype() {
 
 #[test]
 fn kr_arity_mismatch_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int, int, int); int f(a, b) int a, b; { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7694,7 +7695,7 @@ fn kr_arity_mismatch_panics() {
 
 #[test]
 fn kr_extra_declaration_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a; int b; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7703,7 +7704,7 @@ fn kr_extra_declaration_panics() {
 
 #[test]
 fn kr_duplicate_ident_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a, a) int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7712,7 +7713,7 @@ fn kr_duplicate_ident_panics() {
 
 #[test]
 fn kr_duplicate_declaration_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a; int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7721,7 +7722,7 @@ fn kr_duplicate_declaration_panics() {
 
 #[test]
 fn kr_initializer_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) int a = 1; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7730,7 +7731,7 @@ fn kr_initializer_panics() {
 
 #[test]
 fn kr_storage_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) static int a; { return a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7739,7 +7740,7 @@ fn kr_storage_panics() {
 
 #[test]
 fn kr_void_param_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(a) void a; { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7748,7 +7749,7 @@ fn kr_void_param_panics() {
 
 #[test]
 fn prototype_scope_tags_do_not_leak() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(struct S { int x; } s);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7762,7 +7763,7 @@ fn prototype_scope_tags_do_not_leak() {
     };
     assert!(matches!(params.as_slice(), [Ty::Struct(_)]));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(struct Q *p);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7776,7 +7777,7 @@ fn prototype_scope_tags_do_not_leak() {
 fn tentative_and_definitions() {
     // `int x;` parses as tentative — checked via `parse_declaration`,
     // which does not run end-of-TU finalization ...
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x;", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -7784,7 +7785,7 @@ fn tentative_and_definitions() {
     assert!(parser.sema.decls[ids[0].0 as usize].tentative);
 
     // ... but a whole TU finalizes it to a definition (C17 §6.9.2p2).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x;", &mut sema, &mut interner);
     let (id, kind) = parse_one_external("int x;", &mut parser);
@@ -7792,7 +7793,7 @@ fn tentative_and_definitions() {
     assert!(parser.sema.decls[id.0 as usize].defined);
     assert!(!parser.sema.decls[id.0 as usize].tentative);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 1;", &mut sema, &mut interner);
     let (id, _) = parse_one_external("int x = 1;", &mut parser);
@@ -7800,14 +7801,14 @@ fn tentative_and_definitions() {
     assert!(!parser.sema.decls[id.0 as usize].tentative);
 
     // Tentative + tentative merges (then finalizes to defined).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
     assert_eq!(parser.sema.decls.len(), 1);
     assert!(parser.sema.decls[0].defined);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; int x = 1;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7815,7 +7816,7 @@ fn tentative_and_definitions() {
     assert!(parser.sema.decls[0].defined);
 
     // `extern` without init is a pure declaration (never finalized).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int x;", &mut sema, &mut interner);
     let (id, _) = parse_one_external("extern int x;", &mut parser);
@@ -7823,7 +7824,7 @@ fn tentative_and_definitions() {
     assert!(!parser.sema.decls[id.0 as usize].tentative);
 
     // ... even `extern int x = 1;` defines.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int x = 1;", &mut sema, &mut interner);
     let (id, _) = parse_one_external("extern int x = 1;", &mut parser);
@@ -7832,7 +7833,7 @@ fn tentative_and_definitions() {
 
 #[test]
 fn two_initialized_definitions_panic() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 1; int x = 2;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7841,7 +7842,7 @@ fn two_initialized_definitions_panic() {
 
 #[test]
 fn object_linkage_merges() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static int x; extern int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7854,7 +7855,7 @@ fn block_static_object_is_distinguished_from_automatic() {
     // A block-scope `static` has no linkage but static storage duration
     // (C17 §6.2.4p3); `block_static` is what tells the backend to give it
     // a data symbol instead of a stack slot or SSA variable.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { static int s = 1; int a; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7872,7 +7873,7 @@ fn file_scope_static_uses_linkage_not_block_static() {
     // File-scope `static` is threaded through `linkage` (Internal); it
     // must not set `block_static`, or the backend would re-declare it
     // under a mangled local name.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static int x; int f(void) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7884,7 +7885,7 @@ fn file_scope_static_uses_linkage_not_block_static() {
 
 #[test]
 fn object_extern_then_static_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("extern int x; static int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7893,7 +7894,7 @@ fn object_extern_then_static_panics() {
 
 #[test]
 fn var_and_func_conflict() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; int x(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7902,7 +7903,7 @@ fn var_and_func_conflict() {
 
 #[test]
 fn auto_at_file_scope_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("auto int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7911,7 +7912,7 @@ fn auto_at_file_scope_panics() {
 
 #[test]
 fn multiple_storage_classes_panic() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static extern int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7920,7 +7921,7 @@ fn multiple_storage_classes_panic() {
 
 #[test]
 fn inline_on_object_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("inline int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7929,7 +7930,7 @@ fn inline_on_object_panics() {
 
 #[test]
 fn void_object_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7938,7 +7939,7 @@ fn void_object_panics() {
 
 #[test]
 fn function_initializer_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) = 1;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7947,7 +7948,7 @@ fn function_initializer_panics() {
 
 #[test]
 fn function_returning_function_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void)(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7957,7 +7958,7 @@ fn function_returning_function_panics() {
 #[test]
 fn function_definition_with_comma_panics() {
     // A definition takes exactly one declarator (C17 §6.9.1p2).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int g, f(void) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -7969,7 +7970,7 @@ fn block_extern_reuses_file_entity() {
     // A block-scope `extern` merges with the file-scope entity instead
     // of shadowing it (C17 §6.2.2p4).
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let x = intern.get_or_intern("x");
     let file = sema
         .declare(
@@ -8034,7 +8035,7 @@ fn block_extern_reuses_file_entity() {
 fn block_extern_after_local_reports() {
     // gcc: "extern declaration follows declaration with no linkage".
     let mut intern = Interner::new();
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let x = intern.get_or_intern("x");
     sema.push_scope();
     sema.declare(
@@ -8098,7 +8099,7 @@ fn block_extern_after_local_reports() {
 use crate::span::HasSpan;
 
 fn span_of_decl(src: &str) -> crate::span::Span {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -8116,7 +8117,7 @@ fn span_covers_whole_declaration() {
 
 #[test]
 fn span_translation_unit_covers_input() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x;\nint y;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -8153,7 +8154,7 @@ fn span_param_covers_specifiers_and_declarator() {
 
 #[test]
 fn span_member_covers_member_declaration() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int x; };", &mut sema, &mut interner);
     assert!(parser.parse_declaration().is_empty());
@@ -8171,7 +8172,7 @@ fn span_member_covers_member_declaration() {
 fn span_merged_declaration_keeps_first_site() {
     // The stored binding keeps the first declaration's span, so later
     // diagnostics can point at both sites.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(); int f(int);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8183,7 +8184,7 @@ fn span_merged_declaration_keeps_first_site() {
 
 #[test]
 fn error_message_carries_location() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int); int f(float);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8235,7 +8236,7 @@ fn byte_range_maps_lines_and_columns() {
 
 #[test]
 fn single_label_error_renders_source_snippet() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("int x;\nfloat y;", &mut sema, &mut interner);
     let file = parser.intern.get_or_intern("<__glcc_source>");
@@ -8257,7 +8258,7 @@ fn single_label_error_renders_source_snippet() {
 
 #[test]
 fn conflicting_redeclaration_renders_both_sites() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("int a;\nfloat a;", &mut sema, &mut interner);
     let file = parser.intern.get_or_intern("<__glcc_source>");
@@ -8339,7 +8340,7 @@ fn conflicting_redeclaration_renders_both_sites() {
 
 #[test]
 fn dummy_span_error_renders_message_only() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser("int x;", &mut sema, &mut interner);
     let out = parser.emit_to_string(&CompileError::new("mystery error", Span::dummy()));
@@ -8351,7 +8352,7 @@ fn diagnostic_names_real_file_and_original_line() {
     // Preprocessed TU with linemarkers: buffer line 4 holds `float y;`,
     // whose original location is `b.h:10`.
     let src = "# 1 \"a.c\"\nint x;\n# 10 \"b.h\"\nfloat y;\n";
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser(src, &mut sema, &mut interner);
     let file = parser.intern.get_or_intern("b.h");
@@ -8375,7 +8376,7 @@ fn diagnostic_names_real_file_and_original_line() {
 fn diagnostic_labels_span_files() {
     // Primary in `b.h`, secondary in `a.c`: each header names its own file.
     let src = "# 1 \"a.c\"\nint a;\n# 20 \"b.h\"\nfloat a;\n";
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let parser = test_parser(src, &mut sema, &mut interner);
     let a_c = parser.intern.get_or_intern("a.c");
@@ -8410,7 +8411,7 @@ fn diagnostic_labels_span_files() {
 // ---- function bodies ----
 
 /// Parse one function definition and return its stored body.
-fn parse_one_body(src: &str, parser: &mut Parser) -> (DeclId, crate::parse::FuncBody) {
+fn parse_one_body<'a>(src: &str, parser: &mut Parser<'a, '_>) -> (DeclId, crate::parse::FuncBody<'a>) {
     let tu = parser.parse_translation_unit();
     finish(parser);
     assert!(parser.tokens.is_empty(), "trailing tokens for {src:?}");
@@ -8423,7 +8424,7 @@ fn parse_one_body(src: &str, parser: &mut Parser) -> (DeclId, crate::parse::Func
 
 #[test]
 fn body_declarations_register_without_leaking() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { int x; int y; }", &mut sema, &mut interner);
     let (id, body) = parse_one_body("decls", &mut parser);
@@ -8442,7 +8443,7 @@ fn body_declarations_register_without_leaking() {
 
 #[test]
 fn body_params_shadow_file_scope() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x; int f(int x, int y) { int z; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -8466,11 +8467,11 @@ fn body_params_shadow_file_scope() {
 
 #[test]
 fn body_nested_blocks_nest() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { { int a; } int b; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("nested", &mut parser);
-    let [first, second] = body.block.items.as_slice() else { panic!("{body:?}") };
+    let [first, second] = body.block.items else { panic!("{body:?}") };
     let BlockItem::Stmt(Stmt::Compound(inner)) = first else { panic!("{first:?}") };
     assert_eq!(inner.items.len(), 1);
     assert!(matches!(&inner.items[0], BlockItem::Decl { .. }));
@@ -8482,39 +8483,39 @@ fn body_nested_blocks_nest() {
 
 #[test]
 fn body_return_and_empty_statements() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return 0; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("return", &mut parser);
-    let [BlockItem::Stmt(Stmt::Return { expr, .. })] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(Stmt::Return { expr, .. })] = body.block.items else {
         panic!("{body:?}")
     };
     let Some(expr) = expr else { panic!("expected a return value") };
     assert!(matches!(&expr.kind, CheckedExprKind::Int(_)));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { return; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("bare return", &mut parser);
-    assert!(matches!(body.block.items.as_slice(), [BlockItem::Stmt(Stmt::Return { expr: None, .. })]));
+    assert!(matches!(body.block.items, [BlockItem::Stmt(Stmt::Return { expr: None, .. })]));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) {}", &mut sema, &mut interner);
     let (_, body) = parse_one_body("empty", &mut parser);
     assert!(body.block.items.is_empty());
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { ; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("semi", &mut parser);
-    assert!(matches!(body.block.items.as_slice(), [BlockItem::Stmt(Stmt::Empty { .. })]));
+    assert!(matches!(body.block.items, [BlockItem::Stmt(Stmt::Empty { .. })]));
 }
 
 #[test]
 fn body_block_may_shadow_param() {
     // Legal C (unlike C++): a block-scope declaration shadows the parameter.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x) { int x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8525,7 +8526,7 @@ fn body_block_may_shadow_param() {
 
 #[test]
 fn body_duplicate_params_panic() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int x, int x) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8534,11 +8535,11 @@ fn body_duplicate_params_panic() {
 
 #[test]
 fn body_if_with_block_registers_decls() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int n) { if (n) { int y; } return n; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("if", &mut parser);
-    let [first, second] = body.block.items.as_slice() else { panic!("{body:?}") };
+    let [first, second] = body.block.items else { panic!("{body:?}") };
     let BlockItem::Stmt(Stmt::If { cond, then, els, .. }) = first else {
         panic!("{first:?}")
     };
@@ -8554,36 +8555,36 @@ fn body_if_with_block_registers_decls() {
 
 #[test]
 fn body_if_else_and_while() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a; int b(void); int c(void); if (a) b(); else c(); }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("if-else", &mut parser);
-    let [_, _, _, BlockItem::Stmt(Stmt::If { els: Some(_), .. })] = body.block.items.as_slice() else {
+    let [_, _, _, BlockItem::Stmt(Stmt::If { els: Some(_), .. })] = body.block.items else {
         panic!("{body:?}")
     };
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a; int b(void); while (a) b(); }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("while", &mut parser);
-    assert!(matches!(body.block.items.as_slice(), [_, _, BlockItem::Stmt(Stmt::While { .. })]));
+    assert!(matches!(body.block.items, [_, _, BlockItem::Stmt(Stmt::While { .. })]));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a; int b(void); do b(); while (a); }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("do-while", &mut parser);
-    assert!(matches!(body.block.items.as_slice(), [_, _, BlockItem::Stmt(Stmt::DoWhile { .. })]));
+    assert!(matches!(body.block.items, [_, _, BlockItem::Stmt(Stmt::DoWhile { .. })]));
 }
 
 #[test]
 fn body_for_with_declaration_init() {
     use crate::parse::ForInit;
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { for (int i = 0; i < 1; i++) {} }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("for-decl", &mut parser);
-    let [BlockItem::Stmt(Stmt::For { init, cond, step, body, .. })] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(Stmt::For { init, cond, step, body, .. })] = body.block.items else {
         panic!("{body:?}")
     };
     assert!(matches!(init, ForInit::Decl(ids) if ids.len() == 1));
@@ -8596,7 +8597,7 @@ fn body_for_with_declaration_init() {
 
 #[test]
 fn body_unterminated_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8605,7 +8606,7 @@ fn body_unterminated_panics() {
 
 #[test]
 fn body_unterminated_statement_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { if (1)", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8614,7 +8615,7 @@ fn body_unterminated_statement_panics() {
 
 #[test]
 fn body_truncated_expression_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return 0", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8623,7 +8624,7 @@ fn body_truncated_expression_panics() {
 
 #[test]
 fn body_missing_semi_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { int x }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8633,8 +8634,8 @@ fn body_missing_semi_panics() {
 // ---- expressions ----
 
 /// Parse `src` as one full expression; panics if tokens remain.
-fn parse_one_expr(src: &str) -> Expr {
-    let mut sema = Sema::new();
+fn parse_one_expr(src: &str) -> Expr<'_> {
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let expr = parser.parse_expression();
@@ -8746,8 +8747,8 @@ fn expr_postfix_forms() {
     let Expr::Call { func, args, .. } = parse_one_expr("a.b[c](d)") else {
         panic!("chained call")
     };
-    let Expr::Subscript { base, .. } = func.as_ref() else { panic!("subscript") };
-    let Expr::Member { arrow: false, .. } = base.as_ref() else { panic!("member") };
+    let Expr::Subscript { base, .. } = func else { panic!("subscript") };
+    let Expr::Member { arrow: false, .. } = base else { panic!("member") };
     assert_eq!(args.len(), 1);
 
     let Expr::Member { arrow: true, .. } = parse_one_expr("p->m") else { panic!("arrow") };
@@ -8795,7 +8796,7 @@ fn expr_casts_and_sizeof() {
 #[test]
 fn expr_typedef_cast_disambiguation() {
     // `(T)` casts when `T` is a typedef name (C17 §6.7.6.3p11 spirit).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("typedef int T; (T)x", &mut sema, &mut interner);
     parser.parse_declaration();
@@ -8861,7 +8862,7 @@ fn expr_member_missing_name_panics() {
 
 #[test]
 fn stmt_switch_case_default_break_continue() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "void f(int x) { switch (x) { int y(void); int z(void); case 1: y(); break; default: z(); } }",
@@ -8869,13 +8870,13 @@ fn stmt_switch_case_default_break_continue() {
         &mut interner,
     );
     let (_, body) = parse_one_body("switch", &mut parser);
-    let [BlockItem::Stmt(Stmt::Switch { cond, body: switch_body, .. })] = body.block.items.as_slice() else {
+    let [BlockItem::Stmt(Stmt::Switch { cond, body: switch_body, .. })] = body.block.items else {
         panic!("{body:?}")
     };
     assert!(matches!(&cond.kind, CheckedExprKind::Ident(_)));
     let Stmt::Compound(inner) = &**switch_body else { panic!("{switch_body:?}") };
     assert_eq!(inner.items.len(), 5);
-    let [_, _, case, brk, default] = inner.items.as_slice() else { panic!("{inner:?}") };
+    let [_, _, case, brk, default] = inner.items else { panic!("{inner:?}") };
     let BlockItem::Stmt(Stmt::Case { expr: Some(_), stmt, .. }) = case else {
         panic!("{case:?}")
     };
@@ -8886,24 +8887,24 @@ fn stmt_switch_case_default_break_continue() {
     };
     assert!(matches!(&**stmt, Stmt::Expr { .. }));
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a; while (a) { continue; } }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("continue", &mut parser);
-    let [_, BlockItem::Stmt(Stmt::While { body, .. })] = body.block.items.as_slice() else {
+    let [_, BlockItem::Stmt(Stmt::While { body, .. })] = body.block.items else {
         panic!("{body:?}")
     };
     let Stmt::Compound(inner) = &**body else { panic!("{body:?}") };
-    assert!(matches!(inner.items.as_slice(), [BlockItem::Stmt(Stmt::Continue { .. })]));
+    assert!(matches!(inner.items, [BlockItem::Stmt(Stmt::Continue { .. })]));
 }
 
 #[test]
 fn stmt_goto_and_label() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { goto end; end: return; }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("goto", &mut parser);
-    let [goto, label] = body.block.items.as_slice() else { panic!("{body:?}") };
+    let [goto, label] = body.block.items else { panic!("{body:?}") };
     assert!(matches!(goto, BlockItem::Stmt(Stmt::Goto { .. })));
     let BlockItem::Stmt(Stmt::Label { stmt, .. }) = label else { panic!("{label:?}") };
     assert!(matches!(&**stmt, Stmt::Return { .. }));
@@ -8911,11 +8912,11 @@ fn stmt_goto_and_label() {
 
 #[test]
 fn stmt_expression_statement() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int a; int b(int); int c; int d(void); a = 1; b(c), d(); }", &mut sema, &mut interner);
     let (_, body) = parse_one_body("expr-stmt", &mut parser);
-    let [_, _, _, _, first, second] = body.block.items.as_slice() else { panic!("{body:?}") };
+    let [_, _, _, _, first, second] = body.block.items else { panic!("{body:?}") };
     let BlockItem::Stmt(Stmt::Expr { expr, .. }) = first else { panic!("{first:?}") };
     assert!(matches!(&expr.kind, CheckedExprKind::Assign(..)));
     let BlockItem::Stmt(Stmt::Expr { expr, .. }) = second else { panic!("{second:?}") };
@@ -8927,7 +8928,7 @@ fn stmt_expression_statement() {
 
 #[test]
 fn init_expr_stored_in_sema() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 1 + 2;", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -8939,7 +8940,7 @@ fn init_expr_stored_in_sema() {
     assert!(parser.sema.decls[ids[0].0 as usize].defined);
 
     // No initializer means no entry (tentative definition).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int y;", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -8949,7 +8950,7 @@ fn init_expr_stored_in_sema() {
 #[test]
 fn init_brace_lists_and_designators() {
     // Plain and nested lists.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = { 5 };", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -8960,7 +8961,7 @@ fn init_brace_lists_and_designators() {
     assert!(items[0].designators.is_empty());
 
     // Designated struct members, out of order plus nesting.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a; int b; }; struct S s = { .b = 2, .a = { 3 } };", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -8971,8 +8972,8 @@ fn init_brace_lists_and_designators() {
     let Initializer::List { items, .. } = parser.sema.inits.get(&id).expect("init") else {
         panic!("expected a list")
     };
-    let [first, second] = items.as_slice() else { panic!("{items:?}") };
-    let [Designator::Field { .. }] = first.designators.as_slice() else {
+    let [first, second] = items else { panic!("{items:?}") };
+    let [Designator::Field { .. }] = first.designators else {
         panic!("{first:?}")
     };
     assert!(matches!(&*first.init, Initializer::Expr(_)));
@@ -8982,7 +8983,7 @@ fn init_brace_lists_and_designators() {
 #[test]
 fn init_designated_scalar_panics() {
     // Designators need an aggregate; gcc rejects this the same way.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = { [0] = 5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -8991,7 +8992,7 @@ fn init_designated_scalar_panics() {
 
 #[test]
 fn init_missing_comma_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = { 1 2 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9000,7 +9001,7 @@ fn init_missing_comma_panics() {
 
 #[test]
 fn init_designator_missing_assign_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("struct S { int a; }; struct S s = { .a 5 };", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9009,7 +9010,7 @@ fn init_designator_missing_assign_panics() {
 
 #[test]
 fn init_empty_value_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9056,13 +9057,13 @@ fn array_types_lower() {
 #[test]
 fn array_redeclarations_merge() {
     // Same bounds merge; `[]` takes the specified bound (C17 §6.2.7).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; int a[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
     assert_eq!(parser.sema.decls.len(), 1);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[]; int a[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9072,7 +9073,7 @@ fn array_redeclarations_merge() {
     };
 
     // `[*]` combines like `[]` (verified against gcc).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int [*]); void f(int [3]);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9081,7 +9082,7 @@ fn array_redeclarations_merge() {
 
 #[test]
 fn array_bound_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; int a[4];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9090,7 +9091,7 @@ fn array_bound_conflict_panics() {
 
 #[test]
 fn array_element_conflict_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[3]; float a[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9099,7 +9100,7 @@ fn array_element_conflict_panics() {
 
 #[test]
 fn array_of_functions_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void); int g[3](void);", &mut sema, &mut interner);
     // `g[3](void)`: array of functions (C17 §6.7.6.1p1).
@@ -9109,7 +9110,7 @@ fn array_of_functions_panics() {
 
 #[test]
 fn function_returning_array_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void)[3];", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9118,7 +9119,7 @@ fn function_returning_array_panics() {
 
 #[test]
 fn star_in_definition_params_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int a[*]) {}", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9128,7 +9129,7 @@ fn star_in_definition_params_panics() {
 #[test]
 fn star_in_prototype_params_merges() {
     // `[*]` is at home in prototypes (verified against gcc).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int [*]); void f(int [*]);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9139,7 +9140,7 @@ fn star_in_prototype_params_merges() {
 fn star_in_nested_prototype_of_definition_is_fine() {
     // The `[*]` sits in `g`'s prototype scope, not `f`'s parameter list
     // (verified against gcc).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(int g(int [*])) { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9151,7 +9152,7 @@ fn star_in_nested_prototype_of_definition_is_fine() {
 
 #[test]
 fn array_with_initializer_stores_init() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[2] = { 1, 2 };", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -9160,22 +9161,22 @@ fn array_with_initializer_stores_init() {
     assert_eq!(items.len(), 2);
 
     // Index designators select array elements.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a[2] = { [1] = 5 };", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
     let init = parser.sema.inits.get(&ids[0]).expect("init stored");
     let Initializer::List { items, .. } = init else { panic!("expected a list") };
-    let [item] = items.as_slice() else { panic!("{items:?}") };
-    assert!(matches!(item.designators.as_slice(), [Designator::Index { .. }]));
+    let [item] = items else { panic!("{items:?}") };
+    assert!(matches!(item.designators, [Designator::Index { .. }]));
 }
 
 // ---- expression checking (see `crate::check`) ----
 
 /// Declare each of `decls`, then parse and check `expr_src`.
 /// Panics if tokens remain or checking fails.
-fn check_with(decls: &[&str], expr_src: &str) -> CheckedExpr {
-    let mut sema = Sema::new();
+fn check_with(decls: &[&str], expr_src: &str) -> CheckedExpr<'static> {
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let src = format!("{} {}", decls.join(" "), expr_src);
     let mut parser = test_parser(&src, &mut sema, &mut interner);
@@ -9192,7 +9193,7 @@ fn check_with(decls: &[&str], expr_src: &str) -> CheckedExpr {
 
 /// Like [`check_with`], but checking must fail; returns the message.
 fn check_with_err(decls: &[&str], expr_src: &str) -> String {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let src = format!("{} {}", decls.join(" "), expr_src);
     let mut parser = test_parser(&src, &mut sema, &mut interner);
@@ -9267,7 +9268,7 @@ fn complex_types_check() {
 fn complex_constants_fold() {
     use crate::eval::{Value, eval_const};
     fn fold(src: &str) -> Option<Value> {
-        let mut sema = Sema::new();
+        let mut sema = Sema::leak_for_tests();
         let mut interner = Interner::new();
         let mut parser = test_parser(src, &mut sema, &mut interner);
         let expr = parser.parse_expression();
@@ -9598,7 +9599,7 @@ fn check_casts_and_sizeof() {
 
 #[test]
 fn body_undeclared_expression_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9607,7 +9608,7 @@ fn body_undeclared_expression_panics() {
 
 #[test]
 fn body_undeclared_return_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return y; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9617,7 +9618,7 @@ fn body_undeclared_return_panics() {
 #[test]
 fn void_function_returns_void_call() {
     // `return f();` for a void `f` is legal; a non-void value is not.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void); void g(void) { return f(); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9625,7 +9626,7 @@ fn void_function_returns_void_call() {
 
 #[test]
 fn void_function_returns_value_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void g(void) { return 3; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9644,7 +9645,7 @@ fn cast_to_union_initializes_member() {
 
 #[test]
 fn body_struct_condition_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { struct S { int m; }; struct S s; if (s) {} }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9653,7 +9654,7 @@ fn body_struct_condition_panics() {
 
 #[test]
 fn body_float_switch_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { switch (1.5) {} }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9662,7 +9663,7 @@ fn body_float_switch_panics() {
 
 #[test]
 fn body_float_case_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x) { switch (x) { case 1.5: break; } }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9671,7 +9672,7 @@ fn body_float_case_panics() {
 
 #[test]
 fn init_undeclared_name_panics() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = y;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9682,7 +9683,7 @@ fn init_undeclared_name_panics() {
 fn init_pointer_to_int_warns_not_fails() {
     // Integer/pointer mixes convert with a GCC-style warning, including
     // in initializers (`locp = malloc(..)` with an implicit declaration).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int *p; int x = p;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -9692,7 +9693,7 @@ fn init_pointer_to_int_warns_not_fails() {
 #[test]
 fn init_narrowing_conversion_accepted() {
     // `=` converts like assignment; the definition still records.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = 1.5;", &mut sema, &mut interner);
     let ids = parser.parse_declaration();
@@ -9719,7 +9720,7 @@ fn gnu_qualifier_spellings_open_declarations() {
                extern size_t strlen (__const char *__s);\n\
                __volatile int a = 0;\n\
                int f (const char *__restrict p) { return p[0]; }\n";
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     let unit = parser.parse_translation_unit();
@@ -9733,7 +9734,7 @@ fn dump_golden() {
     // The s-expression dump pins its own format: every declaration,
     // body, and expression with its type. Changes to the format
     // update this string deliberately.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int g = 1; int f(int x) { int y = x + 1L; if (y) { return y; } return 0; }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -9750,7 +9751,7 @@ fn dump_golden() {
 #[test]
 fn dump_control_flow_and_members() {
     // Labels, gotos, member paths (by name), and string spellings.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "struct S { int m; }; const char *msg = \"hi\"; int f(struct S *p) { goto out; out: return p->m; }",
@@ -9766,15 +9767,15 @@ fn dump_control_flow_and_members() {
 }
 
 /// Body items of the single function `f` defined in `src`.
-fn body_of_f(src: &str) -> Vec<BlockItem> {
-    let mut sema = Sema::new();
+fn body_of_f(src: &str) -> Vec<BlockItem<'_>> {
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(src, &mut sema, &mut interner);
     parser.parse_translation_unit();
     finish(&parser);
     let f = parser.intern.get_or_intern("f");
     let fid = parser.sema.lookup_symbol(f).expect("function declared");
-    parser.sema.bodies[&fid].block.items.clone()
+    parser.sema.bodies[&fid].block.items.to_vec()
 }
 
 #[test]
@@ -9787,10 +9788,10 @@ fn asm_statement_parses_operands() {
     };
     assert_eq!(asm.template, "");
     assert!(!asm.is_volatile() && !asm.is_goto());
-    let [output] = asm.outputs.as_slice() else { panic!("expected one output") };
+    let [output] = asm.outputs else { panic!("expected one output") };
     assert_eq!(output.constraint, "=r");
     assert_eq!(output.name, None);
-    let [input] = asm.inputs.as_slice() else { panic!("expected one input") };
+    let [input] = asm.inputs else { panic!("expected one input") };
     assert_eq!(input.tie(), Some(0));
     assert_eq!(asm.clobbers, vec!["memory".to_string()]);
     assert!(asm.labels.is_empty());
@@ -9943,7 +9944,7 @@ fn asm_memory_letters_follow_the_target() {
 fn asm_aarch64_memory_letter_needs_an_lvalue() {
     // ... but not on AArch64, where `"Q"` is memory.
     use crate::target::Target;
-    let mut sema = Sema::with_target(Target::AARCH64);
+    let mut sema = Sema::leak_with_target_for_tests(Target::AARCH64);
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(int x){ asm(\"\" : : \"Q\"(x + 1)); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9957,7 +9958,7 @@ fn asm_output_readonly_rejected() {
 
 #[test]
 fn file_scope_asm_collected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("asm(\".globl x\\n.globl y\");\n__asm__(\"nop\");\nint f(void){ return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9967,7 +9968,7 @@ fn file_scope_asm_collected() {
 
 #[test]
 fn file_scope_asm_rejects_operands() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("asm(\"nop\" : : \"memory\");", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9976,7 +9977,7 @@ fn file_scope_asm_rejects_operands() {
 
 #[test]
 fn naked_attribute_recorded() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) void f(void) { __asm__(\"nop\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -9989,7 +9990,7 @@ fn naked_attribute_recorded() {
 fn section_attribute_recorded() {
     // The object lands in the named section; a prototype may carry the
     // attribute for a definition that omits it (first wins in `declare`).
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser(
         "__attribute__((section(\".vectors\"))) int table[4];\n\
@@ -10011,7 +10012,7 @@ fn section_attribute_recorded() {
 
 #[test]
 fn naked_prototype_attribute_reaches_definition() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) void f(void);\nvoid f(void) { __asm__(\"nop\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10022,7 +10023,7 @@ fn naked_prototype_attribute_reaches_definition() {
 
 #[test]
 fn naked_body_rejects_c_code() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) int f(void) { return 1; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10031,7 +10032,7 @@ fn naked_body_rejects_c_code() {
 
 #[test]
 fn naked_body_rejects_extended_asm() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((naked)) void f(void) { __asm__(\"\" ::: \"memory\"); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10042,14 +10043,14 @@ fn naked_body_rejects_extended_asm() {
 
 /// [`test_parser`] with the extension enabled, the way `-fglcc-async`
 /// reaches the parser.
-fn async_parser<'a>(src: &str, sema: &'a mut Sema, interner: &'a mut Interner) -> Parser<'a> {
+fn async_parser<'a, 'b>(src: &str, sema: &'b mut Sema<'a>, interner: &'b mut Interner) -> Parser<'a, 'b> {
     sema.async_enabled = true;
     test_parser(src, sema, interner)
 }
 
 #[test]
 fn future_specifier_needs_the_flag() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(_Future(int) x);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10058,7 +10059,7 @@ fn future_specifier_needs_the_flag() {
 
 #[test]
 fn await_builtin_needs_the_flag() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return __builtin_await(0); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10069,7 +10070,7 @@ fn await_builtin_needs_the_flag() {
 fn async_attribute_without_the_flag_is_inert() {
     // No `-fglcc-async`: the attribute warns on stderr and is ignored,
     // so calls still see the declared result.
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("__attribute__((async)) int f(void); f()", &mut sema, &mut interner);
     parser.parse_external_declaration();
@@ -10081,7 +10082,7 @@ fn async_attribute_without_the_flag_is_inert() {
 
 #[test]
 fn await_outside_a_coroutine_is_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("int f(void) { return __builtin_await(0); }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10090,7 +10091,7 @@ fn await_outside_a_coroutine_is_rejected() {
 
 #[test]
 fn variadic_coroutines_are_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int f(int x, ...) { return x; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10099,7 +10100,7 @@ fn variadic_coroutines_are_rejected() {
 
 #[test]
 fn async_main_is_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int main(void) { return 0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10108,7 +10109,7 @@ fn async_main_is_rejected() {
 
 #[test]
 fn naked_coroutines_are_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) __attribute__((naked)) void f(void) { }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10117,7 +10118,7 @@ fn naked_coroutines_are_rejected() {
 
 #[test]
 fn async_on_an_object_is_inert() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10128,7 +10129,7 @@ fn async_on_an_object_is_inert() {
 /// is spelled.
 #[test]
 fn future_handles_are_interned_per_result_type() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("_Future(int) a; _Future(int) b; _Future(char) c;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10146,7 +10147,7 @@ fn future_handles_are_interned_per_result_type() {
 /// held, passed around, and awaited later.
 #[test]
 fn async_calls_are_typed_as_future_handles() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int f(int x); f(1)", &mut sema, &mut interner);
     parser.parse_external_declaration();
@@ -10160,7 +10161,7 @@ fn async_calls_are_typed_as_future_handles() {
 /// that are not futures.
 #[test]
 fn await_yields_the_result_and_rejects_non_futures() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("__attribute__((async)) int f(int x); __builtin_await(f(1))", &mut sema, &mut interner);
     parser.parse_external_declaration();
@@ -10171,7 +10172,7 @@ fn await_yields_the_result_and_rejects_non_futures() {
     assert!(matches!(checked.kind, CheckedExprKind::Await(_)));
     parser.sema.checking_async_fn.set(false);
 
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = async_parser("int x; __builtin_await(x)", &mut sema, &mut interner);
     parser.parse_external_declaration();
@@ -10188,7 +10189,7 @@ fn await_yields_the_result_and_rejects_non_futures() {
 /// rather than fall through to an unrelated parse error.
 #[test]
 fn imaginary_type_specifier_is_diagnosed_at_file_scope() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Imaginary float x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10197,7 +10198,7 @@ fn imaginary_type_specifier_is_diagnosed_at_file_scope() {
 
 #[test]
 fn imaginary_type_specifier_is_diagnosed_in_a_block() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { _Imaginary double x = 0.0; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10206,7 +10207,7 @@ fn imaginary_type_specifier_is_diagnosed_in_a_block() {
 
 #[test]
 fn imaginary_type_specifier_is_diagnosed_in_a_cast() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int f(void) { return (int)(_Imaginary float)1.0f; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10243,7 +10244,7 @@ fn atomic_erases_to_its_base_type() {
 
 #[test]
 fn atomic_declarations_parse() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Atomic int x = 0; typedef _Atomic _Bool atomic_flag;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10259,7 +10260,7 @@ fn atomic_declarations_parse() {
 /// hint this compiler does not consume, but it only applies to functions.
 #[test]
 fn noreturn_function_specifier_parses() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Noreturn void abort(void);", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10270,7 +10271,7 @@ fn noreturn_function_specifier_parses() {
 
 #[test]
 fn noreturn_on_object_is_rejected() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Noreturn int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10349,7 +10350,7 @@ fn ucn_surrogate_is_diagnosed() {
 /// native preprocessor removes it; raw-source callers must skip it too.
 #[test]
 fn pragma_operator_is_skipped_at_file_scope() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Pragma(\"pack(1)\")\nint x;", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
@@ -10358,7 +10359,7 @@ fn pragma_operator_is_skipped_at_file_scope() {
 
 #[test]
 fn pragma_operator_is_skipped_in_a_block() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { _Pragma(\"pack(1)\") int x; (void)x; _Pragma(\"pack()\") }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10366,7 +10367,7 @@ fn pragma_operator_is_skipped_in_a_block() {
 
 #[test]
 fn pragma_operator_without_operand_is_diagnosed() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("_Pragma int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10380,7 +10381,7 @@ fn pragma_operator_without_operand_is_diagnosed() {
 /// holds one error per broken construct.
 #[test]
 fn recovery_reports_each_broken_declaration() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ; long y = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10393,7 +10394,7 @@ fn recovery_reports_each_broken_declaration() {
 /// says why.
 #[test]
 fn recovery_stops_after_error_limit() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut src = String::new();
     for i in 0..(crate::parse::MAX_ERRORS + 5) {
@@ -10414,7 +10415,7 @@ fn recovery_stops_after_error_limit() {
 /// declarations) are the unit that resynchronizes.
 #[test]
 fn recovery_reports_each_broken_statement() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("void f(void) { int x = ; int y = ; }", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10426,7 +10427,7 @@ fn recovery_reports_each_broken_statement() {
 /// declaration, so a later valid one is still recorded in `Sema`.
 #[test]
 fn recovery_declares_the_next_declaration() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ; int ok;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10439,7 +10440,7 @@ fn recovery_declares_the_next_declaration() {
 /// accumulation sink), so a caller sees one ordered stream.
 #[test]
 fn lexer_diagnostics_reach_the_parser_sink() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int \\u12 = 1;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10450,7 +10451,7 @@ fn lexer_diagnostics_reach_the_parser_sink() {
 /// tell them apart (and they never latch recovery).
 #[test]
 fn warnings_are_tagged_and_do_not_latch() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = sizeof(void); int y = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10466,7 +10467,7 @@ fn warnings_are_tagged_and_do_not_latch() {
 /// severity, message, and 1-based line/column plus byte offsets.
 #[test]
 fn diagnostics_json_shape() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10484,7 +10485,7 @@ fn diagnostics_json_shape() {
 /// diagnostic that carries a real (non-dummy) span.
 #[test]
 fn diagnostics_json_positions_match_the_source() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int x = ;", &mut sema, &mut interner);
     parser.parse_translation_unit();
@@ -10500,7 +10501,7 @@ fn diagnostics_json_positions_match_the_source() {
 /// first one encountered.
 #[test]
 fn recovery_reports_lexer_parser_and_sema_errors_together() {
-    let mut sema = Sema::new();
+    let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("int a = \\u12;\nint b = ;\nint c = missing;\n", &mut sema, &mut interner);
     parser.parse_translation_unit();

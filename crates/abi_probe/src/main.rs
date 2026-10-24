@@ -531,9 +531,10 @@ fn build_module_object(src: &str, target: Target, fe_target: glcc_frontend::targ
 
     // Frontend -> MIR.
     let mut interner = glcc_frontend::lexer::Interner::new();
-    let mut sema = glcc_frontend::sema::Sema::with_target(fe_target);
+    let arena = glcc_frontend::bumpalo::Bump::new();
+    let mut sema = glcc_frontend::sema::Sema::with_target(fe_target, &arena);
     let tokens = glcc_frontend::lexer::Lexer::new(src, &mut interner).lex_all();
-    let mut parser = glcc_frontend::parse::Parser::new(src, tokens, &mut sema, &mut interner);
+    let mut parser = glcc_frontend::parse::Parser::new(src, tokens, &arena, &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     let mir_module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
     let errors = glcc_mir::verify::verify_module(&mir_module);

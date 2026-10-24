@@ -23,7 +23,7 @@ use crate::{
 
 /// Dump a whole translation unit: one s-expression per external
 /// declaration, bodies and initializers included.
-pub fn dump_translation_unit(sema: &Sema, interner: &Interner, tu: &TranslationUnit) -> String {
+pub fn dump_translation_unit(sema: &Sema<'_>, interner: &Interner, tu: &TranslationUnit) -> String {
     let mut out = Vec::new();
     for ed in &tu.external_declarations {
         out.push(match ed {
@@ -38,7 +38,7 @@ fn name(interner: &Interner, sym: SymbolU32) -> String {
     interner.resolve(sym).unwrap_or("?").to_string()
 }
 
-fn dump_var(sema: &Sema, interner: &Interner, id: DeclId) -> String {
+fn dump_var(sema: &Sema<'_>, interner: &Interner, id: DeclId) -> String {
     let binding = &sema.decls[id.0 as usize];
     let var = match binding.name {
         Some(sym) => format!("{}#{}", name(interner, sym), id.0),
@@ -64,7 +64,7 @@ fn dump_func(sema: &Sema, interner: &Interner, id: DeclId) -> String {
 
 fn dump_block(body: &FuncBody, sema: &Sema, interner: &Interner) -> String {
     let mut items = Vec::new();
-    for param in &body.params {
+    for param in body.params {
         let binding = &sema.decls[param.0 as usize];
         let var = match binding.name {
             Some(sym) => format!("{}#{}", name(interner, sym), param.0),
@@ -72,11 +72,11 @@ fn dump_block(body: &FuncBody, sema: &Sema, interner: &Interner) -> String {
         };
         items.push(format!("(param {} :{})", var, dump_ty(&binding.ty, sema, interner)));
     }
-    for item in &body.block.items {
+    for item in body.block.items {
         items.push(match item {
             BlockItem::Decl { ids, .. } => {
                 let mut decls = Vec::new();
-                for id in ids {
+                for id in ids.iter() {
                     decls.push(dump_var(sema, interner, *id));
                 }
                 format!("(decl {})", decls.join(" "))
@@ -91,11 +91,11 @@ fn dump_stmt(s: &Stmt, sema: &Sema, interner: &Interner) -> String {
     match s {
         Stmt::Compound(compound) => {
             let mut items = Vec::new();
-            for item in &compound.items {
+            for item in compound.items {
                 items.push(match item {
                     BlockItem::Decl { ids, .. } => {
                         let mut decls = Vec::new();
-                        for id in ids {
+                        for id in ids.iter() {
                             decls.push(dump_var(sema, interner, *id));
                         }
                         format!("(decl {})", decls.join(" "))
@@ -113,13 +113,13 @@ fn dump_stmt(s: &Stmt, sema: &Sema, interner: &Interner) -> String {
         Stmt::Expr { expr, .. } => format!("(; {})", dump_ex(expr, sema, interner)),
         Stmt::Asm(asm) => {
             let mut out = format!("(asm {:?}", asm.template);
-            for op in &asm.outputs {
+            for op in asm.outputs {
                 out.push_str(&format!(" (out {:?} {})", op.constraint, dump_ex(&op.expr, sema, interner)));
             }
-            for op in &asm.inputs {
+            for op in asm.inputs {
                 out.push_str(&format!(" (in {:?} {})", op.constraint, dump_ex(&op.expr, sema, interner)));
             }
-            for clobber in &asm.clobbers {
+            for clobber in asm.clobbers {
                 out.push_str(&format!(" (clobber {:?})", clobber));
             }
             out.push(')');
@@ -144,7 +144,7 @@ fn dump_stmt(s: &Stmt, sema: &Sema, interner: &Interner) -> String {
             let init = match init {
                 ForInit::Decl(ids) => {
                     let mut decls = Vec::new();
-                    for id in ids {
+                    for id in ids.iter() {
                         decls.push(dump_var(sema, interner, *id));
                     }
                     format!("(decl {})", decls.join(" "))
@@ -182,9 +182,9 @@ fn dump_init(init: &Initializer, sema: &Sema, interner: &Interner) -> String {
         Initializer::Expr(expr) => dump_ex(expr, sema, interner),
         Initializer::List { items, .. } => {
             let mut parts = Vec::new();
-            for item in items {
+            for item in *items {
                 let mut designators = Vec::new();
-                for designator in &item.designators {
+                for designator in item.designators {
                     designators.push(match designator {
                         Designator::Field { name: field, .. } => {
                             format!(".{}", name(interner, *field))
@@ -197,7 +197,7 @@ fn dump_init(init: &Initializer, sema: &Sema, interner: &Interner) -> String {
                         }
                     });
                 }
-                parts.push(format!("({}{})", designators.join(""), dump_init(&item.init, sema, interner)));
+                parts.push(format!("({}{})", designators.join(""), dump_init(item.init, sema, interner)));
             }
             format!("(list {})", parts.join(" "))
         }
@@ -219,7 +219,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::Char(lit) => format!("(char {} :{})", interner.resolve(lit.spelling).unwrap_or("?"), t),
         CheckedExprKind::Str(parts) => {
             let mut literals = Vec::new();
-            for part in parts {
+            for part in *parts {
                 // Spellings keep their quotes and prefix.
                 literals.push(interner.resolve(part.spelling).unwrap_or("?").to_string());
             }
@@ -239,7 +239,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::Elvis { cond, els } => format!("(?: {} {} :{})", dump_ex(cond, sema, interner), dump_ex(els, sema, interner), t),
         CheckedExprKind::Call { func, args } => {
             let mut parts = vec![dump_ex(func, sema, interner)];
-            for arg in args {
+            for arg in *args {
                 parts.push(dump_ex(arg, sema, interner));
             }
             format!("(call {} :{})", parts.join(" "), t)
@@ -249,7 +249,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         }
         CheckedExprKind::Atomic { op, args } => {
             let mut parts = Vec::new();
-            for arg in args {
+            for arg in *args {
                 parts.push(dump_ex(arg, sema, interner));
             }
             format!("(atomic-{:?} {} :{})", op, parts.join(" "), t)
@@ -311,7 +311,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
                     }
                 },
             };
-            for &index in path {
+            for &index in *path {
                 let def = &sema.structs[id.0 as usize];
                 match def.members.get(index).and_then(|m| m.name) {
                     Some(sym) => names.push(name(interner, sym)),
@@ -327,7 +327,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::Cast { ty, expr } => format!("(cast {} {} :{})", dump_ty(ty, sema, interner), dump_ex(expr, sema, interner), t),
         CheckedExprKind::Generic { index, assocs, .. } => {
             let mut parts = Vec::new();
-            for (ty, expr) in assocs {
+            for (ty, expr) in *assocs {
                 let label = match ty {
                     Some(ty) => dump_ty(ty, sema, interner),
                     None => "default".to_string(),
@@ -338,7 +338,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         }
         CheckedExprKind::GenericTy { ty, index, assocs } => {
             let mut parts = Vec::new();
-            for (ty, expr) in assocs {
+            for (ty, expr) in *assocs {
                 let label = match ty {
                     Some(ty) => dump_ty(ty, sema, interner),
                     None => "default".to_string(),
@@ -350,11 +350,11 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
         CheckedExprKind::VaArg { ap, ty } => format!("(va-arg {} {} :{})", dump_ex(ap, sema, interner), dump_ty(ty, sema, interner), t),
         CheckedExprKind::StmtExpr { items } => {
             let mut parts = Vec::new();
-            for item in items {
+            for item in *items {
                 parts.push(match item {
                     BlockItem::Decl { ids, .. } => {
                         let mut decls = Vec::new();
-                        for id in ids {
+                        for id in ids.iter() {
                             decls.push(dump_var(sema, interner, *id));
                         }
                         format!("(decl {})", decls.join(" "))

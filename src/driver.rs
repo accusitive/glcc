@@ -1232,7 +1232,8 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
     // sema: the lexer fills spellings, the parser borrows all of
     // it, and `(sema, interner)` thread on into MIR lowering.
     let mut interner = Interner::new();
-    let mut sema = Sema::with_target(target);
+    let arena = glcc_frontend::bumpalo::Bump::new();
+    let mut sema = Sema::with_target(target, &arena);
     sema.lang = lang;
     sema.async_enabled = async_enabled;
     // C++ `inline` has vague linkage: EDG lowers every C++ inline
@@ -1241,7 +1242,7 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
     // keeps GNU89 strong-standalone semantics.
     sema.weak_extern_inline = flavor == Flavor::Cpp;
     let tokens = Lexer::new(src, &mut interner).lex_all();
-    let mut parser = Parser::new(src, tokens, &mut sema, &mut interner);
+    let mut parser = Parser::new(src, tokens, &arena, &mut sema, &mut interner);
     // `json` consumers render `Parser::diagnostics_json` themselves.
     parser.emit_human = error_format == ErrorFormat::Human;
     let tu = parser.parse_translation_unit();
@@ -1422,11 +1423,12 @@ fn dump_mir_source(src: &str, flavor: Flavor, target: Target, opt_level: OptLeve
 fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut interner = Interner::new();
-        let mut sema = Sema::with_target(target);
+        let arena = glcc_frontend::bumpalo::Bump::new();
+        let mut sema = Sema::with_target(target, &arena);
         sema.lang = lang;
         sema.async_enabled = async_enabled;
         let tokens = Lexer::new(src, &mut interner).lex_all();
-        let mut parser = Parser::new(src, tokens, &mut sema, &mut interner);
+        let mut parser = Parser::new(src, tokens, &arena, &mut sema, &mut interner);
         parser.emit_human = error_format == ErrorFormat::Human;
         let _ = parser.parse_translation_unit();
         let has_errors = parser.has_errors();

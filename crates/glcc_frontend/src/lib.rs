@@ -27,6 +27,8 @@ pub mod sema;
 pub mod span;
 pub mod target;
 
+pub use bumpalo;
+
 use alloc::string::String;
 
 /// Preprocessed C source bytes as the frontend's string view.

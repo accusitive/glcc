@@ -112,7 +112,7 @@ fn align_up_bits(pos: u128, align: u128) -> Option<u128> {
     pos.checked_add(extra)
 }
 
-impl Sema {
+impl<'a> Sema<'a> {
     /// Whether a value of this type can exist: primitives (opaque
     /// builtins included) and pointers always can; structs, unions,
     /// and enums need completed definitions; arrays need complete
@@ -278,7 +278,7 @@ impl Sema {
                 }
                 Some(width) => {
                     let type_bits = size.checked_mul(8)?;
-                    let w = self.bit_width(width, type_bits, interner)?;
+                    let w = *width;
                     if w == 0 {
                         // `:0` (unnamed — named zero widths never parse):
                         // align the position, contribute nothing else.
@@ -377,7 +377,7 @@ impl Sema {
                     }
                 }
                 Some(width) => {
-                    let w = self.bit_width(width, msize.checked_mul(8)?, interner)?;
+                    let w = *width;
                     if w == 0 {
                         continue;
                     }

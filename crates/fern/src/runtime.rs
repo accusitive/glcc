@@ -49,9 +49,10 @@ fn compile() -> mir::Module {
     opts.defines.push(("_WIN32".to_string(), Some("1".to_string())));
     let src = glcc_pp::preprocess(SOURCE, NAME, &opts).expect("fern runtime: preprocessing rt/gc.c failed");
     let mut interner = Interner::new();
-    let mut sema = Sema::with_target(Target::native());
+    let arena = glcc_frontend::bumpalo::Bump::new();
+    let mut sema = Sema::with_target(Target::native(), &arena);
     let tokens = Lexer::new(&src, &mut interner).lex_all();
-    let mut parser = Parser::new(&src, tokens, &mut sema, &mut interner);
+    let mut parser = Parser::new(&src, tokens, &arena, &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     drop(parser);
     let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);

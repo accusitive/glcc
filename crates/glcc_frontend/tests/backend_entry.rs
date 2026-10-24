@@ -13,10 +13,11 @@ use glcc_frontend::{
 #[test]
 fn backend_owns_driver_state_and_parses() {
     let mut interner = Interner::new();
-    let mut sema = Sema::new();
+    let arena = bumpalo::Bump::new();
+    let mut sema = Sema::new(&arena);
     let src = "struct P { int x; int y; }; int f(struct P *p) { return p->x + p->y; }";
     let tokens = Lexer::new(src, &mut interner).lex_all();
-    let mut parser = Parser::new(src, tokens, &mut sema, &mut interner);
+    let mut parser = Parser::new(src, tokens, &arena, &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
     drop(parser);

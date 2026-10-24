@@ -295,10 +295,11 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
 fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String, String), MirFailure> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(glcc_mir::Module, String, String, String), (Vec<String>, String)> {
         let mut interner = Interner::new();
-        let mut sema = Sema::with_target(target);
+        let arena = glcc_frontend::bumpalo::Bump::new();
+        let mut sema = Sema::with_target(target, &arena);
         sema.async_enabled = async_enabled;
         let tokens = Lexer::new(source, &mut interner).lex_all();
-        let mut parser = Parser::new(source, tokens, &mut sema, &mut interner);
+        let mut parser = Parser::new(source, tokens, &arena, &mut sema, &mut interner);
         // The explorer reports diagnostics through `Output::errors` and
         // `Output::diagnostics`, not codespan's stderr rendering.
         parser.emit_human = false;
