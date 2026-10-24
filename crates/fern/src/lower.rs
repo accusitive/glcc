@@ -382,12 +382,7 @@ impl<'d> Lowerer<'d> {
                 slot += 1;
             }
         }
-        let call = push_inst(
-            &mut func,
-            entry,
-            mir::InstKind::CallExtern { target, args: args.into() },
-            ret.clone(),
-        );
+        let call = push_inst(&mut func, entry, mir::InstKind::CallExtern { target, args: args.into() }, ret.clone());
         push_void_inst(
             &mut func,
             entry,
@@ -478,12 +473,7 @@ impl<'d> Lowerer<'d> {
                 let inst = &self.defs.instances[instance];
                 let class = &self.defs.classes[inst.class_id.index()];
                 let head = inst.args[0].substitute(subst).mangle();
-                format!(
-                    "{}::{}::{}",
-                    head,
-                    class.name.replace("::", "$"),
-                    class.methods[method].name
-                )
+                format!("{}::{}::{}", head, class.name.replace("::", "$"), class.methods[method].name)
             }
         };
         if hir.generics.is_empty() {

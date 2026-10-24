@@ -200,17 +200,9 @@ impl State {
                 }
                 let stored = &self.lattice[param.index()];
                 if stored != &expected {
-                    errors.push(format!(
-                        "{}: b{block_idx} param %{} is {stored:?}, expected {expected:?}",
-                        func.name,
-                        param.index()
-                    ));
+                    errors.push(format!("{}: b{block_idx} param %{} is {stored:?}, expected {expected:?}", func.name, param.index()));
                 } else if matches!(stored, Lat::Unknown) {
-                    errors.push(format!(
-                        "{}: b{block_idx} param %{} never joined (stayed Unknown)",
-                        func.name,
-                        param.index()
-                    ));
+                    errors.push(format!("{}: b{block_idx} param %{} never joined (stayed Unknown)", func.name, param.index()));
                 }
             }
         }
@@ -1095,13 +1087,7 @@ mod tests {
             args: [carried].into_iter().collect(),
         });
         func.blocks[out].term = Some(Terminator::Return { val: Some(zero) });
-        WideningLoop {
-            func,
-            hdr,
-            back,
-            j,
-            carried,
-        }
+        WideningLoop { func, hdr, back, j, carried }
     }
 
     fn param(func: &mut Function, block: Block, ty: Ty, index: u32) -> Value {

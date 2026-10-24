@@ -211,11 +211,7 @@ fn provenance_suffix(func: &Function, module: &Module, values: &[crate::ir::Valu
         }
         entries.push(entry);
     }
-    if entries.is_empty() {
-        String::new()
-    } else {
-        format!("  ; {}", entries.join(", "))
-    }
+    if entries.is_empty() { String::new() } else { format!("  ; {}", entries.join(", ")) }
 }
 
 /// Render one function. With `None`, instructions print bare; with a

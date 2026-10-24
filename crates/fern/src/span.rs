@@ -48,17 +48,11 @@ impl Span {
     /// different files are never combined by the parser.
     pub fn to(self, other: Span) -> Span {
         debug_assert!(
-            self.file == other.file
-                || self.file == FileId::UNSPECIFIED
-                || other.file == FileId::UNSPECIFIED,
+            self.file == other.file || self.file == FileId::UNSPECIFIED || other.file == FileId::UNSPECIFIED,
             "combined spans from different files"
         );
         Span {
-            file: if self.file == FileId::UNSPECIFIED {
-                other.file
-            } else {
-                self.file
-            },
+            file: if self.file == FileId::UNSPECIFIED { other.file } else { self.file },
             lo: self.lo.min(other.lo),
             hi: self.hi.max(other.hi),
         }

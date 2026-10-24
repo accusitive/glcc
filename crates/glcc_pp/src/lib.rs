@@ -830,9 +830,7 @@ impl Ctx {
     /// builtins for clang, so let the later MSVC/system directories
     /// provide `intrin.h` and the `*intrin.h` files it includes.
     fn skips_clang_intrinsic(&self, dir: &Path, name: &str) -> bool {
-        name.ends_with("intrin.h")
-            && self.opts.clang_resource_dir.as_deref() == Some(dir)
-            && matches!(self.opts.target, Some(t) if t.os == glcc_frontend::target::Os::Windows)
+        name.ends_with("intrin.h") && self.opts.clang_resource_dir.as_deref() == Some(dir) && matches!(self.opts.target, Some(t) if t.os == glcc_frontend::target::Os::Windows)
     }
 
     pub fn record_once(&mut self, path: &Path) {
@@ -936,11 +934,7 @@ fn translate_trigraphs(source: &str) -> Cow<'_, str> {
 }
 
 fn translate_source<'a>(source: &'a str, opts: &PpOptions) -> Cow<'a, str> {
-    if trigraphs_enabled(opts) {
-        translate_trigraphs(source)
-    } else {
-        Cow::Borrowed(source)
-    }
+    if trigraphs_enabled(opts) { translate_trigraphs(source) } else { Cow::Borrowed(source) }
 }
 
 /// Preprocess `source` and return the expanded text.
@@ -1167,8 +1161,7 @@ mod tests {
 
     #[test]
     fn warning_directive_is_reported_only_when_active() {
-        let (text, warnings) =
-            preprocess_with_warnings("#if 0\n#warning no\n#endif\n#warning \"yes\"\n", "t.c", &opts()).unwrap();
+        let (text, warnings) = preprocess_with_warnings("#if 0\n#warning no\n#endif\n#warning \"yes\"\n", "t.c", &opts()).unwrap();
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert_eq!(warnings[0].loc, "t.c:4");
         assert_eq!(warnings[0].message, "\"yes\"");
@@ -1455,10 +1448,7 @@ mod tests {
 
     #[test]
     fn trigraphs_translate_before_c23() {
-        assert_eq!(
-            translate_trigraphs("??=??/??'??(??)??!??<??>??-").as_ref(),
-            "#\\^[]|{}~"
-        );
+        assert_eq!(translate_trigraphs("??=??/??'??(??)??!??<??>??-").as_ref(), "#\\^[]|{}~");
         let c17 = PpOptions {
             std: Some("-std=c17".to_string()),
             ..opts()
@@ -1476,7 +1466,10 @@ mod tests {
         assert!(!got.contains("int a[2]"), "was: {got}");
         assert_eq!(got, "int a??(2??) = {0};\n");
         assert!(!trigraphs_enabled(&c23));
-        assert!(trigraphs_enabled(&PpOptions { trigraphs: Some(true), ..c23.clone() }));
+        assert!(trigraphs_enabled(&PpOptions {
+            trigraphs: Some(true),
+            ..c23.clone()
+        }));
     }
 
     #[test]
@@ -1535,11 +1528,7 @@ mod tests {
     #[test]
     fn predefines_report_the_gnu_version_glcc_targets() {
         let pre = predefines(None, None);
-        let get = |name: &str| {
-            pre.iter()
-                .find(|(existing, _)| existing == name)
-                .map(|(_, value)| value.as_str())
-        };
+        let get = |name: &str| pre.iter().find(|(existing, _)| existing == name).map(|(_, value)| value.as_str());
         assert_eq!(get("__GNUC__"), Some("4"));
         assert_eq!(get("__GNUC_MINOR__"), Some("8"));
         assert_eq!(get("__GNUC_PATCHLEVEL__"), Some("0"));

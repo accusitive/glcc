@@ -52,11 +52,7 @@ pub fn parse_expr_fragment(tokens: Vec<Token>) -> KResult<Expr> {
 /// diagnostic and discards the partially parsed program.
 pub fn parse(tokens: Vec<Token>) -> KResult<Program> {
     let mut out = parse_recovering(tokens);
-    if out.diags.is_empty() {
-        Ok(out.program)
-    } else {
-        Err(out.diags.remove(0))
-    }
+    if out.diags.is_empty() { Ok(out.program) } else { Err(out.diags.remove(0)) }
 }
 
 struct Parser {
@@ -105,10 +101,7 @@ impl Parser {
         if self.is(want) {
             return Ok(self.bump());
         }
-        Err(self.complete_if_eof(Diag::new(
-            format!("expected {what}, found {}", self.peek().describe()),
-            self.span(),
-        )))
+        Err(self.complete_if_eof(Diag::new(format!("expected {what}, found {}", self.peek().describe()), self.span())))
     }
 
     fn eat(&mut self, want: &Tok) -> bool {
@@ -225,7 +218,10 @@ impl Parser {
             }
             other => {
                 return Err(self.complete_if_eof(Diag::new(
-                    format!("expected an item (`data`, `class`, `instance`, `extern`, `fun`, `let`, `import`, or `use`), found {}", other.describe()),
+                    format!(
+                        "expected an item (`data`, `class`, `instance`, `extern`, `fun`, `let`, `import`, or `use`), found {}",
+                        other.describe()
+                    ),
                     self.span(),
                 )));
             }
@@ -408,11 +404,7 @@ impl Parser {
         let start = self.span();
         self.bump();
         let symbol = if matches!(self.peek(), Tok::Str(_)) {
-            let Token {
-                tok: Tok::Str(symbol),
-                ..
-            } = self.bump()
-            else {
+            let Token { tok: Tok::Str(symbol), .. } = self.bump() else {
                 unreachable!("checked above");
             };
             Some(symbol)
@@ -471,11 +463,7 @@ impl Parser {
         let start = self.span();
         self.bump();
         let name = self.lower("a value name")?;
-        let ty = if self.eat(&Tok::Colon) {
-            Some(self.ty_expr()?)
-        } else {
-            None
-        };
+        let ty = if self.eat(&Tok::Colon) { Some(self.ty_expr()?) } else { None };
         self.expect(&Tok::Eq, "`=` after the value name")?;
         let body = self.expr()?;
         Ok(ValueDecl {
@@ -490,11 +478,7 @@ impl Parser {
         let start = self.span();
         self.bump();
         let path = self.module_path("a module path")?;
-        let alias = if self.eat(&Tok::As) {
-            Some(self.lower("an import alias")?)
-        } else {
-            None
-        };
+        let alias = if self.eat(&Tok::As) { Some(self.lower("an import alias")?) } else { None };
         Ok(ImportDecl {
             span: start.to(self.prev_span()),
             path,
@@ -513,11 +497,7 @@ impl Parser {
                 path.push(self.lower("a module path or imported item")?);
             }
         }
-        let alias = if self.eat(&Tok::As) {
-            Some(self.lower("an import alias")?)
-        } else {
-            None
-        };
+        let alias = if self.eat(&Tok::As) { Some(self.lower("an import alias")?) } else { None };
         Ok(UseDecl {
             span: start.to(self.prev_span()),
             path,
@@ -582,10 +562,7 @@ impl Parser {
                             ..
                         } => segment,
                         other => {
-                            return Err(Diag::new(
-                                format!("expected a type name after `.`, found {}", other.tok.describe()),
-                                other.span,
-                            ));
+                            return Err(Diag::new(format!("expected a type name after `.`, found {}", other.tok.describe()), other.span));
                         }
                     };
                     name.push('.');
@@ -963,8 +940,7 @@ impl Parser {
                 };
                 let opens_record = matches!(
                     (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
-                    (Some(Token { tok: Tok::RBrace, .. }), _)
-                        | (Some(Token { tok: Tok::Lower(_), .. }), Some(Token { tok: Tok::Eq, .. }))
+                    (Some(Token { tok: Tok::RBrace, .. }), _) | (Some(Token { tok: Tok::Lower(_), .. }), Some(Token { tok: Tok::Eq, .. }))
                 );
                 if !opens_record {
                     break;
@@ -999,10 +975,7 @@ impl Parser {
                         ..
                     } => name,
                     other => {
-                        return Err(Diag::new(
-                            format!("expected a member name, found {}", other.tok.describe()),
-                            other.span,
-                        ));
+                        return Err(Diag::new(format!("expected a member name, found {}", other.tok.describe()), other.span));
                     }
                 };
                 let upper = member.as_bytes()[0].is_ascii_uppercase();
@@ -1122,7 +1095,11 @@ impl Parser {
                 })
             }
             Tok::Shell { .. } => {
-                let Token { tok: Tok::Shell { src, capture }, span } = self.bump() else {
+                let Token {
+                    tok: Tok::Shell { src, capture },
+                    span,
+                } = self.bump()
+                else {
                     unreachable!("checked above");
                 };
                 let base = span.lo + if capture { 2 } else { 1 };
@@ -1231,27 +1208,13 @@ impl Parser {
     /// when the shape is not a lambda. Errors are abortive (the caller
     /// rewinds either way).
     fn convert_shell(&mut self, raw: crate::shell::RawCommand) -> KResult<ShellCommand> {
-        let stages = raw
-            .stages
-            .into_iter()
-            .map(|stage| self.convert_stage(stage))
-            .collect::<KResult<Vec<_>>>()?;
-        Ok(ShellCommand {
-            stages,
-            span: raw.span,
-        })
+        let stages = raw.stages.into_iter().map(|stage| self.convert_stage(stage)).collect::<KResult<Vec<_>>>()?;
+        Ok(ShellCommand { stages, span: raw.span })
     }
 
     fn convert_stage(&mut self, raw: crate::shell::RawStage) -> KResult<ShellStage> {
-        let words = raw
-            .words
-            .into_iter()
-            .map(|word| self.convert_word(word))
-            .collect::<KResult<Vec<_>>>()?;
-        Ok(ShellStage {
-            words,
-            span: raw.span,
-        })
+        let words = raw.words.into_iter().map(|word| self.convert_word(word)).collect::<KResult<Vec<_>>>()?;
+        Ok(ShellStage { words, span: raw.span })
     }
 
     fn convert_word(&mut self, raw: crate::shell::RawWord) -> KResult<ShellWord> {
@@ -1265,15 +1228,10 @@ impl Parser {
                     let expr = parse_expr_fragment(tokens)?;
                     Ok(ShellWordPart::Interp(expr))
                 }
-                crate::shell::RawPart::Capture(command) => {
-                    Ok(ShellWordPart::Capture(Box::new(self.convert_shell(*command)?)))
-                }
+                crate::shell::RawPart::Capture(command) => Ok(ShellWordPart::Capture(Box::new(self.convert_shell(*command)?))),
             })
             .collect::<KResult<Vec<_>>>()?;
-        Ok(ShellWord {
-            parts,
-            span: raw.span,
-        })
+        Ok(ShellWord { parts, span: raw.span })
     }
 
     fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
@@ -1323,16 +1281,7 @@ fn expr_path(expr: &Expr) -> Option<String> {
 fn is_item_start(tok: &Tok) -> bool {
     matches!(
         tok,
-        Tok::Data
-            | Tok::Class
-            | Tok::Instance
-            | Tok::Extern
-            | Tok::Async
-            | Tok::Fun
-            | Tok::Let
-            | Tok::Import
-            | Tok::Use
-            | Tok::Priv
+        Tok::Data | Tok::Class | Tok::Instance | Tok::Extern | Tok::Async | Tok::Fun | Tok::Let | Tok::Import | Tok::Use | Tok::Priv
     )
 }
 

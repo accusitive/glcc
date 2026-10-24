@@ -22,10 +22,10 @@ pub mod lower;
 pub mod parser;
 pub mod prelude;
 pub mod resolve;
-pub mod shell;
 #[cfg(feature = "c-rt")]
 pub mod runtime;
 pub mod session;
+pub mod shell;
 pub mod solve;
 pub mod span;
 pub mod ty;
@@ -43,11 +43,7 @@ pub fn compile(src: &str) -> KResult<MirModule> {
 /// Render a diagnostic for a driver. Prelude diagnostics resolve against
 /// the prelude text; everything else against `src`.
 pub fn render_diag(src: &str, diag: &Diag) -> String {
-    let source = if diag.span.file == FileId::PRELUDE {
-        prelude::SOURCE
-    } else {
-        src
-    };
+    let source = if diag.span.file == FileId::PRELUDE { prelude::SOURCE } else { src };
     let rendered = SourceMap::new(source).render(source, diag);
     if diag.span.file == FileId::PRELUDE {
         rendered.replacen(" --> ", " --> prelude:", 1)

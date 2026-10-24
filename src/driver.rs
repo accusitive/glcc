@@ -1200,8 +1200,8 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
             }
             opts.include_paths.extend(native);
         }
-        let (text, warnings) = glcc_pp::preprocess_with_warnings(&text, &input.to_string_lossy(), &opts)
-            .map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())))?;
+        let (text, warnings) =
+            glcc_pp::preprocess_with_warnings(&text, &input.to_string_lossy(), &opts).map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())))?;
         for warning in warnings {
             eprintln!("{warning}");
         }
@@ -1227,7 +1227,15 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
 /// accumulated by the parser and reported (codespan or JSON, per
 /// `error_format`) before returning `Err`; a later codegen/verification
 /// panic is caught by the callers and reported as `Quiet`.
-fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(glcc_mir::Module, String), ()> {
+fn lower_source_to_mir(
+    src: &str,
+    flavor: Flavor,
+    target: Target,
+    opt_level: OptLevel,
+    async_enabled: bool,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+) -> std::result::Result<(glcc_mir::Module, String), ()> {
     // The driver owns the interner, the lexer output, and the
     // sema: the lexer fills spellings, the parser borrows all of
     // it, and `(sema, interner)` thread on into MIR lowering.
@@ -1291,7 +1299,17 @@ fn lower_source_to_mir(src: &str, flavor: Flavor, target: Target, opt_level: Opt
 /// diagnostics are reported by `lower_source_to_mir`; any panic here
 /// (codegen or MIR verification) is `Quiet`: the panic hook or the
 /// rendered diagnostic already spoke.
-fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, pic: bool, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat) -> std::result::Result<(Vec<u8>, String), ()> {
+fn compile_source(
+    src: &str,
+    flavor: Flavor,
+    target: Target,
+    debug: bool,
+    pic: bool,
+    opt_level: OptLevel,
+    async_enabled: bool,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (mir_module, mut asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
         let cl_target = match target.arch {
@@ -1311,7 +1329,9 @@ fn compile_source(src: &str, flavor: Flavor, target: Target, debug: bool, pic: b
         flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
         // Cranelift's MachInst verifier is a dev-time safety net; our own
         // MIR verifier still runs in every build.
-        flag_builder.set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" }).expect("verifier");
+        flag_builder
+            .set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })
+            .expect("verifier");
         // TLS access (`tls_value` for the x86-64 foreign-variadic
         // trampoline) has no lowering unless a model is selected;
         // `elf_gd` lowers on all supported ISAs, like the legacy
@@ -1403,7 +1423,16 @@ fn apply_narrow_relocs(product: &mut cranelift_object::ObjectProduct, narrow: &[
 /// MIR text for `--emit-mir`/`--emit-full-mir`, sharing
 /// `compile_source`'s panic handling: the frontend speaks for itself,
 /// so a caught panic becomes `Quiet` instead of double-reporting.
-fn dump_mir_source(src: &str, flavor: Flavor, target: Target, opt_level: OptLevel, async_enabled: bool, lang: LangOpts, error_format: ErrorFormat, full: bool) -> std::result::Result<String, ()> {
+fn dump_mir_source(
+    src: &str,
+    flavor: Flavor,
+    target: Target,
+    opt_level: OptLevel,
+    async_enabled: bool,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+    full: bool,
+) -> std::result::Result<String, ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
         Ok::<String, ()>(if full {
@@ -2002,7 +2031,18 @@ fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path
         }
         save_temp_file(&dir, &format!("{stem}.i"), &bytes);
     }
-    let (bytes, asm_text) = compile_source(&c, job.flavor, job.target, job.debug, job.pic, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
+    let (bytes, asm_text) = compile_source(
+        &c,
+        job.flavor,
+        job.target,
+        job.debug,
+        job.pic,
+        job.opt_level,
+        job.async_enabled,
+        language(job),
+        job.error_format,
+    )
+    .map_err(|()| {
         take_diagnostic_emitted();
         Fail::Quiet
     })?;
@@ -2154,7 +2194,18 @@ fn compile_input_to_bytes(ctx: &Ctx, job: &Job, input: &Input, obj_out: Option<&
         Lang::Assembler => unreachable!("assembler inputs are assembled, not compiled"),
         Lang::Cpp | Lang::EdgC => unreachable!("EDG inputs are handled by compile_edg_input"),
     };
-    compile_source(&text, job.flavor, job.target, job.debug, job.pic, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
+    compile_source(
+        &text,
+        job.flavor,
+        job.target,
+        job.debug,
+        job.pic,
+        job.opt_level,
+        job.async_enabled,
+        language(job),
+        job.error_format,
+    )
+    .map_err(|()| {
         // Drain the flag so a caught diagnostic never silences a
         // later, unrelated panic in the hook.
         take_diagnostic_emitted();
@@ -3127,9 +3178,19 @@ mod tests {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
         let src = "int f(int x) { return x + 1; }\nint g(void) { return f(2); }\nint main(void) { return g(); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::WINDOWS_X86_64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
-            .expect("compiles")
-            .0;
+        let bytes = compile_source(
+            src,
+            Flavor::C,
+            Target::WINDOWS_X86_64,
+            false,
+            true,
+            OptLevel::None,
+            false,
+            LangOpts::default(),
+            ErrorFormat::Human,
+        )
+        .expect("compiles")
+        .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
         assert_eq!(obj.format(), object::BinaryFormat::Coff);
 
@@ -3431,10 +3492,7 @@ mod tests {
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
         let rodata = obj.section_by_name(".rodata").expect(".rodata section");
-        let literals: Vec<_> = obj
-            .symbols()
-            .filter(|symbol| symbol.name().is_ok_and(|name| name.starts_with("__str.")))
-            .collect();
+        let literals: Vec<_> = obj.symbols().filter(|symbol| symbol.name().is_ok_and(|name| name.starts_with("__str."))).collect();
         assert_eq!(literals.len(), 2, "both literals are materialized");
         for symbol in literals {
             assert_eq!(
@@ -3516,10 +3574,7 @@ mod tests {
         assert_eq!(parse(&["--error-format=json", "a.c"]).error_format, ErrorFormat::Json);
         assert_eq!(parse(&["--error-format", "human", "a.c"]).error_format, ErrorFormat::Human);
         // Last wins, like other repeated options.
-        assert_eq!(
-            parse(&["--error-format=json", "--error-format=human", "a.c"]).error_format,
-            ErrorFormat::Human
-        );
+        assert_eq!(parse(&["--error-format=json", "--error-format=human", "a.c"]).error_format, ErrorFormat::Human);
         assert!(parse_args(&args(&["--error-format=bogus", "a.c"])).is_err());
     }
 
@@ -3819,7 +3874,10 @@ mod tests {
         let job = parse(&["--target=x86_64-windows", "-shared", "a.c"]);
         let (_, args) = msvc_link_command_with(&job, &|_| OsString::from("a.obj"), OsStr::new("a.dll"), &[], OsString::from("link.exe"), &[]);
         let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(s, ["/nologo", "/dll", "/out:a.dll", "/subsystem:windows", "a.obj", "libcmt.lib", "kernel32.lib", "user32.lib"]);
+        assert_eq!(
+            s,
+            ["/nologo", "/dll", "/out:a.dll", "/subsystem:windows", "a.obj", "libcmt.lib", "kernel32.lib", "user32.lib"]
+        );
         let bare = parse(&["--target=x86_64-windows", "-nostdlib", "a.c"]);
         let (_, args) = msvc_link_command_with(&bare, &|_| OsString::from("a.obj"), OsStr::new("a.exe"), &[], OsString::from("link.exe"), &[]);
         assert!(!args.iter().any(|a| a == OsStr::new("libcmt.lib")));

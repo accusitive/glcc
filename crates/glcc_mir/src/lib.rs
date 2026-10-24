@@ -29,9 +29,9 @@ pub mod verify;
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use debug::{BaseEncoding, DebugType, DebugTypeId, Enumerator, File, FunctionDebug, GlobalDebug, Location, Member, MemberLocation, Qualifier, ScopeDebug, VarDebug, VarHome};
 pub use ir::{
-    AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, ExternEffect, FcmpPred, Func, Function, Global, GlobalData, IcmpPred,
-    Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
+    AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, ExternEffect, FcmpPred, Func, Function, Global, GlobalData, IcmpPred, Inst,
+    InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
-pub use optimize::{optimize, OptLevel};
+pub use optimize::{OptLevel, optimize};
 pub use pass::{FunctionPass, ModulePass, PassManager};
 pub use ty::{FloatKind, GepIndex, Signature, Ty, dense_field_offsets, struct_field_offsets};

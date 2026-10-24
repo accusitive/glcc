@@ -177,9 +177,7 @@ impl IntoTokenTree {
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
                 Ok(Some(TokenTree::IfNDef { macro_name, body, opposition }))
             }
-            ControlLine::Elif { .. } | ControlLine::ElifDef { .. } | ControlLine::ElifNDef { .. } | ControlLine::Else
-                if !self.expecting_opposition =>
-            {
+            ControlLine::Elif { .. } | ControlLine::ElifDef { .. } | ControlLine::ElifNDef { .. } | ControlLine::Else if !self.expecting_opposition => {
                 Err(err(format!("{file}:{}: #elif/#else without #if", tok.line)))
             }
             ControlLine::Elif { condition } => {

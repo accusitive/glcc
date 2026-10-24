@@ -3,7 +3,7 @@
 
 #![cfg(not(windows))]
 
-use fern_repl::{input_incomplete, is_definition, Repl};
+use fern_repl::{Repl, input_incomplete, is_definition};
 
 #[test]
 fn defines_and_calls_a_function() {
@@ -41,14 +41,11 @@ fn a_failed_definition_rolls_back() {
 fn adt_match_and_recursion() {
     let mut repl = Repl::new();
     repl.define("data Color = Red | Green | Blue").expect("data");
-    repl.define(
-        "fun to_int(c : Color) : Int = match c { case Red => 0 case Green => 1 case Blue => 2 }",
-    )
-    .expect("matches");
+    repl.define("fun to_int(c : Color) : Int = match c { case Red => 0 case Green => 1 case Blue => 2 }")
+        .expect("matches");
     assert_eq!(repl.eval_expr("to_int(Green)").expect("runs"), "1");
 
-    repl.define("fun fac(n : Int) : Int = if n == 0 then 1 else n * fac(n - 1)")
-        .expect("recursion");
+    repl.define("fun fac(n : Int) : Int = if n == 0 then 1 else n * fac(n - 1)").expect("recursion");
     assert_eq!(repl.eval_expr("fac(6)").expect("runs"), "720");
 }
 
@@ -67,10 +64,7 @@ fn closures_and_higher_order_functions() {
         .expect("defines");
     repl.define("fun map(f : a -> b, xs : List a) : List b = match xs { case Nil => Nil case Cons(x, rest) => Cons(f(x), map(f, rest)) }")
         .expect("defines");
-    assert_eq!(
-        repl.eval_expr("sum(map((x) -> x * 2, [1, 2, 3]))").expect("runs"),
-        "12"
-    );
+    assert_eq!(repl.eval_expr("sum(map((x) -> x * 2, [1, 2, 3]))").expect("runs"), "12");
 }
 
 #[test]
@@ -88,46 +82,21 @@ fn string_literals_evaluate() {
     assert_eq!(repl.eval_expr("\"hello\"").expect("runs"), "hello");
     assert_eq!(repl.eval_expr("\"a\\nb\"").expect("runs"), "a\nb");
     repl.define("fun greeting(name : String) : String = name").expect("defines");
-    assert_eq!(
-        repl.eval_expr("greeting(\"fern\")").expect("runs"),
-        "fern"
-    );
+    assert_eq!(repl.eval_expr("greeting(\"fern\")").expect("runs"), "fern");
 }
 
 #[test]
 fn externs_and_shell_primitives() {
     let mut repl = Repl::new();
     assert_eq!(repl.eval_expr("\"a\" == \"a\"").expect("runs"), "true");
-    assert_eq!(
-        repl.eval_expr("spawn_status(\"true\", [])").expect("runs"),
-        "0"
-    );
-    assert_eq!(
-        repl.eval_expr("spawn_status(\"false\", [])").expect("runs"),
-        "1"
-    );
-    assert_eq!(
-        repl.eval_expr("spawn_capture(\"echo\", [\"hi\"])")
-            .expect("runs"),
-        "hi\n"
-    );
-    repl.define("extern \"strlen\" c_strlen : String -> Int")
-        .expect("declares an extern");
+    assert_eq!(repl.eval_expr("spawn_status(\"true\", [])").expect("runs"), "0");
+    assert_eq!(repl.eval_expr("spawn_status(\"false\", [])").expect("runs"), "1");
+    assert_eq!(repl.eval_expr("spawn_capture(\"echo\", [\"hi\"])").expect("runs"), "hi\n");
+    repl.define("extern \"strlen\" c_strlen : String -> Int").expect("declares an extern");
     assert_eq!(repl.eval_expr("c_strlen(\"abcd\")").expect("runs"), "4");
-    assert_eq!(
-        repl.eval_expr("str_join(\"|\", str_split(\",\", \"a,b\"))")
-            .expect("runs"),
-        "a|b"
-    );
-    assert_eq!(
-        repl.eval_expr("set_env(\"FERN_PHASE_B\", \"yes\")")
-            .expect("runs"),
-        "true"
-    );
-    assert_eq!(
-        repl.eval_expr("getenv(\"FERN_PHASE_B\")").expect("runs"),
-        "yes"
-    );
+    assert_eq!(repl.eval_expr("str_join(\"|\", str_split(\",\", \"a,b\"))").expect("runs"), "a|b");
+    assert_eq!(repl.eval_expr("set_env(\"FERN_PHASE_B\", \"yes\")").expect("runs"), "true");
+    assert_eq!(repl.eval_expr("getenv(\"FERN_PHASE_B\")").expect("runs"), "yes");
 }
 
 #[test]
@@ -136,36 +105,17 @@ fn shell_commands_capture_and_pipe() {
     assert_eq!(repl.eval_expr("$ true").expect("runs"), "true");
     assert_eq!(repl.eval_expr("$ false").expect("runs"), "false");
     assert_eq!(repl.eval_expr("$(echo hi)").expect("runs"), "hi\n");
-    assert_eq!(
-        repl.eval_expr("$(echo hi | tr a-z A-Z)").expect("runs"),
-        "HI\n"
-    );
-    assert_eq!(
-        repl.eval_expr("$(printf \"[%s]\" ${\"a b\"})")
-            .expect("runs"),
-        "[a b]"
-    );
-    assert_eq!(
-        repl.eval_expr("($ #env HOME) == getenv(\"HOME\")")
-            .expect("runs"),
-        "true"
-    );
-    assert_eq!(
-        repl.eval_expr("$ true && $ false").expect("runs"),
-        "false"
-    );
-    assert_eq!(
-        repl.eval_expr("$(printf hi) |> str_len").expect("runs"),
-        "2"
-    );
+    assert_eq!(repl.eval_expr("$(echo hi | tr a-z A-Z)").expect("runs"), "HI\n");
+    assert_eq!(repl.eval_expr("$(printf \"[%s]\" ${\"a b\"})").expect("runs"), "[a b]");
+    assert_eq!(repl.eval_expr("($ #env HOME) == getenv(\"HOME\")").expect("runs"), "true");
+    assert_eq!(repl.eval_expr("$ true && $ false").expect("runs"), "false");
+    assert_eq!(repl.eval_expr("$(printf hi) |> str_len").expect("runs"), "2");
 }
 
 #[test]
 fn shell_commands_work_in_definitions() {
     let mut repl = Repl::new();
-    let sig = repl
-        .define("let shell_ok = $ true")
-        .expect("defines a command value");
+    let sig = repl.define("let shell_ok = $ true").expect("defines a command value");
     assert_eq!(sig, vec!["shell_ok : Bool"]);
     assert_eq!(repl.eval_expr("shell_ok").expect("runs"), "true");
     repl.define("fun upper(s : String) : String = $(printf \"%s\" ${s} | tr a-z A-Z)")
@@ -239,11 +189,7 @@ fn imports_load_a_module_and_expose_qualified_names() {
     let dir = std::env::temp_dir().join(format!("fern-repl-modules-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
-    std::fs::write(
-        dir.join("math.fern"),
-        "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 0\n",
-    )
-    .expect("write math");
+    std::fs::write(dir.join("math.fern"), "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 0\n").expect("write math");
 
     let mut repl = Repl::new();
     repl.set_module_root(&dir);

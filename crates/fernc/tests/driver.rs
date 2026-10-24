@@ -22,13 +22,8 @@ fn glcc_binary() -> PathBuf {
     if let Some(path) = std::env::var_os("CARGO_BIN_EXE_glcc") {
         return PathBuf::from(path);
     }
-    let candidate =
-        Path::new(FERNC).parent().expect("fernc has a parent").join(format!("glcc{}", std::env::consts::EXE_SUFFIX));
-    assert!(
-        candidate.is_file(),
-        "glcc not found at {}; build it with `cargo build -p glcc`",
-        candidate.display()
-    );
+    let candidate = Path::new(FERNC).parent().expect("fernc has a parent").join(format!("glcc{}", std::env::consts::EXE_SUFFIX));
+    assert!(candidate.is_file(), "glcc not found at {}; build it with `cargo build -p glcc`", candidate.display());
     candidate
 }
 
@@ -52,13 +47,7 @@ fn exe_path(dir: &Path, name: &str) -> PathBuf {
 }
 
 fn link_with_c(c_path: &Path, object: &Path, exe: &Path) -> Output {
-    Command::new(glcc_binary())
-        .arg(c_path)
-        .arg(object)
-        .arg("-o")
-        .arg(exe)
-        .output()
-        .expect("run glcc")
+    Command::new(glcc_binary()).arg(c_path).arg(object).arg("-o").arg(exe).output().expect("run glcc")
 }
 
 fn run_fernc(source: &str, name: &str, extra: &[&str]) -> (PathBuf, PathBuf) {
@@ -118,11 +107,7 @@ fn run_linked(dir: &Path, object: &Path, input: Option<&str>) -> (String, i32) {
     assert!(out.status.success(), "link failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let out = match input {
         Some(input) => {
-            let mut child = Command::new(&exe)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()
-                .expect("spawn program");
+            let mut child = Command::new(&exe).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().expect("spawn program");
             child.stdin.take().expect("piped stdin").write_all(input.as_bytes()).expect("write stdin");
             child.wait_with_output().expect("run program")
         }
@@ -611,12 +596,7 @@ fn stdlib_modules_link_and_run() {
     .expect("write stdlib program");
 
     let object = object_path(&dir);
-    let out = Command::new(FERNC)
-        .arg(&source)
-        .arg("-o")
-        .arg(&object)
-        .output()
-        .expect("run fernc");
+    let out = Command::new(FERNC).arg(&source).arg("-o").arg(&object).output().expect("run fernc");
     assert!(
         out.status.success(),
         "fernc failed:\n{}\n{}",
@@ -636,28 +616,11 @@ fn module_imports_link_and_run() {
     }
     let dir = temp_dir("modules");
     let main_path = dir.join("main.fern");
-    fs::write(
-        &main_path,
-        "import math\nfun answer() : Int = math.double(math.origin()) + 1\n",
-    )
-    .expect("write main");
-    fs::write(
-        dir.join("math.fern"),
-        "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 20\n",
-    )
-    .expect("write math");
+    fs::write(&main_path, "import math\nfun answer() : Int = math.double(math.origin()) + 1\n").expect("write main");
+    fs::write(dir.join("math.fern"), "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 20\n").expect("write math");
     let object = object_path(&dir);
-    let out = Command::new(FERNC)
-        .arg(&main_path)
-        .arg("-o")
-        .arg(&object)
-        .output()
-        .expect("run fernc");
-    assert!(
-        out.status.success(),
-        "fernc failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = Command::new(FERNC).arg(&main_path).arg("-o").arg(&object).output().expect("run fernc");
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
     assert_eq!(stdout, "41\n");
@@ -677,25 +640,12 @@ fn same_named_modules_link_and_run() {
         )
     };
     let main_path = dir.join("main.fern");
-    fs::write(
-        &main_path,
-        "import a\nimport b\nfun answer() : Int = a.get(a.make()) + b.get(b.make())\n",
-    )
-    .expect("write main");
+    fs::write(&main_path, "import a\nimport b\nfun answer() : Int = a.get(a.make()) + b.get(b.make())\n").expect("write main");
     fs::write(dir.join("a.fern"), source(20)).expect("write a");
     fs::write(dir.join("b.fern"), source(22)).expect("write b");
     let object = object_path(&dir);
-    let out = Command::new(FERNC)
-        .arg(&main_path)
-        .arg("-o")
-        .arg(&object)
-        .output()
-        .expect("run fernc");
-    assert!(
-        out.status.success(),
-        "fernc failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = Command::new(FERNC).arg(&main_path).arg("-o").arg(&object).output().expect("run fernc");
+    assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
     assert_eq!(stdout, "42\n");

@@ -870,18 +870,13 @@ impl<'a> Sema<'a> {
     pub fn set_enum_fixed(&mut self, id: EnumId, fixed: Option<Ty>, span: Span) -> Result<(), CompileError> {
         let def = &mut self.enums[id.0 as usize];
         match (&def.fixed, fixed) {
-            (Some(previous), Some(new)) if *previous != new => Err(CompileError::new(
-                "enumeration redeclared with a different underlying type",
-                span,
-            )
-            .with_secondary(def.span, "previous declaration here")),
-            (Some(_), None) => Err(CompileError::new("enumeration previously declared with fixed underlying type", span)
-                .with_secondary(def.span, "previous declaration here")),
-            (None, Some(_)) if def.complete => Err(CompileError::new(
-                "enumeration previously declared with nonfixed underlying type",
-                span,
-            )
-            .with_secondary(def.span, "previous declaration here")),
+            (Some(previous), Some(new)) if *previous != new => {
+                Err(CompileError::new("enumeration redeclared with a different underlying type", span).with_secondary(def.span, "previous declaration here"))
+            }
+            (Some(_), None) => Err(CompileError::new("enumeration previously declared with fixed underlying type", span).with_secondary(def.span, "previous declaration here")),
+            (None, Some(_)) if def.complete => {
+                Err(CompileError::new("enumeration previously declared with nonfixed underlying type", span).with_secondary(def.span, "previous declaration here"))
+            }
             (_, fixed @ Some(_)) => {
                 def.fixed = fixed;
                 Ok(())
@@ -965,7 +960,18 @@ pub fn types_compatible(a: &Ty, b: &Ty) -> bool {
             // libc functions this way, like GCC.
             pa.iter().zip(pb.iter()).all(|(x, y)| types_compatible(&unqualified_param_ty(x), &unqualified_param_ty(y)))
         }
-        (Ty::Pointer { qualifiers: qa, size: sa, pointee: pa }, Ty::Pointer { qualifiers: qb, size: sb, pointee: pb }) => qa == qb && sa == sb && types_compatible(pa, pb),
+        (
+            Ty::Pointer {
+                qualifiers: qa,
+                size: sa,
+                pointee: pa,
+            },
+            Ty::Pointer {
+                qualifiers: qb,
+                size: sb,
+                pointee: pb,
+            },
+        ) => qa == qb && sa == sb && types_compatible(pa, pb),
         (Ty::Array { elem: ea, quals: qa, bound: ba }, Ty::Array { elem: eb, quals: qb, bound: bb }) => qa == qb && types_compatible(ea, eb) && bounds_compatible(ba, bb),
         _ => a == b,
     }
@@ -1063,7 +1069,14 @@ pub fn composite_type(a: Ty, b: Ty) -> Ty {
                 }
             }
         }
-        (Ty::Pointer { qualifiers: qa, size, pointee: pa }, Ty::Pointer { pointee: pb, .. }) => Ty::Pointer {
+        (
+            Ty::Pointer {
+                qualifiers: qa,
+                size,
+                pointee: pa,
+            },
+            Ty::Pointer { pointee: pb, .. },
+        ) => Ty::Pointer {
             qualifiers: qa,
             size,
             pointee: Box::new(composite_type(*pa, *pb)),
@@ -1151,12 +1164,7 @@ pub fn string_contents(parts: &[StringLiteral], interner: &Interner) -> Option<S
 /// already walks). Declarations nested in GNU statement expressions
 /// keep their bindings; only their initializers' expression nodes are
 /// rewritten, via `inits`.
-fn remap_expr_ident<'a>(
-    expr: &CheckedExpr<'a>,
-    arena: &'a bumpalo::Bump,
-    inits: &mut HashMap<DeclId, Initializer<'a>>,
-    map: &HashMap<DeclId, DeclId>,
-) -> CheckedExpr<'a> {
+fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) -> CheckedExpr<'a> {
     let kind = match &expr.kind {
         CheckedExprKind::Ident(id) => CheckedExprKind::Ident(map.get(id).copied().unwrap_or(*id)),
         CheckedExprKind::Int(lit) => CheckedExprKind::Int(lit.clone()),
@@ -1171,9 +1179,10 @@ fn remap_expr_ident<'a>(
         CheckedExprKind::AlignofTy(ty) => CheckedExprKind::AlignofTy(ty.clone()),
         CheckedExprKind::StaticAssert => CheckedExprKind::StaticAssert,
         CheckedExprKind::LabelAddr(label) => CheckedExprKind::LabelAddr(*label),
-        CheckedExprKind::FrameAddress { level, returns_address } => {
-            CheckedExprKind::FrameAddress { level: *level, returns_address: *returns_address }
-        }
+        CheckedExprKind::FrameAddress { level, returns_address } => CheckedExprKind::FrameAddress {
+            level: *level,
+            returns_address: *returns_address,
+        },
         CheckedExprKind::Unary(op, e) => CheckedExprKind::Unary(*op, arena.alloc(remap_expr_ident(e, arena, inits, map))),
         CheckedExprKind::Await(e) => CheckedExprKind::Await(arena.alloc(remap_expr_ident(e, arena, inits, map))),
         CheckedExprKind::Cast { ty, expr: e } => CheckedExprKind::Cast {
@@ -1184,20 +1193,21 @@ fn remap_expr_ident<'a>(
             expr: arena.alloc(remap_expr_ident(e, arena, inits, map)),
             ty: ty.clone(),
         },
-        CheckedExprKind::SizeofExpr(e) => {
-            CheckedExprKind::SizeofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
-        }
-        CheckedExprKind::CountofExpr(e) => {
-            CheckedExprKind::CountofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
-        }
-        CheckedExprKind::AlignofExpr(e) => {
-            CheckedExprKind::AlignofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map)))
-        }
+        CheckedExprKind::SizeofExpr(e) => CheckedExprKind::SizeofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        CheckedExprKind::CountofExpr(e) => CheckedExprKind::CountofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        CheckedExprKind::AlignofExpr(e) => CheckedExprKind::AlignofExpr(arena.alloc(remap_expr_ident(e, arena, inits, map))),
         CheckedExprKind::VaArg { ap, ty } => CheckedExprKind::VaArg {
             ap: arena.alloc(remap_expr_ident(ap, arena, inits, map)),
             ty: ty.clone(),
         },
-        CheckedExprKind::Member { base, path, arrow, offset, bitfield, decl_ty } => CheckedExprKind::Member {
+        CheckedExprKind::Member {
+            base,
+            path,
+            arrow,
+            offset,
+            bitfield,
+            decl_ty,
+        } => CheckedExprKind::Member {
             base: arena.alloc(remap_expr_ident(base, arena, inits, map)),
             path,
             arrow: *arrow,
@@ -1250,9 +1260,9 @@ fn remap_expr_ident<'a>(
             res: arena.alloc(remap_expr_ident(res, arena, inits, map)),
             res_ty: res_ty.clone(),
         },
-        CheckedExprKind::Alloca { size } => {
-            CheckedExprKind::Alloca { size: arena.alloc(remap_expr_ident(size, arena, inits, map)) }
-        }
+        CheckedExprKind::Alloca { size } => CheckedExprKind::Alloca {
+            size: arena.alloc(remap_expr_ident(size, arena, inits, map)),
+        },
         CheckedExprKind::Clz { ctz, arg, fallback } => CheckedExprKind::Clz {
             ctz: *ctz,
             arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
@@ -1285,7 +1295,11 @@ fn remap_expr_ident<'a>(
             storage: *storage,
         },
     };
-    CheckedExpr { ty: expr.ty.clone(), span: expr.span, kind }
+    CheckedExpr {
+        ty: expr.ty.clone(),
+        span: expr.span,
+        kind,
+    }
 }
 
 fn remap_expr_slice<'a>(
@@ -1314,12 +1328,7 @@ fn remap_assocs<'a>(
     out.into_bump_slice()
 }
 
-fn remap_inits<'a>(
-    ids: &[DeclId],
-    arena: &'a bumpalo::Bump,
-    inits: &mut HashMap<DeclId, Initializer<'a>>,
-    map: &HashMap<DeclId, DeclId>,
-) {
+fn remap_inits<'a>(ids: &[DeclId], arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) {
     for id in ids {
         if let Some(init) = inits.remove(id) {
             let init = remap_init_ident(&init, arena, inits, map);
@@ -1331,12 +1340,7 @@ fn remap_inits<'a>(
 /// Rewrite across an initializer: the expression form plus every
 /// nested list item, drilling through designators into their index
 /// expressions.
-fn remap_init_ident<'a>(
-    init: &Initializer<'a>,
-    arena: &'a bumpalo::Bump,
-    inits: &mut HashMap<DeclId, Initializer<'a>>,
-    map: &HashMap<DeclId, DeclId>,
-) -> Initializer<'a> {
+fn remap_init_ident<'a>(init: &Initializer<'a>, arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) -> Initializer<'a> {
     match init {
         Initializer::Expr(expr) => Initializer::Expr(remap_expr_ident(expr, arena, inits, map)),
         Initializer::List { items, span } => {
@@ -1359,19 +1363,17 @@ fn remap_init_ident<'a>(
                     span: item.span,
                 });
             }
-            Initializer::List { items: out.into_bump_slice(), span: *span }
+            Initializer::List {
+                items: out.into_bump_slice(),
+                span: *span,
+            }
         }
     }
 }
 
 /// Rewrite across block items: statements plus the initializers of
 /// declarations nested in GNU statement expressions.
-fn remap_block_items<'a>(
-    items: &'a [BlockItem<'a>],
-    arena: &'a bumpalo::Bump,
-    inits: &mut HashMap<DeclId, Initializer<'a>>,
-    map: &HashMap<DeclId, DeclId>,
-) -> &'a [BlockItem<'a>] {
+fn remap_block_items<'a>(items: &'a [BlockItem<'a>], arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) -> &'a [BlockItem<'a>] {
     let mut out = bumpalo::collections::Vec::new_in(arena);
     for item in items {
         out.push(match item {
@@ -1387,12 +1389,7 @@ fn remap_block_items<'a>(
 
 /// Rewrite across a statement: every expression position plus `for`
 /// initializers.
-fn remap_stmt_ident<'a>(
-    stmt: &Stmt<'a>,
-    arena: &'a bumpalo::Bump,
-    inits: &mut HashMap<DeclId, Initializer<'a>>,
-    map: &HashMap<DeclId, DeclId>,
-) -> Stmt<'a> {
+fn remap_stmt_ident<'a>(stmt: &Stmt<'a>, arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) -> Stmt<'a> {
     match stmt {
         Stmt::Compound(compound) => Stmt::Compound(Compound {
             span: compound.span,

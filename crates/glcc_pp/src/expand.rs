@@ -1198,9 +1198,7 @@ impl<'a, 'b> Expander<'a, 'b> {
             return Err(err(format!("{loc}: '{name}' must be followed by '(...)'")));
         }
         let value = match name {
-            "__has_include" | "__has_include_next" => {
-                i64::from(self.eval_has_include(&arg_toks, name == "__has_include_next", &loc)?)
-            }
+            "__has_include" | "__has_include_next" => i64::from(self.eval_has_include(&arg_toks, name == "__has_include_next", &loc)?),
             "__has_feature" | "__has_extension" => {
                 let arg = render_raw(&arg_toks, self.interner);
                 i64::from(crate::has_feature(name, arg.trim(), self.std_flag.as_deref()))
@@ -1208,9 +1206,7 @@ impl<'a, 'b> Expander<'a, 'b> {
             // Never building modules in a native preprocessing run.
             "__building_module" => 0,
             "__has_builtin" => i64::from(has_builtin(render_raw(&arg_toks, self.interner).trim())),
-            "__has_attribute" | "__has_declspec_attribute" => {
-                i64::from(has_attribute(render_raw(&arg_toks, self.interner).trim()))
-            }
+            "__has_attribute" | "__has_declspec_attribute" => i64::from(has_attribute(render_raw(&arg_toks, self.interner).trim())),
             "__has_c_attribute" => i64::from(has_c_attribute(render_raw(&arg_toks, self.interner).trim())),
             // C++ attributes are not part of C23; keep this false rather
             // than claiming the C spellings through the C++ probe.
@@ -2505,7 +2501,7 @@ fn trim_tokens(tokens: &[Tok]) -> &[Tok] {
 /// contexts such as `#embed limit(...)`.
 fn eval_frontend_int(text: &str, target: Option<glcc_frontend::target::Target>) -> Option<i128> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        use glcc_frontend::eval::{eval_const, Value};
+        use glcc_frontend::eval::{Value, eval_const};
         use glcc_frontend::lexer::{Interner, Lexer};
         use glcc_frontend::parse::Parser;
         use glcc_frontend::sema::Sema;

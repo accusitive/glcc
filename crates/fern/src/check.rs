@@ -49,12 +49,7 @@ pub fn check(defs: &mut Defs, program: &ast::Program) -> KResult<HirProgram> {
 /// Recheck only `selected` items, keeping the bodies of everything else
 /// from `start_hir`. The item list and its IDs must have the same shape as
 /// the one `start_hir` was checked from.
-pub fn check_selected(
-    defs: &mut Defs,
-    program: &ast::Program,
-    selected: &HashSet<usize>,
-    mut start_hir: HirProgram,
-) -> KResult<HirProgram> {
+pub fn check_selected(defs: &mut Defs, program: &ast::Program, selected: &HashSet<usize>, mut start_hir: HirProgram) -> KResult<HirProgram> {
     let mut fn_ids = HashSet::new();
     let mut value_ids = HashSet::new();
     let mut instances = HashSet::new();
@@ -79,11 +74,7 @@ pub fn check_selected(
                 }
                 instance_index += 1;
             }
-            ast::ItemKind::Data(_)
-            | ast::ItemKind::Class(_)
-            | ast::ItemKind::Extern(_)
-            | ast::ItemKind::Import(_)
-            | ast::ItemKind::Use(_) => {}
+            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     start_hir.bodies.retain(|body| match body.key {
@@ -227,19 +218,11 @@ impl<'d> Check<'d> {
         self.run_from(program, 0)
     }
 
-    fn run_selected(
-        &mut self,
-        program: &ast::Program,
-        selected: &HashSet<usize>,
-    ) -> KResult<HirProgram> {
+    fn run_selected(&mut self, program: &ast::Program, selected: &HashSet<usize>) -> KResult<HirProgram> {
         let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
         for (index, item) in program.items.iter().enumerate() {
             match &item.kind {
-                ast::ItemKind::Data(_)
-                | ast::ItemKind::Class(_)
-                | ast::ItemKind::Extern(_)
-                | ast::ItemKind::Import(_)
-                | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     if selected.contains(&index) {
                         self.check_instance(instance_index)?;
@@ -270,20 +253,12 @@ impl<'d> Check<'d> {
                 ast::ItemKind::Instance(_) => instance_index += 1,
                 ast::ItemKind::Fun(_) => fn_index += 1,
                 ast::ItemKind::Let(_) => value_index += 1,
-                ast::ItemKind::Data(_)
-                | ast::ItemKind::Class(_)
-                | ast::ItemKind::Extern(_)
-                | ast::ItemKind::Import(_)
-                | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
             }
         }
         for item in &program.items[first_item..] {
             match &item.kind {
-                ast::ItemKind::Data(_)
-                | ast::ItemKind::Class(_)
-                | ast::ItemKind::Extern(_)
-                | ast::ItemKind::Import(_)
-                | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     self.check_instance(instance_index)?;
                     instance_index += 1;
@@ -313,27 +288,18 @@ impl<'d> Check<'d> {
         let fn_ty = declared.ty.clone();
         let outer_async = self.in_async;
         self.in_async = f.is_async;
-        let checked = self.check_root(
-            BodyKey::Fn(id),
-            name,
-            span,
-            declared.vars.clone(),
-            Vec::new(),
-            false,
-            Some(declared.clone()),
-            &mut |this| {
-                check_param_names(f.params.iter().map(|p| &p.pat), span)?;
-                let mut params = Vec::new();
-                for (param, ty) in f.params.iter().zip(&param_tys) {
-                    params.push(this.check_pat(&param.pat, ty, span)?);
-                }
-                this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
-                this.returns.push(ret.clone());
-                let body = this.check_expr(&f.body, &ret);
-                this.returns.pop();
-                Ok((params, ret.clone(), body?, fn_ty.clone()))
-            },
-        );
+        let checked = self.check_root(BodyKey::Fn(id), name, span, declared.vars.clone(), Vec::new(), false, Some(declared.clone()), &mut |this| {
+            check_param_names(f.params.iter().map(|p| &p.pat), span)?;
+            let mut params = Vec::new();
+            for (param, ty) in f.params.iter().zip(&param_tys) {
+                params.push(this.check_pat(&param.pat, ty, span)?);
+            }
+            this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
+            this.returns.push(ret.clone());
+            let body = this.check_expr(&f.body, &ret);
+            this.returns.pop();
+            Ok((params, ret.clone(), body?, fn_ty.clone()))
+        });
         self.in_async = outer_async;
         let (_, mut hir_fn) = checked?;
         hir_fn.is_async = f.is_async;
@@ -368,23 +334,14 @@ impl<'d> Check<'d> {
             return Ok(());
         }
 
-        let (scheme, hir_fn) = self.check_root(
-            BodyKey::Value(id),
-            name,
-            span,
-            Vec::new(),
-            Vec::new(),
-            false,
-            None,
-            &mut |this| {
-                let ty = this.infer.fresh();
-                this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
-                this.returns.push(ty.clone());
-                let body = this.check_expr(&v.body, &ty);
-                this.returns.pop();
-                Ok((Vec::new(), ty.clone(), body?, ty))
-            },
-        )?;
+        let (scheme, hir_fn) = self.check_root(BodyKey::Value(id), name, span, Vec::new(), Vec::new(), false, None, &mut |this| {
+            let ty = this.infer.fresh();
+            this.self_ref = Some(SelfRef::Value(id, v.name.clone(), ty.clone()));
+            this.returns.push(ty.clone());
+            let body = this.check_expr(&v.body, &ty);
+            this.returns.pop();
+            Ok((Vec::new(), ty.clone(), body?, ty))
+        })?;
         self.value_schemes[id.index()] = Some(scheme);
         self.hir.bodies.push(hir_fn);
         Ok(())
@@ -647,10 +604,7 @@ impl<'d> Check<'d> {
                 return Ok(shell_call(name, args, command.span));
             }
             let program = self.shell_word(&stage.words[0])?;
-            let args = stage.words[1..]
-                .iter()
-                .map(|word| self.shell_word(word))
-                .collect::<KResult<Vec<_>>>()?;
+            let args = stage.words[1..].iter().map(|word| self.shell_word(word)).collect::<KResult<Vec<_>>>()?;
             let list = ast::Expr {
                 kind: ast::ExprKind::List(args),
                 span: stage.span,
@@ -664,16 +618,9 @@ impl<'d> Check<'d> {
             .iter()
             .map(|stage| {
                 if self.shell_builtin(stage)?.is_some() {
-                    return Err(Diag::new(
-                        "a `#` builtin cannot be a pipeline stage",
-                        stage.span,
-                    ));
+                    return Err(Diag::new("a `#` builtin cannot be a pipeline stage", stage.span));
                 }
-                let words = stage
-                    .words
-                    .iter()
-                    .map(|word| self.shell_word(word))
-                    .collect::<KResult<Vec<_>>>()?;
+                let words = stage.words.iter().map(|word| self.shell_word(word)).collect::<KResult<Vec<_>>>()?;
                 let list = ast::Expr {
                     kind: ast::ExprKind::List(words),
                     span: stage.span,
@@ -686,11 +633,7 @@ impl<'d> Check<'d> {
             span: command.span,
         };
         let pipe = shell_call("shell_pipe_of", vec![list], command.span);
-        let function = if capture {
-            "shell_pipeline_capture"
-        } else {
-            "shell_pipeline"
-        };
+        let function = if capture { "shell_pipeline_capture" } else { "shell_pipeline" };
         Ok(shell_call(function, vec![pipe], command.span))
     }
 
@@ -710,16 +653,11 @@ impl<'d> Check<'d> {
         let Some(head) = chars.next() else {
             return Ok(None);
         };
-        if !(head.is_ascii_lowercase() || head == '_')
-            || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if !(head.is_ascii_lowercase() || head == '_') || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Ok(None);
         }
         let name = crate::prelude::builtin_name(name);
-        let args = stage.words[1..]
-            .iter()
-            .map(|word| self.shell_word(word))
-            .collect::<KResult<Vec<_>>>()?;
+        let args = stage.words[1..].iter().map(|word| self.shell_word(word)).collect::<KResult<Vec<_>>>()?;
         Ok(Some((name, args)))
     }
 
@@ -731,14 +669,8 @@ impl<'d> Check<'d> {
                     kind: ast::ExprKind::Str(text.clone()),
                     span: word.span,
                 },
-                ast::ShellWordPart::Interp(expr) => {
-                    shell_call("shell_arg", vec![expr.clone()], word.span)
-                }
-                ast::ShellWordPart::Capture(command) => shell_call(
-                    "shell_arg",
-                    vec![self.desugar_shell(command, true)?],
-                    word.span,
-                ),
+                ast::ShellWordPart::Interp(expr) => shell_call("shell_arg", vec![expr.clone()], word.span),
+                ast::ShellWordPart::Capture(command) => shell_call("shell_arg", vec![self.desugar_shell(command, true)?], word.span),
             };
             joined = Some(match joined {
                 None => piece,
@@ -918,10 +850,7 @@ impl<'d> Check<'d> {
         let mut hir_args = Vec::with_capacity(values.len());
         for (index, value) in values.into_iter().enumerate() {
             let Some(value) = value else {
-                return Err(Diag::new(
-                    format!("record constructor `{name}` is missing field `{}`", field_names[index]),
-                    span,
-                ));
+                return Err(Diag::new(format!("record constructor `{name}` is missing field `{}`", field_names[index]), span));
             };
             let want = ctor.args[index].substitute(&map);
             hir_args.push(self.check_expr(value, &want)?);
@@ -948,12 +877,12 @@ impl<'d> Check<'d> {
         };
         let data_id = self.defs.data_by_name(name).ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?;
         let data = self.defs.data[data_id.index()].clone();
-        let ctor = data.ctors.first().filter(|_| data.ctors.len() == 1).ok_or_else(|| {
-            Diag::new(format!("`{name}` is not a record type"), span)
-        })?;
-        let field_names = ctor.field_names.as_ref().ok_or_else(|| {
-            Diag::new(format!("`{name}` is not a record type"), span)
-        })?;
+        let ctor = data
+            .ctors
+            .first()
+            .filter(|_| data.ctors.len() == 1)
+            .ok_or_else(|| Diag::new(format!("`{name}` is not a record type"), span))?;
+        let field_names = ctor.field_names.as_ref().ok_or_else(|| Diag::new(format!("`{name}` is not a record type"), span))?;
         let Some(index) = field_names.iter().position(|name| name == field) else {
             return Err(Diag::new(format!("`{name}` has no field `{field}`"), span));
         };
@@ -963,10 +892,7 @@ impl<'d> Check<'d> {
         let subst: HashMap<String, Ty> = data.params.iter().map(|(n, _)| n.clone()).zip(args.iter().cloned()).collect();
         let ty = ctor.args[index].substitute(&subst);
         Ok(HirExpr {
-            kind: HirExprKind::Field {
-                base: Box::new(base),
-                index,
-            },
+            kind: HirExprKind::Field { base: Box::new(base), index },
             ty,
             span,
         })
@@ -1131,9 +1057,7 @@ impl<'d> Check<'d> {
     fn synthesize_try(&mut self, inner: &ast::Expr, span: Span) -> KResult<HirExpr> {
         let value = self.synth(inner)?;
         let input = self.try_info(&value.ty, inner.span)?;
-        let ret = self.returns.last().cloned().ok_or_else(|| {
-            Diag::new("`?` can only be used inside a function body", span)
-        })?;
+        let ret = self.returns.last().cloned().ok_or_else(|| Diag::new("`?` can only be used inside a function body", span))?;
         let mut ret = self.infer.shallow(&ret);
         if matches!(ret, Ty::Var(_)) {
             let fresh = self.infer.fresh();
@@ -1146,9 +1070,9 @@ impl<'d> Check<'d> {
             ret = wrapper;
         }
         let want = if input.is_maybe { "Maybe" } else { "Result" };
-        let out = self.try_info(&ret, span).map_err(|_| {
-            Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span)
-        })?;
+        let out = self
+            .try_info(&ret, span)
+            .map_err(|_| Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span))?;
         if input.is_maybe != out.is_maybe {
             return Err(Diag::new(format!("`?` on a `{want}` requires the enclosing function to return `{want}`"), span));
         }
@@ -1646,12 +1570,7 @@ impl<'d> Check<'d> {
     fn comparable(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args }
-                if args.is_empty()
-                    && (name == "Int" || name == "Float" || name == "Bool" || name == "String") =>
-            {
-                Ok(())
-            }
+            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool" || name == "String") => Ok(()),
             other => Err(Diag::new(format!("cannot compare values of type `{other}`"), span)),
         }
     }

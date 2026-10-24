@@ -39,7 +39,10 @@ pub enum Tok {
     Str(String),
     /// `$ command` or `$(command)`: `src` is the command text, `capture`
     /// selects `$()`.
-    Shell { src: String, capture: bool },
+    Shell {
+        src: String,
+        capture: bool,
+    },
     // punctuation
     LParen,
     RParen,
@@ -245,10 +248,7 @@ impl<'s> Lexer<'s> {
         let mut depth = 1;
         loop {
             if self.pos + 1 >= self.bytes.len() {
-                return Err(Diag::incomplete(
-                    "unterminated block comment",
-                    self.span(lo, self.pos),
-                ));
+                return Err(Diag::incomplete("unterminated block comment", self.span(lo, self.pos)));
             }
             if self.peek() == b'*' && self.peek2() == b'/' {
                 depth -= 1;
@@ -325,11 +325,7 @@ impl<'s> Lexer<'s> {
             end += 1;
         }
         if end == start || !self.bytes[start].is_ascii_lowercase() {
-            return Err(self.err(
-                "`#` must be followed by a lowercase builtin name",
-                lo,
-                end.max(start + 1),
-            ));
+            return Err(self.err("`#` must be followed by a lowercase builtin name", lo, end.max(start + 1)));
         }
         self.pos = end;
         let name = self.src[start..end].to_string();
@@ -341,11 +337,7 @@ impl<'s> Lexer<'s> {
         use crate::shell::{Stop, command_end};
 
         if self.peek2() == b'{' {
-            return Err(self.err(
-                "`${...}` is an interpolation inside a shell word; start a command with `$`",
-                lo,
-                lo + 2,
-            ));
+            return Err(self.err("`${...}` is an interpolation inside a shell word; start a command with `$`", lo, lo + 2));
         }
         if self.peek2() == b'(' {
             let start = self.pos + 2;

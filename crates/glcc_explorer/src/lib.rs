@@ -293,38 +293,35 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
 }
 
 fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String, String), MirFailure> {
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(glcc_mir::Module, String, String, String), (Vec<String>, String)> {
-        let mut interner = Interner::new();
-        let arena = glcc_frontend::bumpalo::Bump::new();
-        let mut sema = Sema::with_target(target, &arena);
-        sema.async_enabled = async_enabled;
-        let tokens = Lexer::new(source, &mut interner).lex_all();
-        let mut parser = Parser::new(source, tokens, &arena, &mut sema, &mut interner);
-        // The explorer reports diagnostics through `Output::errors` and
-        // `Output::diagnostics`, not codespan's stderr rendering.
-        parser.emit_human = false;
-        let tu = parser.parse_translation_unit();
-        let diagnostics = parser.diagnostics_json();
-        if parser.has_errors() {
-            let errors = parser
-                .diagnostics()
-                .into_iter()
-                .filter(|d| d.is_error())
-                .map(|d| d.message)
-                .collect();
-            return Err((errors, diagnostics));
-        }
-        drop(parser);
-        let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
-        let text = glcc_mir::display::dump_module(&module);
-        let text_full = glcc_mir::display::dump_module_full(&module);
-        // Driver-equivalent ordering: coroutines become start/resume
-        // pairs before any other pass and regardless of the opt level
-        // (`await` has no lowering of its own); `text` stays pre-split
-        // so the raw panels show the awaits.
-        glcc_mir::pass::PassManager::new().add_module_pass(glcc_mir::coroutine::LowerCoroutines).run(&mut module);
-        Ok((module, text, text_full, diagnostics))
-    }));
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+        || -> Result<(glcc_mir::Module, String, String, String), (Vec<String>, String)> {
+            let mut interner = Interner::new();
+            let arena = glcc_frontend::bumpalo::Bump::new();
+            let mut sema = Sema::with_target(target, &arena);
+            sema.async_enabled = async_enabled;
+            let tokens = Lexer::new(source, &mut interner).lex_all();
+            let mut parser = Parser::new(source, tokens, &arena, &mut sema, &mut interner);
+            // The explorer reports diagnostics through `Output::errors` and
+            // `Output::diagnostics`, not codespan's stderr rendering.
+            parser.emit_human = false;
+            let tu = parser.parse_translation_unit();
+            let diagnostics = parser.diagnostics_json();
+            if parser.has_errors() {
+                let errors = parser.diagnostics().into_iter().filter(|d| d.is_error()).map(|d| d.message).collect();
+                return Err((errors, diagnostics));
+            }
+            drop(parser);
+            let mut module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
+            let text = glcc_mir::display::dump_module(&module);
+            let text_full = glcc_mir::display::dump_module_full(&module);
+            // Driver-equivalent ordering: coroutines become start/resume
+            // pairs before any other pass and regardless of the opt level
+            // (`await` has no lowering of its own); `text` stays pre-split
+            // so the raw panels show the awaits.
+            glcc_mir::pass::PassManager::new().add_module_pass(glcc_mir::coroutine::LowerCoroutines).run(&mut module);
+            Ok((module, text, text_full, diagnostics))
+        },
+    ));
     match outcome {
         Ok(Ok((module, text, text_full, diagnostics))) => {
             let verify = glcc_mir::verify::verify_module(&module);
@@ -512,11 +509,7 @@ pub fn output_json(o: &Output) -> String {
         err.push('"');
     }
     err.push(']');
-    let diagnostics = if o.diagnostics.is_empty() {
-        "{\"diagnostics\":[]}"
-    } else {
-        &o.diagnostics
-    };
+    let diagnostics = if o.diagnostics.is_empty() { "{\"diagnostics\":[]}" } else { &o.diagnostics };
     format!(
         "{{\"success\":{},\"mir\":\"{}\",\"mir_raw\":\"{}\",\"mir_full\":\"{}\",\"mir_raw_full\":\"{}\",\"asm\":\"{}\",\"errors\":{},\"diagnostics\":{},\"object_len\":{}}}",
         o.success,

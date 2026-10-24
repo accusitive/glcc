@@ -394,8 +394,7 @@ impl<'a> Lexer<'a> {
                     col += 1;
                     let _ = self.pp_next(&mut line);
                     col += 1;
-                    let hashhash = self.chars.peek().is_some_and(|(c, _, _)| *c == '%')
-                        && self.chars.peek_nth(1).is_some_and(|(c, _, _)| *c == ':');
+                    let hashhash = self.chars.peek().is_some_and(|(c, _, _)| *c == '%') && self.chars.peek_nth(1).is_some_and(|(c, _, _)| *c == ':');
                     if hashhash {
                         let _ = self.pp_next(&mut line);
                         let _ = self.pp_next(&mut line);
@@ -622,11 +621,7 @@ impl TokenStream {
     }
 
     pub fn with_diagnostics(tokens: Vec<Located<Token>>, diagnostics: Vec<CompileError>) -> Self {
-        Self {
-            tokens,
-            pos: 0,
-            diagnostics,
-        }
+        Self { tokens, pos: 0, diagnostics }
     }
 
     /// Lexical errors that lexing recovered from (unterminated literals,
@@ -1062,11 +1057,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_punctuator(&mut self) -> Located<Token> {
-        let (punct, len) = if self.peek_char(0) == Some('%')
-            && self.peek_char(1) == Some(':')
-            && self.peek_char(2) == Some('%')
-            && self.peek_char(3) == Some(':')
-        {
+        let (punct, len) = if self.peek_char(0) == Some('%') && self.peek_char(1) == Some(':') && self.peek_char(2) == Some('%') && self.peek_char(3) == Some(':') {
             (Punctuator::HashHash, 4)
         } else {
             match (self.peek_char(0).expect("lex_punctuator at EOF"), self.peek_char(1), self.peek_char(2)) {
@@ -1309,11 +1300,7 @@ impl<'a> Lexer<'a> {
             if is_digit(c) {
                 self.bump_into(buf);
                 after_sep = false;
-            } else if c == '\''
-                && !after_sep
-                && buf.chars().last().is_some_and(&is_digit)
-                && matches!(self.peek_char(1), Some(next) if is_digit(next))
-            {
+            } else if c == '\'' && !after_sep && buf.chars().last().is_some_and(&is_digit) && matches!(self.peek_char(1), Some(next) if is_digit(next)) {
                 self.bump();
                 after_sep = true;
             } else {
@@ -1411,18 +1398,13 @@ impl<'a> Lexer<'a> {
         if let Some(suffix) = self.lex_ms_int_suffix(buf) {
             return suffix;
         }
-        if matches!(self.peek_char(0), Some('u') | Some('U'))
-            && matches!(self.peek_char(1), Some('w') | Some('W'))
-            && matches!(self.peek_char(2), Some('b') | Some('B'))
-        {
+        if matches!(self.peek_char(0), Some('u') | Some('U')) && matches!(self.peek_char(1), Some('w') | Some('W')) && matches!(self.peek_char(2), Some('b') | Some('B')) {
             for _ in 0..3 {
                 self.bump_into(buf);
             }
             return IntSuffix::UWb;
         }
-        if matches!(self.peek_char(0), Some('w') | Some('W'))
-            && matches!(self.peek_char(1), Some('b') | Some('B'))
-        {
+        if matches!(self.peek_char(0), Some('w') | Some('W')) && matches!(self.peek_char(1), Some('b') | Some('B')) {
             for _ in 0..2 {
                 self.bump_into(buf);
             }

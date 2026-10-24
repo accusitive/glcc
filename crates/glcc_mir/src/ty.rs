@@ -65,10 +65,7 @@ impl Ty {
     }
 
     pub fn ptr_bits(pointee: Ty, bits: u32) -> Self {
-        Ty::Ptr {
-            pointee: Box::new(pointee),
-            bits,
-        }
+        Ty::Ptr { pointee: Box::new(pointee), bits }
     }
 
     /// Width in bits of a pointer type, `None` for anything else.

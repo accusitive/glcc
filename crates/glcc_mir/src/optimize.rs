@@ -62,9 +62,7 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
     // give module-level propagation another look at the settled IR. A
     // copied read-only global can then expose its field initializers.
     for _ in 0..3 {
-        let mut globals = PassManager::new()
-            .add_module_pass(passes::GlobalConstProp)
-            .add_module_pass(passes::DeadModuleItems);
+        let mut globals = PassManager::new().add_module_pass(passes::GlobalConstProp).add_module_pass(passes::DeadModuleItems);
         let module_report = globals.run(module);
         let changed = module_report.iter().any(|(_, changed)| *changed);
         report.extend(module_report);
@@ -137,32 +135,9 @@ mod tests {
 
         let sig = Signature::new(vec![], Ty::int(32));
         let (mut func, entry) = Function::new("read_twice", sig.clone());
-        let addr = emit(
-            &mut func,
-            entry,
-            InstKind::GlobalAddr {
-                global: constant,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
-        let left = emit(
-            &mut func,
-            entry,
-            InstKind::Load {
-                addr,
-                flags: Default::default(),
-            },
-            Ty::int(32),
-        );
-        let right = emit(
-            &mut func,
-            entry,
-            InstKind::Load {
-                addr,
-                flags: Default::default(),
-            },
-            Ty::int(32),
-        );
+        let addr = emit(&mut func, entry, InstKind::GlobalAddr { global: constant }, Ty::ptr(Ty::int(32)));
+        let left = emit(&mut func, entry, InstKind::Load { addr, flags: Default::default() }, Ty::int(32));
+        let right = emit(&mut func, entry, InstKind::Load { addr, flags: Default::default() }, Ty::int(32));
         let sum = emit(&mut func, entry, InstKind::Add(left, right), Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
         module.push_func(func);
@@ -178,10 +153,7 @@ mod tests {
         assert_eq!(module.funcs.len(), 1);
         assert_eq!(module.funcs[0].name, "read_twice");
         assert!(module.globals.is_empty(), "the constant was fully propagated");
-        assert_eq!(
-            module.funcs[0].const_value(returned(&module.funcs[0])),
-            Some(&Const::Int { bits: 32, value: 8 })
-        );
+        assert_eq!(module.funcs[0].const_value(returned(&module.funcs[0])), Some(&Const::Int { bits: 32, value: 8 }));
         assert!(crate::verify::verify_module(&module).is_empty());
     }
 
@@ -212,21 +184,8 @@ mod tests {
         let seed = module.push_global("seed", Ty::int(32), Some(Const::Int { bits: 32, value: 17 }));
         module.globals[seed].local = true;
         let (mut reader, reader_entry) = Function::new("read_seed", sig);
-        let addr = emit(
-            &mut reader,
-            reader_entry,
-            InstKind::GlobalAddr { global: seed },
-            Ty::ptr(Ty::int(32)),
-        );
-        let loaded = emit(
-            &mut reader,
-            reader_entry,
-            InstKind::Load {
-                addr,
-                flags: Default::default(),
-            },
-            Ty::int(32),
-        );
+        let addr = emit(&mut reader, reader_entry, InstKind::GlobalAddr { global: seed }, Ty::ptr(Ty::int(32)));
+        let loaded = emit(&mut reader, reader_entry, InstKind::Load { addr, flags: Default::default() }, Ty::int(32));
         reader.blocks[reader_entry].term = Some(Terminator::Return { val: Some(loaded) });
         module.push_func(reader);
 

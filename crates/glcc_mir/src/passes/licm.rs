@@ -30,7 +30,7 @@ use std::collections::HashSet;
 use crate::ir::{Block, Def, Function, Inst, InstKind, Value};
 use crate::pass::FunctionPass;
 
-use super::{address_info, non_escaping_stack_slots, ranges_may_overlap, DomInfo, MemoryObject};
+use super::{DomInfo, MemoryObject, address_info, non_escaping_stack_slots, ranges_may_overlap};
 
 /// Hoist loop-invariant pure instructions out of natural loops.
 #[derive(Default)]
@@ -127,13 +127,7 @@ fn preheader_of(func: &Function, dom: &DomInfo, header: Block, loop_blocks: &Has
 /// Hoist one loop's invariants. Candidates repeat: an instruction
 /// hoisted earlier in this sweep leaves the loop blocks behind, so its
 /// own users become invariant until the sweep stops moving.
-fn hoist_loop(
-    func: &mut Function,
-    preheader: Block,
-    loop_blocks: &HashSet<Block>,
-    uses: &[u32],
-    non_escaping: &HashSet<Value>,
-) -> bool {
+fn hoist_loop(func: &mut Function, preheader: Block, loop_blocks: &HashSet<Block>, uses: &[u32], non_escaping: &HashSet<Value>) -> bool {
     let mut changed = false;
     let mut order: Vec<Block> = loop_blocks.iter().copied().collect();
     order.sort_by_key(|b| b.index());
@@ -162,13 +156,7 @@ fn hoist_loop(
     }
 }
 
-fn should_hoist(
-    func: &Function,
-    inst: Inst,
-    loop_blocks: &HashSet<Block>,
-    uses: &[u32],
-    non_escaping: &HashSet<Value>,
-) -> bool {
+fn should_hoist(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, uses: &[u32], non_escaping: &HashSet<Value>) -> bool {
     let Some(result) = func.insts[inst].result else {
         return false;
     };
@@ -228,21 +216,11 @@ fn hoistable_load(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, non
 
 fn write_may_alias(func: &Function, inst: Inst, addr: Value, len: u64, non_escaping: &HashSet<Value>) -> bool {
     match &func.insts[inst].kind {
-        InstKind::Store { addr: write, val, .. } => {
-            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
-        }
-        InstKind::Memcpy { dst, len: write_len, .. } | InstKind::Memset { dst, len: write_len, .. } => {
-            ranges_may_overlap(func, non_escaping, *dst, *write_len, addr, len)
-        }
-        InstKind::AtomicStore { addr: write, val } => {
-            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
-        }
-        InstKind::AtomicRmw { addr: write, val, .. } => {
-            ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len)
-        }
-        InstKind::AtomicCas { addr: write, replacement, .. } => {
-            ranges_may_overlap(func, non_escaping, *write, func.values[*replacement].ty.size_bytes(), addr, len)
-        }
+        InstKind::Store { addr: write, val, .. } => ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len),
+        InstKind::Memcpy { dst, len: write_len, .. } | InstKind::Memset { dst, len: write_len, .. } => ranges_may_overlap(func, non_escaping, *dst, *write_len, addr, len),
+        InstKind::AtomicStore { addr: write, val } => ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len),
+        InstKind::AtomicRmw { addr: write, val, .. } => ranges_may_overlap(func, non_escaping, *write, func.values[*val].ty.size_bytes(), addr, len),
+        InstKind::AtomicCas { addr: write, replacement, .. } => ranges_may_overlap(func, non_escaping, *write, func.values[*replacement].ty.size_bytes(), addr, len),
         InstKind::InlineAsm { .. } | InstKind::VaStart { .. } | InstKind::VaArg { .. } | InstKind::VaEnd { .. } | InstKind::VaCopy { .. } => true,
         _ => false,
     }
@@ -540,15 +518,7 @@ mod tests {
         let sig = Signature::new(vec![Ty::Bool], Ty::Void);
         let (mut func, entry) = Function::new("f", sig);
         let cond = param(&mut func, entry, Ty::Bool, 0);
-        let slot = emit(
-            &mut func,
-            entry,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 1,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
+        let slot = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let header = func.push_block(vec![]);
         let latch = func.push_block(vec![]);
         let exit = func.push_block(vec![]);
@@ -606,15 +576,7 @@ mod tests {
         let sig = Signature::new(vec![Ty::Bool], Ty::Void);
         let (mut func, entry) = Function::new("f", sig);
         let cond = param(&mut func, entry, Ty::Bool, 0);
-        let slot = emit(
-            &mut func,
-            entry,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 1,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
+        let slot = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let header = func.push_block(vec![]);
         let latch = func.push_block(vec![]);
         let exit = func.push_block(vec![]);
@@ -679,15 +641,7 @@ mod tests {
         let sig = Signature::new(vec![Ty::Bool], Ty::Void);
         let (mut func, entry) = Function::new("f", sig);
         let cond = param(&mut func, entry, Ty::Bool, 0);
-        let slot = emit(
-            &mut func,
-            entry,
-            InstKind::Alloca {
-                pointee: Ty::int(32),
-                count: 1,
-            },
-            Ty::ptr(Ty::int(32)),
-        );
+        let slot = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let header = func.push_block(vec![]);
         let latch = func.push_block(vec![]);
         let exit = func.push_block(vec![]);

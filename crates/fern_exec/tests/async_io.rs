@@ -64,11 +64,7 @@ fn sleep_suspends_the_driver() {
                fun main() : Int = block_on_int(nap())";
     let start = Instant::now();
     assert_eq!(run(src), Value::Int(5));
-    assert!(
-        start.elapsed() >= Duration::from_millis(20),
-        "sleep returned after {:?}",
-        start.elapsed()
-    );
+    assert!(start.elapsed() >= Duration::from_millis(20), "sleep returned after {:?}", start.elapsed());
 }
 
 #[test]

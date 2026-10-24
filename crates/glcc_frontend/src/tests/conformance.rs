@@ -18,20 +18,14 @@ fn lang(std: Std) -> LangOpts {
 
 fn accepts(name: &str, std: Std, src: &str) {
     let diags = tu_diagnostics_with_lang(src, lang(std));
-    assert!(
-        diags.iter().all(|d| !d.is_error()),
-        "{name} should compile in {std:?}: {diags:#?}"
-    );
+    assert!(diags.iter().all(|d| !d.is_error()), "{name} should compile in {std:?}: {diags:#?}");
 }
 
 fn rejects(name: &str, std: Std, src: &str) {
     let mut strict = lang(std);
     strict.strict = true;
     let diags = tu_diagnostics_with_lang(src, strict);
-    assert!(
-        diags.iter().any(|d| d.is_error()),
-        "{name} should be rejected in {std:?}: {diags:#?}"
-    );
+    assert!(diags.iter().any(|d| d.is_error()), "{name} should be rejected in {std:?}: {diags:#?}");
 }
 
 #[test]

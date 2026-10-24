@@ -2115,7 +2115,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         else_args: Default::default(),
                     },
                 );
-                frame.loops.push(LoopTarget { cont: header, labels: labels.clone() });
+                frame.loops.push(LoopTarget {
+                    cont: header,
+                    labels: labels.clone(),
+                });
                 frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
@@ -2132,7 +2135,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let check = func.push_block(vec![]);
                 let exit = func.push_block(vec![]);
                 self.branch(func, frame, loop_body, vec![]);
-                frame.loops.push(LoopTarget { cont: check, labels: labels.clone() });
+                frame.loops.push(LoopTarget {
+                    cont: check,
+                    labels: labels.clone(),
+                });
                 frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
@@ -2193,7 +2199,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     None => self.branch(func, frame, loop_body, vec![]),
                 }
-                frame.loops.push(LoopTarget { cont: step_block, labels: labels.clone() });
+                frame.loops.push(LoopTarget {
+                    cont: step_block,
+                    labels: labels.clone(),
+                });
                 frame.breaks.push(BreakTarget { block: exit, labels });
                 frame.current = Some(loop_body);
                 self.lower_stmt(module, func, frame, funcs, externs, globals, body);
@@ -3410,9 +3419,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.iconst(func, int_bits(&mir_ty), n as i128)
             }
             fe::check::CheckedExprKind::StaticAssert => self.iconst(func, 32, 0),
-            fe::check::CheckedExprKind::CountofTy(ty) => {
-                self.countof_value(module, func, frame, funcs, externs, globals, ty, None, &expr.ty)
-            }
+            fe::check::CheckedExprKind::CountofTy(ty) => self.countof_value(module, func, frame, funcs, externs, globals, ty, None, &expr.ty),
             fe::check::CheckedExprKind::CountofExpr(inner) => {
                 let cached = self.vla_cached_extents(frame, inner);
                 self.countof_value(module, func, frame, funcs, externs, globals, &inner.ty, cached.as_ref(), &expr.ty)
@@ -4252,11 +4259,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         result_ty: &fe::parse::Ty,
     ) -> mir::Value {
         match ty.unqualified() {
-            fe::parse::Ty::Array { bound: Some(fe::parse::ArrayBound::Fixed(n)), .. } => {
+            fe::parse::Ty::Array {
+                bound: Some(fe::parse::ArrayBound::Fixed(n)),
+                ..
+            } => {
                 let mir_ty = lower_ty(result_ty, self.sema, self.interner);
                 self.iconst(func, int_bits(&mir_ty), *n as i128)
             }
-            fe::parse::Ty::Array { bound: Some(fe::parse::ArrayBound::Vla(id)), .. } => {
+            fe::parse::Ty::Array {
+                bound: Some(fe::parse::ArrayBound::Vla(id)),
+                ..
+            } => {
                 let value = cached
                     .and_then(|map| map.get(id).copied())
                     .unwrap_or_else(|| self.vla_extent(module, func, frame, funcs, externs, globals, *id));
@@ -5761,12 +5774,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 if storage.contains(fe::parse::CompoundStorage::THREAD_LOCAL) {
                     module.module.globals[target].tls = true;
                 }
-                let addr = self.emit(
-                    func,
-                    frame,
-                    mir::InstKind::GlobalAddr { global: target },
-                    mir::Ty::ptr(mir_ty.clone()),
-                );
+                let addr = self.emit(func, frame, mir::InstKind::GlobalAddr { global: target }, mir::Ty::ptr(mir_ty.clone()));
                 (addr, mir_ty)
             }
             // Aggregate rvalues (call results, statement expressions,
@@ -6823,10 +6831,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mir::FloatKind::F80 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F80), ty),
                     mir::FloatKind::F128 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F128), ty),
                 };
-                func.push_const(mir::Const::Float {
-                    kind: float_kind(ty),
-                    bits,
-                })
+                func.push_const(mir::Const::Float { kind: float_kind(ty), bits })
             }
             _ => self.iconst(func, int_bits(ty), 1),
         }
@@ -7683,12 +7688,7 @@ mod tests {
         let dump = mir::display::dump_module(&module);
         for (name, expected) in [("land", "and"), ("lor", "or")] {
             let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
-            let kinds: Vec<&mir::InstKind> = func
-                .blocks
-                .iter()
-                .flat_map(|block| block.insts.iter())
-                .map(|inst| &func.insts[*inst].kind)
-                .collect();
+            let kinds: Vec<&mir::InstKind> = func.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &func.insts[*inst].kind).collect();
             assert!(
                 kinds.iter().any(|kind| match (expected, kind) {
                     ("and", mir::InstKind::And(..)) | ("or", mir::InstKind::Or(..)) => true,
@@ -7696,10 +7696,7 @@ mod tests {
                 }),
                 "{name} did not become a bitwise operation:\n{dump}"
             );
-            assert!(
-                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
-                "{name} kept a select:\n{dump}"
-            );
+            assert!(!kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })), "{name} kept a select:\n{dump}");
         }
         assert_eq!(jit_run_main(module), 2);
     }
@@ -7725,16 +7722,15 @@ mod tests {
         for name in ["land3", "lor3"] {
             let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
             assert!(
-                !func
-                    .blocks
-                    .iter()
-                    .any(|block| matches!(block.term, Some(mir::Terminator::CondBr { .. }))),
+                !func.blocks.iter().any(|block| matches!(block.term, Some(mir::Terminator::CondBr { .. }))),
                 "{name} kept a conditional branch:\n{dump}"
             );
             assert!(
-                !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
-                    matches!(func.insts[*inst].kind, mir::InstKind::Select { .. })
-                }),
+                !func
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.insts.iter())
+                    .any(|inst| { matches!(func.insts[*inst].kind, mir::InstKind::Select { .. }) }),
                 "{name} kept a select:\n{dump}"
             );
         }
@@ -7766,9 +7762,11 @@ mod tests {
                 .count();
             assert_eq!(zexts, 1, "{name} did not keep one extension:\n{dump}");
             assert!(
-                !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
-                    matches!(func.insts[*inst].kind, mir::InstKind::Select { .. })
-                }),
+                !func
+                    .blocks
+                    .iter()
+                    .flat_map(|block| block.insts.iter())
+                    .any(|inst| { matches!(func.insts[*inst].kind, mir::InstKind::Select { .. }) }),
                 "{name} kept a select:\n{dump}"
             );
         }
@@ -7790,20 +7788,12 @@ mod tests {
         let dump = mir::display::dump_module(&module);
         for name in ["yes", "no"] {
             let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
-            let kinds: Vec<&mir::InstKind> = func
-                .blocks
-                .iter()
-                .flat_map(|block| block.insts.iter())
-                .map(|inst| &func.insts[*inst].kind)
-                .collect();
+            let kinds: Vec<&mir::InstKind> = func.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &func.insts[*inst].kind).collect();
             assert!(
                 kinds.iter().any(|kind| matches!(kind, mir::InstKind::Zext(..))),
                 "{name} did not become an extension:\n{dump}"
             );
-            assert!(
-                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
-                "{name} kept a select:\n{dump}"
-            );
+            assert!(!kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })), "{name} kept a select:\n{dump}");
             assert!(
                 !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Not(..))),
                 "{name} negated a byte-carried bool bitwise:\n{dump}"
@@ -7829,20 +7819,12 @@ mod tests {
         let dump = mir::display::dump_module(&module);
         for name in ["yes", "no"] {
             let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
-            let kinds: Vec<&mir::InstKind> = func
-                .blocks
-                .iter()
-                .flat_map(|block| block.insts.iter())
-                .map(|inst| &func.insts[*inst].kind)
-                .collect();
+            let kinds: Vec<&mir::InstKind> = func.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &func.insts[*inst].kind).collect();
             assert!(
                 kinds.iter().any(|kind| matches!(kind, mir::InstKind::Sext(..))),
                 "{name} did not become a sign extension:\n{dump}"
             );
-            assert!(
-                !kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })),
-                "{name} kept a select:\n{dump}"
-            );
+            assert!(!kinds.iter().any(|kind| matches!(kind, mir::InstKind::Select { .. })), "{name} kept a select:\n{dump}");
         }
         assert_eq!(jit_run_main(module), 31);
     }
@@ -8082,12 +8064,10 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         let divides = module.funcs.iter().any(|f| {
-            f.blocks.iter().flat_map(|b| b.insts.iter()).any(|inst| {
-                matches!(
-                    f.insts[*inst].kind,
-                    mir::InstKind::Sdiv(..) | mir::InstKind::Srem(..)
-                )
-            })
+            f.blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .any(|inst| matches!(f.insts[*inst].kind, mir::InstKind::Sdiv(..) | mir::InstKind::Srem(..)))
         });
         assert!(!divides, "signed power-of-two division survived:\n{dump}");
         assert_eq!(jit_run_main(module), 0);
@@ -8133,12 +8113,11 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         let func = module.funcs.iter().find(|f| f.name == "inc").expect("function lowered");
-        let rebuilds_first = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
-            matches!(
-                func.insts[*inst].kind,
-                mir::InstKind::ExtractValue { index: 0, .. }
-            )
-        });
+        let rebuilds_first = func
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .any(|inst| matches!(func.insts[*inst].kind, mir::InstKind::ExtractValue { index: 0, .. }));
         assert!(!rebuilds_first, "inc still extracts the unchanged field:\n{dump}");
         assert_eq!(jit_run_main(module), 35);
     }
@@ -8154,12 +8133,11 @@ mod tests {
         run_opt_pipeline(&mut module);
         let dump = mir::display::dump_module(&module);
         let func = module.funcs.iter().find(|f| f.name == "bump").expect("function lowered");
-        let rebuilds_unchanged = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
-            matches!(
-                func.insts[*inst].kind,
-                mir::InstKind::ExtractValue { index: 2, .. }
-            )
-        });
+        let rebuilds_unchanged = func
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter())
+            .any(|inst| matches!(func.insts[*inst].kind, mir::InstKind::ExtractValue { index: 2, .. }));
         assert!(!rebuilds_unchanged, "bump still extracts the unchanged field:\n{dump}");
         assert_eq!(jit_run_main(module), 465);
     }
@@ -8179,10 +8157,7 @@ mod tests {
             let arithmetic = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
                 matches!(
                     func.insts[*inst].kind,
-                    mir::InstKind::FAdd(..)
-                        | mir::InstKind::FSub(..)
-                        | mir::InstKind::FMul(..)
-                        | mir::InstKind::FDiv(..)
+                    mir::InstKind::FAdd(..) | mir::InstKind::FSub(..) | mir::InstKind::FMul(..) | mir::InstKind::FDiv(..)
                 )
             });
             assert!(!arithmetic, "{name} kept literal float arithmetic:\n{dump}");
@@ -8205,10 +8180,7 @@ mod tests {
         let converted = func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
             matches!(
                 func.insts[*inst].kind,
-                mir::InstKind::SFtoI(..)
-                    | mir::InstKind::UFtoI(..)
-                    | mir::InstKind::Fptrunc(..)
-                    | mir::InstKind::Fpext(..)
+                mir::InstKind::SFtoI(..) | mir::InstKind::UFtoI(..) | mir::InstKind::Fptrunc(..) | mir::InstKind::Fpext(..)
             )
         });
         assert!(!converted, "literal conversion stayed in f:\n{dump}");
@@ -8228,12 +8200,11 @@ mod tests {
         let dump = mir::display::dump_module(&module);
         let func = module.funcs.iter().find(|f| f.name == "id").expect("function lowered");
         assert!(
-            !func.blocks.iter().flat_map(|block| block.insts.iter()).any(|inst| {
-                matches!(
-                    func.insts[*inst].kind,
-                    mir::InstKind::ExtractValue { .. } | mir::InstKind::InsertValue { .. }
-                )
-            }),
+            !func
+                .blocks
+                .iter()
+                .flat_map(|block| block.insts.iter())
+                .any(|inst| { matches!(func.insts[*inst].kind, mir::InstKind::ExtractValue { .. } | mir::InstKind::InsertValue { .. }) }),
             "id still rebuilds its parameter:\n{dump}"
         );
         assert_eq!(jit_run_main(module), 7);
@@ -8254,12 +8225,11 @@ mod tests {
         let dump = mir::display::dump_module(&module);
         for name in ["px", "py"] {
             let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
-            let hidden = func.blocks.iter().flat_map(|b| b.insts.iter()).any(|inst| {
-                matches!(
-                    func.insts[*inst].kind,
-                    mir::InstKind::Memcpy { .. } | mir::InstKind::Load { .. }
-                )
-            });
+            let hidden = func
+                .blocks
+                .iter()
+                .flat_map(|b| b.insts.iter())
+                .any(|inst| matches!(func.insts[*inst].kind, mir::InstKind::Memcpy { .. } | mir::InstKind::Load { .. }));
             assert!(!hidden, "{name} still copies or loads the global initializer:\n{dump}");
         }
         assert_eq!(jit_run_main(module), 49);
@@ -10859,7 +10829,9 @@ mod tests {
         // pointer with `p - (u32)`, so zero-extension there crashes.
         let high = "char *p = (char*)0x211E22B8B5Cull;";
         assert_eq!(
-            run_main(&format!("int main(){{{high} unsigned int u = 28; char *q = p - u; return q == (char*)0x211E22B8B40ull ? 0 : 1;}}")),
+            run_main(&format!(
+                "int main(){{{high} unsigned int u = 28; char *q = p - u; return q == (char*)0x211E22B8B40ull ? 0 : 1;}}"
+            )),
             0
         );
         assert_eq!(
@@ -10885,15 +10857,11 @@ mod tests {
         assert_eq!(literals.len(), 2);
         assert!(literals.iter().all(|g| !g.writable));
         assert!(
-            literals
-                .iter()
-                .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"hi\0")),
+            literals.iter().any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"hi\0")),
             "the literal keeps its bytes"
         );
         assert!(
-            literals
-                .iter()
-                .any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
+            literals.iter().any(|g| matches!(&g.init, Some(mir::Const::Bytes(bytes)) if bytes == b"\0")),
             "the empty literal keeps its terminator"
         );
     }
@@ -10901,17 +10869,10 @@ mod tests {
     #[test]
     fn c2y_static_assert_expressions_lower() {
         assert_eq!(
-            jit_run_main(lower_module_c2y(
-                "int main(void) { int x = (static_assert(1), 42); static_assert(1); return x; }"
-            )),
+            jit_run_main(lower_module_c2y("int main(void) { int x = (static_assert(1), 42); static_assert(1); return x; }")),
             42
         );
-        assert_eq!(
-            jit_run_main(lower_module_c2y(
-                "int main(void) { return (static_assert(1), _Static_assert(1), 7); }"
-            )),
-            7
-        );
+        assert_eq!(jit_run_main(lower_module_c2y("int main(void) { return (static_assert(1), _Static_assert(1), 7); }")), 7);
     }
 
     #[test]
@@ -10973,12 +10934,7 @@ mod tests {
     #[test]
     fn gnu_auto_type_lowers() {
         assert_eq!(jit_run_main(lower_module("int main(void) { __auto_type x = 7; return x; }")), 7);
-        assert_eq!(
-            jit_run_main(lower_module(
-                "int main(void) { int a[3] = {1, 2, 3}; __auto_type p = a; return p[2]; }"
-            )),
-            3
-        );
+        assert_eq!(jit_run_main(lower_module("int main(void) { int a[3] = {1, 2, 3}; __auto_type p = a; return p[2]; }")), 3);
     }
 
     #[test]
@@ -11043,9 +10999,7 @@ mod tests {
         // The declared object shadows an outer one and is gone after the
         // selection statement.
         assert_eq!(
-            run_main(
-                "int main(){int x = 100; if (int x = 0) { return 1; }                  else if (x == 0) { x = 7; } else { return 2; } return x;}"
-            ),
+            run_main("int main(){int x = 100; if (int x = 0) { return 1; }                  else if (x == 0) { x = 7; } else { return 2; } return x;}"),
             100
         );
         // Initialization still runs when the control expression folds
@@ -11055,10 +11009,7 @@ mod tests {
 
     #[test]
     fn delimited_escapes_lower() {
-        assert_eq!(
-            run_main("int main(){char s[] = \"\\o{110}\\x{65}llo\"; return s[0] + s[4];}"),
-            ('H' as i32) + ('o' as i32)
-        );
+        assert_eq!(run_main("int main(){char s[] = \"\\o{110}\\x{65}llo\"; return s[0] + s[4];}"), ('H' as i32) + ('o' as i32));
         assert_eq!(run_main("int main(){return (int)sizeof(\"\\u{2021}\");}"), 4);
         assert_eq!(run_main("int main(){return L\"\\u{2021}\"[0] == 0x2021;}"), 1);
     }
@@ -11111,15 +11062,11 @@ mod tests {
             5
         );
         assert_eq!(
-            run_main(
-                "struct P{int x; double y;}; struct P id(struct P p){return p;} int main(){struct P p = {3, 4.0}; struct P q = id(p); return q.x + (int)q.y;}"
-            ),
+            run_main("struct P{int x; double y;}; struct P id(struct P p){return p;} int main(){struct P p = {3, 4.0}; struct P q = id(p); return q.x + (int)q.y;}"),
             7
         );
         assert_eq!(
-            run_main(
-                "struct P{int x; double y;}; int main(){struct P p = {0}; p.x = 5; p.y = 2.0; return p.x + (int)p.y;}"
-            ),
+            run_main("struct P{int x; double y;}; int main(){struct P p = {0}; p.x = 5; p.y = 2.0; return p.x + (int)p.y;}"),
             7
         );
     }

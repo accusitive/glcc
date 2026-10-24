@@ -69,17 +69,11 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             elem: Box::new(mir::Ty::int(8)),
             len: image.len() as u64,
         };
-        let global = self
-            .lw
-            .module
-            .push_global(&format!("__fern_str.{n}"), ty, Some(mir::Const::Bytes(image)));
+        let global = self.lw.module.push_global(&format!("__fern_str.{n}"), ty, Some(mir::Const::Bytes(image)));
         let data = &mut self.lw.module.globals[global];
         data.local = true;
         data.align = Some(1);
-        self.emit(
-            mir::InstKind::GlobalAddr { global },
-            mir::Ty::ptr(mir::Ty::int(8)),
-        )
+        self.emit(mir::InstKind::GlobalAddr { global }, mir::Ty::ptr(mir::Ty::int(8)))
     }
 
     /// Build a data cell: the tag, then the constructor's payload. The
@@ -191,10 +185,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 (def.name.clone(), def.params.clone(), def.ret.clone())
             };
             if params.is_empty() {
-                return Err(Diag::new(
-                    format!("`{name}` has no parameters and cannot be used as a value"),
-                    e.span,
-                ));
+                return Err(Diag::new(format!("`{name}` has no parameters and cannot be used as a value"), e.span));
             }
             let mut param_tys = Vec::with_capacity(params.len());
             for param in &params {
@@ -290,13 +281,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             values.push(value);
         }
         let ret = self.ty_of(&e.ty, e.span)?;
-        let call = self.emit(
-            mir::InstKind::CallExtern {
-                target,
-                args: values.into(),
-            },
-            ret,
-        );
+        let call = self.emit(mir::InstKind::CallExtern { target, args: values.into() }, ret);
         self.release(mark)?;
         call
     }

@@ -43,11 +43,7 @@ impl ModulePass for LowerLibcMemory {
                 let mut expanded = false;
                 for inst in insts {
                     let call = match &func.insts[inst].kind {
-                        InstKind::CallExtern { target, args }
-                            if args.len() == 3 && (copies.contains(target) || sets.contains(target)) =>
-                        {
-                            Some((*target, args.clone()))
-                        }
+                        InstKind::CallExtern { target, args } if args.len() == 3 && (copies.contains(target) || sets.contains(target)) => Some((*target, args.clone())),
                         _ => None,
                     };
                     let Some((target, args)) = call else {
@@ -60,11 +56,7 @@ impl ModulePass for LowerLibcMemory {
                     };
                     let dst = args[0];
                     let kind = if copies.contains(&target) {
-                        InstKind::Memcpy {
-                            dst,
-                            src: args[1],
-                            len,
-                        }
+                        InstKind::Memcpy { dst, src: args[1], len }
                     } else {
                         let Some(byte) = const_u8(func, args[1]) else {
                             rebuilt.push(inst);
@@ -76,12 +68,7 @@ impl ModulePass for LowerLibcMemory {
                         func.replace_uses(result, dst);
                     }
                     let loc = func.insts[inst].loc;
-                    let replacement = func.insts.push(InstData {
-                        block,
-                        kind,
-                        result: None,
-                        loc,
-                    });
+                    let replacement = func.insts.push(InstData { block, kind, result: None, loc });
                     rebuilt.push(replacement);
                     expanded = true;
                     changed = true;
@@ -158,10 +145,7 @@ mod tests {
 
     fn module_with(extern_name: &str) -> (Module, crate::ir::Func, Block, crate::ir::Extern) {
         let mut module = Module::new();
-        let sig = Signature::new(
-            vec![Ty::ptr(Ty::int(8)), Ty::ptr(Ty::int(8)), Ty::int(64)],
-            Ty::ptr(Ty::int(8)),
-        );
+        let sig = Signature::new(vec![Ty::ptr(Ty::int(8)), Ty::ptr(Ty::int(8)), Ty::int(64)], Ty::ptr(Ty::int(8)));
         let ext = module.push_extern(extern_name, sig);
         let (mut func, entry) = Function::new("caller", Signature::new(vec![Ty::int(64)], Ty::Void));
         let len = func.values.push(ValueData {
@@ -189,12 +173,7 @@ mod tests {
         assert!(LowerLibcMemory.run(&mut module));
         let f = &module.funcs[func_id];
         assert!(!f.blocks[entry].insts.contains(&call));
-        let kinds: Vec<_> = f
-            .blocks
-            .iter()
-            .flat_map(|block| block.insts.iter())
-            .map(|inst| &f.insts[*inst].kind)
-            .collect();
+        let kinds: Vec<_> = f.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &f.insts[*inst].kind).collect();
         assert!(kinds.iter().any(|kind| matches!(kind, InstKind::Memcpy { len: 8, .. })));
         assert!(!kinds.iter().any(|kind| matches!(kind, InstKind::CallExtern { .. })));
         assert_eq!(f.use_count(result), 0, "the call result is replaced by dst");
@@ -214,10 +193,7 @@ mod tests {
         };
 
         assert!(!LowerLibcMemory.run(&mut module));
-        assert!(matches!(
-            module.funcs[func_id].insts[call].kind,
-            InstKind::CallExtern { .. }
-        ));
+        assert!(matches!(module.funcs[func_id].insts[call].kind, InstKind::CallExtern { .. }));
     }
 
     #[test]
@@ -234,15 +210,8 @@ mod tests {
 
         assert!(LowerLibcMemory.run(&mut module));
         let f = &module.funcs[func_id];
-        let kinds: Vec<_> = f
-            .blocks
-            .iter()
-            .flat_map(|block| block.insts.iter())
-            .map(|inst| &f.insts[*inst].kind)
-            .collect();
-        assert!(kinds
-            .iter()
-            .any(|kind| matches!(kind, InstKind::Memset { byte: 0xab, len: 16, .. })));
+        let kinds: Vec<_> = f.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &f.insts[*inst].kind).collect();
+        assert!(kinds.iter().any(|kind| matches!(kind, InstKind::Memset { byte: 0xab, len: 16, .. })));
         assert!(!kinds.iter().any(|kind| matches!(kind, InstKind::CallExtern { .. })));
         assert!(verify_func(f).is_empty());
     }

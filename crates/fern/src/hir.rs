@@ -168,10 +168,7 @@ pub enum HirExprKind {
 #[derive(Debug, Clone, Copy)]
 pub enum TryResidual {
     Reuse,
-    Rebuild {
-        err_ctor: usize,
-        ret_err_ctor: usize,
-    },
+    Rebuild { err_ctor: usize, ret_err_ctor: usize },
 }
 
 #[derive(Debug, Clone)]

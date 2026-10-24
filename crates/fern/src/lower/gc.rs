@@ -53,13 +53,7 @@ pub(crate) fn declare(module: &mut mir::Module) -> Runtime {
     module.externs[alloc].effect = mir::ExternEffect::allocator();
     module.externs[str_eq].effect = mir::ExternEffect::read_only();
 
-    Runtime {
-        enter,
-        pin,
-        leave,
-        alloc,
-        str_eq,
-    }
+    Runtime { enter, pin, leave, alloc, str_eq }
 }
 
 /// Whether a value of this MIR type can point into the heap.

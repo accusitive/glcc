@@ -27,9 +27,7 @@ fn test_parser<'a, 'b>(src: &str, sema: &'b mut Sema<'a>, interner: &'b mut Inte
 fn assert_parse_error(parser: &Parser, expected: &str) {
     let diagnostics = parser.diagnostics();
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.is_error() && d.message.contains(expected)),
+        diagnostics.iter().any(|d| d.is_error() && d.message.contains(expected)),
         "expected an error containing {expected:?}, got: {:#?}",
         diagnostics.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
@@ -349,10 +347,7 @@ fn c23_binary_literals_and_digit_separators() {
 
 #[test]
 fn c2y_octal_literals() {
-    assert_eq!(
-        lex_raw("0o17 0O17 0o1'7 0o17u 0O777ll"),
-        ["i:0o17", "i:0O17", "i:0o17", "i:0o17u", "i:0O777ll"]
-    );
+    assert_eq!(lex_raw("0o17 0O17 0o1'7 0o17u 0O777ll"), ["i:0o17", "i:0O17", "i:0o17", "i:0o17u", "i:0O777ll"]);
 }
 
 #[test]
@@ -534,10 +529,7 @@ fn char_prefix_metadata() {
             other => panic!("expected char constant, got {other:?}"),
         }
     }
-    assert_eq!(
-        prefixes,
-        [CharPrefix::None, CharPrefix::L, CharPrefix::SmallU, CharPrefix::BigU, CharPrefix::U8]
-    );
+    assert_eq!(prefixes, [CharPrefix::None, CharPrefix::L, CharPrefix::SmallU, CharPrefix::BigU, CharPrefix::U8]);
 }
 
 #[test]
@@ -628,13 +620,15 @@ fn c23_u8_literals_are_unsigned_char() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "_Static_assert(_Generic(u8\"x\"[0], unsigned char: 1, default: 0), \"string\");\n\
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(_Generic(u8\"x\"[0], unsigned char: 1, default: 0), \"string\");\n\
          _Static_assert(_Generic(u8'x', unsigned char: 1, default: 0), \"char\");\n\
          _Static_assert(sizeof(u8\"x\") == 2, \"size\");",
-        c23
-    )
-    .is_empty());
+            c23
+        )
+        .is_empty()
+    );
     let diags = tu_diagnostics_with_lang("int x = u8'a';", c17);
     assert!(diags.iter().any(|d| d.is_error() && d.message.contains("u8 character constants need C23")), "{diags:#?}");
 }
@@ -2116,10 +2110,7 @@ fn pedantic_errors_reject_implicit_int_and_functions() {
     assert!(!tu_diagnostics_with_lang("int f(void){ return foo(); }", c89).iter().any(|d| d.is_error()));
     for lang in [c99, c23] {
         let diags = tu_diagnostics_with_lang("main(){ return 0; }", lang);
-        assert!(
-            diags.iter().any(|d| d.is_error() && d.message.contains("implicit `int`")),
-            "{diags:#?}"
-        );
+        assert!(diags.iter().any(|d| d.is_error() && d.message.contains("implicit `int`")), "{diags:#?}");
         let diags = tu_diagnostics_with_lang("int f(void){ return foo(); }", lang);
         assert!(
             diags.iter().any(|d| d.is_error() && d.message.contains("implicit declaration of function 'foo'")),
@@ -2344,11 +2335,7 @@ fn enum_fixed_underlying_type_rejects_bad_values_and_types() {
         clang: false,
         strict: false,
     };
-    for src in [
-        "enum A : unsigned char { A0 = 256 };",
-        "enum A : _Bool { A0 = 2 };",
-        "enum A : float { A0 };",
-    ] {
+    for src in ["enum A : unsigned char { A0 = 256 };", "enum A : _Bool { A0 = 2 };", "enum A : float { A0 };"] {
         let diagnostics = tu_diagnostics_with_lang(src, c23);
         assert!(diagnostics.iter().any(|d| d.is_error()), "{src}: {diagnostics:#?}");
     }
@@ -2363,11 +2350,7 @@ fn enum_fixed_underlying_type_redeclaration_checks() {
         clang: false,
         strict: false,
     };
-    for src in [
-        "enum E : int; enum E { A };",
-        "enum E : int; enum E : long { A };",
-        "enum E { A }; enum E : int;",
-    ] {
+    for src in ["enum E : int; enum E { A };", "enum E : int; enum E : long { A };", "enum E { A }; enum E : int;"] {
         let diagnostics = tu_diagnostics_with_lang(src, c23);
         assert!(diagnostics.iter().any(|d| d.is_error()), "{src}: {diagnostics:#?}");
     }
@@ -3340,13 +3323,15 @@ fn c2y_bit_precise_enum_underlying_types() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "enum E : _BitInt(5) { E_MIN = -16, E_MAX = 15 };
+    assert!(
+        tu_diagnostics_with_lang(
+            "enum E : _BitInt(5) { E_MIN = -16, E_MAX = 15 };
          enum U : unsigned _BitInt(5) { U_MAX = 31 };
          int f(void) { enum E e = E_MAX; return sizeof(e) + _Generic((enum E)0, enum E: 1, default: 0); }",
-        c2y
-    )
-    .is_empty());
+            c2y
+        )
+        .is_empty()
+    );
     let diags = tu_diagnostics_with_lang("enum A : _BitInt(5) { A0 = 16 };", c2y);
     assert!(
         diags.iter().any(|d| d.is_error() && d.message.contains("does not fit the fixed underlying type")),
@@ -3378,22 +3363,16 @@ fn named_loops_resolve_enclosing_targets() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "int f(void) { int r = 0; outer: for (int i = 0; i < 3; i++) { \
+    assert!(
+        tu_diagnostics_with_lang(
+            "int f(void) { int r = 0; outer: for (int i = 0; i < 3; i++) { \
          for (int j = 0; j < 3; j++) { if (j == 1) continue outer; r++; } } return r; }",
-        c2y
-    )
-    .is_empty());
-    assert!(tu_diagnostics_with_lang(
-        "int f(int x) { int r = 0; a: switch (x) { case 1: break a; } return r; }",
-        c2y
-    )
-    .is_empty());
-    assert!(tu_diagnostics_with_lang(
-        "int f(void) { int r = 0; a: b: do { if (r++) continue b; break a; } while (1); return r; }",
-        c2y
-    )
-    .is_empty());
+            c2y
+        )
+        .is_empty()
+    );
+    assert!(tu_diagnostics_with_lang("int f(int x) { int r = 0; a: switch (x) { case 1: break a; } return r; }", c2y).is_empty());
+    assert!(tu_diagnostics_with_lang("int f(void) { int r = 0; a: b: do { if (r++) continue b; break a; } while (1); return r; }", c2y).is_empty());
     // A label names only the loop or switch it immediately prefixes.
     let diags = tu_diagnostics_with_lang("int f(int x) { a: if (x) { break a; } return 0; }", c2y);
     assert!(diags.iter().any(|d| d.message.contains("does not name an enclosing loop")), "{diags:#?}");
@@ -3426,33 +3405,13 @@ fn selection_declarations_scope_over_branches() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "int f(void) { if (int x = 0) return x; else return x + 1; }",
-        c2y
-    )
-    .is_empty());
-    assert!(tu_diagnostics_with_lang(
-        "int f(void) { if (int x = 3; x > 2) return x; return 0; }",
-        c2y
-    )
-    .is_empty());
-    assert!(tu_diagnostics_with_lang(
-        "int f(int y) { switch (int x = y) { case 1: return x; } return 0; }",
-        c2y
-    )
-    .is_empty());
+    assert!(tu_diagnostics_with_lang("int f(void) { if (int x = 0) return x; else return x + 1; }", c2y).is_empty());
+    assert!(tu_diagnostics_with_lang("int f(void) { if (int x = 3; x > 2) return x; return 0; }", c2y).is_empty());
+    assert!(tu_diagnostics_with_lang("int f(int y) { switch (int x = y) { case 1: return x; } return 0; }", c2y).is_empty());
     // The declaration's scope covers the else branch too, but not the
     // statement after the selection.
-    assert!(tu_diagnostics_with_lang(
-        "int f(void) { int y = 0; if (int x = 0) y = x; else y = x; return y; }",
-        c2y
-    )
-    .is_empty());
-    assert!(!tu_diagnostics_with_lang(
-        "int f(void) { if (int x = 0) y = x; return x; }",
-        c2y
-    )
-    .is_empty());
+    assert!(tu_diagnostics_with_lang("int f(void) { int y = 0; if (int x = 0) y = x; else y = x; return y; }", c2y).is_empty());
+    assert!(!tu_diagnostics_with_lang("int f(void) { if (int x = 0) y = x; return x; }", c2y).is_empty());
 
     let c17 = LangOpts {
         std: Std::C17,
@@ -3823,11 +3782,13 @@ fn folded_zero_is_null() {
 
 #[test]
 fn digraphs_are_punctuators() {
-    assert!(tu_diagnostics(
-        "int arr<:3:> = <% 1, 2, 3 %>;\n\
+    assert!(
+        tu_diagnostics(
+            "int arr<:3:> = <% 1, 2, 3 %>;\n\
          int main(void) <% return arr<:0:>; %>"
-    )
-    .is_empty());
+        )
+        .is_empty()
+    );
 }
 
 #[test]
@@ -3859,14 +3820,8 @@ fn int_literal_values() {
     assert_eq!(lit("1ull", Radix::Dec, IntSuffix::ULL), Some((UnsignedLongLong, 1)));
     assert_eq!(lit("0xFFFFFFFFFFFFFFFF", Radix::Hex, IntSuffix::None), Some((UnsignedLong, u64::MAX as i128)));
     assert_eq!(lit("0x10000000000000000", Radix::Hex, IntSuffix::None), None);
-    assert_eq!(
-        lit("9223372036854775807i64", Radix::Dec, IntSuffix::I64),
-        Some((LongLong, i64::MAX as i128))
-    );
-    assert_eq!(
-        lit("0xFFFFFFFFFFFFFFFFui64", Radix::Hex, IntSuffix::UI64),
-        Some((UnsignedLongLong, u64::MAX as i128))
-    );
+    assert_eq!(lit("9223372036854775807i64", Radix::Dec, IntSuffix::I64), Some((LongLong, i64::MAX as i128)));
+    assert_eq!(lit("0xFFFFFFFFFFFFFFFFui64", Radix::Hex, IntSuffix::UI64), Some((UnsignedLongLong, u64::MAX as i128)));
     assert_eq!(lit("127i8", Radix::Dec, IntSuffix::I8), Some((SignedChar, 127)));
     assert_eq!(lit("128i8", Radix::Dec, IntSuffix::I8), None);
     assert_eq!(lit("0xffffui16", Radix::Hex, IntSuffix::UI16), Some((UnsignedShort, 0xffff)));
@@ -3936,9 +3891,7 @@ fn c23_bare_static_assert() {
     assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1, \"ok\"); }", c23).is_empty());
     let diags = tu_diagnostics_with_lang("static_assert(0, \"boom\");", c23);
     assert!(
-        diags
-            .iter()
-            .any(|d| d.is_error() && d.message.contains("static assertion failed: \"boom\"")),
+        diags.iter().any(|d| d.is_error() && d.message.contains("static assertion failed: \"boom\"")),
         "missing failure: {diags:#?}"
     );
     assert!(!tu_diagnostics("static_assert(1);").is_empty());
@@ -5477,11 +5430,7 @@ fn c23_labels_before_declarations_and_at_block_end() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "int main(void) { goto L; L: int x = 1; return x; }",
-        c23
-    )
-    .is_empty());
+    assert!(tu_diagnostics_with_lang("int main(void) { goto L; L: int x = 1; return x; }", c23).is_empty());
     assert!(tu_diagnostics_with_lang("int main(void) { switch (0) { case 1: int x = 1; break; } return 0; }", c23).is_empty());
     assert!(tu_diagnostics_with_lang("int main(void) { L: }", c23).is_empty());
     assert!(!tu_diagnostics_with_lang("int main(void) { L: int x = 1; return x; }", c17).is_empty());
@@ -5496,14 +5445,16 @@ fn c23_bool_true_false() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "_Static_assert(sizeof(bool) == 1, \"bool\");\n\
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(sizeof(bool) == 1, \"bool\");\n\
          _Static_assert(sizeof(true) == 1, \"true\");\n\
          _Static_assert(_Generic(true, bool: 1, default: 0), \"type\");\n\
          bool b = true; int main(void) { return false; }",
-        c23
-    )
-    .is_empty());
+            c23
+        )
+        .is_empty()
+    );
     assert!(tu_diagnostics("int bool = 1;").is_empty());
 }
 
@@ -5516,8 +5467,9 @@ fn c23_nullptr() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "_Static_assert(sizeof(nullptr) == sizeof(void *), \"size\");\n\
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(sizeof(nullptr) == sizeof(void *), \"size\");\n\
          typedef typeof(nullptr) nullptr_t;\n\
          _Static_assert(sizeof(nullptr_t) == sizeof(void *), \"nullptr_t size\");\n\
          _Static_assert(_Generic(nullptr, nullptr_t: 1, default: 0), \"distinct type\");\n\
@@ -5529,17 +5481,12 @@ fn c23_nullptr() {
              return (q == nullptr) + (p == nullptr) + (nullptr == 0)\n\
                  + !nullptr + (nullptr ? 0 : 1);\n\
          }",
-        c23
-    )
-    .is_empty());
+            c23
+        )
+        .is_empty()
+    );
     assert!(tu_diagnostics("int nullptr = 0;").is_empty());
-    for src in [
-        "(long long)nullptr;",
-        "(nullptr_t)1;",
-        "(nullptr_t)(int *)0;",
-        "nullptr + 1;",
-        "nullptr < nullptr;",
-    ] {
+    for src in ["(long long)nullptr;", "(nullptr_t)1;", "(nullptr_t)(int *)0;", "nullptr + 1;", "nullptr < nullptr;"] {
         assert!(
             tu_diagnostics_with_lang(&format!("typedef typeof(nullptr) nullptr_t; int x = {src} 0;"), c23)
                 .iter()
@@ -5650,9 +5597,7 @@ fn c23_attributes_parse_and_drive_warnings() {
         "{diagnostics:#?}"
     );
     assert!(
-        diagnostics
-            .iter()
-            .any(|d| d.severity == Severity::Warning && d.message.contains("'old' is deprecated")),
+        diagnostics.iter().any(|d| d.severity == Severity::Warning && d.message.contains("'old' is deprecated")),
         "{diagnostics:#?}"
     );
 
@@ -5703,8 +5648,9 @@ fn c23_bitint_types_and_suffixes() {
         clang: false,
         strict: false,
     };
-    assert!(tu_diagnostics_with_lang(
-        "_Static_assert(sizeof(_BitInt(8)) == 1, \"8-bit storage\");\n\
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(sizeof(_BitInt(8)) == 1, \"8-bit storage\");\n\
          _Static_assert(_Alignof(_BitInt(9)) == 2, \"16-bit storage\");\n\
          _Static_assert(sizeof(_BitInt(17)) == 4, \"32-bit storage\");\n\
          _Static_assert(sizeof(unsigned _BitInt(33)) == 8, \"64-bit storage\");\n\
@@ -5716,9 +5662,10 @@ fn c23_bitint_types_and_suffixes() {
              unsigned _BitInt(9) b = 511;\n\
              return (int)(a + b);\n\
          }",
-        c23
-    )
-    .is_empty());
+            c23
+        )
+        .is_empty()
+    );
     assert!(tu_diagnostics_with_lang("_BitInt(0) x;", c23).iter().any(|d| d.is_error()));
     assert!(tu_diagnostics_with_lang("_BitInt(65) x;", c23).iter().any(|d| d.is_error()));
     assert!(tu_diagnostics_with_lang("signed _BitInt(1) x;", c23).iter().any(|d| d.is_error()));
@@ -5786,9 +5733,7 @@ fn alignas_opens_a_declaration_at_file_and_block_scope() {
     assert!(tu_diagnostics("_Alignas(16) int x;").is_empty());
     assert!(tu_diagnostics("void f(void) { _Alignas(16) int y; (void)y; }").is_empty());
     assert!(tu_diagnostics_with_lang("alignas(16) int x;", c23).is_empty());
-    assert!(
-        tu_diagnostics_with_lang("void f(void) { alignas(16) int y; (void)y; }", c23).is_empty()
-    );
+    assert!(tu_diagnostics_with_lang("void f(void) { alignas(16) int y; (void)y; }", c23).is_empty());
 }
 
 #[test]
@@ -6000,14 +5945,8 @@ fn generic_type_operand_selects_without_decay() {
     // the controlling type.
     assert_eq!(enum_value_of("enum { N = _Generic(const int, int: 5, default: 6) };", "N"), 6);
     // An expression operand still decays, unlike the type spelling.
-    assert_eq!(
-        enum_value_of("int a[3]; enum { N = _Generic(a, int *: 5, default: 6) };", "N"),
-        5
-    );
-    assert_eq!(
-        enum_value_of("enum { N = _Generic(int[3], int[3]: 5, default: 6) };", "N"),
-        5
-    );
+    assert_eq!(enum_value_of("int a[3]; enum { N = _Generic(a, int *: 5, default: 6) };", "N"), 5);
+    assert_eq!(enum_value_of("enum { N = _Generic(int[3], int[3]: 5, default: 6) };", "N"), 5);
 }
 
 #[test]
@@ -8984,9 +8923,7 @@ fn init_brace_lists_and_designators() {
         panic!("expected a list")
     };
     let [first, second] = items else { panic!("{items:?}") };
-    let [Designator::Field { .. }] = first.designators else {
-        panic!("{first:?}")
-    };
+    let [Designator::Field { .. }] = first.designators else { panic!("{first:?}") };
     assert!(matches!(&*first.init, Initializer::Expr(_)));
     assert!(matches!(&*second.init, Initializer::List { .. }));
 }
@@ -9897,7 +9834,10 @@ fn asm_goto_template_accepted() {
 
 #[test]
 fn asm_goto_reference_must_be_listed() {
-    assert_diag_contains(&tu_diagnostics("void f(int x){ asm goto(\"jmp %l[baz]\" : : \"r\"(x) : : lab); lab: ; }"), "undefined named operand 'baz'");
+    assert_diag_contains(
+        &tu_diagnostics("void f(int x){ asm goto(\"jmp %l[baz]\" : : \"r\"(x) : : lab); lab: ; }"),
+        "undefined named operand 'baz'",
+    );
 }
 
 #[test]
@@ -9917,7 +9857,10 @@ fn asm_labels_require_goto() {
 
 #[test]
 fn asm_goto_label_must_exist() {
-    assert_diag_contains(&tu_diagnostics("void f(int x){ asm goto(\"jmp %l[missing]\" : : \"r\"(x) : : missing); }"), "label 'missing' used but not defined");
+    assert_diag_contains(
+        &tu_diagnostics("void f(int x){ asm goto(\"jmp %l[missing]\" : : \"r\"(x) : : missing); }"),
+        "label 'missing' used but not defined",
+    );
 }
 
 #[test]
@@ -9927,7 +9870,10 @@ fn asm_memory_input_needs_address() {
 
 #[test]
 fn asm_memory_bitfield_rejected() {
-    assert_diag_contains(&tu_diagnostics("void f(void){ struct S { unsigned b : 3; } s; asm(\"\" : : \"m\"(s.b)); }"), "cannot take address of bit-field");
+    assert_diag_contains(
+        &tu_diagnostics("void f(void){ struct S { unsigned b : 3; } s; asm(\"\" : : \"m\"(s.b)); }"),
+        "cannot take address of bit-field",
+    );
 }
 
 #[test]
@@ -9966,7 +9912,10 @@ fn asm_aarch64_memory_letter_needs_an_lvalue() {
 
 #[test]
 fn asm_output_readonly_rejected() {
-    assert_diag_contains(&tu_diagnostics("void f(void){ const int x = 1; __asm__(\"\" : \"=r\"(x)); }"), "assignment of read-only variable 'x'");
+    assert_diag_contains(
+        &tu_diagnostics("void f(void){ const int x = 1; __asm__(\"\" : \"=r\"(x)); }"),
+        "assignment of read-only variable 'x'",
+    );
 }
 
 #[test]

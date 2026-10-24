@@ -779,10 +779,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 ctx.scope = scope;
                 let data_id = defs.data_ids[&d.name];
                 if d.ctors.iter().any(|c| c.field_names.is_some()) && d.ctors.len() != 1 {
-                    return Err(Diag::new(
-                        format!("record type `{}` must have exactly one constructor", d.name),
-                        d.span,
-                    ));
+                    return Err(Diag::new(format!("record type `{}` must have exactly one constructor", d.name), d.span));
                 }
                 let mut ctors = Vec::with_capacity(d.ctors.len());
                 for ctor in &d.ctors {
@@ -825,12 +822,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 method_var_kinds.insert(class_id, vars_per_method);
             }
-            ast::ItemKind::Instance(..)
-            | ast::ItemKind::Extern(..)
-            | ast::ItemKind::Fun(..)
-            | ast::ItemKind::Let(..)
-            | ast::ItemKind::Import(..)
-            | ast::ItemKind::Use(..) => {}
+            ast::ItemKind::Instance(..) | ast::ItemKind::Extern(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) | ast::ItemKind::Import(..) | ast::ItemKind::Use(..) => {}
         }
     }
 

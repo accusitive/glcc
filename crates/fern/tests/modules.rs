@@ -301,10 +301,7 @@ fn the_bundled_std_provides_foldable() {
         .unwrap_or_else(|diags| panic!("std load failed: {}", diags[0].msg));
     assert!(std::path::Path::new(session.path(foldable)).ends_with("stdlib/std/foldable.fern"));
 
-    let main = session.add_file(
-        "<main>",
-        "import std::foldable\nfun main() : Int = fold((h, b) -> h + b, 0, [1, 2, 3])",
-    );
+    let main = session.add_file("<main>", "import std::foldable\nfun main() : Int = fold((h, b) -> h + b, 0, [1, 2, 3])");
     let module = session
         .compile(&[session.prelude(), main, foldable])
         .unwrap_or_else(|diags| panic!("compile failed: {}", diags[0].msg));

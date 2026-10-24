@@ -804,7 +804,13 @@ impl<'a> Sema<'a> {
                 (true, false) => right.clone(),
                 (false, true) if left_signed => corresponding_unsigned(left),
                 (false, true) => left.clone(),
-                _ => if left_signed { corresponding_unsigned(left) } else { left.clone() },
+                _ => {
+                    if left_signed {
+                        corresponding_unsigned(left)
+                    } else {
+                        left.clone()
+                    }
+                }
             };
         }
         // Same signedness: the greater rank wins.
@@ -1050,7 +1056,11 @@ impl<'a> Sema<'a> {
             Ty::Pointer { pointee, size, .. } => {
                 let (span, kind) = (expr.span, expr.kind);
                 CheckedExpr {
-                    ty: Ty::Pointer { qualifiers: TypeQualifiers::empty(), size, pointee },
+                    ty: Ty::Pointer {
+                        qualifiers: TypeQualifiers::empty(),
+                        size,
+                        pointee,
+                    },
                     span,
                     kind,
                 }
@@ -1316,7 +1326,7 @@ impl<'a> Sema<'a> {
         match init {
             // Values arrive already checked (parsers check inline, where
             // scopes are live); here they only convert to the target.
-            Initializer::Expr (expr) => {
+            Initializer::Expr(expr) => {
                 // `char s[] = "abc";` — a string literal initializes an
                 // array of its own character type directly (C17
                 // §6.7.9p14), with or without braces (the braced form
@@ -1330,7 +1340,7 @@ impl<'a> Sema<'a> {
                                 // braced path gets; only the fit check
                                 // differs.
                                 self.check_string_fit(parts, bound, expr.span(), interner);
-                                return Ok(Initializer::Expr (expr.clone()));
+                                return Ok(Initializer::Expr(expr.clone()));
                             }
                         }
                     }
@@ -1345,14 +1355,21 @@ impl<'a> Sema<'a> {
                 if matches!(target.unqualified(), Ty::Struct(_)) && is_scalar(&expr.ty) && !matches!(&expr.kind, CheckedExprKind::Str(_)) {
                     let single = vec![InitItem {
                         designators: &[],
-                        init: self.alloc(Initializer::Expr (expr.clone())),
+                        init: self.alloc(Initializer::Expr(expr.clone())),
                         span: expr.span(),
                     }];
                     let span = expr.span();
-                    return self.check_initializer(target, &Initializer::List { items: self.alloc_slice(single), span }, interner);
+                    return self.check_initializer(
+                        target,
+                        &Initializer::List {
+                            items: self.alloc_slice(single),
+                            span,
+                        },
+                        interner,
+                    );
                 }
                 let converted = self.convert_for_assignment(target, expr.clone(), interner)?;
-                Ok(Initializer::Expr (converted))
+                Ok(Initializer::Expr(converted))
             }
             Initializer::List { items, span } => {
                 let items = self.check_init_list(target, items, interner)?;
@@ -1365,17 +1382,20 @@ impl<'a> Sema<'a> {
                 if let Ty::Array { elem, .. } = target.unqualified() {
                     if let [item] = items.as_slice() {
                         if item.designators.is_empty() {
-                            if let Initializer::Expr (expr) = &*item.init {
+                            if let Initializer::Expr(expr) = &*item.init {
                                 if let CheckedExprKind::Str(parts) = &expr.kind {
                                     if self.string_elem_ty(parts).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
-                                        return Ok(Initializer::Expr (expr.clone()));
+                                        return Ok(Initializer::Expr(expr.clone()));
                                     }
                                 }
                             }
                         }
                     }
                 }
-                Ok(Initializer::List { items: self.alloc_slice(items), span: *span })
+                Ok(Initializer::List {
+                    items: self.alloc_slice(items),
+                    span: *span,
+                })
             }
         }
     }
@@ -1475,7 +1495,14 @@ impl<'a> Sema<'a> {
                     if j > i {
                         let sub = items[i..j].to_vec();
                         let span = sub.first().map(|it| it.span).unwrap_or(item.span).merge(sub.last().map(|it| it.span).unwrap_or(item.span));
-                        let init = self.check_initializer(&member_ty, &Initializer::List { items: self.alloc_slice(sub), span }, interner)?;
+                        let init = self.check_initializer(
+                            &member_ty,
+                            &Initializer::List {
+                                items: self.alloc_slice(sub),
+                                span,
+                            },
+                            interner,
+                        )?;
                         self.advance_cursor(id, &mut cursor);
                         checked.push(InitItem {
                             designators: &[],
@@ -1515,7 +1542,7 @@ impl<'a> Sema<'a> {
     /// recurse normally, and a string literal initializes a character
     /// array directly (no elision).
     fn needs_elision(&self, member_ty: &Ty, init: &Initializer<'a>) -> bool {
-        let Initializer::Expr (expr) = init else {
+        let Initializer::Expr(expr) = init else {
             return false;
         };
         match member_ty.unqualified() {
@@ -1595,7 +1622,7 @@ impl<'a> Sema<'a> {
     /// Whether `items[j]` is a bare expression item: brace elision
     /// feeds only un-designated expression items to a member.
     fn bare_item(items: &[InitItem<'a>], j: usize) -> bool {
-        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr (_)))
+        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
     }
 
     /// Element type of a string literal under the selected dialect
@@ -1611,7 +1638,7 @@ impl<'a> Sema<'a> {
         if !item.designators.is_empty() {
             return None;
         }
-        let Initializer::Expr (expr) = &*item.init else {
+        let Initializer::Expr(expr) = &*item.init else {
             return None;
         };
         let CheckedExprKind::Str(parts) = &expr.kind else {
@@ -1856,7 +1883,7 @@ impl<'a> Sema<'a> {
         };
         if let [item] = items {
             if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr (expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
-                if let Initializer::Expr (expr) = &*item.init {
+                if let Initializer::Expr(expr) = &*item.init {
                     if let CheckedExprKind::Str(parts) = &expr.kind {
                         let lit_elem = self.string_elem_ty(parts);
                         if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
@@ -1940,7 +1967,14 @@ impl<'a> Sema<'a> {
                 if j > i {
                     let sub = items[i..j].to_vec();
                     let span = sub.first().map(|it| it.span).unwrap_or(item.span).merge(sub.last().map(|it| it.span).unwrap_or(item.span));
-                    let init = self.check_initializer(elem, &Initializer::List { items: self.alloc_slice(sub), span }, interner)?;
+                    let init = self.check_initializer(
+                        elem,
+                        &Initializer::List {
+                            items: self.alloc_slice(sub),
+                            span,
+                        },
+                        interner,
+                    )?;
                     checked.push(InitItem {
                         designators: &[],
                         init: self.alloc(init),
@@ -2004,10 +2038,10 @@ impl<'a> Sema<'a> {
         // The braced shape collapses to the bare `Expr<'a>` one at check
         // time (see `check_initializer`), so accept either.
         let string = match init {
-            Initializer::Expr (expr) => Some(expr),
+            Initializer::Expr(expr) => Some(expr),
             Initializer::List { items, .. } => match items {
                 [item] if item.designators.is_empty() => match &*item.init {
-                    Initializer::Expr (expr) => Some(expr),
+                    Initializer::Expr(expr) => Some(expr),
                     _ => None,
                 },
                 _ => None,
@@ -2099,9 +2133,7 @@ impl<'a> Sema<'a> {
                 }
                 if self.std_attrs.get(&id).is_some_and(|attrs| attrs.contains(StdAttributes::DEPRECATED)) {
                     let text = interner.resolve(*name).unwrap_or("?");
-                    self.warnings
-                        .borrow_mut()
-                        .push(CompileError::warning(format!("'{text}' is deprecated"), span));
+                    self.warnings.borrow_mut().push(CompileError::warning(format!("'{text}' is deprecated"), span));
                 }
                 Ok(CheckedExpr {
                     ty: binding.ty.clone(),
@@ -2215,7 +2247,10 @@ impl<'a> Sema<'a> {
                 Ok(CheckedExpr {
                     ty: ty.clone(),
                     span,
-                    kind: CheckedExprKind::VaArg { ap: self.alloc(ap), ty: ty.clone() },
+                    kind: CheckedExprKind::VaArg {
+                        ap: self.alloc(ap),
+                        ty: ty.clone(),
+                    },
                 })
             }
             Expr::Offsetof { ty, designators, .. } => {
@@ -2358,7 +2393,9 @@ impl<'a> Sema<'a> {
                 return Ok(());
             }
             Ty::Void => {
-                self.warnings.borrow_mut().push(CompileError::warning("invalid application of `sizeof` to a void type", span));
+                self.warnings
+                    .borrow_mut()
+                    .push(CompileError::warning("invalid application of `sizeof` to a void type", span));
                 return Ok(());
             }
             _ => {}
@@ -2373,10 +2410,14 @@ impl<'a> Sema<'a> {
     /// known or variable top-level extent (but not `[]` or `[*]`).
     fn check_countof_operand(&self, ty: &Ty, span: Span) -> Result<(), CompileError> {
         match ty.unqualified() {
-            Ty::Array { bound: Some(ArrayBound::Fixed(_) | ArrayBound::Vla(_)), .. } => Ok(()),
-            Ty::Array { bound: Some(ArrayBound::Star) | None, .. } => {
-                Err(CompileError::new("invalid application of `_Countof` to an incomplete type", span))
-            }
+            Ty::Array {
+                bound: Some(ArrayBound::Fixed(_) | ArrayBound::Vla(_)),
+                ..
+            } => Ok(()),
+            Ty::Array {
+                bound: Some(ArrayBound::Star) | None,
+                ..
+            } => Err(CompileError::new("invalid application of `_Countof` to an incomplete type", span)),
             _ => Err(CompileError::new("`_Countof` requires an argument of array type", span)),
         }
     }
@@ -2793,7 +2834,15 @@ impl<'a> Sema<'a> {
     /// The common tail of `?:`: the condition must be a scalar, and the
     /// arms convert to a shared result type. `elvis` picks the node
     /// shape (see [`Self::conditional_node`]).
-    fn check_conditional(&self, cond: CheckedExpr<'a>, then: CheckedExpr<'a>, els: CheckedExpr<'a>, interner: &Interner, span: Span, elvis: bool) -> Result<CheckedExpr<'a>, CompileError> {
+    fn check_conditional(
+        &self,
+        cond: CheckedExpr<'a>,
+        then: CheckedExpr<'a>,
+        els: CheckedExpr<'a>,
+        interner: &Interner,
+        span: Span,
+        elvis: bool,
+    ) -> Result<CheckedExpr<'a>, CompileError> {
         if !is_scalar(&cond.ty) {
             return Err(CompileError::new("ternary condition must have scalar type", cond.span));
         }
@@ -2845,14 +2894,18 @@ impl<'a> Sema<'a> {
             let take_then = fwd == PointeeConversion::Yes || (fwd == PointeeConversion::Warns && rev != PointeeConversion::Yes);
             if take_then && fwd != PointeeConversion::No {
                 if fwd == PointeeConversion::Warns {
-                    self.warnings.borrow_mut().push(CompileError::warning("pointer type mismatch in conditional expression", span));
+                    self.warnings
+                        .borrow_mut()
+                        .push(CompileError::warning("pointer type mismatch in conditional expression", span));
                 }
                 let ty = then.ty.clone();
                 return Ok(self.conditional_node(cond, then, els, ty, span, elvis));
             }
             if rev != PointeeConversion::No {
                 if rev == PointeeConversion::Warns {
-                    self.warnings.borrow_mut().push(CompileError::warning("pointer type mismatch in conditional expression", span));
+                    self.warnings
+                        .borrow_mut()
+                        .push(CompileError::warning("pointer type mismatch in conditional expression", span));
                 }
                 let ty = els.ty.clone();
                 return Ok(self.conditional_node(cond, then, els, ty, span, elvis));
@@ -3499,7 +3552,16 @@ impl<'a> Sema<'a> {
     /// `T __atomic_add_fetch(T *ptr, T val, int order)` (new value),
     /// plus the sized spellings. Pointer targets act on `uintptr_t`
     /// (no scaling); `_Bool` targets are rejected like GCC.
-    fn check_atomic_rmw(&self, base: &str, fetch: bool, args: &[Expr<'a>], interner: &Interner, span: Span, sized: Option<u8>, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
+    fn check_atomic_rmw(
+        &self,
+        base: &str,
+        fetch: bool,
+        args: &[Expr<'a>],
+        interner: &Interner,
+        span: Span,
+        sized: Option<u8>,
+        what: &str,
+    ) -> Result<CheckedExpr<'a>, CompileError> {
         let op = match base {
             "fetch_add" | "add_fetch" => RmwOp::Add,
             "fetch_sub" | "sub_fetch" => RmwOp::Sub,
@@ -4413,7 +4475,7 @@ impl<'a> Sema<'a> {
                         init: self.alloc(Initializer::List {
                             items: self.alloc_slice([InitItem {
                                 designators: self.alloc_slice([Designator::Field { name, span }]),
-                                init: self.alloc(Initializer::Expr (operand)),
+                                init: self.alloc(Initializer::Expr(operand)),
                                 span,
                             }]),
                             span,

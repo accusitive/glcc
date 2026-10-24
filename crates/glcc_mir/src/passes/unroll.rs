@@ -17,11 +17,11 @@ use std::collections::{HashMap, HashSet};
 
 use smallvec::SmallVec;
 
-use crate::ir::{remap_inst, Block, BlockData, Def, Function, IcmpPred, InstData, InstKind, Terminator, Value, ValueData};
+use crate::ir::{Block, BlockData, Def, Function, IcmpPred, InstData, InstKind, Terminator, Value, ValueData, remap_inst};
 use crate::pass::FunctionPass;
 
 use super::licm::natural_loops;
-use super::{eval_icmp, int_const, DomInfo};
+use super::{DomInfo, eval_icmp, int_const};
 
 /// Largest trip count expanded into straight-line code.
 const MAX_TRIP_COUNT: usize = 8;
@@ -417,11 +417,7 @@ fn clone_block_insts(func: &mut Function, original: &HashMap<Block, BlockData>, 
 
 fn clone_term(term: &Terminator, blocks: &HashMap<Block, Block>, values: &HashMap<Value, Value>, header: Block, next_header: Block) -> Terminator {
     let block = |dest: Block| {
-        if dest == header {
-            next_header
-        } else {
-            blocks[&dest]
-        }
+        if dest == header { next_header } else { blocks[&dest] }
     };
     let value = |value: Value| values.get(&value).copied().unwrap_or(value);
     match term {
@@ -461,7 +457,7 @@ fn map_values(values: &[Value], map: &HashMap<Value, Value>) -> SmallVec<[Value;
 mod tests {
     use super::*;
     use crate::ir::{Const, Func, InstData, InstKind, Module, ValueData};
-    use crate::optimize::{optimize, OptLevel};
+    use crate::optimize::{OptLevel, optimize};
     use crate::ty::{Signature, Ty};
 
     fn emit(func: &mut Function, block: Block, kind: InstKind, ty: Ty) -> Value {

@@ -188,9 +188,7 @@ impl Qualifier {
                         qualifier.methods.insert(method.name.clone());
                     }
                 }
-                ItemKind::Extern(extern_decl) => {
-                    qualifier.register(module, &extern_decl.name, Sort::Value)
-                }
+                ItemKind::Extern(extern_decl) => qualifier.register(module, &extern_decl.name, Sort::Value),
                 ItemKind::Fun(fun) => qualifier.register(module, &fun.name, Sort::Value),
                 ItemKind::Let(value) => qualifier.register(module, &value.name, Sort::Value),
                 ItemKind::Instance(_) | ItemKind::Import(_) | ItemKind::Use(_) => {}
@@ -209,11 +207,7 @@ impl Qualifier {
 
     fn register(&mut self, module: ModuleId, name: &str, sort: Sort) {
         let canonical = self.canonical(module, name);
-        self.modules[module.index()]
-            .locals
-            .entry(name.to_string())
-            .or_default()
-            .push((sort, canonical.clone()));
+        self.modules[module.index()].locals.entry(name.to_string()).or_default().push((sort, canonical.clone()));
         self.sorts.insert(canonical.clone(), sort);
         if matches!(sort, Sort::Type | Sort::Class) {
             self.owners.insert(canonical, module);
@@ -222,11 +216,7 @@ impl Qualifier {
 
     fn canonical(&self, module: ModuleId, name: &str) -> String {
         let path = &self.modules[module.index()].path;
-        if path.is_empty() {
-            name.to_string()
-        } else {
-            format!("{}::{name}", path.join("::"))
-        }
+        if path.is_empty() { name.to_string() } else { format!("{}::{name}", path.join("::")) }
     }
 
     fn local(&self, module: ModuleId, name: &str) -> String {
@@ -235,9 +225,7 @@ impl Qualifier {
 
     fn add_import(&mut self, module: ModuleId, import: &ImportDecl) -> KResult<()> {
         let path = import.path.join("::");
-        let target = self.by_path.get(&path).copied().ok_or_else(|| {
-            Diag::new(format!("unknown module `{path}`"), import.span)
-        })?;
+        let target = self.by_path.get(&path).copied().ok_or_else(|| Diag::new(format!("unknown module `{path}`"), import.span))?;
         let alias = import
             .alias
             .clone()
@@ -246,10 +234,7 @@ impl Qualifier {
         let scope = &mut self.modules[module.index()];
         if let Some(existing) = scope.imports.insert(alias.clone(), target) {
             if existing != target {
-                return Err(Diag::new(
-                    format!("import alias `{alias}` is already bound to another module"),
-                    import.span,
-                ));
+                return Err(Diag::new(format!("import alias `{alias}` is already bound to another module"), import.span));
             }
         }
         scope.imports.entry(import.path.join(".")).or_insert(target);
@@ -258,30 +243,21 @@ impl Qualifier {
 
     fn add_use(&mut self, module: ModuleId, use_decl: &UseDecl) -> KResult<()> {
         if use_decl.path.len() < 2 {
-            return Err(Diag::new(
-                "`use` needs a module path and an item name",
-                use_decl.span,
-            ));
+            return Err(Diag::new("`use` needs a module path and an item name", use_decl.span));
         }
         let item = use_decl.path.last().expect("checked length").clone();
         let module_path = use_decl.path[..use_decl.path.len() - 1].join("::");
-        let target = self.by_path.get(&module_path).copied().ok_or_else(|| {
-            Diag::new(
-                format!("unknown module `{module_path}`"),
-                use_decl.span,
-            )
-        })?;
+        let target = self
+            .by_path
+            .get(&module_path)
+            .copied()
+            .ok_or_else(|| Diag::new(format!("unknown module `{module_path}`"), use_decl.span))?;
         let alias = use_decl.alias.clone().unwrap_or_else(|| item.clone());
         let locals = self.modules[target.index()]
             .locals
             .get(&item)
             .cloned()
-            .ok_or_else(|| {
-                Diag::new(
-                    format!("module `{module_path}` has no item `{item}`"),
-                    use_decl.span,
-                )
-            })?;
+            .ok_or_else(|| Diag::new(format!("module `{module_path}` has no item `{item}`"), use_decl.span))?;
         let scope = &mut self.modules[module.index()];
         for (sort, canonical) in locals {
             let map = match sort {
@@ -291,10 +267,7 @@ impl Qualifier {
             };
             if let Some(existing) = map.insert(alias.clone(), canonical.clone()) {
                 if existing != canonical {
-                    return Err(Diag::new(
-                        format!("`{alias}` is already imported"),
-                        use_decl.span,
-                    ));
+                    return Err(Diag::new(format!("`{alias}` is already imported"), use_decl.span));
                 }
             }
         }
@@ -317,13 +290,7 @@ impl Qualifier {
                 .find(|(sort, _)| accept(*sort))
                 .map(|(_, canonical)| canonical.clone())
         };
-        find(module).or_else(|| {
-            if module != ModuleId::ROOT {
-                find(ModuleId::ROOT)
-            } else {
-                None
-            }
-        })
+        find(module).or_else(|| if module != ModuleId::ROOT { find(ModuleId::ROOT) } else { None })
     }
 
     fn lookup_direct(&self, module: ModuleId, name: &str, expect: Expect) -> Option<String> {
@@ -352,13 +319,7 @@ impl Qualifier {
         map.get(name).cloned()
     }
 
-    fn resolve_name(
-        &self,
-        module: ModuleId,
-        name: &str,
-        expect: Expect,
-        span: Span,
-    ) -> KResult<String> {
+    fn resolve_name(&self, module: ModuleId, name: &str, expect: Expect, span: Span) -> KResult<String> {
         if name.contains("::") {
             return Ok(name.to_string());
         }
@@ -391,43 +352,25 @@ impl Qualifier {
         Err(Diag::new(format!("unknown {what} `{name}`"), span))
     }
 
-    fn resolve_member(
-        &self,
-        module: ModuleId,
-        name: &str,
-        expect: Expect,
-        span: Span,
-    ) -> KResult<String> {
+    fn resolve_member(&self, module: ModuleId, name: &str, expect: Expect, span: Span) -> KResult<String> {
         let parts: Vec<&str> = name.split('.').collect();
         let scope = &self.modules[module.index()];
         for prefix_len in (1..parts.len()).rev() {
             let prefix = parts[..prefix_len].join(".");
             if let Some(target) = scope.imports.get(&prefix).copied() {
                 if parts.len() - prefix_len != 1 {
-                    return Err(Diag::new(
-                        format!("`{name}` does not name a single module item"),
-                        span,
-                    ));
+                    return Err(Diag::new(format!("`{name}` does not name a single module item"), span));
                 }
                 let item = parts[prefix_len];
-                return self.lookup_member(target, item, expect, span).ok_or_else(|| {
-                    Diag::new(format!("module `{prefix}` has no matching `{item}`"), span)
-                });
+                return self
+                    .lookup_member(target, item, expect, span)
+                    .ok_or_else(|| Diag::new(format!("module `{prefix}` has no matching `{item}`"), span));
             }
         }
-        Err(Diag::new(
-            format!("unknown module in `{name}`; add an `import` first"),
-            span,
-        ))
+        Err(Diag::new(format!("unknown module in `{name}`; add an `import` first"), span))
     }
 
-    fn lookup_member(
-        &self,
-        module: ModuleId,
-        name: &str,
-        expect: Expect,
-        span: Span,
-    ) -> Option<String> {
+    fn lookup_member(&self, module: ModuleId, name: &str, expect: Expect, span: Span) -> Option<String> {
         let canonical = self.lookup_direct(module, name, expect)?;
         if expect == Expect::Class && self.sorts.get(&canonical) != Some(&Sort::Class) {
             return None;
@@ -477,27 +420,16 @@ impl Qualifier {
         self.resolve_name(module, name, Expect::Ctor, span)
     }
 
-    fn check_orphan(
-        &self,
-        module: ModuleId,
-        class: &str,
-        self_ty: &TyExpr,
-        span: Span,
-    ) -> KResult<()> {
+    fn check_orphan(&self, module: ModuleId, class: &str, self_ty: &TyExpr, span: Span) -> KResult<()> {
         let class_owner = self.owners.get(class).copied();
         let mut names = Vec::new();
         collect_type_names(self_ty, &mut names);
-        let local = names
-            .iter()
-            .any(|name| self.owners.get(*name) == Some(&module));
+        let local = names.iter().any(|name| self.owners.get(*name) == Some(&module));
         if class_owner == Some(module) || local {
             Ok(())
         } else {
             Err(Diag::new(
-                format!(
-                    "orphan instance: neither `{class}` nor `{}` belongs to this module",
-                    self_ty.display()
-                ),
+                format!("orphan instance: neither `{class}` nor `{}` belongs to this module", self_ty.display()),
                 span,
             ))
         }
@@ -505,11 +437,7 @@ impl Qualifier {
 
     fn expr(&self, module: ModuleId, expr: &mut Expr, scopes: &mut Scopes) -> KResult<()> {
         match &mut expr.kind {
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::BoolConst(_)
-            | ExprKind::Str(_)
-            | ExprKind::Unit => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BoolConst(_) | ExprKind::Str(_) | ExprKind::Unit => {}
             ExprKind::CtorCall { name, args } => {
                 let span = expr.span;
                 *name = self.ctor_name(module, name, span)?;
@@ -587,11 +515,7 @@ impl Qualifier {
                     self.expr(module, item, scopes)?;
                 }
             }
-            ExprKind::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
+            ExprKind::If { cond, then_body, else_body } => {
                 self.expr(module, cond, scopes)?;
                 self.expr(module, then_body, scopes)?;
                 self.expr(module, else_body, scopes)?;
@@ -612,25 +536,17 @@ impl Qualifier {
         if let Some(path) = field_path(expr) {
             let first = &path[0];
             let imports = &self.modules[module.index()].imports;
-            let module_path = !scopes.contains(first)
-                && (1..path.len()).any(|n| imports.contains_key(&path[..n].join(".")));
+            let module_path = !scopes.contains(first) && (1..path.len()).any(|n| imports.contains_key(&path[..n].join(".")));
             if module_path {
                 let member = path.last().expect("field paths are non-empty");
-                let expect = if member.as_bytes()[0].is_ascii_uppercase() {
-                    Expect::Ctor
-                } else {
-                    Expect::Value
-                };
+                let expect = if member.as_bytes()[0].is_ascii_uppercase() { Expect::Ctor } else { Expect::Value };
                 let name = self.resolve_member(module, &path.join("."), expect, span)?;
                 *expr = match expect {
                     Expect::Ctor => Expr {
                         kind: ExprKind::Ctor { name },
                         span,
                     },
-                    _ => Expr {
-                        kind: ExprKind::Var(name),
-                        span,
-                    },
+                    _ => Expr { kind: ExprKind::Var(name), span },
                 };
                 return Ok(());
             }

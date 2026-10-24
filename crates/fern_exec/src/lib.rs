@@ -35,7 +35,12 @@ unsafe extern "C" {
     fn read(fd: i32, buf: *mut core::ffi::c_void, n: usize) -> isize;
     fn usleep(usec: u32) -> i32;
     fn gettimeofday(tv: *mut core::ffi::c_void, tz: *mut core::ffi::c_void) -> i32;
-    fn pthread_create(thread: *mut usize, attr: *const core::ffi::c_void, start: unsafe extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void, arg: *mut core::ffi::c_void) -> i32;
+    fn pthread_create(
+        thread: *mut usize,
+        attr: *const core::ffi::c_void,
+        start: unsafe extern "C" fn(*mut core::ffi::c_void) -> *mut core::ffi::c_void,
+        arg: *mut core::ffi::c_void,
+    ) -> i32;
     fn pthread_detach(thread: usize) -> i32;
 }
 
@@ -48,7 +53,14 @@ unsafe extern "C" {
     #[link_name = "GetFileAttributesExA"]
     fn get_file_attributes_ex(path: *const core::ffi::c_char, level: i32, data: *mut core::ffi::c_void) -> i32;
     #[link_name = "_beginthreadex"]
-    fn beginthreadex(security: *mut core::ffi::c_void, stack_size: u32, start: unsafe extern "C" fn(*mut core::ffi::c_void) -> u32, arg: *mut core::ffi::c_void, flags: u32, thread_id: *mut u32) -> usize;
+    fn beginthreadex(
+        security: *mut core::ffi::c_void,
+        stack_size: u32,
+        start: unsafe extern "C" fn(*mut core::ffi::c_void) -> u32,
+        arg: *mut core::ffi::c_void,
+        flags: u32,
+        thread_id: *mut u32,
+    ) -> usize;
     #[link_name = "CloseHandle"]
     fn close_handle(handle: usize) -> i32;
     #[link_name = "Sleep"]
@@ -116,13 +128,7 @@ impl ExecSession {
         let target = glcc_lower_cl::Target::native();
         let defined_funcs = &self.defined_funcs;
         let defined_data = &self.defined_data;
-        let ids = glcc_lower_cl::lower_module_selected(
-            module,
-            &mut self.jit,
-            target,
-            &|name| !defined_funcs.contains(name),
-            &|name| !defined_data.contains(name),
-        );
+        let ids = glcc_lower_cl::lower_module_selected(module, &mut self.jit, target, &|name| !defined_funcs.contains(name), &|name| !defined_data.contains(name));
         for (id, fid) in ids {
             self.funcs.insert(module.funcs[id].name.clone(), fid);
         }
@@ -204,11 +210,7 @@ impl ExecSession {
 }
 
 fn build_jit() -> JITModule {
-    let mut builder = JITBuilder::with_flags(
-        &[("preserve_frame_pointers", "true")],
-        cranelift_module::default_libcall_names(),
-    )
-    .expect("jit builder");
+    let mut builder = JITBuilder::with_flags(&[("preserve_frame_pointers", "true")], cranelift_module::default_libcall_names()).expect("jit builder");
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
     builder.symbol("malloc", malloc as *const u8);

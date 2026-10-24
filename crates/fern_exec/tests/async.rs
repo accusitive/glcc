@@ -16,19 +16,15 @@ fn run(src: &str) -> Value {
 fn async_and_await_run_to_completion() {
     assert_eq!(run("async fun inc(x : Int) : Int = x + 1\nfun main() : Int = block_on_int(inc(41))"), Value::Int(42));
     assert_eq!(
-        run(
-            "async fun inc(x : Int) : Int = x + 1\n\
+        run("async fun inc(x : Int) : Int = x + 1\n\
              async fun twice(x : Int) : Int = { let a = await inc(x); let b = await inc(a); b }\n\
-             fun main() : Int = block_on_int(twice(1))"
-        ),
+             fun main() : Int = block_on_int(twice(1))"),
         Value::Int(3)
     );
     assert_eq!(
-        run(
-            "async fun inc(x : Int) : Int = x + 1\n\
+        run("async fun inc(x : Int) : Int = x + 1\n\
              async fun both(x : Int) : Int = { let a = await inc(x); let b = await inc(x); a + b }\n\
-             fun main() : Int = block_on_int(both(1))"
-        ),
+             fun main() : Int = block_on_int(both(1))"),
         Value::Int(4)
     );
 }
@@ -36,11 +32,9 @@ fn async_and_await_run_to_completion() {
 #[test]
 fn a_tail_await_returns_the_child_result() {
     assert_eq!(
-        run(
-            "async fun inc(x : Int) : Int = x + 1\n\
+        run("async fun inc(x : Int) : Int = x + 1\n\
              async fun tail(x : Int) : Int = await inc(x)\n\
-             fun main() : Int = block_on_int(tail(41))"
-        ),
+             fun main() : Int = block_on_int(tail(41))"),
         Value::Int(42)
     );
 }

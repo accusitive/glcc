@@ -386,15 +386,8 @@ impl Session {
             }
         }
 
-        let tried = tried
-            .iter()
-            .map(|candidate| format!("`{}`", candidate.display()))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Err(Diag::new(
-            format!("cannot find module `{}` (tried {tried})", path.join("::")),
-            span,
-        ))
+        let tried = tried.iter().map(|candidate| format!("`{}`", candidate.display())).collect::<Vec<_>>().join(", ");
+        Err(Diag::new(format!("cannot find module `{}` (tried {tried})", path.join("::")), span))
     }
 
     pub fn set_text(&mut self, file: FileId, text: impl Into<String>) {
@@ -882,11 +875,7 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
 
 fn env_search_paths() -> Vec<PathBuf> {
     std::env::var_os("FERN_PATH")
-        .map(|value| {
-            std::env::split_paths(&value)
-                .filter(|path| !path.as_os_str().is_empty())
-                .collect()
-        })
+        .map(|value| std::env::split_paths(&value).filter(|path| !path.as_os_str().is_empty()).collect())
         .unwrap_or_default()
 }
 
@@ -920,9 +909,7 @@ fn find_in_root(root: &Path, path: &[String], tried: &mut Vec<PathBuf>) -> Optio
     }
     tried.push(leaf);
 
-    let package = root
-        .join(&joined)
-        .join(format!("{}.fern", path.last().expect("non-empty module path")));
+    let package = root.join(&joined).join(format!("{}.fern", path.last().expect("non-empty module path")));
     if package.is_file() {
         return Some(package);
     }

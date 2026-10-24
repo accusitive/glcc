@@ -100,11 +100,7 @@ fn forward_block(func: &mut Function, block: Block, non_escaping: &HashSet<Value
                         Action::Keep
                     } else {
                         entries.retain(|entry| !ranges_may_overlap(func, non_escaping, *addr, len, entry.addr, entry.len));
-                        entries.push(Entry {
-                            addr: *addr,
-                            len,
-                            value: *val,
-                        });
+                        entries.push(Entry { addr: *addr, len, value: *val });
                         Action::Keep
                     }
                 }
@@ -207,8 +203,25 @@ mod tests {
     fn store_then_load_forwards_the_stored_value() {
         let (mut func, entry, p) = ptr_func();
         let five = int_const(&mut func, 5);
-        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: p,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(run(&mut func));
@@ -220,8 +233,24 @@ mod tests {
     #[test]
     fn duplicate_loads_share_one_result() {
         let (mut func, entry, p) = ptr_func();
-        let first = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
-        let second = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
+        let second = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         let sum = emit(&mut func, entry, InstKind::Add(first, second), Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
 
@@ -234,10 +263,35 @@ mod tests {
     fn a_may_aliasing_store_invalidates_loads() {
         let (mut func, entry, p) = ptr_func();
         let q = param(&mut func, entry, Ty::ptr(Ty::int(32)), 1);
-        let first = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         let zero = int_const(&mut func, 0);
-        emit(&mut func, entry, InstKind::Store { addr: q, val: zero, flags: MemFlags::plain() }, Ty::Void);
-        let second = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: q,
+                val: zero,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let second = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         let sum = emit(&mut func, entry, InstKind::Add(first, second), Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
 
@@ -253,9 +307,35 @@ mod tests {
         let b = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let five = int_const(&mut func, 5);
         let eight = int_const(&mut func, 8);
-        emit(&mut func, entry, InstKind::Store { addr: a, val: five, flags: MemFlags::plain() }, Ty::Void);
-        emit(&mut func, entry, InstKind::Store { addr: b, val: eight, flags: MemFlags::plain() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: a, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: a,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: b,
+                val: eight,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: a,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(run(&mut func));
@@ -269,7 +349,16 @@ mod tests {
         let p = param(&mut func, entry, Ty::ptr(Ty::int(32)), 0);
         let slot = emit(&mut func, entry, InstKind::Alloca { pointee: Ty::int(32), count: 1 }, Ty::ptr(Ty::int(32)));
         let five = int_const(&mut func, 5);
-        emit(&mut func, entry, InstKind::Store { addr: slot, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: slot,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
         let call = emit(
             &mut func,
             entry,
@@ -286,8 +375,25 @@ mod tests {
         func.blocks[entry].insts.retain(|inst| *inst != call_inst);
 
         let nine = int_const(&mut func, 9);
-        emit(&mut func, entry, InstKind::Store { addr: p, val: nine, flags: MemFlags::plain() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: slot, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: p,
+                val: nine,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: slot,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(run(&mut func), "the dead call no longer makes the slot escape");
@@ -299,9 +405,34 @@ mod tests {
         let (mut func, entry, p) = ptr_func();
         func.set_extern_effects(&[crate::ir::ExternEffect::neutral()]);
         let five = int_const(&mut func, 5);
-        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
-        emit(&mut func, entry, InstKind::CallExtern { target: Extern::from_usize(0), args: Default::default() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: p,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        emit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target: Extern::from_usize(0),
+                args: Default::default(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(run(&mut func));
@@ -316,13 +447,55 @@ mod tests {
         let size = func.push_const(Const::Int { bits: 64, value: 8 });
         let ptr_ty = Ty::ptr(Ty::int(32));
         let target = Extern::from_usize(0);
-        let a = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty.clone());
-        let b = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty);
+        let a = emit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target,
+                args: [size].into_iter().collect(),
+            },
+            ptr_ty.clone(),
+        );
+        let b = emit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target,
+                args: [size].into_iter().collect(),
+            },
+            ptr_ty,
+        );
         let five = int_const(&mut func, 5);
         let seven = int_const(&mut func, 7);
-        emit(&mut func, entry, InstKind::Store { addr: a, val: five, flags: MemFlags::plain() }, Ty::Void);
-        emit(&mut func, entry, InstKind::Store { addr: b, val: seven, flags: MemFlags::plain() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: a, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: a,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: b,
+                val: seven,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: a,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(run(&mut func));
@@ -338,9 +511,26 @@ mod tests {
         let (mut func, entry) = Function::new("caller", sig);
         let p = param(&mut func, entry, Ty::ptr(Ty::int(32)), 0);
         let five = int_const(&mut func, 5);
-        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: p,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
         emit(&mut func, entry, InstKind::CallExtern { target, args: Default::default() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
         module.push_func(func);
 
@@ -356,13 +546,55 @@ mod tests {
         let size = func.push_const(Const::Int { bits: 64, value: 8 });
         let ptr_ty = Ty::ptr(Ty::int(32));
         let target = Extern::from_usize(0);
-        let a = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty.clone());
-        let b = emit(&mut func, entry, InstKind::CallExtern { target, args: [size].into_iter().collect() }, ptr_ty);
+        let a = emit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target,
+                args: [size].into_iter().collect(),
+            },
+            ptr_ty.clone(),
+        );
+        let b = emit(
+            &mut func,
+            entry,
+            InstKind::CallExtern {
+                target,
+                args: [size].into_iter().collect(),
+            },
+            ptr_ty,
+        );
         let five = int_const(&mut func, 5);
         let seven = int_const(&mut func, 7);
-        emit(&mut func, entry, InstKind::Store { addr: a, val: five, flags: MemFlags::plain() }, Ty::Void);
-        emit(&mut func, entry, InstKind::Store { addr: b, val: seven, flags: MemFlags::plain() }, Ty::Void);
-        let loaded = emit(&mut func, entry, InstKind::Load { addr: a, flags: MemFlags::plain() }, Ty::int(32));
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: a,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: b,
+                val: seven,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
+        let loaded = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: a,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         assert!(!run(&mut func), "an unannotated extern may return an aliasing pointer");
@@ -373,7 +605,16 @@ mod tests {
     fn volatile_and_call_barriers_keep_the_load() {
         let (mut func, entry, p) = ptr_func();
         let five = int_const(&mut func, 5);
-        emit(&mut func, entry, InstKind::Store { addr: p, val: five, flags: MemFlags::plain() }, Ty::Void);
+        emit(
+            &mut func,
+            entry,
+            InstKind::Store {
+                addr: p,
+                val: five,
+                flags: MemFlags::plain(),
+            },
+            Ty::Void,
+        );
         let volatile = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::vol() }, Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(volatile) });
         assert!(!run(&mut func), "volatile load is never forwarded");
@@ -381,10 +622,26 @@ mod tests {
         let sig = Signature::new(vec![Ty::ptr(Ty::int(32))], Ty::int(32));
         let (mut func, entry) = Function::new("g", sig);
         let p = param(&mut func, entry, Ty::ptr(Ty::int(32)), 0);
-        let first = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        let first = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         let target = Extern::from_usize(0);
         emit(&mut func, entry, InstKind::CallExtern { target, args: Default::default() }, Ty::Void);
-        let second = emit(&mut func, entry, InstKind::Load { addr: p, flags: MemFlags::plain() }, Ty::int(32));
+        let second = emit(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: p,
+                flags: MemFlags::plain(),
+            },
+            Ty::int(32),
+        );
         let sum = emit(&mut func, entry, InstKind::Add(first, second), Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
         assert!(!run(&mut func), "a call may write through p");

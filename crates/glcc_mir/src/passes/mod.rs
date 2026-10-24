@@ -20,10 +20,7 @@ pub use sccp::Sccp;
 pub use sroa::Sroa;
 pub use unroll::LoopUnroll;
 
-use crate::ir::{
-    remap_inst, Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module,
-    Terminator, Value, ValueData,
-};
+use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, remap_inst};
 use crate::pass::{FunctionPass, ModulePass};
 use crate::ty::{FloatKind, GepIndex, Ty};
 
@@ -532,15 +529,17 @@ enum FloatOp {
 fn fold_float2(func: &Function, a: Value, b: Value, op: FloatOp) -> Option<Const> {
     let (kind, l, r) = match (func.const_value(a)?, func.const_value(b)?) {
         (
-            Const::Float { kind: kind @ FloatKind::F32, bits: l },
+            Const::Float {
+                kind: kind @ FloatKind::F32,
+                bits: l,
+            },
             Const::Float { kind: FloatKind::F32, bits: r },
-        ) => (
-            *kind,
-            f32::from_bits(*l as u32) as f64,
-            f32::from_bits(*r as u32) as f64,
-        ),
+        ) => (*kind, f32::from_bits(*l as u32) as f64, f32::from_bits(*r as u32) as f64),
         (
-            Const::Float { kind: kind @ FloatKind::F64, bits: l },
+            Const::Float {
+                kind: kind @ FloatKind::F64,
+                bits: l,
+            },
             Const::Float { kind: FloatKind::F64, bits: r },
         ) => (*kind, f64::from_bits(*l as u64), f64::from_bits(*r as u64)),
         _ => return None,
@@ -619,11 +618,7 @@ fn fold_float_to_int(func: &Function, a: Value, result_ty: Option<&Ty>, unsigned
         }
         (truncated as u128) as i128
     } else {
-        let limit = if bits == 128 {
-            2f64.powi(127)
-        } else {
-            2f64.powi(bits as i32 - 1)
-        };
+        let limit = if bits == 128 { 2f64.powi(127) } else { 2f64.powi(bits as i32 - 1) };
         if truncated < -limit || truncated >= limit {
             return None;
         }
@@ -636,12 +631,8 @@ fn fold_float_to_int(func: &Function, a: Value, result_ty: Option<&Ty>, unsigned
 /// a separate instruction, so only one conversion applies here.
 fn fold_float_width(func: &Function, a: Value, result_ty: Option<&Ty>, extend: bool) -> Option<Const> {
     let value = match (func.const_value(a)?, result_ty?) {
-        (Const::Float { kind: FloatKind::F32, bits }, Ty::Float(FloatKind::F64)) if extend => {
-            (f32::from_bits(*bits as u32) as f64).to_bits()
-        }
-        (Const::Float { kind: FloatKind::F64, bits }, Ty::Float(FloatKind::F32)) if !extend => {
-            (f64::from_bits(*bits as u64) as f32).to_bits() as u64
-        }
+        (Const::Float { kind: FloatKind::F32, bits }, Ty::Float(FloatKind::F64)) if extend => (f32::from_bits(*bits as u32) as f64).to_bits(),
+        (Const::Float { kind: FloatKind::F64, bits }, Ty::Float(FloatKind::F32)) if !extend => (f64::from_bits(*bits as u64) as f32).to_bits() as u64,
         _ => return None,
     };
     Some(Const::Float {
@@ -974,13 +965,7 @@ fn expand_local_aggregate_copies(func: &mut Function, non_escaping: &std::collec
     changed
 }
 
-fn local_aggregate_copy_leaves(
-    func: &Function,
-    dst: Value,
-    src: Value,
-    len: u64,
-    non_escaping: &std::collections::HashSet<Value>,
-) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
+fn local_aggregate_copy_leaves(func: &Function, dst: Value, src: Value, len: u64, non_escaping: &std::collections::HashSet<Value>) -> Option<Vec<(Vec<GepIndex>, Ty)>> {
     let Ty::Ptr { pointee, .. } = &func.values[dst].ty else {
         return None;
     };
@@ -1114,15 +1099,7 @@ fn expand_local_aggregate_stores(func: &mut Function, non_escaping: &std::collec
                     Ty::ptr_bits(ty, bits),
                 );
                 rebuilt.push(dst_inst);
-                rebuilt.push(make_unit(
-                    func,
-                    block,
-                    InstKind::Store {
-                        addr: dst,
-                        val: extracted,
-                        flags,
-                    },
-                ));
+                rebuilt.push(make_unit(func, block, InstKind::Store { addr: dst, val: extracted, flags }));
             }
             expanded = true;
             changed = true;
@@ -1436,15 +1413,7 @@ fn expand_aggregate_load_extracts(func: &mut Function, non_escaping: &std::colle
                     Ty::ptr_bits(extraction.ty.clone(), *bits),
                 );
                 rebuilt.push(field_inst);
-                let (loaded, load_inst) = make_value(
-                    func,
-                    block,
-                    InstKind::Load {
-                        addr: field,
-                        flags: *flags,
-                    },
-                    extraction.ty.clone(),
-                );
+                let (loaded, load_inst) = make_value(func, block, InstKind::Load { addr: field, flags: *flags }, extraction.ty.clone());
                 rebuilt.push(load_inst);
                 replacements.push((extraction.result, loaded));
             }
@@ -1513,20 +1482,11 @@ pub(crate) fn address_info(func: &Function, value: Value) -> Option<AddressInfo>
             object: MemoryObject::Stack(value),
             offset: Some(0),
         }),
-        InstKind::CallExtern { target, .. }
-            if func.extern_effect(*target).allocates && matches!(func.values[value].ty, Ty::Ptr { .. }) =>
-        {
-            Some(AddressInfo {
-                object: MemoryObject::Heap(value),
-                offset: Some(0),
-            })
-        }
-        InstKind::Bitcast(inner)
-            if matches!(func.values[value].ty, Ty::Ptr { .. })
-                && matches!(func.values[*inner].ty, Ty::Ptr { .. }) =>
-        {
-            address_info(func, *inner)
-        }
+        InstKind::CallExtern { target, .. } if func.extern_effect(*target).allocates && matches!(func.values[value].ty, Ty::Ptr { .. }) => Some(AddressInfo {
+            object: MemoryObject::Heap(value),
+            offset: Some(0),
+        }),
+        InstKind::Bitcast(inner) if matches!(func.values[value].ty, Ty::Ptr { .. }) && matches!(func.values[*inner].ty, Ty::Ptr { .. }) => address_info(func, *inner),
         InstKind::GlobalAddr { .. } => Some(AddressInfo {
             object: MemoryObject::Global(value),
             offset: Some(0),
@@ -2065,9 +2025,11 @@ fn promote_slots(func: &mut Function) -> bool {
     // Every alloca from lowering is promoted on the first run; later
     // pipeline turns only hold orphaned ones in the arena. Check before
     // the remaining scans so those turns stay cheap.
-    if !func.insts.iter_enumerated().any(|(id, inst)| {
-        resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_scalar())
-    }) {
+    if !func
+        .insts
+        .iter_enumerated()
+        .any(|(id, inst)| resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_scalar()))
+    {
         return false;
     }
     let escaped = escaping_addresses(func);
@@ -2223,13 +2185,7 @@ fn promote_slot(
 /// of the slot gets a phi only when the slot is live-in there. Returns
 /// `None` when a phi would land somewhere unsupported (the entry block
 /// or a `Switch` target), leaving the caller to keep the slot in memory.
-fn place_phis(
-    func: &Function,
-    dom: &DomInfo,
-    store_blocks: &[Block],
-    switch_targets: &std::collections::HashSet<Block>,
-    slot: &SlotSites,
-) -> Option<Vec<Block>> {
+fn place_phis(func: &Function, dom: &DomInfo, store_blocks: &[Block], switch_targets: &std::collections::HashSet<Block>, slot: &SlotSites) -> Option<Vec<Block>> {
     let live_in = slot_live_in(func, slot);
     let mut placed: std::collections::HashSet<Block> = std::collections::HashSet::new();
     let mut work: Vec<Block> = store_blocks.to_vec();
@@ -2282,10 +2238,7 @@ fn slot_live_in(func: &Function, slot: &SlotSites) -> Vec<bool> {
             if !reachable[index.index()] || live[index.index()] || defines[index.index()] {
                 continue;
             }
-            let flows_out = block
-                .term
-                .as_ref()
-                .is_some_and(|term| term.successors().into_iter().any(|succ| live[succ.index()]));
+            let flows_out = block.term.as_ref().is_some_and(|term| term.successors().into_iter().any(|succ| live[succ.index()]));
             if flows_out {
                 live[index.index()] = true;
                 changed = true;
@@ -2754,11 +2707,7 @@ fn fold_fork(
         });
         let inst = func.insts.push(InstData {
             block,
-            kind: InstKind::Select {
-                cond,
-                then_val,
-                else_val,
-            },
+            kind: InstKind::Select { cond, then_val, else_val },
             result: Some(result),
             loc: None,
         });
@@ -2919,9 +2868,18 @@ fn same_terminator(a: &Terminator, b: &Terminator) -> bool {
                 else_args: bea,
             },
         ) => ac == bc && at == bt && ae == be && ata == bta && aea == bea,
-        (Terminator::Switch { scrutinee: as_, cases: ac, default: ad }, Terminator::Switch { scrutinee: bs, cases: bc, default: bd }) => {
-            as_ == bs && ac == bc && ad == bd
-        }
+        (
+            Terminator::Switch {
+                scrutinee: as_,
+                cases: ac,
+                default: ad,
+            },
+            Terminator::Switch {
+                scrutinee: bs,
+                cases: bc,
+                default: bd,
+            },
+        ) => as_ == bs && ac == bc && ad == bd,
         (Terminator::Return { val: a }, Terminator::Return { val: b }) => a == b,
         (Terminator::Unreachable, Terminator::Unreachable) => true,
         _ => false,
@@ -3067,11 +3025,7 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                 let Some(Terminator::Br { dest, args: outgoing }) = func.blocks[arm].term.clone() else {
                     continue;
                 };
-                if dest == arm
-                    || dest == fork
-                    || dest == func.entry
-                    || func.blocks[dest].term.is_none()
-                {
+                if dest == arm || dest == fork || dest == func.entry || func.blocks[dest].term.is_none() {
                     continue;
                 }
                 let params = func.blocks[arm].params.clone();
@@ -3084,22 +3038,13 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                 if dest == other && func.blocks[dest].params.len() != other_args.len() {
                     continue;
                 }
-                if func.blocks[arm]
-                    .insts
-                    .iter()
-                    .any(|inst| !func.insts[*inst].kind.is_pure())
-                {
+                if func.blocks[arm].insts.iter().any(|inst| !func.insts[*inst].kind.is_pure()) {
                     continue;
                 }
                 let local_values: Vec<Value> = params
                     .iter()
                     .copied()
-                    .chain(
-                        func.blocks[arm]
-                            .insts
-                            .iter()
-                            .filter_map(|inst| func.insts[*inst].result),
-                    )
+                    .chain(func.blocks[arm].insts.iter().filter_map(|inst| func.insts[*inst].result))
                     .collect();
                 let escapes_arm = local_values.iter().any(|value| !uses.confined_to(*value, arm));
                 if escapes_arm {
@@ -3144,10 +3089,7 @@ fn if_convert_diamonds(func: &mut Function) -> bool {
                     cloned.push(fresh);
                 }
                 func.blocks[fork].insts.extend(cloned);
-                let outgoing: smallvec::SmallVec<[Value; 4]> = outgoing
-                    .iter()
-                    .map(|value| map.get(value).copied().unwrap_or(*value))
-                    .collect();
+                let outgoing: smallvec::SmallVec<[Value; 4]> = outgoing.iter().map(|value| map.get(value).copied().unwrap_or(*value)).collect();
                 func.blocks[fork].term = Some(Terminator::CondBr {
                     cond,
                     then_block: if arm == then_block { dest } else { then_block },
@@ -3409,10 +3351,7 @@ impl ModulePass for Inline {
             }
             let reachable = module.funcs[caller_id].reachable_blocks();
             let dom = DomInfo::compute(&module.funcs[caller_id], &reachable);
-            let hot_blocks: std::collections::HashSet<Block> = licm::natural_loops(&module.funcs[caller_id], &dom)
-                .into_iter()
-                .flat_map(|(_, blocks)| blocks)
-                .collect();
+            let hot_blocks: std::collections::HashSet<Block> = licm::natural_loops(&module.funcs[caller_id], &dom).into_iter().flat_map(|(_, blocks)| blocks).collect();
             for site in sites {
                 let (block, callee, args, result) = {
                     let caller = &module.funcs[caller_id];
@@ -4338,24 +4277,14 @@ mod tests {
         let src = entry_param(&mut func, entry, Ty::ptr(Ty::int(8)), 0);
         let slot = stack_slot(&mut func, entry, Ty::int(64));
         let void_ptr = push_value(&mut func, entry, InstKind::Bitcast(slot), Ty::ptr(Ty::Void));
-        let copy = push_unit(
-            &mut func,
-            entry,
-            InstKind::Memcpy {
-                dst: void_ptr,
-                src,
-                len: 8,
-            },
-        );
+        let copy = push_unit(&mut func, entry, InstKind::Memcpy { dst: void_ptr, src, len: 8 });
         let loaded = push_scalar_load(&mut func, entry, slot, Ty::int(64));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         let mut forward = ForwardAggregateCopy;
         assert!(forward.run(&mut func));
         assert!(!func.blocks[entry].insts.contains(&copy));
-        assert!(!resident_kinds(&func)
-            .iter()
-            .any(|kind| matches!(kind, InstKind::Memcpy { .. })));
+        assert!(!resident_kinds(&func).iter().any(|kind| matches!(kind, InstKind::Memcpy { .. })));
 
         let mut dce = DeadCodeElim;
         dce.run(&mut func);
@@ -4363,9 +4292,7 @@ mod tests {
         let mut mem2reg = Mem2Reg;
         sroa.run(&mut func);
         mem2reg.run(&mut func);
-        assert!(!resident_kinds(&func)
-            .iter()
-            .any(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Store { .. })));
+        assert!(!resident_kinds(&func).iter().any(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Store { .. })));
         assert!(crate::verify::verify_func(&func).is_empty());
     }
 
@@ -4395,10 +4322,7 @@ mod tests {
         let mut forward = ForwardAggregateCopy;
         assert!(forward.run(&mut func));
         assert!(!func.blocks[entry].insts.contains(&copy));
-        assert!(!func.blocks[entry]
-            .insts
-            .iter()
-            .any(|inst| matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
+        assert!(!func.blocks[entry].insts.iter().any(|inst| matches!(func.insts[*inst].kind, InstKind::Memcpy { .. })));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;
@@ -4466,14 +4390,20 @@ mod tests {
                 flags: MemFlags::plain(),
             },
         );
-        let loaded = push_value(&mut func, entry, InstKind::Load { addr: slot, flags: MemFlags::plain() }, ty);
+        let loaded = push_value(
+            &mut func,
+            entry,
+            InstKind::Load {
+                addr: slot,
+                flags: MemFlags::plain(),
+            },
+            ty,
+        );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
         let mut forward = ForwardAggregateCopy;
         assert!(forward.run(&mut func));
-        assert!(!resident_kinds(&func)
-            .iter()
-            .any(|kind| matches!(kind, InstKind::Memcpy { .. })));
+        assert!(!resident_kinds(&func).iter().any(|kind| matches!(kind, InstKind::Memcpy { .. })));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;
@@ -4492,23 +4422,21 @@ mod tests {
         };
         let (mut func, entry) = Function::new("load_fields", Signature::new(vec![], Ty::int(32)));
         let slot = stack_slot(&mut func, entry, ty.clone());
-        let aggregate = push_value(&mut func, entry, InstKind::Load { addr: slot, flags: MemFlags::plain() }, ty);
-        let field = push_value(
+        let aggregate = push_value(
             &mut func,
             entry,
-            InstKind::ExtractValue {
-                agg: aggregate,
-                index: 1,
+            InstKind::Load {
+                addr: slot,
+                flags: MemFlags::plain(),
             },
-            Ty::int(32),
+            ty,
         );
+        let field = push_value(&mut func, entry, InstKind::ExtractValue { agg: aggregate, index: 1 }, Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(field) });
 
         let mut forward = ForwardAggregateCopy;
         assert!(forward.run(&mut func));
-        assert!(!resident_kinds(&func)
-            .iter()
-            .any(|kind| matches!(kind, InstKind::ExtractValue { .. })));
+        assert!(!resident_kinds(&func).iter().any(|kind| matches!(kind, InstKind::ExtractValue { .. })));
 
         let mut sroa = Sroa;
         let mut mem2reg = Mem2Reg;
@@ -5085,10 +5013,7 @@ mod tests {
             .filter(|k| matches!(k, InstKind::Select { .. }))
             .collect();
         assert_eq!(selects.len(), 1, "fork becomes one select: {selects:?}");
-        assert!(matches!(
-            func.blocks[entry].term,
-            Some(Terminator::Return { val: Some(_) })
-        ));
+        assert!(matches!(func.blocks[entry].term, Some(Terminator::Return { val: Some(_) })));
     }
 
     #[test]
@@ -5126,10 +5051,7 @@ mod tests {
         assert!(func.blocks[left].params.is_empty());
         assert!(matches!(func.blocks[left].term, Some(Terminator::Unreachable)));
         assert!(matches!(func.blocks[right].term, Some(Terminator::Unreachable)));
-        assert!(func.blocks[entry].insts.iter().any(|i| matches!(
-            func.insts[*i].kind,
-            InstKind::Select { .. }
-        )));
+        assert!(func.blocks[entry].insts.iter().any(|i| matches!(func.insts[*i].kind, InstKind::Select { .. })));
     }
 
     #[test]
@@ -5161,7 +5083,8 @@ mod tests {
     }
 
     #[test]
-    fn merges_single_predecessor_chain() {        let sig = Signature::new(vec![], Ty::int(32));
+    fn merges_single_predecessor_chain() {
+        let sig = Signature::new(vec![], Ty::int(32));
         let (mut func, entry) = Function::new("chain", sig);
         let mid = func.push_block(vec![]);
         let end = func.push_block(vec![Ty::int(32)]);
@@ -5258,9 +5181,7 @@ mod tests {
             .insts
             .iter()
             .find_map(|inst| match &func.insts[*inst].kind {
-                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == x => {
-                    Some((*inst, *then_val))
-                }
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == x => Some((*inst, *then_val)),
                 _ => None,
             })
             .expect("diamond arm became a select");
@@ -5322,9 +5243,7 @@ mod tests {
             .insts
             .iter()
             .find_map(|inst| match &func.insts[*inst].kind {
-                InstKind::Select { cond: c, then_val, else_val } if *c == cond => {
-                    Some((*then_val, *else_val))
-                }
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond => Some((*then_val, *else_val)),
                 _ => None,
             })
             .expect("both diamond arms became one select");
@@ -5372,9 +5291,7 @@ mod tests {
             .insts
             .iter()
             .find_map(|inst| match &func.insts[*inst].kind {
-                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == y => {
-                    Some(*then_val)
-                }
+                InstKind::Select { cond: c, then_val, else_val } if *c == cond && *else_val == y => Some(*then_val),
                 _ => None,
             })
             .expect("parameterized diamond arm became a select");
@@ -6615,43 +6532,70 @@ mod tests {
                 Const::Int { bits: 32, value: -3 },
                 Conv::SItoF,
                 Ty::Float(FloatKind::F64),
-                Const::Float { kind: FloatKind::F64, bits: (-3.0f64).to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: (-3.0f64).to_bits() as u128,
+                },
             ),
             (
                 Const::Int { bits: 32, value: -1 },
                 Conv::UItoF,
                 Ty::Float(FloatKind::F64),
-                Const::Float { kind: FloatKind::F64, bits: (u32::MAX as f64).to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: (u32::MAX as f64).to_bits() as u128,
+                },
             ),
             (
-                Const::Float { kind: FloatKind::F64, bits: 2.9f64.to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: 2.9f64.to_bits() as u128,
+                },
                 Conv::SFtoI,
                 Ty::int(32),
                 Const::Int { bits: 32, value: 2 },
             ),
             (
-                Const::Float { kind: FloatKind::F64, bits: (-2.9f64).to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: (-2.9f64).to_bits() as u128,
+                },
                 Conv::SFtoI,
                 Ty::int(32),
                 Const::Int { bits: 32, value: -2 },
             ),
             (
-                Const::Float { kind: FloatKind::F64, bits: 3.9f64.to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: 3.9f64.to_bits() as u128,
+                },
                 Conv::UFtoI,
                 Ty::int(32),
                 Const::Int { bits: 32, value: 3 },
             ),
             (
-                Const::Float { kind: FloatKind::F64, bits: 1.5f64.to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: 1.5f64.to_bits() as u128,
+                },
                 Conv::Fptrunc,
                 Ty::Float(FloatKind::F32),
-                Const::Float { kind: FloatKind::F32, bits: 1.5f32.to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F32,
+                    bits: 1.5f32.to_bits() as u128,
+                },
             ),
             (
-                Const::Float { kind: FloatKind::F32, bits: (-1.5f32).to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F32,
+                    bits: (-1.5f32).to_bits() as u128,
+                },
                 Conv::Fpext,
                 Ty::Float(FloatKind::F64),
-                Const::Float { kind: FloatKind::F64, bits: (-1.5f64).to_bits() as u128 },
+                Const::Float {
+                    kind: FloatKind::F64,
+                    bits: (-1.5f64).to_bits() as u128,
+                },
             ),
         ];
         for (input, conv, result_ty, expected) in cases {
@@ -6692,7 +6636,13 @@ mod tests {
             (FloatKind::F64, 1.5f64.to_bits() as u128, 4.0f64.to_bits() as u128, Arith::Mul, 6.0f64.to_bits() as u128),
             (FloatKind::F64, 1.5f64.to_bits() as u128, 2.0f64.to_bits() as u128, Arith::Div, 0.75f64.to_bits() as u128),
             (FloatKind::F32, 1.5f32.to_bits() as u128, 2.25f32.to_bits() as u128, Arith::Add, 3.75f32.to_bits() as u128),
-            (FloatKind::F32, 1.0f32.to_bits() as u128, 0.0f32.to_bits() as u128, Arith::Div, f32::INFINITY.to_bits() as u128),
+            (
+                FloatKind::F32,
+                1.0f32.to_bits() as u128,
+                0.0f32.to_bits() as u128,
+                Arith::Div,
+                f32::INFINITY.to_bits() as u128,
+            ),
         ];
         for (kind, left, right, op, expected) in cases {
             let ty = Ty::Float(kind);

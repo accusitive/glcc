@@ -14,7 +14,11 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{cell::{Cell, RefCell}, fmt, mem, ops::Range};
+use core::{
+    cell::{Cell, RefCell},
+    fmt, mem,
+    ops::Range,
+};
 
 use string_interner::symbol::SymbolU32;
 
@@ -337,10 +341,7 @@ impl<'a> Recover for Stmt<'a> {
 
 impl<'a> Recover for Initializer<'a> {
     fn recover() -> Self {
-        Initializer::List {
-            items: &[],
-            span: Span::dummy(),
-        }
+        Initializer::List { items: &[], span: Span::dummy() }
     }
 }
 
@@ -356,10 +357,7 @@ impl<'a> Recover for CheckedExpr<'a> {
 
 impl<'a> Recover for Compound<'a> {
     fn recover() -> Self {
-        Compound {
-            span: Span::dummy(),
-            items: &[],
-        }
+        Compound { span: Span::dummy(), items: &[] }
     }
 }
 
@@ -869,14 +867,8 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             Err(_) => out.push_str("null"),
         }
-        let line = self
-            .files
-            .line_number(file_id, span.start_ln.saturating_sub(1) as usize)
-            .unwrap_or(span.start_ln as usize);
-        let end_line = self
-            .files
-            .line_number(file_id, span.end_ln.saturating_sub(1) as usize)
-            .unwrap_or(span.end_ln as usize);
+        let line = self.files.line_number(file_id, span.start_ln.saturating_sub(1) as usize).unwrap_or(span.start_ln as usize);
+        let end_line = self.files.line_number(file_id, span.end_ln.saturating_sub(1) as usize).unwrap_or(span.end_ln as usize);
         let byte = byte_range(self.files.source_text(), span);
         out.push_str(&format!(
             ",\"line\":{line},\"column\":{},\"endLine\":{end_line},\"endColumn\":{},\"start\":{},\"end\":{}",
@@ -912,10 +904,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         // A construct that already consumed its `;` (or closed its `}`)
         // ends at a declaration boundary: resyncing would skip the next,
         // unrelated declaration.
-        if matches!(
-            self.tokens.prev().map(|t| &t.val),
-            Some(Token::Punctuator(Punctuator::Semi | Punctuator::RBrace))
-        ) {
+        if matches!(self.tokens.prev().map(|t| &t.val), Some(Token::Punctuator(Punctuator::Semi | Punctuator::RBrace))) {
             return;
         }
         let mut depth = 0i32;
@@ -1386,7 +1375,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let mut items = Vec::with_capacity(block.items.len() + entry_bounds.len());
                 for (id, span) in &entry_bounds {
                     let expr = self.sema.vla_bounds[*id as usize].clone();
-                    items.push(BlockItem::Stmt (Stmt::Expr { expr, span: *span }));
+                    items.push(BlockItem::Stmt(Stmt::Expr { expr, span: *span }));
                 }
                 items.extend_from_slice(block.items);
                 block.items = self.alloc_slice(items);
@@ -1422,8 +1411,8 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn check_naked_body(&self, block: &Compound<'a>) {
         for item in block.items {
             let ok = match item {
-                BlockItem::Stmt (Stmt::Asm(asm)) => asm.outputs.is_empty() && asm.inputs.is_empty() && asm.clobbers.is_empty() && asm.labels.is_empty(),
-                BlockItem::Stmt (Stmt::Empty { .. }) => true,
+                BlockItem::Stmt(Stmt::Asm(asm)) => asm.outputs.is_empty() && asm.inputs.is_empty() && asm.clobbers.is_empty() && asm.labels.is_empty(),
+                BlockItem::Stmt(Stmt::Empty { .. }) => true,
                 _ => false,
             };
             if !ok {
@@ -1573,7 +1562,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 };
             }
             if let Ty::Array { elem, quals, .. } = ty {
-                ty = Ty::Pointer { qualifiers: quals, size: PtrSize::Default, pointee: elem };
+                ty = Ty::Pointer {
+                    qualifiers: quals,
+                    size: PtrSize::Default,
+                    pointee: elem,
+                };
             }
             if ty.unqualified() == &Ty::Void {
                 return self.fail(decl_span, "declaration of `void` object");
@@ -1750,7 +1743,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.skip_msvc_operator();
         }
         if self.peek_is_static_assert() && self.static_assert_is_declaration() {
-            return BlockItem::Stmt (self.parse_static_assert());
+            return BlockItem::Stmt(self.parse_static_assert());
         }
         if self.can_start_declaration() {
             let start = self.mark();
@@ -1760,7 +1753,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 span: self.span_since(start),
             }
         } else {
-            BlockItem::Stmt (self.parse_statement(ret))
+            BlockItem::Stmt(self.parse_statement(ret))
         }
     }
     /// Whether the next token spells `asm`, `__asm__`, or `__asm` —
@@ -1905,9 +1898,15 @@ impl<'a, 'b> Parser<'a, 'b> {
             labels: self.alloc_slice(labels),
             flags: {
                 let mut flags = AsmFlags::empty();
-                if is_volatile { flags.insert(AsmFlags::VOLATILE); }
-                if is_goto { flags.insert(AsmFlags::GOTO); }
-                if !saw_colon { flags.insert(AsmFlags::BASIC); }
+                if is_volatile {
+                    flags.insert(AsmFlags::VOLATILE);
+                }
+                if is_goto {
+                    flags.insert(AsmFlags::GOTO);
+                }
+                if !saw_colon {
+                    flags.insert(AsmFlags::BASIC);
+                }
                 flags
             },
             span,
@@ -1934,11 +1933,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let constraint = self.parse_asm_string("constraint");
             self.expect_punct(Punctuator::LParen);
             let expr = self.parse_expression();
-            let expr = if outputs {
-                self.checked_asm_output(&expr)
-            } else {
-                self.checked_expr(&expr)
-            };
+            let expr = if outputs { self.checked_asm_output(&expr) } else { self.checked_expr(&expr) };
             self.expect_punct(Punctuator::RParen);
             let span = self.span_since(start);
             if self.memory_only_constraint(&constraint) {
@@ -2090,10 +2085,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         // named by that outer label.
         let starts_label = matches!(self.tokens.peek_val(), Some(Token::Identifier(_)))
             && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon)));
-        let starts_loop_or_switch = matches!(
-            self.tokens.peek_val(),
-            Some(Token::Keyword(Keyword::While | Keyword::Do | Keyword::For | Keyword::Switch))
-        );
+        let starts_loop_or_switch = matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::While | Keyword::Do | Keyword::For | Keyword::Switch)));
         if !starts_label && !starts_loop_or_switch {
             self.pending_loop_labels.clear();
         }
@@ -2125,7 +2117,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.expect_punct(Punctuator::Semi);
                 Stmt::Empty { span: self.span_since(start) }
             }
-            Some(Token::Punctuator(Punctuator::LBrace)) => Stmt::Compound (self.parse_compound_statement(ret)),
+            Some(Token::Punctuator(Punctuator::LBrace)) => Stmt::Compound(self.parse_compound_statement(ret)),
             Some(Token::Punctuator(Punctuator::Semi)) => {
                 self.tokens.advance();
                 Stmt::Empty { span: self.span_since(start) }
@@ -2157,9 +2149,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                     };
                     self.sema.pop_scope();
                     self.label_scopes.pop();
-                    Stmt::Compound (Compound {
+                    Stmt::Compound(Compound {
                         span,
-                        items: self.alloc_slice([BlockItem::Decl { ids: self.alloc_slice(ids), span: decl_span }, BlockItem::Stmt(stmt)]),
+                        items: self.alloc_slice([
+                            BlockItem::Decl {
+                                ids: self.alloc_slice(ids),
+                                span: decl_span,
+                            },
+                            BlockItem::Stmt(stmt),
+                        ]),
                     })
                 } else {
                     let cond = self.parse_expression();
@@ -2190,7 +2188,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let cond = self.checked_condition(&cond);
                 self.expect_punct(Punctuator::RParen);
                 self.claimed_loop_labels.extend(labels.iter().copied());
-                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
+                self.named_loops.push(NamedLoop {
+                    labels,
+                    kind: NamedLoopKind::Loop,
+                });
                 let body = self.parse_statement(ret);
                 self.named_loops.pop();
                 Stmt::While {
@@ -2203,7 +2204,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.tokens.advance();
                 let labels = mem::take(&mut self.pending_loop_labels);
                 self.claimed_loop_labels.extend(labels.iter().copied());
-                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
+                self.named_loops.push(NamedLoop {
+                    labels,
+                    kind: NamedLoopKind::Loop,
+                });
                 let body = self.parse_statement(ret);
                 self.named_loops.pop();
                 self.expect_keyword(Keyword::While);
@@ -2235,7 +2239,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let expr = self.parse_expression();
                     let expr = self.checked_expr(&expr);
                     self.expect_punct(Punctuator::Semi);
-                    ForInit::Expr (expr)
+                    ForInit::Expr(expr)
                 };
                 let cond = if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Semi))) {
                     self.tokens.advance();
@@ -2255,7 +2259,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 };
                 self.expect_punct(Punctuator::RParen);
                 self.claimed_loop_labels.extend(labels.iter().copied());
-                self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Loop });
+                self.named_loops.push(NamedLoop {
+                    labels,
+                    kind: NamedLoopKind::Loop,
+                });
                 let body = self.parse_statement(ret);
                 self.named_loops.pop();
                 self.sema.pop_scope();
@@ -2278,7 +2285,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                     let cond = self.checked_integer_expr(&cond, "switch controlling expression");
                     self.expect_punct(Punctuator::RParen);
                     self.claimed_loop_labels.extend(labels.iter().copied());
-                    self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Switch });
+                    self.named_loops.push(NamedLoop {
+                        labels,
+                        kind: NamedLoopKind::Switch,
+                    });
                     let body = self.parse_statement(ret);
                     self.named_loops.pop();
                     self.check_switch_cases(&cond, &body);
@@ -2290,16 +2300,25 @@ impl<'a, 'b> Parser<'a, 'b> {
                     };
                     self.sema.pop_scope();
                     self.label_scopes.pop();
-                    Stmt::Compound (Compound {
+                    Stmt::Compound(Compound {
                         span,
-                        items: self.alloc_slice([BlockItem::Decl { ids: self.alloc_slice(ids), span: decl_span }, BlockItem::Stmt(stmt)]),
+                        items: self.alloc_slice([
+                            BlockItem::Decl {
+                                ids: self.alloc_slice(ids),
+                                span: decl_span,
+                            },
+                            BlockItem::Stmt(stmt),
+                        ]),
                     })
                 } else {
                     let cond = self.parse_expression();
                     let cond = self.checked_integer_expr(&cond, "switch controlling expression");
                     self.expect_punct(Punctuator::RParen);
                     self.claimed_loop_labels.extend(labels.iter().copied());
-                    self.named_loops.push(NamedLoop { labels, kind: NamedLoopKind::Switch });
+                    self.named_loops.push(NamedLoop {
+                        labels,
+                        kind: NamedLoopKind::Switch,
+                    });
                     let body = self.parse_statement(ret);
                     self.named_loops.pop();
                     self.check_switch_cases(&cond, &body);
@@ -2332,10 +2351,16 @@ impl<'a, 'b> Parser<'a, 'b> {
                 if let Some(name) = label {
                     let target = self.named_loops.iter().rev().find(|target| target.labels.contains(&name));
                     if target.is_none() {
-                        self.fail::<()>(label_span.unwrap_or_else(|| self.span_since(start)), "break label does not name an enclosing loop or switch");
+                        self.fail::<()>(
+                            label_span.unwrap_or_else(|| self.span_since(start)),
+                            "break label does not name an enclosing loop or switch",
+                        );
                     }
                 }
-                Stmt::Break { label, span: self.span_since(start) }
+                Stmt::Break {
+                    label,
+                    span: self.span_since(start),
+                }
             }
             Some(Token::Keyword(Keyword::Continue)) => {
                 self.tokens.advance();
@@ -2352,7 +2377,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(_) => {}
                     }
                 }
-                Stmt::Continue { label, span: self.span_since(start) }
+                Stmt::Continue {
+                    label,
+                    span: self.span_since(start),
+                }
             }
             Some(Token::Keyword(Keyword::Goto)) => {
                 self.tokens.advance();
@@ -2473,7 +2501,10 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             if self.can_start_declaration() {
                 let ids = self.parse_declaration();
-                return Stmt::Decl { ids: self.alloc_slice(ids), span: self.span_since(start) };
+                return Stmt::Decl {
+                    ids: self.alloc_slice(ids),
+                    span: self.span_since(start),
+                };
             }
         }
         self.parse_statement(ret)
@@ -2528,9 +2559,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 self.collect_switch_cases(promoted, stmt, values, default);
             }
-            Stmt::Compound (compound) => {
+            Stmt::Compound(compound) => {
                 for item in compound.items {
-                    if let BlockItem::Stmt (inner) = item {
+                    if let BlockItem::Stmt(inner) = item {
                         self.collect_switch_cases(promoted, inner, values, default);
                     }
                 }
@@ -2580,7 +2611,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         self.check_flow_decl_init(*id, &mut gotos, 0, &mut fv);
                     }
                 }
-                BlockItem::Stmt (stmt) => {
+                BlockItem::Stmt(stmt) => {
                     self.check_flow_stmt(stmt, FlowCtx::NONE, &mut labels, &mut gotos, 0, &mut fv);
                 }
             }
@@ -2644,7 +2675,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// the context).
     fn check_flow_stmt(&self, stmt: &Stmt<'a>, ctx: FlowCtx, labels: &mut Vec<(SymbolU32, Span)>, gotos: &mut Vec<(SymbolU32, Span)>, scope: usize, fv: &mut FlowVla) {
         match stmt {
-            Stmt::Compound (compound) => {
+            Stmt::Compound(compound) => {
                 let inner = fv.alloc_scope(scope);
                 for item in compound.items {
                     match item {
@@ -2654,7 +2685,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                                 self.check_flow_decl_init(*id, gotos, inner, fv);
                             }
                         }
-                        BlockItem::Stmt (inner_stmt) => {
+                        BlockItem::Stmt(inner_stmt) => {
                             self.check_flow_stmt(inner_stmt, ctx, labels, gotos, inner, fv);
                         }
                     }
@@ -2696,7 +2727,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                             self.check_flow_decl_init(*id, gotos, fscope, fv);
                         }
                     }
-                    ForInit::Expr (expr) => self.check_flow_expr(expr, labels, gotos, fscope, fv),
+                    ForInit::Expr(expr) => self.check_flow_expr(expr, labels, gotos, fscope, fv),
                     ForInit::Empty => {}
                 }
                 if let Some(cond) = cond {
@@ -2771,7 +2802,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// and fails as undefined).
     fn check_flow_init(&self, init: &Initializer<'a>, gotos: &mut Vec<(SymbolU32, Span)>, scope: usize, fv: &mut FlowVla) {
         match init {
-            Initializer::Expr (expr) => self.check_flow_expr(expr, &mut Vec::new(), gotos, scope, fv),
+            Initializer::Expr(expr) => self.check_flow_expr(expr, &mut Vec::new(), gotos, scope, fv),
             Initializer::List { items, .. } => {
                 for item in *items {
                     self.check_flow_init(&item.init, gotos, scope, fv);
@@ -2899,7 +2930,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                                 self.check_flow_decl_init(*id, &mut scratch, 0, &mut sub);
                             }
                         }
-                        BlockItem::Stmt (stmt) => {
+                        BlockItem::Stmt(stmt) => {
                             self.check_flow_stmt(stmt, FlowCtx::NONE, &mut inner_labels, &mut scratch, 0, &mut sub);
                         }
                     }
@@ -3684,13 +3715,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     // the name scopes over its own initializer (C17 §6.2.1p4) and
     // over later declarators' (`int a = 1, b = a;` sees `a`).
     // Initializers parse into `Sema::inits`.
-    pub(crate) fn parse_init_declarator_list(
-        &mut self,
-        specifiers: &DeclarationSpecifiers,
-        first: Declarator,
-        first_suffix: GnuAttributes,
-        end: DeclEnd,
-    ) -> Vec<DeclId> {
+    pub(crate) fn parse_init_declarator_list(&mut self, specifiers: &DeclarationSpecifiers, first: Declarator, first_suffix: GnuAttributes, end: DeclEnd) -> Vec<DeclId> {
         let mut ids = Vec::new();
         let mut next = Some((first, first_suffix));
         let mut is_first = true;
@@ -3723,7 +3748,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     return self.fail(span, "`auto` initializer must be an expression");
                 }
                 let init = self.parse_initializer();
-                let Initializer::Expr (expr) = &init else {
+                let Initializer::Expr(expr) = &init else {
                     return self.fail(self.peek_span(), "`auto` initializer must be an expression");
                 };
                 let mut ty = self.sema.auto_deduced_type(expr);
@@ -3774,21 +3799,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let checked = self.checked_initializer(&ty, &init);
                 if specifiers.constexpr {
                     let value = match &checked {
-                        Initializer::Expr (expr) => {
+                        Initializer::Expr(expr) => {
                             let value = crate::eval::eval_static_init(expr, self.sema, &self.intern);
                             if value.is_none() && !crate::eval::is_constant_initializer(expr, self.sema, &self.intern) {
-                                self.fail::<()>(
-                                    specifiers.span.merge(declarator.span()),
-                                    "`constexpr` initializer is not a constant expression",
-                                );
+                                self.fail::<()>(specifiers.span.merge(declarator.span()), "`constexpr` initializer is not a constant expression");
                             }
                             value
                         }
                         Initializer::List { .. } => {
-                            self.fail::<()>(
-                                specifiers.span.merge(declarator.span()),
-                                "`constexpr` initializer is not a constant expression",
-                            );
+                            self.fail::<()>(specifiers.span.merge(declarator.span()), "`constexpr` initializer is not a constant expression");
                             None
                         }
                     };
@@ -3838,9 +3857,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         ids
     }
     fn is_plain_auto_declarator(declarator: &Declarator) -> bool {
-        declarator.pointer.is_empty()
-            && declarator.direct.suffixes.is_empty()
-            && matches!(declarator.direct.base, DirectBase::Ident(_))
+        declarator.pointer.is_empty() && declarator.direct.suffixes.is_empty() && matches!(declarator.direct.base, DirectBase::Ident(_))
     }
 
     /// Complete an array of unknown size from its initializer (C17
@@ -3860,7 +3877,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             return;
         }
         let count: u64 = match init {
-            Initializer::Expr (expr) => match &expr.kind {
+            Initializer::Expr(expr) => match &expr.kind {
                 CheckedExprKind::Str(parts) => match crate::eval::string_length(parts, &self.intern) {
                     Some(len) => len.saturating_add(1),
                     None => return,
@@ -4183,7 +4200,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.parse_brace_list()
         } else {
             let expr = self.parse_assignment_expression();
-            Initializer::Expr (self.checked_expr(&expr))
+            Initializer::Expr(self.checked_expr(&expr))
         }
     }
 
@@ -4273,7 +4290,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         self.parse_brace_list()
                     } else {
                         let expr = self.parse_assignment_expression();
-                        Initializer::Expr (self.checked_expr(&expr))
+                        Initializer::Expr(self.checked_expr(&expr))
                     };
                     return vec![InitItem {
                         designators: self.alloc_slice(designators),
@@ -4325,7 +4342,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             self.parse_brace_list()
         } else {
             let expr = self.parse_assignment_expression();
-            Initializer::Expr (self.checked_expr(&expr))
+            Initializer::Expr(self.checked_expr(&expr))
         };
         let item = InitItem {
             designators: self.alloc_slice(designators),
@@ -4801,7 +4818,11 @@ impl<'a, 'b> Parser<'a, 'b> {
         // pointer to its element; bracket qualifiers (`[const 3]`)
         // qualify the pointer (C17 §6.7.6.3p7).
         if let Ty::Array { elem, quals, .. } = ty {
-            ty = Ty::Pointer { qualifiers: quals, size: PtrSize::Default, pointee: elem };
+            ty = Ty::Pointer {
+                qualifiers: quals,
+                size: PtrSize::Default,
+                pointee: elem,
+            };
         }
         let span = self.span_since(start);
         Param {
@@ -5534,10 +5555,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         };
         match self.intern.resolve(sym) {
             Some("static_assert") => self.sema.lang.standard_includes(Std::C2y),
-            Some("_Static_assert") => {
-                self.sema.lang.standard_includes(Std::C2y)
-                    || ((self.sema.lang.gnu || self.sema.lang.clang) && self.sema.lang.standard_includes(Std::C11))
-            }
+            Some("_Static_assert") => self.sema.lang.standard_includes(Std::C2y) || ((self.sema.lang.gnu || self.sema.lang.clang) && self.sema.lang.standard_includes(Std::C11)),
             _ => false,
         }
     }
@@ -5853,15 +5871,13 @@ impl<'a, 'b> Parser<'a, 'b> {
         // association separator, not a fixed underlying type. A fixed
         // type always begins with a type-name token, so `enum E: 1`
         // leaves the colon for the caller.
-        let has_fixed_colon = matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon)))
-            && self.token_starts_type_name(self.tokens.peek_nth(1).map(|located| &located.val));
+        let has_fixed_colon =
+            matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Colon))) && self.token_starts_type_name(self.tokens.peek_nth(1).map(|located| &located.val));
         let fixed = if has_fixed_colon {
             self.tokens.advance();
             let span = self.peek_span();
             let ty = self.parse_type_name().unqualified().clone();
-            if matches!(ty, Ty::BitInt { .. })
-                && !(self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang)
-            {
+            if matches!(ty, Ty::BitInt { .. }) && !(self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang) {
                 return self.fail(span, "bit-precise enum underlying types require C2y");
             }
             if !Self::is_enum_underlying_type(&ty) {
@@ -6073,7 +6089,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 },
             );
             self.unwrap_diag(declared);
-            enumerators.push(Enumerator { name, value: value_expr.map(|_| const_value), span });
+            enumerators.push(Enumerator {
+                name,
+                value: value_expr.map(|_| const_value),
+                span,
+            });
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
                 self.tokens.advance();
                 continue;
@@ -6685,8 +6705,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         let is_countof = match self.tokens.peek_val() {
             Some(Token::Identifier(sym)) => {
-                matches!(self.intern.resolve(*sym), Some("_Countof"))
-                    && (self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang)
+                matches!(self.intern.resolve(*sym), Some("_Countof")) && (self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang)
             }
             _ => false,
         };
@@ -6990,8 +7009,16 @@ impl<'a, 'b> Parser<'a, 'b> {
         let assocs = self.parse_generic_associations();
         self.expect_punct(Punctuator::RParen);
         match ctrl_ty {
-            Some(ty) => Expr::GenericTy { ty, assocs: self.alloc_slice(assocs), span: self.span_since(start) },
-            None => Expr::Generic { ctrl: ctrl.expect("expression controlling operand"), assocs: self.alloc_slice(assocs), span: self.span_since(start) },
+            Some(ty) => Expr::GenericTy {
+                ty,
+                assocs: self.alloc_slice(assocs),
+                span: self.span_since(start),
+            },
+            None => Expr::Generic {
+                ctrl: ctrl.expect("expression controlling operand"),
+                assocs: self.alloc_slice(assocs),
+                span: self.span_since(start),
+            },
         }
     }
 
@@ -7315,9 +7342,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             match &d.direct.base {
                 DirectBase::Ident(_) | DirectBase::Abstract => {
-                    if specs.type_qualifier.contains(TypeQualifiers::RESTRICT)
-                        && !matches!(&ty, Ty::Pointer { qualifiers, .. } if qualifiers.contains(TypeQualifiers::RESTRICT))
-                    {
+                    if specs.type_qualifier.contains(TypeQualifiers::RESTRICT) && !matches!(&ty, Ty::Pointer { qualifiers, .. } if qualifiers.contains(TypeQualifiers::RESTRICT)) {
                         return self.fail(span, "invalid use of 'restrict'");
                     }
                     return ty;
@@ -8474,14 +8499,14 @@ pub enum AssignOp {
 /// designated, possibly nested) list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Initializer<'a> {
-    Expr (CheckedExpr<'a>),
+    Expr(CheckedExpr<'a>),
     List { items: &'a [InitItem<'a>], span: Span },
 }
 
 impl HasSpan for Initializer<'_> {
     fn span(&self) -> Span {
         match self {
-            Initializer::Expr (expr) => expr.span(),
+            Initializer::Expr(expr) => expr.span(),
             Initializer::List { span, .. } => *span,
         }
     }
@@ -8590,7 +8615,7 @@ impl HasSpan for Compound<'_> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockItem<'a> {
     Decl { ids: &'a [DeclId], span: Span },
-    Stmt (Stmt<'a>),
+    Stmt(Stmt<'a>),
 }
 
 /// The value-producing expression of a GNU statement expression: the
@@ -8600,7 +8625,7 @@ pub enum BlockItem<'a> {
 /// `void`.
 pub fn stmt_expr_value<'a>(items: &'a [BlockItem<'a>]) -> Option<&'a CheckedExpr<'a>> {
     let mut stmt = match items.last()? {
-        BlockItem::Stmt (stmt) => stmt,
+        BlockItem::Stmt(stmt) => stmt,
         BlockItem::Decl { .. } => return None,
     };
     loop {
@@ -8693,7 +8718,7 @@ impl AsmStmt<'_> {
 /// stays structural; `case` holds `None` for `default`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt<'a> {
-    Compound (Compound<'a>),
+    Compound(Compound<'a>),
     /// A declaration under a label (C23 §6.8.1). The declaration keeps
     /// the enclosing block's scope, unlike a compound statement.
     Decl {
@@ -8782,7 +8807,7 @@ pub enum Stmt<'a> {
 impl HasSpan for Stmt<'_> {
     fn span(&self) -> Span {
         match self {
-            Stmt::Compound (compound) => compound.span,
+            Stmt::Compound(compound) => compound.span,
             Stmt::Decl { span, .. } => *span,
             Stmt::Asm(asm) => asm.span,
             Stmt::Empty { span }
@@ -8812,8 +8837,8 @@ fn stmt_has_label<'a>(stmt: &'a Stmt<'a>) -> bool {
     while let Some(stmt) = stack.pop() {
         match stmt {
             Stmt::Label { .. } | Stmt::Case { .. } => return true,
-            Stmt::Compound (compound) => stack.extend(compound.items.iter().filter_map(|item| match item {
-                BlockItem::Stmt (inner) => Some(inner),
+            Stmt::Compound(compound) => stack.extend(compound.items.iter().filter_map(|item| match item {
+                BlockItem::Stmt(inner) => Some(inner),
                 BlockItem::Decl { .. } => None,
             })),
             Stmt::If { then, els, .. } => {
@@ -8858,7 +8883,7 @@ fn fold_constant_if<'a>(cond: &CheckedExpr<'a>, then: &mut Stmt<'a>, els: &mut O
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ForInit<'a> {
     Decl(&'a [DeclId]),
-    Expr (CheckedExpr<'a>),
+    Expr(CheckedExpr<'a>),
     Empty,
 }
 
@@ -8866,7 +8891,7 @@ impl HasSpan for BlockItem<'_> {
     fn span(&self) -> Span {
         match self {
             BlockItem::Decl { span, .. } => *span,
-            BlockItem::Stmt (stmt) => stmt.span(),
+            BlockItem::Stmt(stmt) => stmt.span(),
         }
     }
 }

@@ -30,7 +30,10 @@ pub struct RawWord {
 pub enum RawPart {
     Lit(String),
     /// The source between `${` and `}`, plus its exact file span.
-    Interp { src: String, span: Span },
+    Interp {
+        src: String,
+        span: Span,
+    },
     Capture(Box<RawCommand>),
 }
 
@@ -75,10 +78,7 @@ pub fn command_end(file: FileId, src: &str, start: usize, stop: Stop) -> KResult
             }
             b'\\' => {
                 if i + 1 >= bytes.len() {
-                    return Err(Diag::incomplete(
-                        "unterminated escape in a shell command",
-                        span(file, i, i + 1),
-                    ));
+                    return Err(Diag::incomplete("unterminated escape in a shell command", span(file, i, i + 1)));
                 }
                 i += if bytes[i + 1] == b'\n' { 2 } else { 1 + char_len(src, i + 1) };
                 word_start = false;
@@ -138,10 +138,7 @@ pub fn command_end(file: FileId, src: &str, start: usize, stop: Stop) -> KResult
         }
     }
     if stop == Stop::RParen {
-        return Err(Diag::incomplete(
-            "unterminated `$(` shell capture",
-            span(file, start.saturating_sub(2), src.len()),
-        ));
+        return Err(Diag::incomplete("unterminated `$(` shell capture", span(file, start.saturating_sub(2), src.len())));
     }
     Ok(i)
 }
@@ -152,10 +149,7 @@ pub fn command_end(file: FileId, src: &str, start: usize, stop: Stop) -> KResult
 fn keyword_here(src: &str, at: usize) -> bool {
     let rest = &src[at..];
     ["then", "else"].iter().any(|kw| match rest.strip_prefix(kw) {
-        Some(after) => !after
-            .as_bytes()
-            .first()
-            .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'),
+        Some(after) => !after.as_bytes().first().is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_'),
         None => false,
     })
 }
@@ -169,10 +163,7 @@ fn single_quote_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
         }
         i += char_len(src, i);
     }
-    Err(Diag::incomplete(
-        "unterminated single quote in a shell command",
-        span(file, start, src.len()),
-    ))
+    Err(Diag::incomplete("unterminated single quote in a shell command", span(file, start, src.len())))
 }
 
 fn double_quote_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
@@ -183,10 +174,7 @@ fn double_quote_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
             b'"' => return Ok(i + 1),
             b'\\' => {
                 if i + 1 >= bytes.len() {
-                    return Err(Diag::incomplete(
-                        "unterminated escape in a shell command",
-                        span(file, i, i + 1),
-                    ));
+                    return Err(Diag::incomplete("unterminated escape in a shell command", span(file, i, i + 1)));
                 }
                 i += if bytes[i + 1] == b'\n' { 2 } else { 1 + char_len(src, i + 1) };
             }
@@ -199,10 +187,7 @@ fn double_quote_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
             _ => i += char_len(src, i),
         }
     }
-    Err(Diag::incomplete(
-        "unterminated double quote in a shell command",
-        span(file, start, src.len()),
-    ))
+    Err(Diag::incomplete("unterminated double quote in a shell command", span(file, start, src.len())))
 }
 
 /// Find the `}` matching a `${`, returning the position just past it.
@@ -245,10 +230,7 @@ fn brace_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
             _ => i += char_len(src, i),
         }
     }
-    Err(Diag::incomplete(
-        "unterminated `${` interpolation",
-        span(file, start.saturating_sub(2), src.len()),
-    ))
+    Err(Diag::incomplete("unterminated `${` interpolation", span(file, start.saturating_sub(2), src.len())))
 }
 
 fn block_comment_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
@@ -269,10 +251,7 @@ fn block_comment_end(file: FileId, src: &str, start: usize) -> KResult<usize> {
             i += char_len(src, i);
         }
     }
-    Err(Diag::incomplete(
-        "unterminated block comment in an interpolation",
-        span(file, start, src.len()),
-    ))
+    Err(Diag::incomplete("unterminated block comment in an interpolation", span(file, start, src.len())))
 }
 
 /// Parse the words of a command whose text has already been cut at the
@@ -287,10 +266,7 @@ pub fn parse_raw(file: FileId, src: &str, base: u32) -> KResult<RawCommand> {
     };
     let stages = parser.stages()?;
     if stages.is_empty() {
-        return Err(Diag::new(
-            "expected a command",
-            span(file, base as usize, base as usize + src.len()),
-        ));
+        return Err(Diag::new("expected a command", span(file, base as usize, base as usize + src.len())));
     }
     Ok(RawCommand {
         stages,
@@ -345,10 +321,7 @@ impl WordParser<'_> {
                     self.pos += 1;
                     self.skip_ws();
                     if self.pos >= self.bytes.len() {
-                        return Err(Diag::incomplete(
-                            "expected a command after `|`",
-                            self.span(pipe, pipe + 1),
-                        ));
+                        return Err(Diag::incomplete("expected a command after `|`", self.span(pipe, pipe + 1)));
                     }
                     break;
                 }
@@ -377,10 +350,7 @@ impl WordParser<'_> {
                 b'\\' => {
                     self.pos += 1;
                     if self.pos >= self.bytes.len() {
-                        return Err(Diag::incomplete(
-                            "unterminated escape in a shell word",
-                            self.span(start, self.pos),
-                        ));
+                        return Err(Diag::incomplete("unterminated escape in a shell word", self.span(start, self.pos)));
                     }
                     if self.peek() == b'\n' {
                         self.pos += 1;
@@ -410,10 +380,7 @@ impl WordParser<'_> {
                             self.pos = end;
                         }
                         _ => {
-                            return Err(Diag::new(
-                                "`$` in a shell word must start `${expr}` or `$(command)`",
-                                self.span(self.pos, self.pos + 1),
-                            ));
+                            return Err(Diag::new("`$` in a shell word must start `${expr}` or `$(command)`", self.span(self.pos, self.pos + 1)));
                         }
                     }
                 }
@@ -466,10 +433,7 @@ impl WordParser<'_> {
                 b'\\' => {
                     self.pos += 1;
                     if self.pos >= self.bytes.len() {
-                        return Err(Diag::incomplete(
-                            "unterminated escape in a shell word",
-                            self.span(self.pos.saturating_sub(1), self.pos),
-                        ));
+                        return Err(Diag::incomplete("unterminated escape in a shell word", self.span(self.pos.saturating_sub(1), self.pos)));
                     }
                     if self.peek() == b'\n' {
                         self.pos += 1;
@@ -509,10 +473,7 @@ impl WordParser<'_> {
                             }
                         }
                         _ => {
-                            return Err(Diag::new(
-                                "`$` in a shell word must start `${expr}` or `$(command)`",
-                                self.span(self.pos, self.pos + 1),
-                            ));
+                            return Err(Diag::new("`$` in a shell word must start `${expr}` or `$(command)`", self.span(self.pos, self.pos + 1)));
                         }
                     }
                 }

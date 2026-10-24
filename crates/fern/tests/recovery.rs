@@ -3,7 +3,7 @@
 
 use fern::ast::{ItemKind, Program};
 use fern::lexer::lex;
-use fern::parser::{parse, parse_recovering, ParseOutput};
+use fern::parser::{ParseOutput, parse, parse_recovering};
 
 fn parse_src(src: &str) -> ParseOutput {
     match lex(src) {
@@ -30,21 +30,13 @@ fn fun_names(program: &Program) -> Vec<&str> {
 #[test]
 fn function_parameters_require_type_annotations() {
     let out = parse_src("fun f(x) = x");
-    assert!(
-        out.diags.iter().any(|diag| diag.msg.contains("type annotation")),
-        "{:?}",
-        out.diags
-    );
+    assert!(out.diags.iter().any(|diag| diag.msg.contains("type annotation")), "{:?}", out.diags);
 }
 
 #[test]
 fn functions_require_a_return_type() {
     let out = parse_src("fun f(x : Int) = x");
-    assert!(
-        out.diags.iter().any(|diag| diag.msg.contains("return type")),
-        "{:?}",
-        out.diags
-    );
+    assert!(out.diags.iter().any(|diag| diag.msg.contains("return type")), "{:?}", out.diags);
 }
 
 #[test]
@@ -56,9 +48,7 @@ fn broken_item_does_not_hide_the_next() {
 
 #[test]
 fn error_inside_a_block_skips_nested_item_keywords() {
-    let out = parse_src(
-        "fun broken() : Int = {\n  let x = ;\n  fun nested() : Int = 1\n}\nfun ok() : Int = 2\n",
-    );
+    let out = parse_src("fun broken() : Int = {\n  let x = ;\n  fun nested() : Int = 1\n}\nfun ok() : Int = 2\n");
     let names = fun_names(&out.program);
     assert!(names.contains(&"ok"), "{names:?}");
     assert!(!names.contains(&"nested"), "{names:?}");
@@ -106,9 +96,7 @@ fn fail_fast_parse_still_errors() {
 
 #[test]
 fn recovery_reports_multiple_items() {
-    let out = parse_src(
-        "fun bad_one( = 1\nfun good_one() : Int = 10\nfun bad_two( = 2\nfun good_two() : Int = 20\n",
-    );
+    let out = parse_src("fun bad_one( = 1\nfun good_one() : Int = 10\nfun bad_two( = 2\nfun good_two() : Int = 20\n");
     assert!(out.diags.len() >= 2, "{:?}", out.diags);
     let names = fun_names(&out.program);
     assert!(names.contains(&"good_one"), "{names:?}");

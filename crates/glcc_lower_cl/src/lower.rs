@@ -83,13 +83,7 @@ pub fn lower_module_selected<M: Module>(
 /// text to `asm_text`. The driver assembles it into the TU's `.s`.
 /// Returns the 32-bit (`__ptr32`) address patches the object driver
 /// must apply itself.
-pub fn lower_module_collecting<M: Module>(
-    mir_module: &mir::Module,
-    clif: &mut M,
-    target: Target,
-    asm_text: &mut String,
-    unwind: &mut Vec<WinUnwindEntry>,
-) -> Vec<NarrowReloc> {
+pub fn lower_module_collecting<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target, asm_text: &mut String, unwind: &mut Vec<WinUnwindEntry>) -> Vec<NarrowReloc> {
     lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), &|_| true, &|_| true).1
 }
 

@@ -107,33 +107,14 @@ enum Plan {
     CompareZero { value: Value, equal: bool },
     /// Signed division (or remainder when `remainder`) by a positive
     /// power of two, rounded toward zero.
-    SignedPow2 {
-        value: Value,
-        shift: u32,
-        remainder: bool,
-    },
+    SignedPow2 { value: Value, shift: u32, remainder: bool },
     /// Compare a widened value with a constant after narrowing both to
     /// the original width.
-    NarrowCompare {
-        value: Value,
-        pred: IcmpPred,
-        ty: Ty,
-        constant: i128,
-    },
+    NarrowCompare { value: Value, pred: IcmpPred, ty: Ty, constant: i128 },
     /// Extend a boolean (optionally negated) to an integer result.
-    BoolCast {
-        value: Value,
-        ty: Ty,
-        signed: bool,
-        invert: bool,
-    },
+    BoolCast { value: Value, ty: Ty, signed: bool, invert: bool },
     /// Bitwise operation on two booleans, zero-extended to the result.
-    ZextBoolOp {
-        op: Bitwise,
-        lhs: Value,
-        rhs: Value,
-        ty: Ty,
-    },
+    ZextBoolOp { op: Bitwise, lhs: Value, rhs: Value, ty: Ty },
     /// Start from `source` and overwrite `fields`, keeping the rest.
     RebuildAggregate { source: Value, fields: Vec<(u32, Value)> },
 }
@@ -222,8 +203,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if is_all_ones(func, *b) {
                 Some(Plan::Value(*a))
             } else {
-                combine_bitwise(func, result_ty, *a, *b, Bitwise::And)
-                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::And))
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::And).or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::And))
             }
         }
         InstKind::Or(a, b) => {
@@ -236,8 +216,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if a == b {
                 Some(Plan::Value(*a))
             } else {
-                combine_bitwise(func, result_ty, *a, *b, Bitwise::Or)
-                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Or))
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::Or).or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Or))
             }
         }
         InstKind::Xor(a, b) => {
@@ -252,8 +231,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             } else if is_all_ones(func, *b) {
                 Some(Plan::Inst(InstKind::Not(*a)))
             } else {
-                combine_bitwise(func, result_ty, *a, *b, Bitwise::Xor)
-                    .or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Xor))
+                combine_bitwise(func, result_ty, *a, *b, Bitwise::Xor).or_else(|| zext_bitwise(func, result_ty, *a, *b, Bitwise::Xor))
             }
         }
         InstKind::Shl(a, b) => plan_shift(func, result_ty, *a, *b, ShiftMode::Left, use_counts),
@@ -300,11 +278,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             };
             let inner = def_inst(func, *elem)?;
             match &func.insts[inner].kind {
-                InstKind::ExtractValue { agg: source, index: source_index }
-                    if source == agg && source_index == index =>
-                {
-                    Some(Plan::Value(*agg))
-                }
+                InstKind::ExtractValue { agg: source, index: source_index } if source == agg && source_index == index => Some(Plan::Value(*agg)),
                 _ => None,
             }
         }
@@ -348,9 +322,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 return Some(Plan::Value(source));
             }
             match (&func.values[source].ty, result_ty) {
-                (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => {
-                    Some(Plan::Inst(InstKind::Bitcast(source)))
-                }
+                (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => Some(Plan::Inst(InstKind::Bitcast(source))),
                 _ => None,
             }
         }
@@ -398,8 +370,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
             match int_const(func, *cond) {
                 Some((_, 0)) => Some(Plan::Value(*else_val)),
                 Some(_) => Some(Plan::Value(*then_val)),
-                None => select_bool_constant(func, result_ty, *cond, *then_val, *else_val)
-                    .or_else(|| select_boolean_arm(func, *cond, *then_val, *else_val)),
+                None => select_bool_constant(func, result_ty, *cond, *then_val, *else_val).or_else(|| select_boolean_arm(func, *cond, *then_val, *else_val)),
             }
         }
         InstKind::GetElementPtr { base, indices } => {
@@ -416,9 +387,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(Plan::Value(*base))
             } else {
                 match (base_ty, result_ty) {
-                    (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => {
-                        Some(Plan::Inst(InstKind::Bitcast(*base)))
-                    }
+                    (Ty::Ptr { bits: from, .. }, Ty::Ptr { bits: to, .. }) if from == to => Some(Plan::Inst(InstKind::Bitcast(*base))),
                     _ => None,
                 }
             }
@@ -438,26 +407,12 @@ fn signed_pow2(func: &Function, result_ty: &Ty, value: Value, divisor: Value, re
     if shift == 0 || shift >= bits {
         return None;
     }
-    Some(Plan::SignedPow2 {
-        value,
-        shift,
-        remainder,
-    })
+    Some(Plan::SignedPow2 { value, shift, remainder })
 }
 
-fn push_temp(
-    func: &mut Function,
-    block: Block,
-    kind: InstKind,
-    ty: Ty,
-    loc: Option<crate::debug::Location>,
-    out: &mut Vec<Inst>,
-) -> Value {
+fn push_temp(func: &mut Function, block: Block, kind: InstKind, ty: Ty, loc: Option<crate::debug::Location>, out: &mut Vec<Inst>) -> Value {
     let next = Inst::from_usize(func.insts.len());
-    let value = func.values.push(ValueData {
-        ty,
-        def: Def::Inst(next),
-    });
+    let value = func.values.push(ValueData { ty, def: Def::Inst(next) });
     let inst = func.insts.push(InstData {
         block,
         kind,
@@ -536,11 +491,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
                 ty,
                 def: Def::Const(Const::Int { bits, value: constant }.canonical()),
             });
-            Plan::Inst(InstKind::Icmp {
-                pred,
-                lhs: value,
-                rhs: constant,
-            })
+            Plan::Inst(InstKind::Icmp { pred, lhs: value, rhs: constant })
         }
         other => other,
     };
@@ -579,12 +530,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let loc = func.insts[inst].loc.clone();
             let mut current = source;
             for (index, elem) in fields {
-                let (next, new) = super::make_value(
-                    func,
-                    block,
-                    InstKind::InsertValue { agg: current, elem, index },
-                    ty.clone(),
-                );
+                let (next, new) = super::make_value(func, block, InstKind::InsertValue { agg: current, elem, index }, ty.clone());
                 func.insts[new].loc = loc.clone();
                 out.push(new);
                 current = next;
@@ -633,8 +579,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let bias = push_temp(func, block, InstKind::LShr(sign, bias_amount), ty.clone(), loc.clone(), out);
             let adjusted = push_temp(func, block, InstKind::Add(value, bias), ty.clone(), loc.clone(), out);
             let shift_amount = push_int_const(func, &ty, i128::from(shift));
-            let quotient =
-                push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc.clone(), out);
+            let quotient = push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc.clone(), out);
             if remainder {
                 let scaled = push_temp(func, block, InstKind::Shl(quotient, shift_amount), ty.clone(), loc.clone(), out);
                 push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
@@ -693,13 +638,7 @@ fn zext_bool(func: &Function, v: Value) -> Option<Value> {
 
 /// `select c, 1, 0` is a canonical boolean extension; the inverse and
 /// all-ones forms negate first.
-fn select_bool_constant(
-    func: &Function,
-    result_ty: &Ty,
-    cond: Value,
-    then_val: Value,
-    else_val: Value,
-) -> Option<Plan> {
+fn select_bool_constant(func: &Function, result_ty: &Ty, cond: Value, then_val: Value, else_val: Value) -> Option<Plan> {
     if func.values[cond].ty != Ty::Bool {
         return None;
     }
@@ -740,23 +679,15 @@ fn bool_valued_depth(func: &Function, value: Value, depth: u32) -> bool {
     if depth > 16 {
         return false;
     }
-    if func.values[value].ty == Ty::Bool
-        || matches!(int_const(func, value), Some((_, 0 | 1)))
-        || zext_bool(func, value).is_some()
-    {
+    if func.values[value].ty == Ty::Bool || matches!(int_const(func, value), Some((_, 0 | 1))) || zext_bool(func, value).is_some() {
         return true;
     }
     let Some(inst) = def_inst(func, value) else {
         return false;
     };
     match &func.insts[inst].kind {
-        InstKind::And(a, b) | InstKind::Or(a, b) | InstKind::Xor(a, b) => {
-            bool_valued_depth(func, *a, depth + 1) && bool_valued_depth(func, *b, depth + 1)
-        }
-        InstKind::Select { then_val, else_val, .. } => {
-            bool_valued_depth(func, *then_val, depth + 1)
-                && bool_valued_depth(func, *else_val, depth + 1)
-        }
+        InstKind::And(a, b) | InstKind::Or(a, b) | InstKind::Xor(a, b) => bool_valued_depth(func, *a, depth + 1) && bool_valued_depth(func, *b, depth + 1),
+        InstKind::Select { then_val, else_val, .. } => bool_valued_depth(func, *then_val, depth + 1) && bool_valued_depth(func, *else_val, depth + 1),
         _ => false,
     }
 }
@@ -800,11 +731,7 @@ fn aggregate_field_updates(func: &Function, value: Value) -> Option<(Value, Vec<
     for index in 0..total as u32 {
         let elem = *fields.get(&index)?;
         let unchanged = def_inst(func, elem).and_then(|inst| match &func.insts[inst].kind {
-            InstKind::ExtractValue { agg, index: field }
-                if *field == index && func.values[*agg].ty == *ty =>
-            {
-                Some(*agg)
-            }
+            InstKind::ExtractValue { agg, index: field } if *field == index && func.values[*agg].ty == *ty => Some(*agg),
             _ => None,
         });
         match unchanged {
@@ -843,15 +770,7 @@ fn reconstructed_aggregate(func: &Function, value: Value) -> Option<Value> {
     source
 }
 
-fn walk_reconstruction(
-    func: &Function,
-    value: Value,
-    ty: &Ty,
-    total: usize,
-    seen: &mut std::collections::HashSet<u32>,
-    source: &mut Option<Value>,
-    depth: u32,
-) -> Option<()> {
+fn walk_reconstruction(func: &Function, value: Value, ty: &Ty, total: usize, seen: &mut std::collections::HashSet<u32>, source: &mut Option<Value>, depth: u32) -> Option<()> {
     if depth > 16 {
         return None;
     }
@@ -862,7 +781,11 @@ fn walk_reconstruction(
         return Some(());
     };
     let elem_inst = def_inst(func, *elem)?;
-    let InstKind::ExtractValue { agg: field_source, index: field_index } = &func.insts[elem_inst].kind else {
+    let InstKind::ExtractValue {
+        agg: field_source,
+        index: field_index,
+    } = &func.insts[elem_inst].kind
+    else {
         return None;
     };
     if field_index != index || *index as usize >= total || func.values[*field_source].ty != *ty {
@@ -976,12 +899,7 @@ fn unsigned_zero_bound(func: &Function, pred: IcmpPred, lhs: Value, rhs: Value) 
     if !rhs_zero && !lhs_zero {
         return None;
     }
-    let compare_zero = |value, equal| {
-        Some(Plan::CompareZero {
-            value,
-            equal,
-        })
-    };
+    let compare_zero = |value, equal| Some(Plan::CompareZero { value, equal });
     match (pred, rhs_zero) {
         (IcmpPred::Ult, true) | (IcmpPred::Ugt, false) => Some(Plan::Const(Const::Int { bits: 1, value: 0 })),
         (IcmpPred::Uge, true) | (IcmpPred::Ule, false) => Some(Plan::Const(Const::Int { bits: 1, value: 1 })),
@@ -1097,13 +1015,7 @@ fn swap_icmp(pred: IcmpPred) -> IcmpPred {
 /// Narrow a widened value compared against a constant. Values outside the
 /// source type's range make the comparison constant; values inside it
 /// compare exactly at the source width.
-fn narrow_widened_const_compare(
-    func: &Function,
-    result_ty: &Ty,
-    pred: IcmpPred,
-    lhs: Value,
-    rhs: Value,
-) -> Option<Plan> {
+fn narrow_widened_const_compare(func: &Function, result_ty: &Ty, pred: IcmpPred, lhs: Value, rhs: Value) -> Option<Plan> {
     let (pred, wide, constant) = if let Some((_, constant)) = int_const(func, rhs) {
         (pred, lhs, constant)
     } else if let Some((_, constant)) = int_const(func, lhs) {
@@ -1124,7 +1036,12 @@ fn narrow_widened_const_compare(
     }
     let constant = wrap(wide_bits, constant);
     let result_bits = int_ty_bits(result_ty)?;
-    let truth = |value: bool| Some(Plan::Const(Const::Int { bits: result_bits, value: i128::from(value) }));
+    let truth = |value: bool| {
+        Some(Plan::Const(Const::Int {
+            bits: result_bits,
+            value: i128::from(value),
+        }))
+    };
     match widening {
         Widening::Zero => {
             let maximum = mask(source_bits);
@@ -1151,10 +1068,7 @@ fn narrow_widened_const_compare(
             })
         }
         Widening::Sign => {
-            if bool_source || !matches!(
-                pred,
-                IcmpPred::Eq | IcmpPred::Ne | IcmpPred::Slt | IcmpPred::Sle | IcmpPred::Sgt | IcmpPred::Sge
-            ) {
+            if bool_source || !matches!(pred, IcmpPred::Eq | IcmpPred::Ne | IcmpPred::Slt | IcmpPred::Sle | IcmpPred::Sgt | IcmpPred::Sge) {
                 return None;
             }
             let (minimum, maximum) = if source_bits >= 128 {
@@ -1294,19 +1208,11 @@ fn constant_and_base(func: &Function, bits: u32, a: Value, b: Value) -> Option<(
 }
 
 fn add_constant(value: Value, constant: i128) -> Plan {
-    if constant == 0 {
-        Plan::Value(value)
-    } else {
-        Plan::AddConst(value, constant)
-    }
+    if constant == 0 { Plan::Value(value) } else { Plan::AddConst(value, constant) }
 }
 
 fn sub_constant(value: Value, constant: i128) -> Plan {
-    if constant == 0 {
-        Plan::Value(value)
-    } else {
-        Plan::SubConst(value, constant)
-    }
+    if constant == 0 { Plan::Value(value) } else { Plan::SubConst(value, constant) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1316,14 +1222,7 @@ enum ShiftMode {
     ArithmeticRight,
 }
 
-fn plan_shift(
-    func: &Function,
-    result_ty: &Ty,
-    value: Value,
-    amount: Value,
-    mode: ShiftMode,
-    use_counts: &[u32],
-) -> Option<Plan> {
+fn plan_shift(func: &Function, result_ty: &Ty, value: Value, amount: Value, mode: ShiftMode, use_counts: &[u32]) -> Option<Plan> {
     if is_int_zero(func, amount) {
         return Some(Plan::Value(value));
     }
@@ -1365,14 +1264,7 @@ fn mask_shift(func: &Function, result_ty: &Ty, value: Value, amount: Value, mode
 
 /// Merge nested shifts in the same direction. Amounts that reach the type
 /// width stay untouched because oversized shifts are undefined.
-fn combine_shifts(
-    func: &Function,
-    result_ty: &Ty,
-    value: Value,
-    amount: Value,
-    mode: ShiftMode,
-    use_counts: &[u32],
-) -> Option<Plan> {
+fn combine_shifts(func: &Function, result_ty: &Ty, value: Value, amount: Value, mode: ShiftMode, use_counts: &[u32]) -> Option<Plan> {
     if use_counts.get(value.index()).copied().unwrap_or(0) != 1 {
         return None;
     }
@@ -1731,12 +1623,7 @@ mod tests {
         let sig = Signature::new(vec![source_ty.clone()], dest_ty.clone());
         let (mut func, entry) = Function::new("f", sig);
         let source = param(&mut func, entry, source_ty, 0);
-        let int = emit(
-            &mut func,
-            entry,
-            InstKind::PtrToInt(source),
-            Ty::int(64),
-        );
+        let int = emit(&mut func, entry, InstKind::PtrToInt(source), Ty::int(64));
         let cast = emit(&mut func, entry, InstKind::IntToPtr(int), dest_ty);
         func.blocks[entry].term = Some(Terminator::Return { val: Some(cast) });
         assert!(run(&mut func));
@@ -1756,7 +1643,11 @@ mod tests {
         let sel = emit(
             &mut func,
             entry,
-            InstKind::Select { cond, then_val: x, else_val: cond },
+            InstKind::Select {
+                cond,
+                then_val: x,
+                else_val: cond,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
@@ -1771,7 +1662,11 @@ mod tests {
         let sel = emit(
             &mut func,
             entry,
-            InstKind::Select { cond, then_val: cond, else_val: x },
+            InstKind::Select {
+                cond,
+                then_val: cond,
+                else_val: x,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
@@ -1791,7 +1686,11 @@ mod tests {
         let sel = emit(
             &mut func,
             entry,
-            InstKind::Select { cond, then_val: x_wide, else_val: cond_wide },
+            InstKind::Select {
+                cond,
+                then_val: x_wide,
+                else_val: cond_wide,
+            },
             Ty::int(32),
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
@@ -1808,7 +1707,11 @@ mod tests {
         let sel = emit(
             &mut func,
             entry,
-            InstKind::Select { cond, then_val: cond_wide, else_val: x_wide },
+            InstKind::Select {
+                cond,
+                then_val: cond_wide,
+                else_val: x_wide,
+            },
             Ty::int(32),
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
@@ -1828,18 +1731,8 @@ mod tests {
         let (mut func, entry) = Function::new("f", sig);
         let base = param(&mut func, entry, ty.clone(), 0);
         let x = param(&mut func, entry, Ty::int(32), 1);
-        let inserted = emit(
-            &mut func,
-            entry,
-            InstKind::InsertValue { agg: base, elem: x, index: 0 },
-            ty,
-        );
-        let extracted = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: inserted, index: 0 },
-            Ty::int(32),
-        );
+        let inserted = emit(&mut func, entry, InstKind::InsertValue { agg: base, elem: x, index: 0 }, ty);
+        let extracted = emit(&mut func, entry, InstKind::ExtractValue { agg: inserted, index: 0 }, Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(extracted) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), x);
@@ -1856,18 +1749,8 @@ mod tests {
         let (mut func, entry) = Function::new("f", sig);
         let base = param(&mut func, entry, ty.clone(), 0);
         let x = param(&mut func, entry, Ty::int(32), 1);
-        let inserted = emit(
-            &mut func,
-            entry,
-            InstKind::InsertValue { agg: base, elem: x, index: 0 },
-            ty,
-        );
-        let extracted = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: inserted, index: 1 },
-            Ty::int(32),
-        );
+        let inserted = emit(&mut func, entry, InstKind::InsertValue { agg: base, elem: x, index: 0 }, ty);
+        let extracted = emit(&mut func, entry, InstKind::ExtractValue { agg: inserted, index: 1 }, Ty::int(32));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(extracted) });
         assert!(run(&mut func));
         let inst = def_inst(&func, returned(&func)).expect("field extraction");
@@ -1894,28 +1777,26 @@ mod tests {
             ty: ty.clone(),
             def: Def::Const(Const::Undef),
         });
-        let first = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 0 },
-            Ty::int(32),
-        );
-        let second = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 1 },
-            Ty::int(32),
-        );
+        let first = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 0 }, Ty::int(32));
+        let second = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 1 }, Ty::int(32));
         let with_first = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            InstKind::InsertValue {
+                agg: undef,
+                elem: first,
+                index: 0,
+            },
             ty.clone(),
         );
         let rebuilt = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: with_first, elem: second, index: 1 },
+            InstKind::InsertValue {
+                agg: with_first,
+                elem: second,
+                index: 1,
+            },
             ty,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
@@ -1938,22 +1819,25 @@ mod tests {
             ty: ty.clone(),
             def: Def::Const(Const::Undef),
         });
-        let first = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 0 },
-            Ty::int(32),
-        );
+        let first = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 0 }, Ty::int(32));
         let with_first = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            InstKind::InsertValue {
+                agg: undef,
+                elem: first,
+                index: 0,
+            },
             ty.clone(),
         );
         let rebuilt = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: with_first, elem: changed, index: 1 },
+            InstKind::InsertValue {
+                agg: with_first,
+                elem: changed,
+                index: 1,
+            },
             ty,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
@@ -1976,10 +1860,7 @@ mod tests {
             offsets: vec![0, 4, 8],
             size: 12,
         };
-        let sig = Signature::new(
-            vec![ty.clone(), Ty::int(32), Ty::int(32)],
-            ty.clone(),
-        );
+        let sig = Signature::new(vec![ty.clone(), Ty::int(32), Ty::int(32)], ty.clone());
         let (mut func, entry) = Function::new("f", sig);
         let base = param(&mut func, entry, ty.clone(), 0);
         let first = param(&mut func, entry, Ty::int(32), 1);
@@ -1988,28 +1869,35 @@ mod tests {
             ty: ty.clone(),
             def: Def::Const(Const::Undef),
         });
-        let unchanged = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 2 },
-            Ty::int(32),
-        );
+        let unchanged = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 2 }, Ty::int(32));
         let with_first = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            InstKind::InsertValue {
+                agg: undef,
+                elem: first,
+                index: 0,
+            },
             ty.clone(),
         );
         let with_second = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: with_first, elem: second, index: 1 },
+            InstKind::InsertValue {
+                agg: with_first,
+                elem: second,
+                index: 1,
+            },
             ty.clone(),
         );
         let rebuilt = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: with_second, elem: unchanged, index: 2 },
+            InstKind::InsertValue {
+                agg: with_second,
+                elem: unchanged,
+                index: 2,
+            },
             ty,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
@@ -2046,16 +1934,15 @@ mod tests {
             ty: ty.clone(),
             def: Def::Const(Const::Undef),
         });
-        let first = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 0 },
-            Ty::int(32),
-        );
+        let first = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 0 }, Ty::int(32));
         let rebuilt = emit(
             &mut func,
             entry,
-            InstKind::InsertValue { agg: undef, elem: first, index: 0 },
+            InstKind::InsertValue {
+                agg: undef,
+                elem: first,
+                index: 0,
+            },
             ty.clone(),
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(rebuilt) });
@@ -2073,18 +1960,8 @@ mod tests {
         let sig = Signature::new(vec![ty.clone()], ty.clone());
         let (mut func, entry) = Function::new("f", sig);
         let base = param(&mut func, entry, ty.clone(), 0);
-        let field = emit(
-            &mut func,
-            entry,
-            InstKind::ExtractValue { agg: base, index: 0 },
-            Ty::int(32),
-        );
-        let inserted = emit(
-            &mut func,
-            entry,
-            InstKind::InsertValue { agg: base, elem: field, index: 0 },
-            ty,
-        );
+        let field = emit(&mut func, entry, InstKind::ExtractValue { agg: base, index: 0 }, Ty::int(32));
+        let inserted = emit(&mut func, entry, InstKind::InsertValue { agg: base, elem: field, index: 0 }, ty);
         func.blocks[entry].term = Some(Terminator::Return { val: Some(inserted) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), base);
@@ -2103,7 +1980,11 @@ mod tests {
         let not_zero = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Ne, lhs: both, rhs: zero },
+            InstKind::Icmp {
+                pred: IcmpPred::Ne,
+                lhs: both,
+                rhs: zero,
+            },
             Ty::Bool,
         );
         match zext_boolean_value(&func, not_zero, &Ty::int(32)) {
@@ -2115,7 +1996,11 @@ mod tests {
         let is_zero = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Eq, lhs: both, rhs: zero },
+            InstKind::Icmp {
+                pred: IcmpPred::Eq,
+                lhs: both,
+                rhs: zero,
+            },
             Ty::Bool,
         );
         match zext_boolean_value(&func, is_zero, &Ty::int(32)) {
@@ -2351,18 +2236,16 @@ mod tests {
         for remainder in [false, true] {
             let (mut func, entry, x) = int_func();
             let four = iconst(&mut func, 32, 4);
-            let kind = if remainder {
-                InstKind::Srem(x, four)
-            } else {
-                InstKind::Sdiv(x, four)
-            };
+            let kind = if remainder { InstKind::Srem(x, four) } else { InstKind::Sdiv(x, four) };
             let out = emit(&mut func, entry, kind, Ty::int(32));
             func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
             assert!(run(&mut func));
-            assert!(!func.blocks[entry].insts.iter().any(|inst| matches!(
-                func.insts[*inst].kind,
-                InstKind::Sdiv(..) | InstKind::Srem(..)
-            )));
+            assert!(
+                !func.blocks[entry]
+                    .insts
+                    .iter()
+                    .any(|inst| matches!(func.insts[*inst].kind, InstKind::Sdiv(..) | InstKind::Srem(..)))
+            );
             assert!(crate::verify::verify_func(&func).is_empty());
         }
     }
@@ -2399,7 +2282,13 @@ mod tests {
         match &func.insts[inst].kind {
             InstKind::Add(lhs, rhs) => {
                 assert_eq!(*lhs, x);
-                assert_eq!(func.const_value(*rhs), Some(&Const::Int { bits: 32, value: i128::from(i32::MIN) }));
+                assert_eq!(
+                    func.const_value(*rhs),
+                    Some(&Const::Int {
+                        bits: 32,
+                        value: i128::from(i32::MIN)
+                    })
+                );
             }
             other => panic!("expected addition, got {other:?}"),
         }
@@ -2594,7 +2483,13 @@ mod tests {
             let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: x, rhs: zero }, Ty::Bool);
             func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
             assert!(run(&mut func), "{pred:?}");
-            assert_eq!(func.const_value(returned(&func)), Some(&Const::Int { bits: 1, value: i128::from(truth) }));
+            assert_eq!(
+                func.const_value(returned(&func)),
+                Some(&Const::Int {
+                    bits: 1,
+                    value: i128::from(truth)
+                })
+            );
         }
 
         for (pred, equal) in [(IcmpPred::Ule, true), (IcmpPred::Ugt, false)] {
@@ -2685,7 +2580,11 @@ mod tests {
         let cmp = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Slt, lhs: wide, rhs: constant },
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: wide,
+                rhs: constant,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
@@ -2706,17 +2605,15 @@ mod tests {
             let x = param(&mut func, entry, Ty::int(8), 0);
             let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
             let constant = iconst(&mut func, 32, 300);
-            let cmp = emit(
-                &mut func,
-                entry,
-                InstKind::Icmp { pred, lhs: wide, rhs: constant },
-                Ty::Bool,
-            );
+            let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: wide, rhs: constant }, Ty::Bool);
             func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
             assert!(run(&mut func));
             assert_eq!(
                 func.const_value(returned(&func)),
-                Some(&Const::Int { bits: 1, value: i128::from(truth) })
+                Some(&Const::Int {
+                    bits: 1,
+                    value: i128::from(truth)
+                })
             );
         }
     }
@@ -2731,7 +2628,11 @@ mod tests {
         let cmp = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Slt, lhs: wide, rhs: constant },
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: wide,
+                rhs: constant,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
@@ -2754,7 +2655,11 @@ mod tests {
         let cmp = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Slt, lhs: wide, rhs: constant },
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: wide,
+                rhs: constant,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
@@ -2772,7 +2677,11 @@ mod tests {
         let cmp = emit(
             &mut func,
             entry,
-            InstKind::Icmp { pred: IcmpPred::Sgt, lhs: constant, rhs: wide },
+            InstKind::Icmp {
+                pred: IcmpPred::Sgt,
+                lhs: constant,
+                rhs: wide,
+            },
             Ty::Bool,
         );
         func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
@@ -2790,23 +2699,13 @@ mod tests {
 
     #[test]
     fn zero_extended_boolean_comparisons_fold() {
-        for (pred, constant, expect_value) in [
-            (IcmpPred::Eq, 1, true),
-            (IcmpPred::Ne, 1, false),
-            (IcmpPred::Eq, 0, false),
-            (IcmpPred::Ne, 0, true),
-        ] {
+        for (pred, constant, expect_value) in [(IcmpPred::Eq, 1, true), (IcmpPred::Ne, 1, false), (IcmpPred::Eq, 0, false), (IcmpPred::Ne, 0, true)] {
             let sig = Signature::new(vec![Ty::Bool], Ty::Bool);
             let (mut func, entry) = Function::new("f", sig);
             let x = param(&mut func, entry, Ty::Bool, 0);
             let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
             let constant = iconst(&mut func, 32, constant);
-            let cmp = emit(
-                &mut func,
-                entry,
-                InstKind::Icmp { pred, lhs: wide, rhs: constant },
-                Ty::Bool,
-            );
+            let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: wide, rhs: constant }, Ty::Bool);
             func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
             assert!(run(&mut func), "{pred:?}");
             if expect_value {
@@ -2829,17 +2728,15 @@ mod tests {
             let x = param(&mut func, entry, Ty::Bool, 0);
             let wide = emit(&mut func, entry, InstKind::Zext(x), Ty::int(32));
             let constant = iconst(&mut func, 32, 2);
-            let cmp = emit(
-                &mut func,
-                entry,
-                InstKind::Icmp { pred, lhs: wide, rhs: constant },
-                Ty::Bool,
-            );
+            let cmp = emit(&mut func, entry, InstKind::Icmp { pred, lhs: wide, rhs: constant }, Ty::Bool);
             func.blocks[entry].term = Some(Terminator::Return { val: Some(cmp) });
             assert!(run(&mut func));
             assert_eq!(
                 func.const_value(returned(&func)),
-                Some(&Const::Int { bits: 1, value: i128::from(truth) })
+                Some(&Const::Int {
+                    bits: 1,
+                    value: i128::from(truth)
+                })
             );
         }
     }
@@ -2868,9 +2765,7 @@ mod tests {
             };
             let inner = def_inst(&func, inner).expect("boolean operation");
             match (&func.insts[inner].kind, op) {
-                (InstKind::And(x, y), Bitwise::And)
-                | (InstKind::Or(x, y), Bitwise::Or)
-                | (InstKind::Xor(x, y), Bitwise::Xor) => {
+                (InstKind::And(x, y), Bitwise::And) | (InstKind::Or(x, y), Bitwise::Or) | (InstKind::Xor(x, y), Bitwise::Xor) => {
                     assert_eq!(*x, a);
                     assert_eq!(*y, b);
                 }
@@ -2881,23 +2776,13 @@ mod tests {
 
     #[test]
     fn select_of_boolean_constants_becomes_an_extension() {
-        for (then_value, else_value, signed, invert) in [
-            (1, 0, false, false),
-            (0, 1, false, true),
-            (-1, 0, true, false),
-            (0, -1, true, true),
-        ] {
+        for (then_value, else_value, signed, invert) in [(1, 0, false, false), (0, 1, false, true), (-1, 0, true, false), (0, -1, true, true)] {
             let sig = Signature::new(vec![Ty::Bool], Ty::int(32));
             let (mut func, entry) = Function::new("f", sig);
             let cond = param(&mut func, entry, Ty::Bool, 0);
             let then_val = iconst(&mut func, 32, then_value);
             let else_val = iconst(&mut func, 32, else_value);
-            let sel = emit(
-                &mut func,
-                entry,
-                InstKind::Select { cond, then_val, else_val },
-                Ty::int(32),
-            );
+            let sel = emit(&mut func, entry, InstKind::Select { cond, then_val, else_val }, Ty::int(32));
             func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
             assert!(run(&mut func), "select {then_value}/{else_value}");
             let outer = def_inst(&func, returned(&func)).expect("extension");
@@ -2928,12 +2813,7 @@ mod tests {
         let cond = param(&mut func, entry, Ty::Bool, 0);
         let then_val = func.push_const(Const::Int { bits: 1, value: 1 });
         let else_val = func.push_const(Const::Int { bits: 1, value: 0 });
-        let sel = emit(
-            &mut func,
-            entry,
-            InstKind::Select { cond, then_val, else_val },
-            Ty::Bool,
-        );
+        let sel = emit(&mut func, entry, InstKind::Select { cond, then_val, else_val }, Ty::Bool);
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(run(&mut func));
         assert_eq!(returned(&func), cond);
@@ -2943,12 +2823,7 @@ mod tests {
         let cond = param(&mut func, entry, Ty::Bool, 0);
         let then_val = func.push_const(Const::Int { bits: 1, value: 0 });
         let else_val = func.push_const(Const::Int { bits: 1, value: 1 });
-        let sel = emit(
-            &mut func,
-            entry,
-            InstKind::Select { cond, then_val, else_val },
-            Ty::Bool,
-        );
+        let sel = emit(&mut func, entry, InstKind::Select { cond, then_val, else_val }, Ty::Bool);
         func.blocks[entry].term = Some(Terminator::Return { val: Some(sel) });
         assert!(run(&mut func));
         let inst = def_inst(&func, returned(&func)).expect("negated boolean");
@@ -3089,7 +2964,16 @@ mod tests {
         let (mut func, entry) = Function::new("f", sig.clone());
         let a = param(&mut func, entry, Ty::int(32), 0);
         let b = param(&mut func, entry, Ty::int(32), 1);
-        let less = emit(&mut func, entry, InstKind::Icmp { pred: IcmpPred::Slt, lhs: a, rhs: b }, Ty::Bool);
+        let less = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: a,
+                rhs: b,
+            },
+            Ty::Bool,
+        );
         let zero = iconst(&mut func, 1, 0);
         let not_less = emit(
             &mut func,
@@ -3115,7 +2999,16 @@ mod tests {
         let (mut func, entry) = Function::new("g", sig);
         let a = param(&mut func, entry, Ty::int(32), 0);
         let b = param(&mut func, entry, Ty::int(32), 1);
-        let less = emit(&mut func, entry, InstKind::Icmp { pred: IcmpPred::Slt, lhs: a, rhs: b }, Ty::Bool);
+        let less = emit(
+            &mut func,
+            entry,
+            InstKind::Icmp {
+                pred: IcmpPred::Slt,
+                lhs: a,
+                rhs: b,
+            },
+            Ty::Bool,
+        );
         let zero = iconst(&mut func, 1, 0);
         let truthy = emit(
             &mut func,

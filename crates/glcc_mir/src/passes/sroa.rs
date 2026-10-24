@@ -25,7 +25,7 @@ use crate::ir::{Block, Def, Function, Inst, InstData, InstKind, Value, ValueData
 use crate::pass::FunctionPass;
 use crate::ty::{GepIndex, Ty};
 
-use super::{address_info, MemoryObject};
+use super::{MemoryObject, address_info};
 
 /// Cap the number of split slots so a large constant-indexed array
 /// cannot turn one aggregate into an unbounded pile of stack slots.
@@ -49,9 +49,11 @@ impl FunctionPass for Sroa {
         }
         let reachable = func.reachable_blocks();
         let resident = func.resident_mask();
-        if !func.insts.iter_enumerated().any(|(id, inst)| {
-            resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_aggregate())
-        }) {
+        if !func
+            .insts
+            .iter_enumerated()
+            .any(|(id, inst)| resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_aggregate()))
+        {
             return false;
         }
         let mut plans = Vec::new();
@@ -273,10 +275,7 @@ fn record_access(leaves: &mut BTreeMap<u64, Leaf>, offset: u64, ty: Ty, inst: In
     }
     match leaves.entry(offset) {
         Entry::Vacant(entry) => {
-            entry.insert(Leaf {
-                ty,
-                accesses: vec![inst],
-            });
+            entry.insert(Leaf { ty, accesses: vec![inst] });
         }
         Entry::Occupied(mut entry) => {
             let leaf = entry.get_mut();
@@ -303,10 +302,7 @@ fn apply(func: &mut Function, plans: Vec<Plan>) {
             });
             let alloc = func.insts.push(InstData {
                 block: plan.block,
-                kind: InstKind::Alloca {
-                    pointee: leaf.ty,
-                    count: 1,
-                },
+                kind: InstKind::Alloca { pointee: leaf.ty, count: 1 },
                 result: Some(value),
                 loc: plan.loc.clone(),
             });
@@ -417,15 +413,7 @@ mod tests {
     }
 
     fn load(func: &mut Function, block: Block, addr: Value, ty: Ty) -> Value {
-        emit(
-            func,
-            block,
-            InstKind::Load {
-                addr,
-                flags: MemFlags::plain(),
-            },
-            ty,
-        )
+        emit(func, block, InstKind::Load { addr, flags: MemFlags::plain() }, ty)
     }
 
     fn store(func: &mut Function, block: Block, addr: Value, val: Value) -> Inst {
@@ -448,10 +436,7 @@ mod tests {
     }
 
     fn resident_kinds(func: &Function) -> impl Iterator<Item = &InstKind> {
-        func.blocks
-            .iter()
-            .flat_map(|block| block.insts.iter())
-            .map(|inst| &func.insts[*inst].kind)
+        func.blocks.iter().flat_map(|block| block.insts.iter()).map(|inst| &func.insts[*inst].kind)
     }
 
     fn has_alloca(func: &Function) -> bool {
@@ -463,12 +448,7 @@ mod tests {
     }
 
     fn has_memory_ops(func: &Function) -> bool {
-        resident_kinds(func).any(|kind| {
-            matches!(
-                kind,
-                InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }
-            )
-        })
+        resident_kinds(func).any(|kind| matches!(kind, InstKind::Alloca { .. } | InstKind::Load { .. } | InstKind::Store { .. }))
     }
 
     fn point_ty() -> Ty {
@@ -744,13 +724,7 @@ mod tests {
         let (mut func, entry) = Function::new("nested", sig);
         let value = param(&mut func, entry, Ty::int(8), 0);
         let (_, root) = alloca(&mut func, entry, outer);
-        let addr = gep(
-            &mut func,
-            entry,
-            root,
-            vec![GepIndex::Field(1), GepIndex::Field(1)],
-            Ty::int(8),
-        );
+        let addr = gep(&mut func, entry, root, vec![GepIndex::Field(1), GepIndex::Field(1)], Ty::int(8));
         store(&mut func, entry, addr, value);
         let loaded = load(&mut func, entry, addr, Ty::int(8));
         func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });

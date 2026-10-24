@@ -269,11 +269,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
         .enumerate()
         .filter_map(|(i, site)| {
             let result = site.result?;
-            needs
-                .iter()
-                .enumerate()
-                .any(|(j, live)| j != i && live.contains(&result))
-                .then_some(result)
+            needs.iter().enumerate().any(|(j, live)| j != i && live.contains(&result)).then_some(result)
         })
         .collect();
     let mut spill: Vec<Value> = Vec::new();
@@ -559,7 +555,17 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
 /// dropped (they belong to no block afterwards). `base` is the global
 /// index of `sites[0]`.
 #[allow(clippy::too_many_arguments)]
-fn split_block(func: &mut Function, sites: &[Site], base: usize, handle_slots: &[(Value, Value, Value)], state_addr: Value, ctx: Value, free: Extern, child_frames: &mut [Value], await_loads: &mut HashMap<Value, Value>) {
+fn split_block(
+    func: &mut Function,
+    sites: &[Site],
+    base: usize,
+    handle_slots: &[(Value, Value, Value)],
+    state_addr: Value,
+    ctx: Value,
+    free: Extern,
+    child_frames: &mut [Value],
+    await_loads: &mut HashMap<Value, Value>,
+) {
     let block = sites[0].block;
     let n = sites.len();
     let taken = std::mem::take(&mut func.blocks[block].insts);
@@ -1070,9 +1076,7 @@ mod tests {
             Def::Inst(inst) => match &resume.insts[inst].kind {
                 InstKind::Load { addr, .. } => match resume.values[*addr].def {
                     Def::Inst(gep) => match &resume.insts[gep].kind {
-                        InstKind::GetElementPtr { base, .. } => {
-                            resume.values[*base].def == Def::Param(resume.entry, 0)
-                        }
+                        InstKind::GetElementPtr { base, .. } => resume.values[*base].def == Def::Param(resume.entry, 0),
                         _ => false,
                     },
                     _ => false,

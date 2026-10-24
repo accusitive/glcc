@@ -838,7 +838,10 @@ pub fn sizeof_of(sema: &Sema, ty: &Ty, interner: &Interner) -> Option<u64> {
 /// extent is fixed. Variable extents need runtime values.
 fn count_of(ty: &Ty) -> Option<u64> {
     match ty.unqualified() {
-        Ty::Array { bound: Some(ArrayBound::Fixed(n)), .. } => Some(*n),
+        Ty::Array {
+            bound: Some(ArrayBound::Fixed(n)),
+            ..
+        } => Some(*n),
         _ => None,
     }
 }
@@ -886,15 +889,10 @@ pub fn is_constant_initializer(expr: &CheckedExpr, sema: &Sema, interner: &Inter
     // A cast null pointer constant does not fold to a `Value`, but is
     // still a constant initializer.
     match &expr.kind {
-        CheckedExprKind::Cast { ty, expr } | CheckedExprKind::Convert { expr, ty }
-            if matches!(ty.unqualified(), Ty::Pointer { .. }) =>
-        {
+        CheckedExprKind::Cast { ty, expr } | CheckedExprKind::Convert { expr, ty } if matches!(ty.unqualified(), Ty::Pointer { .. }) => {
             matches!(eval_const(expr, sema, interner), Some(Value::Int(0)))
         }
-        CheckedExprKind::Ident(id) => matches!(
-            sema.decls.get(id.0 as usize).map(|binding| &binding.kind),
-            Some(BindingKind::Func)
-        ),
+        CheckedExprKind::Ident(id) => matches!(sema.decls.get(id.0 as usize).map(|binding| &binding.kind), Some(BindingKind::Func)),
         _ => false,
     }
 }

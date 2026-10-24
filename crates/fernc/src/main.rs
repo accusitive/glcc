@@ -117,9 +117,7 @@ fn run(opts: &Options) -> Result<(), String> {
     let files = session
         .load_entry(&opts.input)
         .map_err(|diags| format!("{}:{}", opts.input.display(), session.render(&diags[0])))?;
-    let mut module = session
-        .compile(&files)
-        .map_err(|diags| format!("{}:{}", opts.input.display(), session.render(&diags[0])))?;
+    let mut module = session.compile(&files).map_err(|diags| format!("{}:{}", opts.input.display(), session.render(&diags[0])))?;
 
     if opts.debug {
         eprintln!("--- mir (frontend output) ---\n{}", glcc_mir::display::dump_module(&module));

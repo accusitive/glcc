@@ -24,9 +24,6 @@ fn runtime_compiles_and_exports_async_hooks() {
         "fern_io_read_stdin",
         "fern_io_read_line",
     ] {
-        assert!(
-            module.funcs.iter().any(|f| f.name == name),
-            "runtime is missing `{name}`"
-        );
+        assert!(module.funcs.iter().any(|f| f.name == name), "runtime is missing `{name}`");
     }
 }

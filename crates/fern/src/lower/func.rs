@@ -244,7 +244,10 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     pub(super) fn bool_const(&mut self, value: bool) -> mir::Value {
         self.func.values.push(mir::ValueData {
             ty: mir::Ty::Bool,
-            def: mir::Def::Const(mir::Const::Int { bits: 1, value: i128::from(value) }),
+            def: mir::Def::Const(mir::Const::Int {
+                bits: 1,
+                value: i128::from(value),
+            }),
         })
     }
 
