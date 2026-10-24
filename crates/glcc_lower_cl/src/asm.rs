@@ -1182,7 +1182,7 @@ pub fn build(block: &mir::AsmBlock, func: &mir::Function, target: Target) -> Sit
         });
         offset += 8;
     }
-    let area_size = ((offset + 15) / 16 * 16).max(16);
+    let area_size = (offset.div_ceil(16) * 16).max(16);
 
     let (name, hash) = wrapper_name(block, &operands, arch);
     let unique = (hash & 0x7fff_ffff).to_string();
@@ -1281,7 +1281,7 @@ fn wrapper_text(
     // x86-64: the call leaves rsp ≡ 8 (mod 16); an odd number of 8-byte
     // pushes restores 16-byte alignment for templates that call.
     let pushes = 1 + saves.len();
-    let pad = arch == Arch::X86_64 && pushes % 2 == 0;
+    let pad = arch == Arch::X86_64 && pushes.is_multiple_of(2);
     if pad {
         text.push_str("\tsub $8, %rsp\n");
     }

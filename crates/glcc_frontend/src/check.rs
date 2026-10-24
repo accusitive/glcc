@@ -102,10 +102,9 @@ fn typed_overflow_builtin(name: &str) -> Option<(OverflowOp, Ty)> {
         (OverflowOp::Add, rest)
     } else if let Some(rest) = rest.strip_prefix("sub") {
         (OverflowOp::Sub, rest)
-    } else if let Some(rest) = rest.strip_prefix("mul") {
-        (OverflowOp::Mul, rest)
     } else {
-        return None;
+        let rest = rest.strip_prefix("mul")?;
+        (OverflowOp::Mul, rest)
     };
     let width = rest.strip_suffix("_overflow")?;
     let ty = match (signed, width) {
@@ -701,8 +700,8 @@ impl<'a> Sema<'a> {
         // (`__complex__ char` computes as `__complex__ int`), mirroring
         // the scalar rule below.
         if let Ty::Complex(inner) = expr.ty.unqualified() {
-            if let Some(rank) = int_rank(inner) {
-                if rank < int_rank(&Ty::Int).expect("Int has a rank") {
+            if let Some(rank) = int_rank(inner)
+                && rank < int_rank(&Ty::Int).expect("Int has a rank") {
                     let int_size = int_type_size(&Ty::Int, &self.target).expect("Int has a size");
                     let target = if int_type_size(inner, &self.target).expect("rank implies size") < int_size {
                         Ty::Int
@@ -711,7 +710,6 @@ impl<'a> Sema<'a> {
                     };
                     return self.convert(expr, Ty::Complex(Box::new(target)));
                 }
-            }
             return expr;
         }
         if let Ty::Enum(id) = expr.ty.unqualified() {
@@ -936,7 +934,7 @@ impl<'a> Sema<'a> {
         };
         let ty = match &expr.ty {
             Ty::Array { elem, quals, .. } => Ty::Pointer {
-                qualifiers: quals.clone(),
+                qualifiers: *quals,
                 size: PtrSize::Default,
                 pointee: elem.clone(),
             },
@@ -1021,11 +1019,10 @@ impl<'a> Sema<'a> {
         if matches!(expr.ty.unqualified(), Ty::Nullptr) {
             return true;
         }
-        if matches!(&expr.ty, Ty::Pointer { pointee, .. } if pointee.as_ref() == &Ty::Void) {
-            if let CheckedExprKind::Cast { expr, .. } | CheckedExprKind::Convert { expr, .. } = &expr.kind {
+        if matches!(&expr.ty, Ty::Pointer { pointee, .. } if pointee.as_ref() == &Ty::Void)
+            && let CheckedExprKind::Cast { expr, .. } | CheckedExprKind::Convert { expr, .. } = &expr.kind {
                 return self.is_null_pointer_constant(expr, interner);
             }
-        }
         matches!(crate::eval::eval_const(expr, self, interner), Some(crate::eval::Value::Int(0)))
     }
 
@@ -1331,9 +1328,9 @@ impl<'a> Sema<'a> {
                 // array of its own character type directly (C17
                 // §6.7.9p14), with or without braces (the braced form
                 // lands in `check_array_init` instead).
-                if let Ty::Array { elem, bound, .. } = target.unqualified() {
-                    if matches!(expr.ty.unqualified(), Ty::Array { .. }) {
-                        if let CheckedExprKind::Str(parts) = &expr.kind {
+                if let Ty::Array { elem, bound, .. } = target.unqualified()
+                    && matches!(expr.ty.unqualified(), Ty::Array { .. })
+                        && let CheckedExprKind::Str(parts) = &expr.kind {
                             let lit_elem = self.string_elem_ty(parts);
                             if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                 // Same overlong-literal warning the
@@ -1343,8 +1340,6 @@ impl<'a> Sema<'a> {
                                 return Ok(Initializer::Expr(expr.clone()));
                             }
                         }
-                    }
-                }
                 // A scalar against a struct/union (`.m = 0` for a mutex,
                 // `= 5` for a one-member struct) initializes the first
                 // member recursively — the elided-braces rule applied
@@ -1379,19 +1374,14 @@ impl<'a> Sema<'a> {
                 // form so sizing and lowering share one shape. The
                 // element must match, or the item was already consumed
                 // by the element (`char x[2][3] = { "ab" }`).
-                if let Ty::Array { elem, .. } = target.unqualified() {
-                    if let [item] = items.as_slice() {
-                        if item.designators.is_empty() {
-                            if let Initializer::Expr(expr) = &*item.init {
-                                if let CheckedExprKind::Str(parts) = &expr.kind {
-                                    if self.string_elem_ty(parts).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
+                if let Ty::Array { elem, .. } = target.unqualified()
+                    && let [item] = items.as_slice()
+                        && item.designators.is_empty()
+                            && let Initializer::Expr(expr) = item.init
+                                && let CheckedExprKind::Str(parts) = &expr.kind
+                                    && self.string_elem_ty(parts).is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                                         return Ok(Initializer::Expr(expr.clone()));
                                     }
-                                }
-                            }
-                        }
-                    }
-                }
                 Ok(Initializer::List {
                     items: self.alloc_slice(items),
                     span: *span,
@@ -1415,13 +1405,13 @@ impl<'a> Sema<'a> {
                 let [item] = items else {
                     return Err(CompileError::new(
                         "excess elements in scalar initializer",
-                        items.get(1).map(|item| item.span).unwrap_or(Span::dummy()),
+                        items.get(1).map(|item| item.span).unwrap_or_default(),
                     ));
                 };
                 if !item.designators.is_empty() {
                     return Err(CompileError::new("designator in scalar initializer", item.span));
                 }
-                let checked = self.check_initializer(target, &item.init, interner)?;
+                let checked = self.check_initializer(target, item.init, interner)?;
                 Ok(vec![InitItem {
                     designators: &[],
                     init: self.alloc(checked),
@@ -1430,7 +1420,7 @@ impl<'a> Sema<'a> {
             }
             _ => Err(CompileError::new(
                 "invalid initializer for type",
-                items.first().map(|item| item.span).unwrap_or(Span::dummy()),
+                items.first().map(|item| item.span).unwrap_or_default(),
             )),
         }
     }
@@ -1453,7 +1443,7 @@ impl<'a> Sema<'a> {
         if !def.complete {
             return Err(CompileError::new(
                 "initializer for incomplete type",
-                items.first().map(|item| item.span).unwrap_or(Span::dummy()),
+                items.first().map(|item| item.span).unwrap_or_default(),
             ));
         }
         let is_union = def.is_union;
@@ -1476,7 +1466,7 @@ impl<'a> Sema<'a> {
                 // member's fields), not its first leaf: climb past the
                 // transparent descent below. Scalars keep leaf
                 // behavior (brace elision into the first member).
-                if matches!(&*item.init, Initializer::List { .. }) {
+                if matches!(item.init, Initializer::List { .. }) {
                     while cursor.len() > 1 {
                         cursor.pop();
                     }
@@ -1490,7 +1480,7 @@ impl<'a> Sema<'a> {
                 // scalars into that member (`{'X', 8, 9}` for `{char;
                 // int[2];}`). The gathered run is checked as one
                 // braced list, exactly like explicit braces.
-                if self.needs_elision(&member_ty, &item.init) {
+                if self.needs_elision(&member_ty, item.init) {
                     let j = self.elision_span(&member_ty, items, i);
                     if j > i {
                         let sub = items[i..j].to_vec();
@@ -1513,7 +1503,7 @@ impl<'a> Sema<'a> {
                         continue;
                     }
                 }
-                let init = self.check_initializer(&member_ty, &item.init, interner)?;
+                let init = self.check_initializer(&member_ty, item.init, interner)?;
                 self.advance_cursor(id, &mut cursor);
                 checked.push(InitItem {
                     designators: &[],
@@ -1522,8 +1512,8 @@ impl<'a> Sema<'a> {
                 });
                 i += 1;
             } else {
-                let (target_ty, outer, expanded) = self.resolve_designation(id, &item.designators, interner)?;
-                let init = self.check_initializer(&target_ty, &item.init, interner)?;
+                let (target_ty, outer, expanded) = self.resolve_designation(id, item.designators, interner)?;
+                let init = self.check_initializer(&target_ty, item.init, interner)?;
                 cursor = vec![outer + 1];
                 self.normalize_cursor(id, &mut cursor);
                 checked.push(InitItem {
@@ -1547,11 +1537,10 @@ impl<'a> Sema<'a> {
         };
         match member_ty.unqualified() {
             Ty::Array { elem, .. } => {
-                if let CheckedExprKind::Str(parts) = &expr.kind {
-                    if let Some(lit_elem) = self.string_elem_ty(parts) {
+                if let CheckedExprKind::Str(parts) = &expr.kind
+                    && let Some(lit_elem) = self.string_elem_ty(parts) {
                         return !Self::string_elem_matches(elem, &lit_elem);
                     }
-                }
                 true
             }
             // A struct-valued expression of the member's own type
@@ -1622,7 +1611,7 @@ impl<'a> Sema<'a> {
     /// Whether `items[j]` is a bare expression item: brace elision
     /// feeds only un-designated expression items to a member.
     fn bare_item(items: &[InitItem<'a>], j: usize) -> bool {
-        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(&*item.init, Initializer::Expr(_)))
+        items.get(j).is_some_and(|item| item.designators.is_empty() && matches!(item.init, Initializer::Expr(_)))
     }
 
     /// Element type of a string literal under the selected dialect
@@ -1638,7 +1627,7 @@ impl<'a> Sema<'a> {
         if !item.designators.is_empty() {
             return None;
         }
-        let Initializer::Expr(expr) = &*item.init else {
+        let Initializer::Expr(expr) = item.init else {
             return None;
         };
         let CheckedExprKind::Str(parts) = &expr.kind else {
@@ -1881,23 +1870,20 @@ impl<'a> Sema<'a> {
         let Ty::Array { elem, bound, .. } = target else {
             unreachable!("array initializer needs an array type")
         };
-        if let [item] = items {
-            if item.designators.is_empty() && matches!(&*item.init, Initializer::Expr (expr) if matches!(expr.ty.unqualified(), Ty::Array { .. })) {
-                if let Initializer::Expr(expr) = &*item.init {
-                    if let CheckedExprKind::Str(parts) = &expr.kind {
+        if let [item] = items
+            && item.designators.is_empty() && matches!(item.init, Initializer::Expr (expr) if matches!(expr.ty.unqualified(), Ty::Array { .. }))
+                && let Initializer::Expr(expr) = item.init
+                    && let CheckedExprKind::Str(parts) = &expr.kind {
                         let lit_elem = self.string_elem_ty(parts);
                         if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                             self.check_string_fit(parts, bound, item.span, interner);
                             return Ok(vec![item.clone()]);
                         }
                     }
-                }
-            }
-        }
         if !items.is_empty() && self.is_variably_modified(target, interner) {
             return Err(CompileError::new(
                 "variable-sized object may not be initialized",
-                items.first().map(|item| item.span).unwrap_or(Span::dummy()),
+                items.first().map(|item| item.span).unwrap_or_default(),
             ));
         }
         // A known bound limits positions; `[]`, `[*]`, and VLAs impose
@@ -1942,8 +1928,8 @@ impl<'a> Sema<'a> {
                 }
             }
             if trackable {
-                if let Some(n) = count {
-                    if pos >= n {
+                if let Some(n) = count
+                    && pos >= n {
                         if designated {
                             return Err(CompileError::new("array index in initializer exceeds array bounds", item.span));
                         }
@@ -1956,13 +1942,12 @@ impl<'a> Sema<'a> {
                         i += 1;
                         continue;
                     }
-                }
                 next = pos.saturating_add(1);
             }
             // Brace elision into an aggregate element (`struct P a[] =
             // {1, 2, ...}`): gather this and following bare scalars as
             // one element's braced list, consuming a single position.
-            if item.designators.is_empty() && self.needs_elision(elem, &item.init) {
+            if item.designators.is_empty() && self.needs_elision(elem, item.init) {
                 let j = self.elision_span(elem, items, i);
                 if j > i {
                     let sub = items[i..j].to_vec();
@@ -1984,7 +1969,7 @@ impl<'a> Sema<'a> {
                     continue;
                 }
             }
-            let init = self.check_initializer(&target, &item.init, interner)?;
+            let init = self.check_initializer(&target, item.init, interner)?;
             checked.push(InitItem {
                 designators: self.alloc_slice(designators),
                 init: self.alloc(init),
@@ -2040,22 +2025,22 @@ impl<'a> Sema<'a> {
         let string = match init {
             Initializer::Expr(expr) => Some(expr),
             Initializer::List { items, .. } => match items {
-                [item] if item.designators.is_empty() => match &*item.init {
+                [item] if item.designators.is_empty() => match item.init {
                     Initializer::Expr(expr) => Some(expr),
                     _ => None,
                 },
                 _ => None,
             },
         };
-        if let Some(expr) = string {
-            if let CheckedExprKind::Str(parts) = &expr.kind {
+        if let Some(expr) = string
+            && let CheckedExprKind::Str(parts) = &expr.kind {
                 let lit_elem = self.string_elem_ty(parts);
                 if lit_elem.is_some_and(|lit| Self::string_elem_matches(elem, &lit)) {
                     match crate::eval::string_length(parts, interner) {
                         Some(len) => {
                             return Ty::Array {
                                 elem: elem.clone(),
-                                quals: quals.clone(),
+                                quals: *quals,
                                 bound: Some(ArrayBound::Fixed(len.saturating_add(1))),
                             };
                         }
@@ -2063,7 +2048,6 @@ impl<'a> Sema<'a> {
                     }
                 }
             }
-        }
         let Initializer::List { items, .. } = init else {
             return ty.clone();
         };
@@ -2095,7 +2079,7 @@ impl<'a> Sema<'a> {
         }
         Ty::Array {
             elem: elem.clone(),
-            quals: quals.clone(),
+            quals: *quals,
             bound: Some(ArrayBound::Fixed(max)),
         }
     }
@@ -2210,7 +2194,7 @@ impl<'a> Sema<'a> {
                     bound: crate::eval::string_length(parts, interner).map(|len| ArrayBound::Fixed(len + 1)),
                 },
                 span,
-                kind: CheckedExprKind::Str(*parts),
+                kind: CheckedExprKind::Str(parts),
             }),
             Expr::Unary { op, operand, .. } => self.check_unary(*op, operand, interner, span),
             Expr::Binary { op, lhs, rhs, .. } => self.check_binary(*op, lhs, rhs, interner, span),
@@ -2273,7 +2257,7 @@ impl<'a> Sema<'a> {
                 Ok(CheckedExpr {
                     ty,
                     span,
-                    kind: CheckedExprKind::StmtExpr { items: *items },
+                    kind: CheckedExprKind::StmtExpr { items: items },
                 })
             }
             Expr::CompoundLiteral { ty, init, storage, .. } => {
@@ -3635,7 +3619,7 @@ impl<'a> Sema<'a> {
     /// dynamic; constant sizes fold here, dynamic ones lower to a size
     /// comparison).
     fn check_atomic_lock_free(&self, args: &[Expr<'a>], interner: &Interner, span: Span, always: bool, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
-        if args.len() < 1 || args.len() > 2 {
+        if args.is_empty() || args.len() > 2 {
             return Err(CompileError::new(format!("`{what}` takes a size and an optional pointer"), span));
         }
         let size = self.decay_checked(self.check_expr(&args[0], interner)?);
@@ -3729,7 +3713,7 @@ impl<'a> Sema<'a> {
     /// backend lowering shape).
     fn check_clzg(&self, args: &[Expr<'a>], interner: &Interner, span: Span, ctz: bool) -> Result<CheckedExpr<'a>, CompileError> {
         let what = if ctz { "`__builtin_ctzg`" } else { "`__builtin_clzg`" };
-        if args.len() < 1 || args.len() > 2 {
+        if args.is_empty() || args.len() > 2 {
             return Err(CompileError::new(format!("{what} takes one unsigned argument and an optional `int` fallback"), span));
         }
         let arg = self.decay_checked(self.check_expr(&args[0], interner)?);
@@ -4115,8 +4099,8 @@ impl<'a> Sema<'a> {
             let layout = self.struct_layout(*cur, interner).expect("member access on a complete type");
             offset += layout.member_offsets[index];
             let member = &self.structs[cur.0 as usize].members[index];
-            if level + 1 == path.len() {
-                if let Some(width_expr) = &member.bitfield {
+            if level + 1 == path.len()
+                && let Some(width_expr) = &member.bitfield {
                     let w = *width_expr;
                     // The unit byte this field starts in, relative to
                     // the containing struct: `member_offsets` holds the
@@ -4126,7 +4110,6 @@ impl<'a> Sema<'a> {
                         bitfield = Some((ml.bit.unwrap_or(0), w as u32));
                     }
                 }
-            }
             level_ty = member.ty.clone();
         }
         // C17 §6.3.1.1: a counter-intuitive bit-field's expression
@@ -4135,15 +4118,14 @@ impl<'a> Sema<'a> {
         // signed divide. Past 32 bits no int type suffices, so the
         // declared type stands (`long l : 40` reads as `long`,
         // matching GCC's full-width value).
-        if let Some((_, width)) = &bitfield {
-            if *width <= 32 {
+        if let Some((_, width)) = &bitfield
+            && *width <= 32 {
                 ty = if ty.is_unsigned_in(self.target.char_signed) {
                     if *width >= 32 { Ty::UnsignedInt } else { Ty::Int }
                 } else {
                     Ty::Int
                 };
             }
-        }
         // A member of a `const`-qualified object is itself `const`
         // (C17 §6.7.3p5): `const struct S s; s.x = 1;` fails, as does
         // `p->x = 1;` through a `const struct S *p`.
@@ -4263,7 +4245,7 @@ impl<'a> Sema<'a> {
         let mut default = None;
         let mut selected = None;
         for assoc in assocs {
-            let expr = self.check_expr(&assoc.expr, interner)?;
+            let expr = self.check_expr(assoc.expr, interner)?;
             match &assoc.ty {
                 None => {
                     if default.replace(checked.len()).is_some() {

@@ -624,7 +624,7 @@ impl<'s> Lexer<'s> {
             // `--` starts a comment even mid-expression (`a - -b` must be
             // written `a - (-b)`).
             self.line_comment();
-            return self.skip_trivia().map_err(|e| e);
+            return self.skip_trivia();
         }
         if b.is_ascii_digit() {
             return self.number(lo, tokens);

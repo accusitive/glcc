@@ -559,11 +559,10 @@ fn rewrite(func: &mut Function, lattice: &[Lat], executable: &[bool]) -> bool {
         }
         for i in 0..func.blocks[block].insts.len() {
             let inst = func.blocks[block].insts[i];
-            if let Some(result) = func.insts[inst].result {
-                if used[result.index()] {
+            if let Some(result) = func.insts[inst].result
+                && used[result.index()] {
                     note_value(func, &mut map, lattice, result);
                 }
-            }
         }
     }
     // Decide terminators while `lattice` still covers every operand:

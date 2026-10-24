@@ -355,8 +355,8 @@ impl FunctionPass for ConstFold {
                 },
                 _ => None,
             };
-            if let Some(c) = folded {
-                if let Some(result) = func.insts[inst].result {
+            if let Some(c) = folded
+                && let Some(result) = func.insts[inst].result {
                     // The replacement stands in for `result`, so it must
                     // carry `result`'s type: `c.ty()` loses it (`Undef` is
                     // `Void`, `Null` is `ptr(Void)`, aggregates have none).
@@ -372,7 +372,6 @@ impl FunctionPass for ConstFold {
                     folded_away.insert(inst);
                     changed = true;
                 }
-            }
         }
         if !folded_away.is_empty() {
             for block in func.blocks.iter_mut() {
@@ -1919,11 +1918,10 @@ impl FunctionPass for DeadCodeElim {
             if !inst.kind.is_pure() {
                 continue;
             }
-            if let Some(result) = inst.result {
-                if counts.get(result.index()).copied().unwrap_or(0) == 0 {
+            if let Some(result) = inst.result
+                && counts.get(result.index()).copied().unwrap_or(0) == 0 {
                     dead.push(id);
                 }
-            }
         }
         if dead.is_empty() {
             return false;
@@ -2314,11 +2312,10 @@ fn set_successor_args(func: &mut Function, block: Block, phi_index: &std::collec
     };
     match term {
         Terminator::Br { dest, args } => {
-            if let Some(&index) = phi_index.get(dest) {
-                if let Some(arg) = args.get_mut(index) {
+            if let Some(&index) = phi_index.get(dest)
+                && let Some(arg) = args.get_mut(index) {
                     *arg = value;
                 }
-            }
         }
         Terminator::CondBr {
             then_block,
@@ -2327,16 +2324,14 @@ fn set_successor_args(func: &mut Function, block: Block, phi_index: &std::collec
             else_args,
             ..
         } => {
-            if let Some(&index) = phi_index.get(then_block) {
-                if let Some(arg) = then_args.get_mut(index) {
+            if let Some(&index) = phi_index.get(then_block)
+                && let Some(arg) = then_args.get_mut(index) {
                     *arg = value;
                 }
-            }
-            if let Some(&index) = phi_index.get(else_block) {
-                if let Some(arg) = else_args.get_mut(index) {
+            if let Some(&index) = phi_index.get(else_block)
+                && let Some(arg) = else_args.get_mut(index) {
                     *arg = value;
                 }
-            }
         }
         Terminator::Switch { .. } | Terminator::Return { .. } | Terminator::Unreachable => {}
     }
@@ -2478,12 +2473,11 @@ impl DomInfo {
                         Some(current) => intersect(pred, current, &idom, &rpo_index, func.entry),
                     });
                 }
-                if let Some(new) = new {
-                    if idom[block.index()] != Some(new) {
+                if let Some(new) = new
+                    && idom[block.index()] != Some(new) {
                         idom[block.index()] = Some(new);
                         changed = true;
                     }
-                }
             }
         }
 
@@ -2736,10 +2730,7 @@ fn thread_trivial_blocks(func: &mut Function) -> bool {
             continue;
         };
         let replacement = match term {
-            Terminator::Br { dest, .. } => match thread_edge(func, &dom, entry, pred, dest) {
-                Some((dest, args)) => Some(Terminator::Br { dest, args }),
-                None => None,
-            },
+            Terminator::Br { dest, .. } => thread_edge(func, &dom, entry, pred, dest).map(|(dest, args)| Terminator::Br { dest, args }),
             Terminator::CondBr {
                 cond,
                 then_block,
@@ -2794,11 +2785,10 @@ fn thread_edge(func: &Function, dom: &DomInfo, entry: Block, pred: Block, target
         return None;
     }
     for &arg in args.iter() {
-        if let Some(def_block) = value_block(func, arg) {
-            if !dom.dominates(def_block, pred, entry) {
+        if let Some(def_block) = value_block(func, arg)
+            && !dom.dominates(def_block, pred, entry) {
                 return None;
             }
-        }
     }
     Some((*dest, args.clone()))
 }

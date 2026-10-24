@@ -353,11 +353,10 @@ fn unroll(func: &mut Function, counted: &CountedLoop) {
         }
     }
     for &inst in &original[&counted.header].insts {
-        if let Some(result) = func.insts[inst].result {
-            if let Some(new) = tail_values.get(&result) {
+        if let Some(result) = func.insts[inst].result
+            && let Some(new) = tail_values.get(&result) {
                 external.insert(result, *new);
             }
-        }
     }
     if let Some(values) = value_maps.last() {
         for &block in &counted.loop_blocks {
@@ -370,11 +369,10 @@ fn unroll(func: &mut Function, counted: &CountedLoop) {
                 }
             }
             for &inst in &original[&block].insts {
-                if let Some(result) = func.insts[inst].result {
-                    if let Some(new) = values.get(&result) {
+                if let Some(result) = func.insts[inst].result
+                    && let Some(new) = values.get(&result) {
                         external.insert(result, *new);
                     }
-                }
             }
         }
     }
@@ -397,7 +395,7 @@ fn clone_block_insts(func: &mut Function, original: &HashMap<Block, BlockData>, 
         let data = &func.insts[old];
         let kind = remap_inst(&data.kind, |value| values.get(&value).copied().unwrap_or(value));
         let old_result = data.result;
-        let loc = data.loc.clone();
+        let loc = data.loc;
         let inst = func.insts.push(InstData {
             block: clone,
             kind,

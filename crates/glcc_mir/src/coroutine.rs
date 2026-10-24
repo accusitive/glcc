@@ -248,11 +248,10 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
     let params: Vec<(Value, Ty)> = resume.blocks[old_entry].params.iter().map(|&v| (v, resume.values[v].ty.clone())).collect();
     let mut allocas: Vec<(Inst, Value, Ty, u64)> = Vec::new();
     for (inst, data) in resume.insts.iter_enumerated() {
-        if let InstKind::Alloca { pointee, count } = &data.kind {
-            if let Some(val) = data.result {
+        if let InstKind::Alloca { pointee, count } = &data.kind
+            && let Some(val) = data.result {
                 allocas.push((inst, val, pointee.clone(), *count));
             }
-        }
     }
 
     // Which values must survive each suspension: the live set right
@@ -527,7 +526,7 @@ fn lower_body(resume: &mut Function, result_ty: &Ty, handle_ty: &Ty, free: Exter
             resume.blocks[block].insts = rebuilt;
             let term = resume.blocks[block].term.take();
             if let Some(term) = term {
-                let uses = term.operands().iter().any(|&o| o == *v);
+                let uses = term.operands().contains(v);
                 let term = if uses {
                     let (ld, lv) = new_inst(resume, block, InstKind::Load { addr, flags: MemFlags::plain() }, Some(ty.clone()));
                     resume.blocks[block].insts.push(ld);

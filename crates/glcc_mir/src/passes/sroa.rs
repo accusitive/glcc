@@ -167,11 +167,10 @@ fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, 
                     }
                 }
                 for index in indices.iter() {
-                    if let GepIndex::Index(value) = index {
-                        if derived.contains_key(value) {
+                    if let GepIndex::Index(value) = index
+                        && derived.contains_key(value) {
                             return None;
                         }
-                    }
                 }
             }
             InstKind::Bitcast(inner) => {
@@ -262,7 +261,7 @@ fn plan_scalarization(func: &Function, root: Value, alloca: Inst, pointee: &Ty, 
     Some(Plan {
         alloca,
         block: func.insts[alloca].block,
-        loc: func.insts[alloca].loc.clone(),
+        loc: func.insts[alloca].loc,
         leaves: leaves.into_values().collect(),
         derived: derived_insts,
     })
@@ -304,7 +303,7 @@ fn apply(func: &mut Function, plans: Vec<Plan>) {
                 block: plan.block,
                 kind: InstKind::Alloca { pointee: leaf.ty, count: 1 },
                 result: Some(value),
-                loc: plan.loc.clone(),
+                loc: plan.loc,
             });
             func.values[value].def = Def::Inst(alloc);
             replacements.entry(plan.alloca).or_default().push(alloc);

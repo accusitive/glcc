@@ -94,7 +94,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             vars: Vec::new(),
             children: Vec::new(),
         };
-        collect_items(&body.block.items, &mut root);
+        collect_items(body.block.items, &mut root);
         let (vars, scopes) = self.scope_debug(module, slots, globals, &root);
         debug.vars = vars;
         debug.scopes = scopes;
@@ -130,10 +130,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         let home = if let Some(slot) = slots.get(&id) {
             mir::VarHome::Slot(*slot)
-        } else if let Some(global) = globals.get(&id) {
-            mir::VarHome::Global(*global)
         } else {
-            return None;
+            let global = globals.get(&id)?;
+            mir::VarHome::Global(*global)
         };
         let name = binding.name.and_then(|s| self.interner.resolve(s)).map(str::to_string);
         let decl = self.debug_location(module, binding.span);
@@ -200,7 +199,7 @@ fn collect_stmt(stmt: &fe::parse::Stmt, scope: &mut ScopeBuild) {
                 vars: Vec::new(),
                 children: Vec::new(),
             };
-            collect_items(&compound.items, &mut child);
+            collect_items(compound.items, &mut child);
             scope.children.push(child);
         }
         fe::parse::Stmt::For { init, body, .. } => {

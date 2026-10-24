@@ -94,11 +94,10 @@ fn stage_elf(root: &Path) {
         None
     };
     let dst_dir = home_dir().join(".local/lib/glcc");
-    if !dst_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(&dst_dir) {
+    if !dst_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&dst_dir) {
             panic!("cannot create {}: {e}", dst_dir.display());
         }
-    }
     let out = dst_dir.join("glccrt.o");
     if is_fresh(&out, root) {
         return;
@@ -135,11 +134,10 @@ fn stage_windows(root: &Path) {
         return;
     };
     let dst_dir = out.parent().expect("staged lib has a parent");
-    if !dst_dir.exists() {
-        if let Err(e) = std::fs::create_dir_all(dst_dir) {
+    if !dst_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(dst_dir) {
             panic!("cannot create {}: {e}", dst_dir.display());
         }
-    }
     let objdir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("win64-runtime");
     std::fs::create_dir_all(&objdir).expect("cannot create Win64 runtime objdir");
 
@@ -191,11 +189,10 @@ fn stage_windows(root: &Path) {
 /// runtime — so the first build passes over with a warning and the next
 /// one stages.
 fn find_glcc(root: &Path) -> Option<PathBuf> {
-    if let Some(v) = std::env::var_os("GLCC") {
-        if !v.is_empty() {
+    if let Some(v) = std::env::var_os("GLCC")
+        && !v.is_empty() {
             return Some(PathBuf::from(v));
         }
-    }
     let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
     let exe = target.join(profile).join(format!("glcc{}", std::env::consts::EXE_SUFFIX));
@@ -231,13 +228,11 @@ fn host_uses_elf() -> bool {
 
 /// `$key` when set and non-empty, else `name` if it runs on PATH.
 fn find_tool(key: &str, name: &str) -> Option<OsString> {
-    if !key.is_empty() {
-        if let Some(v) = std::env::var_os(key) {
-            if !v.is_empty() {
+    if !key.is_empty()
+        && let Some(v) = std::env::var_os(key)
+            && !v.is_empty() {
                 return Some(v);
             }
-        }
-    }
     Command::new(name)
         .arg("--version")
         .stdout(Stdio::null())
@@ -251,11 +246,10 @@ fn find_tool(key: &str, name: &str) -> Option<OsString> {
 /// the staged runtime lands in the same place the driver looks for it.
 fn home_dir() -> PathBuf {
     for key in ["HOME", "USERPROFILE"] {
-        if let Some(v) = std::env::var_os(key) {
-            if !v.is_empty() {
+        if let Some(v) = std::env::var_os(key)
+            && !v.is_empty() {
                 return PathBuf::from(v);
             }
-        }
     }
     PathBuf::from(".")
 }

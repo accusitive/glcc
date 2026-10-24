@@ -118,9 +118,7 @@ fn preheader_of(func: &Function, dom: &DomInfo, header: Block, loop_blocks: &Has
     if !dominates(dom, preheader, header, func.entry) {
         return None;
     }
-    if func.blocks[preheader].term.is_none() {
-        return None;
-    }
+    func.blocks[preheader].term.as_ref()?;
     Some(preheader)
 }
 
@@ -169,11 +167,10 @@ fn should_hoist(func: &Function, inst: Inst, loop_blocks: &HashSet<Block>, uses:
     }
     let mut invariant = true;
     kind.for_each_operand(&mut |op| {
-        if let Some(def) = def_block(func, op) {
-            if loop_blocks.contains(&def) {
+        if let Some(def) = def_block(func, op)
+            && loop_blocks.contains(&def) {
                 invariant = false;
             }
-        }
     });
     invariant
 }

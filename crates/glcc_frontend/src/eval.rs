@@ -903,7 +903,7 @@ pub fn is_constant_initializer(expr: &CheckedExpr, sema: &Sema, interner: &Inter
 pub fn initializer_is_constant(init: &Initializer, sema: &Sema, interner: &Interner) -> bool {
     match init {
         Initializer::Expr(expr) => is_constant_initializer(expr, sema, interner),
-        Initializer::List { items, .. } => items.iter().all(|item| initializer_is_constant(&item.init, sema, interner)),
+        Initializer::List { items, .. } => items.iter().all(|item| initializer_is_constant(item.init, sema, interner)),
     }
 }
 
@@ -1021,7 +1021,7 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             } else {
                 3
             };
-            eval_const(&codes[index], sema, interner)
+            eval_const(codes[index], sema, interner)
         }
         CheckedExprKind::Call { .. }
         | CheckedExprKind::VaArg { .. }
@@ -1409,7 +1409,7 @@ fn eval_binary(op: BinaryOp, lhs: &CheckedExpr, rhs: &CheckedExpr, sema: &Sema, 
                 }
                 // Complex values take the `eval_complex_op` path above
                 // (their common type is complex).
-                (Value::Complex(..), _) | (_, Value::Complex(..)) => return None,
+                (Value::Complex(..), _) | (_, Value::Complex(..)) => None,
             }
         }
     }

@@ -18,7 +18,7 @@ where
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(item) = self.queue.pop_front() {
-            return Some(item);
+            Some(item)
         } else {
             self.inner.next()
         }

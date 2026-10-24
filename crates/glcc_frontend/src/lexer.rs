@@ -433,9 +433,9 @@ impl<'a> Lexer<'a> {
                     }
                     // String/char prefixes (`u8".."`, `L'a'`): the quote
                     // joins the literal; anything else is an identifier.
-                    if matches!(word.as_str(), "u8" | "u" | "U" | "L") {
-                        if let Some((q, _, _)) = self.chars.peek().copied() {
-                            if q == '"' || q == '\'' {
+                    if matches!(word.as_str(), "u8" | "u" | "U" | "L")
+                        && let Some((q, _, _)) = self.chars.peek().copied()
+                            && (q == '"' || q == '\'') {
                                 let _ = self.pp_next(&mut line);
                                 let raw = self.lex_pp_quoted(q, &mut col, &mut line);
                                 let sym = self.intern.get_or_intern(format!("{word}{raw}"));
@@ -443,8 +443,6 @@ impl<'a> Lexer<'a> {
                                 push!(tok, tok_line, start_col, tok_off);
                                 continue;
                             }
-                        }
-                    }
                     let sym = self.intern.get_or_intern(word);
                     push!(PpToken::Ident(sym), tok_line, start_col, tok_off);
                 }
@@ -1209,7 +1207,7 @@ impl<'a> Lexer<'a> {
                     buf.push(self.bump().unwrap());
                     break;
                 }
-                Some(c) if c.to_digit(radix).is_some() => {
+                Some(c) if c.is_digit(radix) => {
                     buf.push(self.bump().unwrap());
                     digits += 1;
                     let d = c.to_digit(radix).unwrap();

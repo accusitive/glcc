@@ -676,11 +676,10 @@ impl<'a, 'b> Expander<'a, 'b> {
             return false;
         };
         // Directly adjacent in one buffer: nothing to keep apart.
-        if let (Some((preg, poff, plen)), Some((creg, coff, _))) = (prev.spell, cur.spell) {
-            if preg == creg && poff + plen == coff {
+        if let (Some((preg, poff, plen)), Some((creg, coff, _))) = (prev.spell, cur.spell)
+            && preg == creg && poff + plen == coff {
                 return false;
             }
-        }
         let kind = concat_kind(prev);
         let mut info = concat_info(kind);
         if info == 0 {
@@ -715,8 +714,8 @@ impl<'a, 'b> Expander<'a, 'b> {
                 // `L`, `u`, `U` followed by a string/char literal paste.
                 matches!(render_tok_text(prev, self.interner).as_str(), "L" | "u" | "U")
             }
-            ConcatKind::Number => first.map_or(false, |c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '+' || c == '-' || c == '$'),
-            ConcatKind::Period => (first_is('.') && prevprev.map_or(false, |p| concat_kind(p) == ConcatKind::Period)) || first.map_or(false, |c| c.is_ascii_digit()),
+            ConcatKind::Number => first.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '+' || c == '-' || c == '$'),
+            ConcatKind::Period => (first_is('.') && prevprev.is_some_and(|p| concat_kind(p) == ConcatKind::Period)) || first.is_some_and(|c| c.is_ascii_digit()),
             ConcatKind::Amp => first_is('&'),
             ConcatKind::Plus => first_is('+'),
             ConcatKind::Minus => first_is('-') || first_is('>'),
@@ -815,13 +814,11 @@ impl<'a, 'b> Expander<'a, 'b> {
         // C11 6.10.6 `_Pragma`: handled where the operator is lexed (clang
         // `Preprocessor::Lex`), so `_Pragma` produced by macro expansion
         // runs its directive too.
-        if let PpToken::Ident(sym) = t.tok {
-            if self.spelling(sym) == "_Pragma" {
-                if let Some(out) = self.expand_pragma_operator(&t)? {
+        if let PpToken::Ident(sym) = t.tok
+            && self.spelling(sym) == "_Pragma"
+                && let Some(out) = self.expand_pragma_operator(&t)? {
                     return Ok(out);
                 }
-            }
-        }
         // A pending empty-macro propagation reaches the next token: a
         // `TokenLexer` token ORs the flags in, while a fresh file token
         // takes its own whitespace/newline flags from the source layout
@@ -1074,7 +1071,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let loc = self.loc(t.line);
         // Skip whitespace (never newlines here in practice, but harmless).
         let mut operand = None;
-        while let Some(tree) = self.trees.next() {
+        for tree in self.trees.by_ref() {
             match tree {
                 TokenTree::Token(t) if matches!(t.tok, PpToken::Ws(_)) => continue,
                 other => {
@@ -1083,8 +1080,8 @@ impl<'a, 'b> Expander<'a, 'b> {
                 }
             }
         }
-        let one = self.interner.get_or_intern("1".to_string());
-        let zero = self.interner.get_or_intern("0".to_string());
+        let one = self.interner.get_or_intern("1");
+        let zero = self.interner.get_or_intern("0");
         let num = |hit: bool| Tok {
             tok: PpToken::PpNumber(if hit { one } else { zero }),
             line: t.line,
@@ -1109,7 +1106,7 @@ impl<'a, 'b> Expander<'a, 'b> {
                 let mut inner = Vec::new();
                 let mut depth = 0u32;
                 let mut closed = false;
-                while let Some(tree) = self.trees.next() {
+                for tree in self.trees.by_ref() {
                     match tree {
                         TokenTree::Token(x) if matches!(x.tok, PpToken::Punct(Punctuator::LParen)) => {
                             depth += 1;
@@ -1155,7 +1152,7 @@ impl<'a, 'b> Expander<'a, 'b> {
     }
 
     fn is_defined_name(&mut self, name: &str) -> bool {
-        let sym = self.interner.get_or_intern(name.to_string());
+        let sym = self.interner.get_or_intern(name);
         self.macros.contains_key(&sym) || is_has_builtin_name(name) || (is_location_name(name) && !self.undef_builtins.contains(name))
     }
 
@@ -1169,7 +1166,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let mut depth = 0u32;
         let mut opened = false;
         let mut closed = false;
-        while let Some(tree) = self.trees.next() {
+        for tree in self.trees.by_ref() {
             match tree {
                 TokenTree::Token(x) if matches!(x.tok, PpToken::Ws(_)) && !opened => continue,
                 TokenTree::Token(x) if matches!(x.tok, PpToken::Punct(Punctuator::LParen)) && !opened => {
@@ -1332,11 +1329,10 @@ impl<'a, 'b> Expander<'a, 'b> {
                     // `DisableExpand`, so re-enabling while this list is
                     // read does not let it expand later (C99 6.10.3.4p2,
                     // PR3927).
-                    if let PpToken::Ident(sym) = x.tok {
-                        if self.macros.contains_key(&sym) && self.expanding.contains(&sym) {
+                    if let PpToken::Ident(sym) = x.tok
+                        && self.macros.contains_key(&sym) && self.expanding.contains(&sym) {
                             x.noexpand = true;
                         }
-                    }
                     arg_toks.push(x);
                 }
                 other => {
@@ -1399,7 +1395,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         // expand inside-out.
         let mut map: ArgMap = HashMap::new();
         for (i, p) in params.iter().enumerate().take(fixed) {
-            let raw: Vec<Tok> = trim_tokens(pieces[i]).into_iter().cloned().collect();
+            let raw: Vec<Tok> = trim_tokens(pieces[i]).iter().cloned().collect();
             let cooked = self.expand_arg(raw.clone())?;
             map.insert(
                 p.clone(),
@@ -1411,7 +1407,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         }
         let mut extras = Vec::new();
         for piece in pieces.iter().skip(fixed) {
-            let raw: Vec<Tok> = trim_tokens(piece).into_iter().cloned().collect();
+            let raw: Vec<Tok> = trim_tokens(piece).iter().cloned().collect();
             let cooked = self.expand_arg(raw.clone())?;
             extras.push(MacroArgument {
                 unexpanded: raw,
@@ -1662,7 +1658,7 @@ impl<'a, 'b> Expander<'a, 'b> {
                 replacement,
             } => {
                 let loc = self.loc(parameters.first().map(|t| t.line).unwrap_or(0));
-                let parsed = parse_parameters(&parameters, &loc, &mut *self.interner)?;
+                let parsed = parse_parameters(&parameters, &loc, &*self.interner)?;
                 let sym = self.interner.get_or_intern(macro_name);
                 Rc::make_mut(&mut self.macros).insert(
                     sym,
@@ -2471,7 +2467,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let mut lexer = Lexer::new(text, self.interner);
         let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
         let disp = self.display();
-        let trees = crate::tree::collect_trees(toks, &disp, &mut *self.interner)?;
+        let trees = crate::tree::collect_trees(toks, &disp, &*self.interner)?;
         let stop_at = self.trees.remaining();
         self.trees.prepend_extend(trees.into_iter());
         while self.trees.remaining() > stop_at {

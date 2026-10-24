@@ -198,11 +198,10 @@ fn lower_module_impl<M: Module>(
     }
     let mut narrow = Vec::new();
     for (id, global) in mir_module.globals.iter_enumerated() {
-        if let Some(&did) = data_ids.get(&id) {
-            if define_data(&global.name) {
+        if let Some(&did) = data_ids.get(&id)
+            && define_data(&global.name) {
                 define_global(global, did, &data_ids, &ids, &extern_ids, clif, &mut narrow);
             }
-        }
     }
     if let Some(debug) = debug.as_deref_mut() {
         for (id, global) in mir_module.globals.iter_enumerated() {
@@ -844,8 +843,8 @@ fn lower_function<M: Module>(
             data_ids,
             tls_data,
             rt,
-            &layouts,
-            &extern_layouts,
+            layouts,
+            extern_layouts,
             block_id,
             wrappers,
         );
@@ -863,13 +862,12 @@ fn lower_function<M: Module>(
         );
         panic!("cannot define function: {e:?}");
     }
-    if let Some(debug) = body.debug.take() {
-        if let Some(code) = ctx.compiled_code() {
+    if let Some(debug) = body.debug.take()
+        && let Some(code) = ctx.compiled_code() {
             crate::debug::collect_function_debug(debug, clif_id, mir_func, &body.slots, code, data_ids, tls_data);
         }
-    }
-    if let Some(unwind) = unwind {
-        if let Some(code) = ctx.compiled_code() {
+    if let Some(unwind) = unwind
+        && let Some(code) = ctx.compiled_code() {
             let info = code
                 .create_unwind_info(clif.isa())
                 .unwrap_or_else(|e| panic!("cannot create unwind info for {}: {e:?}", mir_func.name));
@@ -883,7 +881,6 @@ fn lower_function<M: Module>(
                 });
             }
         }
-    }
 }
 
 /// Order for filling blocks: reverse postorder over the reachable CFG,
@@ -1283,13 +1280,12 @@ fn emit_memcpy(builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, le
 }
 
 fn emit_copy(body: &Body, builder: &mut FunctionBuilder, dst: ClifValue, src: ClifValue, len: u64) {
-    if len >= LIBC_COPY_THRESHOLD {
-        if let Some(memcpy) = body.memcpy {
+    if len >= LIBC_COPY_THRESHOLD
+        && let Some(memcpy) = body.memcpy {
             let len = builder.ins().iconst(types::I64, len as i64);
             builder.ins().call(memcpy, &[dst, src, len]);
             return;
         }
-    }
     emit_memcpy(builder, dst, src, len);
 }
 
@@ -2793,7 +2789,7 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                 _ => panic!("switch scrutinee must fit in 64 bits"),
             };
             let default_target = body.blocks[&default];
-            if body.func.blocks[default].params.len() != 0 {
+            if !body.func.blocks[default].params.is_empty() {
                 panic!("switch target takes block params");
             }
             if cases.is_empty() {
@@ -2801,7 +2797,7 @@ fn emit_term(body: &mut Body, builder: &mut FunctionBuilder, term: mir::Terminat
                 return;
             }
             for (_, dest) in &cases {
-                if body.func.blocks[*dest].params.len() != 0 {
+                if !body.func.blocks[*dest].params.is_empty() {
                     panic!("switch target takes block params");
                 }
             }
@@ -5562,10 +5558,10 @@ fn emit_call<M: Module>(
                         .count()
                         > 1;
                 if multi {
-                    if !splits.contains_key(&owner) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = splits.entry(owner) {
                         let v = operand(body, builder, arg);
                         let from = builder.func.dfg.value_type(v);
-                        splits.insert(owner, split_value(builder, v, from, 2));
+                        e.insert(split_value(builder, v, from, 2));
                     }
                     let idx = (offset / 8) as usize;
                     clif_args.push(splits[&owner][idx]);
@@ -5612,17 +5608,14 @@ fn emit_call<M: Module>(
             extension: ArgumentExtension::None,
         });
     }
-    match &callee_layout.ret {
-        abi::RetLoc::Regs(pieces) => {
-            // A foreign `long double` return arrives in st(0): no Clif
-            // return to declare (fetched through getret at the call).
-            if !foreign_f80_ret {
-                for (_, ty) in pieces {
-                    sig.returns.push(AbiParam::new(*ty));
-                }
+    if let abi::RetLoc::Regs(pieces) = &callee_layout.ret {
+        // A foreign `long double` return arrives in st(0): no Clif
+        // return to declare (fetched through getret at the call).
+        if !foreign_f80_ret {
+            for (_, ty) in pieces {
+                sig.returns.push(AbiParam::new(*ty));
             }
         }
-        _ => {}
     }
     // Direct calls when the declared signature matches the call-site
     // signature: non-variadic internal functions and non-variadic

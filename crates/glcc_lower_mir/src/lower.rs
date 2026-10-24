@@ -386,9 +386,9 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
     for (i, binding) in sema.decls.iter().enumerate() {
         if binding.block_static {
             let id = fe::sema::DeclId(i as u32);
-            if !globals.contains_key(&id) {
+            if let std::collections::hash_map::Entry::Vacant(e) = globals.entry(id) {
                 let gid = lx.declare_block_static(&mut module, id);
-                globals.insert(id, gid);
+                e.insert(gid);
                 define_order.push(id);
             }
         }
@@ -397,10 +397,10 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
         // backend's `ensure_global_data` on first reference.
         if binding.kind == fe::sema::BindingKind::Var && binding.linkage == fe::sema::Linkage::External && !binding.defined && !binding.tentative && binding.alias.is_none() {
             let id = fe::sema::DeclId(i as u32);
-            if !globals.contains_key(&id) {
+            globals.entry(id).or_insert_with(|| {
                 let gid = lx.lower_data_extern(&mut module, id);
-                globals.insert(id, gid);
-            }
+                gid
+            });
         }
     }
     // `__attribute__((alias("a")))` declarations denote the target
@@ -590,7 +590,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let fe::parse::Ty::Func { ret, .. } = binding.ty.unqualified() else {
             panic!("function binding without a Func type");
         };
-        &**ret
+        ret
     }
 
     fn func_sig(&self, binding: &fe::sema::Binding) -> mir::Signature {
@@ -853,7 +853,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     at + self.designated_extent(&member.ty, rest, init)
                 }
                 (fe::parse::Ty::Array { elem, .. }, fe::parse::Designator::Index { index, .. }) => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         return 0;
                     };
                     let elem_size = self.sema.type_size(elem, self.interner).unwrap_or(0);
@@ -912,7 +912,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // Every array element occupies its own size; the
                     // last one may extend further (a flexible member
                     // of a struct element).
-                    let sub = self.designated_extent(elem_ty, item.designators.get(1..).unwrap_or(&[]), &item.init).max(stride);
+                    let sub = self.designated_extent(elem_ty, item.designators.get(1..).unwrap_or(&[]), item.init).max(stride);
                     end = end.max(at + sub);
                 }
                 end
@@ -953,7 +953,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let mut cursor = 0u64;
                 for item in *items {
                     match item.designators.first() {
-                        Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(&index, self.sema, self.interner) {
+                        Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
                             Some(fe::eval::Value::Int(k)) => {
                                 len = len.max((k as u64) + 1);
                                 cursor = (k as u64) + 1;
@@ -1020,8 +1020,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // by the zeroed image. Conversions around the literal
                 // are transparent.
                 if let Some(parts) = Self::peek_global_str(e) {
-                    if let fe::parse::Ty::Array { elem, bound, .. } = fe_ty.unqualified() {
-                        if let Some(lit_elem) = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()) {
+                    if let fe::parse::Ty::Array { elem, bound, .. } = fe_ty.unqualified()
+                        && let Some(lit_elem) = fe::eval::string_elem_ty_in(parts, self.sema.target.wchar()) {
                             let elem_mir = lower_ty(elem, self.sema, self.interner);
                             let lit_mir = lower_ty(&lit_elem, self.sema, self.interner);
                             if elem_mir == lit_mir {
@@ -1038,7 +1038,6 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                                 return;
                             }
                         }
-                    }
                     if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
                         let (target, ..) = self.materialize_string_global(module, parts);
                         relocs.push((base, mir::DataReloc::Global { target, addend: 0 }, pointer_reloc_bits(mir_ty)));
@@ -1115,15 +1114,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // A null pointer constant spelled as a cast (`(T *)0`,
                 // and `NULL` from real headers): fold the operand and
                 // store the (zero) address bytes.
-                if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
-                    if let fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } = &e.kind {
-                        if let Some(fe::eval::Value::Int(n)) = fe::eval::eval_const(expr, self.sema, self.interner) {
+                if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. })
+                    && let fe::check::CheckedExprKind::Cast { expr, .. } | fe::check::CheckedExprKind::Convert { expr, .. } = &e.kind
+                        && let Some(fe::eval::Value::Int(n)) = fe::eval::eval_const(expr, self.sema, self.interner) {
                             let len = mir_ty.size_bytes() as usize;
                             image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
                             return;
                         }
-                    }
-                }
                 // Addresses, pointer arithmetic, and (through
                 // conversions) string literals for pointer targets.
                 if matches!(fe_ty.unqualified(), fe::parse::Ty::Pointer { .. }) {
@@ -1157,7 +1154,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             base + i as u64 * elem_size,
                             elem.as_ref(),
                             &elem_mir,
-                            &item.init,
+                            item.init,
                             None,
                             funcs,
                             externs,
@@ -1169,30 +1166,30 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (fe::parse::Ty::Array { .. }, mir::Ty::Array { .. }) => {
                     let mut cursor = 0u64;
                     for item in *items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 (fe::parse::Ty::Struct(_), mir::Ty::Struct { .. }) => {
                     let mut cursor = 0u64;
                     for item in *items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 // Unions overlay at offset zero; the blob holds bytes.
                 (fe::parse::Ty::Struct(id), mir::Ty::Array { .. }) if self.sema.structs[id.0 as usize].is_union => {
                     let mut cursor = 0u64;
                     for item in *items {
-                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, &item.designators, cursor);
+                        let (off, elem_fe, elem_mir, next, bf) = self.global_designated(base, fe_ty, mir_ty, item.designators, cursor);
                         cursor = next;
-                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, &item.init, bf, funcs, externs, globals, relocs);
+                        self.fold_global_bytes(module, image, off, &elem_fe, &elem_mir, item.init, bf, funcs, externs, globals, relocs);
                     }
                 }
                 _ if items.len() == 1 && items[0].designators.is_empty() => {
-                    self.fold_global_bytes(module, image, base, fe_ty, mir_ty, &items[0].init, bf, funcs, externs, globals, relocs);
+                    self.fold_global_bytes(module, image, base, fe_ty, mir_ty, items[0].init, bf, funcs, externs, globals, relocs);
                 }
                 _ => panic!("braced list for scalar type"),
             },
@@ -1253,7 +1250,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         };
         Some(match pointee.unqualified() {
             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-            _ => self.sema.type_size(&pointee, self.interner)? as i128,
+            _ => self.sema.type_size(pointee, self.interner)? as i128,
         })
     }
 
@@ -1353,7 +1350,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     _ => panic!("non-constant global initializer"),
                 };
                 let elem = match addr_side.ty.unqualified() {
-                    fe::parse::Ty::Pointer { pointee, .. } => self.sema.type_size(&pointee, self.interner).unwrap() as i128,
+                    fe::parse::Ty::Pointer { pointee, .. } => self.sema.type_size(pointee, self.interner).unwrap() as i128,
                     _ => 1,
                 };
                 let addend = if neg { -c * elem } else { c * elem };
@@ -1403,7 +1400,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 (root, disp + *offset as i64)
             }
             fe::check::CheckedExprKind::Subscript { base, index } => {
-                let i = match fe::eval::eval_const(&index, self.sema, self.interner) {
+                let i = match fe::eval::eval_const(index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => n,
                     _ => panic!("non-constant global initializer"),
                 };
@@ -1501,7 +1498,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // to a pointer; the element then comes from the
                 // pointee. Multi-dimensional arrays recurse: each level
                 // strides by its own element.
-                let i = match fe::eval::eval_const(&index, self.sema, self.interner) {
+                let i = match fe::eval::eval_const(index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => n,
                     _ => panic!("non-constant global initializer"),
                 };
@@ -3125,11 +3122,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     // without libm. Only exact signatures intercept,
                     // so same-named user functions still call out
                     // normally.
-                    if self.complex_builtin(id).is_some() {
-                        if let Some(value) = self.lower_complex_builtin(module, func, frame, funcs, externs, globals, id, args) {
+                    if self.complex_builtin(id).is_some()
+                        && let Some(value) = self.lower_complex_builtin(module, func, frame, funcs, externs, globals, id, args) {
                             return value;
                         }
-                    }
                     if let Some(target) = funcs.get(&id) {
                         let target = *target;
                         return self.emit_call(
@@ -3174,7 +3170,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let callee_addr = self.expr_value(module, func, frame, funcs, externs, globals, callee);
                 let sig = self.indirect_sig(callee);
-                return self.emit_call(
+                self.emit_call(
                     module,
                     func,
                     frame,
@@ -3188,7 +3184,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         args: Default::default(),
                         sig,
                     },
-                );
+                )
             }
             fe::check::CheckedExprKind::Await(inner) => {
                 // The handle is any expression (typically an async
@@ -3440,19 +3436,19 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::CheckedExprKind::ConstantP(b) => self.iconst(func, int_bits(&mir_ty), i128::from(*b)),
             fe::check::CheckedExprKind::ClassifyType(code) => self.iconst(func, int_bits(&mir_ty), i128::from(*code)),
             fe::check::CheckedExprKind::FpClass { op, arg } => {
-                return self.lower_fp_class(module, func, frame, funcs, externs, globals, op, arg, &mir_ty);
+                self.lower_fp_class(module, func, frame, funcs, externs, globals, op, arg, &mir_ty)
             }
             fe::check::CheckedExprKind::FpClassify { codes, arg } => {
-                return self.lower_fp_classify(module, func, frame, funcs, externs, globals, codes, arg, &mir_ty);
+                self.lower_fp_classify(module, func, frame, funcs, externs, globals, codes, arg, &mir_ty)
             }
             fe::check::CheckedExprKind::Atomic { op, args } => {
-                return self.lower_atomic(module, func, frame, funcs, externs, globals, op, args, &expr.ty, &mir_ty);
+                self.lower_atomic(module, func, frame, funcs, externs, globals, op, args, &expr.ty, &mir_ty)
             }
             fe::check::CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => {
-                return self.lower_overflow(module, func, frame, funcs, externs, globals, op, lhs, rhs, res, res_ty, &mir_ty);
+                self.lower_overflow(module, func, frame, funcs, externs, globals, op, lhs, rhs, res, res_ty, &mir_ty)
             }
             fe::check::CheckedExprKind::Alloca { size } => {
-                return self.lower_alloca(module, func, frame, funcs, externs, globals, size);
+                self.lower_alloca(module, func, frame, funcs, externs, globals, size)
             }
             fe::check::CheckedExprKind::FrameAddress { level, returns_address } => {
                 // [%rbp] holds the caller's frame pointer and [%rbp + 8]
@@ -3467,7 +3463,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     let (addr, _) = self.ptr_offset_addr(func, frame, fp, 8, mir::Ty::Void);
                     fp = self.load(func, frame, addr, ptr_ty, false);
                 }
-                return fp;
+                fp
             }
             fe::check::CheckedExprKind::Clz { ctz, arg, fallback } => {
                 // Type-generic count at the operand's own width (no
@@ -4304,7 +4300,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     fn pointee_size(&self, pointee: &fe::parse::Ty) -> u64 {
         match pointee.unqualified() {
             fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-            _ => self.sema.type_size(&pointee, self.interner).unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
+            _ => self.sema.type_size(pointee, self.interner).unwrap_or_else(|| panic!("sized pointee: {pointee:?}")),
         }
     }
 
@@ -5676,7 +5672,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         self.place(module, func, frame, funcs, externs, globals, base).0
                     };
                     let obj = lower_ty(decl_ty, self.sema, self.interner);
-                    let (addr, obj) = self.ptr_offset_addr(func, frame, ptr, *offset as u64, obj);
+                    let (addr, obj) = self.ptr_offset_addr(func, frame, ptr, (*offset), obj);
                     return (addr, obj);
                 }
                 let (mut addr, mut obj) = self.place(module, func, frame, funcs, externs, globals, base);
@@ -5728,7 +5724,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
                     _ => self.sema.type_size(&elem_fe, self.interner).expect("index into sized element"),
                 };
-                return self.scaled_index_addr(func, frame, addr, idx, &index.ty, scale, obj);
+                self.scaled_index_addr(func, frame, addr, idx, &index.ty, scale, obj)
             }
             fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::Deref, inner) => {
                 let ptr = self.expr_value(module, func, frame, funcs, externs, globals, inner);
@@ -5764,7 +5760,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let mir_ty = lower_ty(ty, self.sema, self.interner);
                 if storage.is_automatic() {
                     let slot = self.alloca(func, frame, mir_ty.clone());
-                    self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, *init);
+                    self.lower_init(module, func, frame, funcs, externs, globals, slot, ty, init);
                     return (slot, mir_ty);
                 }
                 // A static or thread-local compound literal is one
@@ -6097,7 +6093,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 match (fe_ty.unqualified(), mir_ty) {
                     (fe::parse::Ty::Array { elem, .. }, mir::Ty::Array { elem: mir_elem, len }) => {
-                        items.len() as u64 == *len && items.iter().all(|item| self.initializer_covers_object(elem, mir_elem, &item.init))
+                        items.len() as u64 == *len && items.iter().all(|item| self.initializer_covers_object(elem, mir_elem, item.init))
                     }
                     (fe::parse::Ty::Struct(id), mir::Ty::Struct { fields, .. }) => {
                         let def = &self.sema.structs[id.0 as usize];
@@ -6109,11 +6105,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                                 .iter()
                                 .zip(fields)
                                 .zip(&def.members)
-                                .all(|((item, field), member)| self.initializer_covers_object(&member.ty, field, &item.init))
+                                .all(|((item, field), member)| self.initializer_covers_object(&member.ty, field, item.init))
                     }
                     // `int x = {1}` is a one-element list around a
                     // scalar initializer.
-                    _ if items.len() == 1 => self.initializer_covers_object(fe_ty, mir_ty, &items[0].init),
+                    _ if items.len() == 1 => self.initializer_covers_object(fe_ty, mir_ty, items[0].init),
                     _ => false,
                 }
             }
@@ -6207,7 +6203,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     // `int x = {1}` is legal C: bare scalar braces.
                     _ if items.len() == 1 && items[0].designators.is_empty() => {
-                        self.lower_init(module, func, frame, funcs, externs, globals, slot, fe_ty, &items[0].init);
+                        self.lower_init(module, func, frame, funcs, externs, globals, slot, fe_ty, items[0].init);
                     }
                     _ => panic!("braced list for scalar type"),
                 }
@@ -6257,16 +6253,16 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         };
         if rest.is_empty() {
             if let Some(t) = self.bitfield_target_of(struct_id, index) {
-                self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init);
+                self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, item.init);
             } else {
-                self.lower_init(module, func, frame, funcs, externs, globals, addr, &member.ty, &item.init);
+                self.lower_init(module, func, frame, funcs, externs, globals, addr, &member.ty, item.init);
             }
             return next;
         }
         let (addr, fe, bf) = self.init_addr(func, frame, addr, member.ty.clone(), rest);
         match bf {
-            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
-            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, &item.init),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, item.init),
+            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, item.init),
         }
         next
     }
@@ -6325,7 +6321,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe_ty = self.sema.structs[id.0 as usize].members[index as usize].ty.clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     let fe::parse::Ty::Array { elem, .. } = fe_ty.unqualified() else {
@@ -6369,14 +6365,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 quals: fe::parse::TypeQualifiers::empty(),
                 bound: None,
             };
-            self.init_addr(func, frame, slot, array_ty, &item.designators)
+            self.init_addr(func, frame, slot, array_ty, item.designators)
         };
         match bf {
-            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
-            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, &item.init),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, item.init),
+            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, item.init),
         }
         match item.designators.first() {
-            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(&index, self.sema, self.interner) {
+            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
                 Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
                 _ => cursor,
             },
@@ -6419,11 +6415,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             (addr, ty, None)
         } else {
             let struct_ty = fe::parse::Ty::Struct(struct_id);
-            self.init_addr(func, frame, slot, struct_ty, &item.designators)
+            self.init_addr(func, frame, slot, struct_ty, item.designators)
         };
         match bf {
-            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
-            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, &item.init),
+            Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, item.init),
+            None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &ty, item.init),
         }
         match item.designators.first() {
             Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => designated_member(self.sema, struct_id, des) as usize + 1,
@@ -6477,15 +6473,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let slot = self.retype_addr(func, frame, slot, member_mir);
         if rest.is_empty() {
             if let Some(t) = self.bitfield_target_of(struct_id, index) {
-                self.init_bitfield(module, func, frame, funcs, externs, globals, slot, &t, &item.init);
+                self.init_bitfield(module, func, frame, funcs, externs, globals, slot, &t, item.init);
             } else {
-                self.lower_init(module, func, frame, funcs, externs, globals, slot, &member_fe, &item.init);
+                self.lower_init(module, func, frame, funcs, externs, globals, slot, &member_fe, item.init);
             }
         } else {
             let (addr, fe, bf) = self.init_addr(func, frame, slot, member_fe, rest);
             match bf {
-                Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, &item.init),
-                None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, &item.init),
+                Some(t) => self.init_bitfield(module, func, frame, funcs, externs, globals, addr, &t, item.init),
+                None => self.lower_init(module, func, frame, funcs, externs, globals, addr, &fe, item.init),
             }
         }
         next
@@ -6602,7 +6598,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mi = fields[slot].clone();
                 }
                 fe::parse::Designator::Index { index, .. } => {
-                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(&index, self.sema, self.interner) else {
+                    let Some(fe::eval::Value::Int(k)) = fe::eval::eval_const(index, self.sema, self.interner) else {
                         panic!("non-constant array designator");
                     };
                     // A flexible array member decays to a pointer in
@@ -6627,7 +6623,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }
         let next = if designators.len() == 1 {
             match &designators[0] {
-                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(&index, self.sema, self.interner) {
+                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(index, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
                     _ => cursor,
                 },
@@ -7179,7 +7175,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             // pointees step by one byte.
             let scale = match pointee.unqualified() {
                 fe::parse::Ty::Void | fe::parse::Ty::Func { .. } => 1,
-                _ => self.sema.type_size(&pointee, self.interner).expect("sized pointee"),
+                _ => self.sema.type_size(pointee, self.interner).expect("sized pointee"),
             };
             let (index, index_ty) = if matches!(op, fe::parse::AssignOp::Sub) {
                 (self.pointer_sub_index(func, frame, y, rhs_ty), fe::parse::Ty::LongLong)

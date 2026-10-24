@@ -150,7 +150,7 @@ impl<'a> Sema<'a> {
             Ty::Double => Some(t.double_size),
             Ty::LongDouble => Some(t.long_double_size),
             Ty::Complex(inner) => self.type_size(inner, interner)?.checked_mul(2),
-            Ty::Pointer { size, .. } => Some(pointer_size_bytes(&t, *size)),
+            Ty::Pointer { size, .. } => Some(pointer_size_bytes(t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;
                 self.type_size(&repr, interner)
@@ -189,7 +189,7 @@ impl<'a> Sema<'a> {
             Ty::Double => Some(t.double_align),
             Ty::LongDouble => Some(t.long_double_align),
             Ty::Complex(inner) => self.type_align(inner, interner),
-            Ty::Pointer { size, .. } => Some(pointer_size_bytes(&t, *size)),
+            Ty::Pointer { size, .. } => Some(pointer_size_bytes(t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;
                 self.type_align(&repr, interner)

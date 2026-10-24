@@ -250,14 +250,12 @@ impl Session {
                 let ast::ItemKind::Import(import) = &item.kind else {
                     continue;
                 };
-                if let Some(target) = by_path.get(&import.path).copied() {
-                    if let Some(&target_index) = index_of.get(&target) {
-                        if !imports.contains(&target) {
+                if let Some(target) = by_path.get(&import.path).copied()
+                    && let Some(&target_index) = index_of.get(&target)
+                        && !imports.contains(&target) {
                             imports.push(target);
                             adjacency[i].push(target_index);
                         }
-                    }
-                }
             }
             nodes.push(ModuleNode {
                 file,
@@ -416,11 +414,10 @@ impl Session {
     /// Parse one file, reusing the cached result while its revision is
     /// unchanged.
     pub fn parse(&self, file: FileId) -> Rc<ParseResult> {
-        if let Some(cached) = self.parse_cache.borrow().get(&file) {
-            if cached.revision == self.revision(file) {
+        if let Some(cached) = self.parse_cache.borrow().get(&file)
+            && cached.revision == self.revision(file) {
                 return cached.result.clone();
             }
-        }
         let text = self.text(file);
         let result = Rc::new(match lexer::lex_in(file, text) {
             Ok(tokens) => {
@@ -493,14 +490,13 @@ impl Session {
     /// `fun`, so only that function is checked.
     pub fn analyze(&self, files: &[FileId]) -> Result<Rc<Analysis>, Vec<Diag>> {
         let key: Vec<(FileId, u64)> = files.iter().map(|&f| (f, self.revision(f))).collect();
-        if let Some(cached) = self.analysis_cache.borrow().as_ref() {
-            if cached.key == key {
+        if let Some(cached) = self.analysis_cache.borrow().as_ref()
+            && cached.key == key {
                 // The roots stay in place: a compile right after analyze
                 // must still see which bodies were newly checked.
                 cached.analysis.checked.set(0);
                 return Ok(cached.analysis.clone());
             }
-        }
 
         let (mut program, diags, _) = self.program(files);
         if !diags.is_empty() {
@@ -641,11 +637,10 @@ impl Session {
     /// REPL) keep the handle for the duration of one input.
     pub fn compile_shared(&self, files: &[FileId]) -> Result<Rc<MirModule>, Vec<Diag>> {
         let key: Vec<(FileId, u64)> = files.iter().map(|&f| (f, self.revision(f))).collect();
-        if let Some(cached) = self.unit_cache.borrow().as_ref() {
-            if cached.key == key {
+        if let Some(cached) = self.unit_cache.borrow().as_ref()
+            && cached.key == key {
                 return Ok(cached.module.clone());
             }
-        }
 
         let analysis = self.analyze(files)?;
         let previous = self.lower_state.borrow_mut().take();

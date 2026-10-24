@@ -165,11 +165,7 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(plan)
             } else if let Some(shift) = int_pow2(func, *b) {
                 Some(Plan::ShlBy(*a, shift))
-            } else if let Some(shift) = int_pow2(func, *a) {
-                Some(Plan::ShlBy(*b, shift))
-            } else {
-                None
-            }
+            } else { int_pow2(func, *a).map(|shift| Plan::ShlBy(*b, shift)) }
         }
         // A divisor of one cannot trap, so the quotient is the dividend
         // and the remainder is zero for every input (including the
@@ -509,7 +505,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             fresh
         }
         Plan::Inst(kind) => {
-            let loc = func.insts[inst].loc.clone();
+            let loc = func.insts[inst].loc;
             let next = Inst::from_usize(func.insts.len());
             let replacement = func.values.push(ValueData {
                 ty: func.values[result].ty.clone(),
@@ -527,18 +523,18 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
         }
         Plan::RebuildAggregate { source, fields } => {
             let ty = func.values[result].ty.clone();
-            let loc = func.insts[inst].loc.clone();
+            let loc = func.insts[inst].loc;
             let mut current = source;
             for (index, elem) in fields {
                 let (next, new) = super::make_value(func, block, InstKind::InsertValue { agg: current, elem, index }, ty.clone());
-                func.insts[new].loc = loc.clone();
+                func.insts[new].loc = loc;
                 out.push(new);
                 current = next;
             }
-            return current;
+            current
         }
         Plan::BoolCast { value, ty, signed, invert } => {
-            let loc = func.insts[inst].loc.clone();
+            let loc = func.insts[inst].loc;
             let cond = if invert {
                 let zero = push_int_const(func, &Ty::Bool, 0);
                 push_temp(
@@ -550,7 +546,7 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
                         rhs: zero,
                     },
                     Ty::Bool,
-                    loc.clone(),
+                    loc,
                     out,
                 )
             } else {
@@ -560,28 +556,28 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             push_temp(func, block, kind, ty, loc, out)
         }
         Plan::ZextBoolOp { op, lhs, rhs, ty } => {
-            let loc = func.insts[inst].loc.clone();
+            let loc = func.insts[inst].loc;
             let kind = match op {
                 Bitwise::And => InstKind::And(lhs, rhs),
                 Bitwise::Or => InstKind::Or(lhs, rhs),
                 Bitwise::Xor => InstKind::Xor(lhs, rhs),
             };
-            let inner = push_temp(func, block, kind, Ty::Bool, loc.clone(), out);
+            let inner = push_temp(func, block, kind, Ty::Bool, loc, out);
             push_temp(func, block, InstKind::Zext(inner), ty, loc, out)
         }
         Plan::SignedPow2 { value, shift, remainder } => {
             let ty = func.values[result].ty.clone();
             let bits = int_ty_bits(&ty).expect("signed integer division");
-            let loc = func.insts[inst].loc.clone();
+            let loc = func.insts[inst].loc;
             let sign_amount = push_int_const(func, &ty, i128::from(bits - 1));
-            let sign = push_temp(func, block, InstKind::AShr(value, sign_amount), ty.clone(), loc.clone(), out);
+            let sign = push_temp(func, block, InstKind::AShr(value, sign_amount), ty.clone(), loc, out);
             let bias_amount = push_int_const(func, &ty, i128::from(bits - shift));
-            let bias = push_temp(func, block, InstKind::LShr(sign, bias_amount), ty.clone(), loc.clone(), out);
-            let adjusted = push_temp(func, block, InstKind::Add(value, bias), ty.clone(), loc.clone(), out);
+            let bias = push_temp(func, block, InstKind::LShr(sign, bias_amount), ty.clone(), loc, out);
+            let adjusted = push_temp(func, block, InstKind::Add(value, bias), ty.clone(), loc, out);
             let shift_amount = push_int_const(func, &ty, i128::from(shift));
-            let quotient = push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc.clone(), out);
+            let quotient = push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc, out);
             if remainder {
-                let scaled = push_temp(func, block, InstKind::Shl(quotient, shift_amount), ty.clone(), loc.clone(), out);
+                let scaled = push_temp(func, block, InstKind::Shl(quotient, shift_amount), ty.clone(), loc, out);
                 push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
             } else {
                 quotient

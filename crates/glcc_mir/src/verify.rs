@@ -36,11 +36,10 @@ pub fn verify_func(func: &Function) -> Vec<String> {
                     errors.push(format!("{}: inst {inst:?} bad operand", func.name));
                 }
             }
-            if let Some(result) = data.result {
-                if result.index() >= func.values.len() {
+            if let Some(result) = data.result
+                && result.index() >= func.values.len() {
                     errors.push(format!("{}: inst {inst:?} bad result", func.name));
                 }
-            }
             check_inst_types(func, *inst, &data.kind, &mut errors);
         }
         if let Some(term) = &block.term {
@@ -96,7 +95,7 @@ fn check_inst_types(func: &Function, inst: crate::ir::Inst, kind: &InstKind, err
         InstKind::Load { .. } | InstKind::Store { .. } => {}
         _ => {}
     }
-    let _ = matches!(term_ok(func), true);
+    let _ = term_ok(func);
 }
 
 fn term_ok(_func: &Function) -> bool {

@@ -403,13 +403,11 @@ pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Intern
         "warning" => Ok(ControlLine::Warning(tail.to_vec())),
         "embed" => Ok(ControlLine::Embed(tail.to_vec())),
         "pragma" => {
-            if tail_args.len() == 1 {
-                if let Some(n) = ident_name(tail_args[0], interner) {
-                    if n == "once" {
+            if tail_args.len() == 1
+                && let Some(n) = ident_name(tail_args[0], interner)
+                    && n == "once" {
                         return Ok(ControlLine::PragmaOnce);
                     }
-                }
-            }
             Ok(ControlLine::PragmaOther {
                 tokens: tail_args.iter().map(|t| (*t).clone()).collect(),
                 line,
@@ -437,8 +435,8 @@ fn parse_define(args: &[&Tok], tail: &[Tok], loc: &str, interner: &Interner) -> 
     // *immediately* after it (no whitespace token between) makes it
     // function-like.
     let name_idx = tail.iter().position(|t| matches!(t.tok, PpToken::Ident(_))).unwrap_or(usize::MAX);
-    if name_idx != usize::MAX {
-        if let Some(PpToken::Punct(Punctuator::LParen)) = tail.get(name_idx + 1).map(|t| &t.tok) {
+    if name_idx != usize::MAX
+        && let Some(PpToken::Punct(Punctuator::LParen)) = tail.get(name_idx + 1).map(|t| &t.tok) {
             // Function-like: collect to the matching `)`.
             let mut depth = 0u32;
             let mut j = name_idx + 1;
@@ -466,7 +464,6 @@ fn parse_define(args: &[&Tok], tail: &[Tok], loc: &str, interner: &Interner) -> 
                 replacement,
             });
         }
-    }
     Ok(ControlLine::DefineObject {
         macro_name,
         replacement: trim_ws_tokens(&tail[name_idx.saturating_add(1)..]),

@@ -232,11 +232,10 @@ impl Qualifier {
             .or_else(|| import.path.last().cloned())
             .ok_or_else(|| Diag::new("empty import path", import.span))?;
         let scope = &mut self.modules[module.index()];
-        if let Some(existing) = scope.imports.insert(alias.clone(), target) {
-            if existing != target {
+        if let Some(existing) = scope.imports.insert(alias.clone(), target)
+            && existing != target {
                 return Err(Diag::new(format!("import alias `{alias}` is already bound to another module"), import.span));
             }
-        }
         scope.imports.entry(import.path.join(".")).or_insert(target);
         Ok(())
     }
@@ -265,11 +264,10 @@ impl Qualifier {
                 Sort::Value => &mut scope.value_uses,
                 Sort::Ctor => &mut scope.ctor_uses,
             };
-            if let Some(existing) = map.insert(alias.clone(), canonical.clone()) {
-                if existing != canonical {
+            if let Some(existing) = map.insert(alias.clone(), canonical.clone())
+                && existing != canonical {
                     return Err(Diag::new(format!("`{alias}` is already imported"), use_decl.span));
                 }
-            }
         }
         Ok(())
     }

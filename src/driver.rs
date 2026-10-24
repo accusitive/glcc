@@ -227,11 +227,10 @@ fn push_msvc_link_arg(args: &mut Vec<OsString>, a: &OsStr) {
 /// puts it.
 fn glcc_runtime_candidates(name: &str) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(rt) = std::env::var_os("GLCC_RT") {
-        if !rt.is_empty() {
+    if let Some(rt) = std::env::var_os("GLCC_RT")
+        && !rt.is_empty() {
             out.push(PathBuf::from(rt));
         }
-    }
     if let Some(home) = home_dir() {
         out.push(home.join(".local/lib/glcc").join(name));
     }
@@ -244,11 +243,10 @@ fn glcc_runtime_candidates(name: &str) -> Vec<PathBuf> {
 /// system install location are tried.
 fn glcc_include_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(dir) = std::env::var_os("GLCC_INCLUDE") {
-        if !dir.is_empty() {
+    if let Some(dir) = std::env::var_os("GLCC_INCLUDE")
+        && !dir.is_empty() {
             out.push(PathBuf::from(dir));
         }
-    }
     if let Some(home) = home_dir() {
         out.push(home.join(".local/lib/glcc/include"));
     }
@@ -265,11 +263,10 @@ fn find_glcc_include_dir() -> Option<PathBuf> {
 /// the staged runtime is found on every host.
 fn home_dir() -> Option<PathBuf> {
     for key in ["HOME", "USERPROFILE"] {
-        if let Some(v) = std::env::var_os(key) {
-            if !v.is_empty() {
+        if let Some(v) = std::env::var_os(key)
+            && !v.is_empty() {
                 return Some(PathBuf::from(v));
             }
-        }
     }
     None
 }
@@ -445,7 +442,7 @@ impl ErrorFormat {
         match text {
             "human" => Ok(ErrorFormat::Human),
             "json" => Ok(ErrorFormat::Json),
-            _ => Err(format!("invalid argument to '--error-format' (expected 'human' or 'json')")),
+            _ => Err("invalid argument to '--error-format' (expected 'human' or 'json')".to_string()),
         }
     }
 }
@@ -874,13 +871,13 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                     match text.as_str() {
                         "native" => job.pp_native = Some(true),
                         "clang" => job.pp_native = Some(false),
-                        _ => return Err(format!("invalid argument to '--pp' (expected 'native' or 'clang')")),
+                        _ => return Err("invalid argument to '--pp' (expected 'native' or 'clang')".to_string()),
                     }
                 } else if let Some(rest) = s.strip_prefix("--pp=") {
                     match rest {
                         "native" => job.pp_native = Some(true),
                         "clang" => job.pp_native = Some(false),
-                        _ => return Err(format!("invalid argument to '--pp' (expected 'native' or 'clang')")),
+                        _ => return Err("invalid argument to '--pp' (expected 'native' or 'clang')".to_string()),
                     }
                 } else if s == "--error-format" {
                     let val = attached_or_next(args, &mut pos, s.len(), "--error-format")?;
@@ -912,11 +909,7 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                 } else if s.starts_with("-g") {
                     // Debug knobs: `-g` (any level but `-g0`) emits
                     // DWARF; `-g0` disables it again (last wins, like gcc).
-                    if s == "-g0" {
-                        job.debug = false;
-                    } else {
-                        job.debug = true;
-                    }
+                    job.debug = s != "-g0";
                 } else if let Some(rest) = s.strip_prefix("-Wl,") {
                     // Before `-W` below: `-Wl,...` starts with `-W`.
                     let _ = rest;
@@ -1482,11 +1475,10 @@ fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, 
 /// falls back to the link driver, which also handles `.S` (whose
 /// preprocessing step needs a full driver).
 fn assembler_for(job: &Job) -> Option<OsString> {
-    if let Some(as_) = std::env::var_os("GLCC_AS") {
-        if !as_.is_empty() {
+    if let Some(as_) = std::env::var_os("GLCC_AS")
+        && !as_.is_empty() {
             return Some(as_);
         }
-    }
     if job.target.is_native() {
         return tool_available("as").then(|| OsString::from("as"));
     }
@@ -1498,8 +1490,8 @@ fn assembler_for(job: &Job) -> Option<OsString> {
 /// `.S` to the link driver, whose preprocessor runs first.
 fn assemble_cmd(job: &Job, input: &OsStr, output: &Path) -> (OsString, Vec<OsString>) {
     let preprocessed = Path::new(input).extension().is_some_and(|e| e == "S");
-    if !preprocessed {
-        if let Some(prog) = assembler_for(job) {
+    if !preprocessed
+        && let Some(prog) = assembler_for(job) {
             let mut args = Vec::new();
             for p in &job.as_args {
                 // `-Wa,a,b` arrives comma-joined; the assembler wants
@@ -1513,7 +1505,6 @@ fn assemble_cmd(job: &Job, input: &OsStr, output: &Path) -> (OsString, Vec<OsStr
             args.push(input.to_os_string());
             return (prog, args);
         }
-    }
     let mut args = vec![OsString::from("-c")];
     args.extend(job.target_args());
     if preprocessed {
@@ -1625,11 +1616,10 @@ fn decide_artifact(job: &Job) -> std::result::Result<Artifact, String> {
         return Ok(Artifact::Relocatable);
     }
     if job.shared {
-        if let Some(o) = &job.output {
-            if o.as_encoded_bytes().ends_with(b".a") {
+        if let Some(o) = &job.output
+            && o.as_encoded_bytes().ends_with(b".a") {
                 return Err("cannot combine -shared with '.a' output".into());
             }
-        }
         return Ok(Artifact::Shared);
     }
     if let Some(o) = &job.output {
@@ -1769,11 +1759,10 @@ fn run_depgen(ctx: &Ctx, job: &Job, units: &[(OsString, Option<OsString>)]) -> O
         }
         let prog = preprocessor();
         let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run preprocessor: {e}")))?;
-        if let Some(out) = out {
-            if !out.status.success() {
+        if let Some(out) = out
+            && !out.status.success() {
                 return Err(fail(format!("dependency generation failed:\n{}", String::from_utf8_lossy(&out.stderr).trim_end())));
             }
-        }
         return Ok(());
     }
     for (input, obj) in units {
@@ -1815,11 +1804,10 @@ fn run_depgen(ctx: &Ctx, job: &Job, units: &[(OsString, Option<OsString>)]) -> O
         args.push(input.clone());
         let prog = preprocessor();
         let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run preprocessor: {e}")))?;
-        if let Some(out) = out {
-            if !out.status.success() {
+        if let Some(out) = out
+            && !out.status.success() {
                 return Err(fail(format!("dependency generation failed:\n{}", String::from_utf8_lossy(&out.stderr).trim_end())));
             }
-        }
     }
     Ok(())
 }
@@ -1862,9 +1850,9 @@ fn do_preprocess(ctx: &Ctx, job: &Job) -> Outcome<()> {
         if let OrderItem::Input(i) = item {
             let input = &job.inputs[*i];
             match input.lang {
-                Lang::Cpp | Lang::EdgC => match cpp_preprocess_text(job, input) {
-                    Ok(text) => combined.extend(text.into_bytes()),
-                    Err(e) => return Err(e),
+                Lang::Cpp | Lang::EdgC => {
+                    let text = cpp_preprocess_text(job, input)?;
+                    combined.extend(text.into_bytes())
                 },
                 _ => combined.extend(run_preprocess(ctx, job, &input.path)?),
             }
@@ -2123,11 +2111,10 @@ fn edg_scrape(root: &Path) -> Option<EdpScrape> {
 }
 
 fn resolve_edg_root() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("GLCPP_EDG") {
-        if !v.is_empty() {
+    if let Ok(v) = std::env::var("GLCPP_EDG")
+        && !v.is_empty() {
             return Some(PathBuf::from(v));
         }
-    }
     let from_manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("edg");
     if from_manifest.is_dir() {
         return Some(from_manifest);
@@ -2138,19 +2125,17 @@ fn resolve_edg_root() -> Option<PathBuf> {
 /// Directory holding `libC.a` for the C++ link: the baked-in staged
 /// path wins, then `$GLCPP_LIB_DIR`, then the install location.
 fn resolve_libc_dir() -> Option<PathBuf> {
-    if let Some(dir) = EDG_OPS.get().and_then(|ops| ops.libc_dir.as_ref()) {
-        if dir.join("libC.a").is_file() {
+    if let Some(dir) = EDG_OPS.get().and_then(|ops| ops.libc_dir.as_ref())
+        && dir.join("libC.a").is_file() {
             return Some(dir.clone());
         }
-    }
-    if let Ok(v) = std::env::var("GLCPP_LIB_DIR") {
-        if !v.is_empty() {
+    if let Ok(v) = std::env::var("GLCPP_LIB_DIR")
+        && !v.is_empty() {
             let dir = PathBuf::from(v);
             if dir.join("libC.a").is_file() {
                 return Some(dir);
             }
         }
-    }
     if let Some(home) = home_dir() {
         let dir = home.join(".local/lib/glcc");
         if dir.join("libC.a").is_file() {
@@ -2365,11 +2350,10 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
                 }
             };
             pairs.push((input.path.clone(), out));
-        } else if let OrderItem::LinkArg(a) = item {
-            if job.action == Action::Compile {
+        } else if let OrderItem::LinkArg(a) = item
+            && job.action == Action::Compile {
                 eprintln!("glcc: warning: '{}': linker input file unused because linking not done", Path::new(a).display());
             }
-        }
     }
     if ctx.dry_run {
         for item in &job.order {
@@ -2420,7 +2404,7 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
                     // file, which only exists persistently under `-c`;
                     // in link flow the objects are ephemeral, so temps
                     // fall back to the working directory.
-                    let obj_for_temps = (job.action == Action::Compile).then(|| out.as_path());
+                    let obj_for_temps = (job.action == Action::Compile).then_some(out.as_path());
                     let asm_text = match input.lang {
                         Lang::Cpp | Lang::EdgC => {
                             let scratch_ref = scratch.ok_or_else(|| fail("missing scratch for EDG compile"))?;
@@ -2782,13 +2766,11 @@ fn argv_target(argv: &[OsString]) -> Target {
             if let Some(t) = Target::from_name(rest) {
                 target = t;
             }
-        } else if s == "--target" {
-            if let Some(next) = it.next() {
-                if let Some(t) = Target::from_name(&next.to_string_lossy()) {
+        } else if s == "--target"
+            && let Some(next) = it.next()
+                && let Some(t) = Target::from_name(&next.to_string_lossy()) {
                     target = t;
                 }
-            }
-        }
     }
     target
 }

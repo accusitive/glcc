@@ -170,8 +170,8 @@ impl<'a> ArgumentSubstitution<'a> {
                 return Ok(Some(Vec::new()));
             }
         }
-        if !tok_is_ws(&tok) {
-            if let PpToken::Ident(sym) = tok.tok {
+        if !tok_is_ws(&tok)
+            && let PpToken::Ident(sym) = tok.tok {
                 let name = self.interner.resolve(sym).unwrap_or("");
                 if self.is_variadic && name == "__VA_OPT__" {
                     self.pos += 1;
@@ -197,7 +197,6 @@ impl<'a> ArgumentSubstitution<'a> {
                     return Ok(Some(Vec::new()));
                 }
             }
-        }
         self.pos += 1;
         // Right operand of an open paste chain.
         if self.glue_open {

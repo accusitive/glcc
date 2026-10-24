@@ -496,7 +496,7 @@ impl<'a> Sema<'a> {
         self.scopes.scopes.push(Scope::default());
     }
     pub fn pop_scope(&mut self) {
-        assert!(self.scopes.scopes.len() > 0);
+        assert!(!self.scopes.scopes.is_empty());
         self.scopes.scopes.pop();
     }
     // Record `name` in the current scope, merging with a prior
@@ -541,11 +541,10 @@ impl<'a> Sema<'a> {
         // `typedef`) conflicts — gcc's "extern declaration follows
         // declaration with no linkage" and "redeclared as different
         // kind of symbol".
-        if let Some(current) = self.lookup_symbol_in_current_scope(name) {
-            if self.decls[current.0 as usize].linkage == Linkage::NoLinkage {
+        if let Some(current) = self.lookup_symbol_in_current_scope(name)
+            && self.decls[current.0 as usize].linkage == Linkage::NoLinkage {
                 return Err(CompileError::new("conflicting redeclaration", binding.span).with_secondary(self.decls[current.0 as usize].span, "previously declared here"));
             }
-        }
         if let Some(existing) = self.lookup_visible_with_linkage(name) {
             let prev = &self.decls[existing.0 as usize];
             if prev.kind != binding.kind {
@@ -681,11 +680,10 @@ impl<'a> Sema<'a> {
     /// past a shadowing local.
     pub fn lookup_visible_with_linkage(&self, sym: SymbolU32) -> Option<DeclId> {
         for scope in self.scopes.iter() {
-            if let Some(&id) = scope.ordinary.get(&sym) {
-                if self.decls[id.0 as usize].linkage != Linkage::NoLinkage {
+            if let Some(&id) = scope.ordinary.get(&sym)
+                && self.decls[id.0 as usize].linkage != Linkage::NoLinkage {
                     return Some(id);
                 }
-            }
         }
         None
     }
@@ -1167,9 +1165,9 @@ pub fn string_contents(parts: &[StringLiteral], interner: &Interner) -> Option<S
 fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits: &mut HashMap<DeclId, Initializer<'a>>, map: &HashMap<DeclId, DeclId>) -> CheckedExpr<'a> {
     let kind = match &expr.kind {
         CheckedExprKind::Ident(id) => CheckedExprKind::Ident(map.get(id).copied().unwrap_or(*id)),
-        CheckedExprKind::Int(lit) => CheckedExprKind::Int(lit.clone()),
-        CheckedExprKind::Float(lit) => CheckedExprKind::Float(lit.clone()),
-        CheckedExprKind::Char(lit) => CheckedExprKind::Char(lit.clone()),
+        CheckedExprKind::Int(lit) => CheckedExprKind::Int(*lit),
+        CheckedExprKind::Float(lit) => CheckedExprKind::Float(*lit),
+        CheckedExprKind::Char(lit) => CheckedExprKind::Char(*lit),
         CheckedExprKind::Str(parts) => CheckedExprKind::Str(parts),
         CheckedExprKind::ConstantP(value) => CheckedExprKind::ConstantP(*value),
         CheckedExprKind::ClassifyType(code) => CheckedExprKind::ClassifyType(*code),

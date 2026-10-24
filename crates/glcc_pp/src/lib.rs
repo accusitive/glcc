@@ -125,13 +125,11 @@ struct Seed {
 fn seed(triple: Option<&str>, std_flag: Option<&str>) -> Seed {
     static CACHE: std::sync::Mutex<Option<(String, Seed)>> = std::sync::Mutex::new(None);
     let key = format!("{}|{}", triple.unwrap_or(""), std_flag.unwrap_or(""));
-    if let Ok(cache) = CACHE.lock() {
-        if let Some((k, v)) = cache.as_ref() {
-            if *k == key {
+    if let Ok(cache) = CACHE.lock()
+        && let Some((k, v)) = cache.as_ref()
+            && *k == key {
                 return v.clone();
             }
-        }
-    }
     let got = clang_seed(triple, std_flag).unwrap_or_else(|| Seed {
         predefined: fallback_predefines(triple),
         includes: fallback_include_paths(triple),
@@ -806,11 +804,10 @@ impl Ctx {
             }
         }
         for (i, p) in self.opts.include_paths.iter().enumerate() {
-            if let Some(s) = start {
-                if i < s {
+            if let Some(s) = start
+                && i < s {
                     continue;
                 }
-            }
             if matches!(after, Some(FoundKind::QuoterDir)) && p == dir {
                 continue;
             }
@@ -979,7 +976,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
 
     let main_path = PathBuf::from(filename);
     let main_dir = main_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
-    let main_display = interner.get_or_intern(filename.to_string());
+    let main_display = interner.get_or_intern(filename);
     // `-include` files come first, as if included at line 1.
     for pre in opts.preincludes.clone() {
         let (target, found) = ctx
@@ -1042,7 +1039,7 @@ fn seed_macros(pairs: &[(String, String)], filename: &str, interner: &mut Intern
         let text = if rep.is_empty() { format!("define {name}") } else { format!("define {name} {rep}") };
         let mut lexer = Lexer::new(&text, interner);
         let toks = lexer.lex_pp_all();
-        let file = interner.get_or_intern(filename.to_string());
+        let file = interner.get_or_intern(filename);
         let rest: Vec<Tok> = toks.into_iter().map(|t| Tok::from_pp(&t, file, false, false)).collect();
         let control = parse_control_line(&rest, filename, 1, interner)?;
         match control {

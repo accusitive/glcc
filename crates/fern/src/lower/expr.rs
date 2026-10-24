@@ -85,12 +85,12 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let bytes = self.iconst(64, layout.cell_size as i128);
         let cell = self.call_alloc(bytes)?;
         let tag = self.iconst(32, ctor as i128);
-        self.store(cell.clone(), tag)?;
-        let mark = self.hold(cell.clone())?;
-        let base = self.offset_addr(cell.clone(), layout.payload_offsets[ctor])?;
+        self.store(cell, tag)?;
+        let mark = self.hold(cell)?;
+        let base = self.offset_addr(cell, layout.payload_offsets[ctor])?;
         for (i, a) in args.iter().enumerate() {
             let value = self.expr(a)?;
-            let dst = self.offset_addr(base.clone(), layout.field_offsets[ctor][i])?;
+            let dst = self.offset_addr(base, layout.field_offsets[ctor][i])?;
             self.store(dst, value)?;
         }
         self.release(mark)?;
@@ -100,7 +100,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// Read a named record field from its constructor payload.
     fn field_expr(&mut self, e: &HirExpr, base: &HirExpr, index: usize) -> KResult<mir::Value> {
         let cell = self.expr(base)?;
-        let mark = self.hold(cell.clone())?;
+        let mark = self.hold(cell)?;
         let ty = base.ty.substitute(&self.sub);
         let layout = self.lw.types.data_layout(&ty, base.span)?;
         let payload = self.offset_addr(cell, layout.payload_offsets[0])?;
@@ -116,10 +116,10 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// function's residual and branches to its shared return block.
     fn try_expr(&mut self, e: &HirExpr, value: &HirExpr, ok_ctor: usize, residual: TryResidual) -> KResult<mir::Value> {
         let cell = self.expr(value)?;
-        let mark = self.hold(cell.clone())?;
+        let mark = self.hold(cell)?;
         let src = value.ty.substitute(&self.sub);
         let layout = self.lw.types.data_layout(&src, value.span)?;
-        let tag = self.load(cell.clone(), &mir::Ty::int(32))?;
+        let tag = self.load(cell, &mir::Ty::int(32))?;
         let want = self.iconst(32, ok_ctor as i128);
         let ok = self.emit(
             mir::InstKind::Icmp {
@@ -141,19 +141,19 @@ impl<'l, 'd> FnCtx<'l, 'd> {
 
         self.goto(failure);
         let residual = match residual {
-            TryResidual::Reuse => cell.clone(),
+            TryResidual::Reuse => cell,
             TryResidual::Rebuild { err_ctor, ret_err_ctor } => {
                 let src_err = layout.payload_offsets[err_ctor] + layout.field_offsets[err_ctor][0];
-                let src_addr = self.offset_addr(cell.clone(), src_err)?;
+                let src_addr = self.offset_addr(cell, src_err)?;
                 let err_ty = layout.field_tys[err_ctor][0].clone();
                 let ret_ty = self.return_ty.substitute(&self.sub);
                 let ret_layout = self.lw.types.data_layout(&ret_ty, e.span)?;
                 let out = self.alloc_cell(ret_layout.cell_size)?;
                 let ret_tag = self.iconst(32, ret_err_ctor as i128);
-                self.store(out.clone(), ret_tag)?;
+                self.store(out, ret_tag)?;
                 let err = self.load(src_addr, &err_ty)?;
                 let dst = ret_layout.payload_offsets[ret_err_ctor] + ret_layout.field_offsets[ret_err_ctor][0];
-                let dst = self.offset_addr(out.clone(), dst)?;
+                let dst = self.offset_addr(out, dst)?;
                 self.store(dst, err)?;
                 out
             }
@@ -227,7 +227,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         self.store(cell, code)?;
         for (i, &outer) in captures.iter().enumerate() {
             let src = self.read_local(outer)?;
-            let dst = self.offset_addr(cell.clone(), env.offsets[i])?;
+            let dst = self.offset_addr(cell, env.offsets[i])?;
             self.store(dst, src)?;
         }
         Ok(cell)
@@ -249,19 +249,18 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         for (i, a) in args.iter().enumerate() {
             let value = self.expr(a)?;
             if i + 1 < args.len() {
-                self.hold(value.clone())?;
+                self.hold(value)?;
             }
             values.push(value);
         }
-        if tail && self.self_func == Some(callee) {
-            if let Some(head) = self.loop_head {
+        if tail && self.self_func == Some(callee)
+            && let Some(head) = self.loop_head {
                 self.release(mark)?;
                 self.branch(head, values);
                 // The block has terminated; callers only use this value
                 // when the expression did not diverge.
                 return Ok(self.iconst(64, 0));
             }
-        }
         let ret = self.ty_of(&e.ty, e.span)?;
         let call = self.emit(mir::InstKind::Call { callee, args: values.into() }, ret);
         self.release(mark)?;
@@ -277,7 +276,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         let mut values = Vec::with_capacity(args.len());
         for a in args {
             let value = self.expr(a)?;
-            self.hold(value.clone())?;
+            self.hold(value)?;
             values.push(value);
         }
         let ret = self.ty_of(&e.ty, e.span)?;
@@ -291,15 +290,15 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     fn call_indirect(&mut self, callee: &HirExpr, args: &[HirExpr], e: &HirExpr) -> KResult<mir::Value> {
         let cell = self.expr(callee)?;
         let ptr = mir::Ty::ptr(mir::Ty::Void);
-        let code = self.load(cell.clone(), &ptr)?;
+        let code = self.load(cell, &ptr)?;
         let mark = self.mark();
-        self.hold(cell.clone())?;
+        self.hold(cell)?;
         let mut values: Vec<mir::Value> = vec![cell];
         let mut param_tys: Vec<mir::Ty> = vec![ptr];
         for (i, a) in args.iter().enumerate() {
             let value = self.expr(a)?;
             if i + 1 < args.len() {
-                self.hold(value.clone())?;
+                self.hold(value)?;
             }
             values.push(value);
             param_tys.push(self.ty_of(&a.ty, a.span)?);
@@ -326,10 +325,10 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         }
         let layout = self.lw.types.tuple_layout(&e.ty.substitute(&self.sub), e.span)?;
         let cell = self.alloc_cell(layout.cell_size)?;
-        let mark = self.hold(cell.clone())?;
+        let mark = self.hold(cell)?;
         for (i, a) in args.iter().enumerate() {
             let value = self.expr(a)?;
-            let dst = self.offset_addr(cell.clone(), layout.offsets[i])?;
+            let dst = self.offset_addr(cell, layout.offsets[i])?;
             self.store(dst, value)?;
         }
         self.release(mark)?;
@@ -383,7 +382,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// unreachable (the checker does not prove exhaustiveness).
     fn match_expr(&mut self, e: &HirExpr, scrutinee: &HirExpr, arms: &[HirArm], tail: bool) -> KResult<mir::Value> {
         let scrut = self.expr(scrutinee)?;
-        let mark = self.hold(scrut.clone())?;
+        let mark = self.hold(scrut)?;
         let ret = self.ty_of(&e.ty, e.span)?;
         let join = self.new_block(vec![ret]);
         let tests: Vec<mir::Block> = arms.iter().map(|_| self.new_block(Vec::new())).collect();
@@ -393,7 +392,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
         for (i, arm) in arms.iter().enumerate() {
             self.goto(tests[i]);
             let fail = if i + 1 < arms.len() { tests[i + 1] } else { dead };
-            self.bind_pattern(&arm.pattern, scrut.clone(), fail)?;
+            self.bind_pattern(&arm.pattern, scrut, fail)?;
             if let Some(guard) = &arm.guard {
                 let g = self.expr(guard)?;
                 let body_block = self.new_block(Vec::new());
@@ -428,7 +427,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             return self.short_circuit(op, lhs, rhs, tail);
         }
         let l = self.expr(lhs)?;
-        let mark = self.hold(l.clone())?;
+        let mark = self.hold(l)?;
         let r = self.expr(rhs)?;
         self.release(mark)?;
         let operand = self.ty_of(&lhs.ty, lhs.span)?;

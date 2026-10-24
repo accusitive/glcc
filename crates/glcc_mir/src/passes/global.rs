@@ -60,11 +60,10 @@ impl ModulePass for GlobalConstProp {
                 let resolved = inst.result.and_then(|result| global_root(func, result, &addresses));
                 match &inst.kind {
                     InstKind::Load { addr, flags } => {
-                        if !flags.volatile {
-                            if let Some((global, offset)) = global_at(func, *addr, &addresses) {
+                        if !flags.volatile
+                            && let Some((global, offset)) = global_at(func, *addr, &addresses) {
                                 sites.push((func_id, inst_id, global, offset));
                             }
-                        }
                     }
                     InstKind::Store { addr, val, .. } => {
                         if let Some(global) = global_root(func, *addr, &addresses) {
@@ -531,11 +530,10 @@ fn global_addresses(func: &Function, resident: &[bool]) -> HashMap<Value, Global
         if !resident[id.index()] {
             continue;
         }
-        if let InstKind::GlobalAddr { global } = inst.kind {
-            if let Some(result) = inst.result {
+        if let InstKind::GlobalAddr { global } = inst.kind
+            && let Some(result) = inst.result {
                 addresses.insert(result, global);
             }
-        }
     }
     addresses
 }

@@ -341,11 +341,10 @@ impl InferCtx {
 /// Rebuilds a type from a head and arguments, folding back into the
 /// saturated `Named` form when the head is a type constructor.
 fn rebuild(head: Ty, args: Vec<Ty>) -> Ty {
-    if let Ty::Named { name, args: none } = &head {
-        if none.is_empty() {
+    if let Ty::Named { name, args: none } = &head
+        && none.is_empty() {
             return Ty::named(name, args);
         }
-    }
     let mut out = head;
     for arg in args {
         out = Ty::app(out, arg);

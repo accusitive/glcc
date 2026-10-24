@@ -251,5 +251,5 @@ pub(crate) fn struct_ty(fields: Vec<mir::Ty>) -> mir::Ty {
 }
 
 fn align_up(n: u64, align: u64) -> u64 {
-    (n + align - 1) / align * align
+    n.div_ceil(align) * align
 }

@@ -712,37 +712,37 @@ impl<'a, 'b> Parser<'a, 'b> {
         if self.failed() {
             return CheckedExpr::recover();
         }
-        self.unwrap_diag(self.sema.check_expr(expr, &self.intern))
+        self.unwrap_diag(self.sema.check_expr(expr, self.intern))
     }
     fn checked_condition(&self, expr: &Expr<'a>) -> CheckedExpr<'a> {
         if self.failed() {
             return CheckedExpr::recover();
         }
-        self.unwrap_diag(self.sema.check_condition(expr, &self.intern))
+        self.unwrap_diag(self.sema.check_condition(expr, self.intern))
     }
     fn checked_integer_expr(&self, expr: &Expr<'a>, what: &str) -> CheckedExpr<'a> {
         if self.failed() {
             return CheckedExpr::recover();
         }
-        self.unwrap_diag(self.sema.check_integer_expr(expr, &self.intern, what))
+        self.unwrap_diag(self.sema.check_integer_expr(expr, self.intern, what))
     }
     fn checked_asm_output(&self, expr: &Expr<'a>) -> CheckedExpr<'a> {
         if self.failed() {
             return CheckedExpr::recover();
         }
-        self.unwrap_diag(self.sema.check_asm_output(expr, &self.intern))
+        self.unwrap_diag(self.sema.check_asm_output(expr, self.intern))
     }
     fn checked_return(&self, ret: &Ty, expr: &Expr<'a>) -> CheckedExpr<'a> {
         if self.failed() {
             return CheckedExpr::recover();
         }
-        self.unwrap_diag(self.sema.check_return(ret, expr, &self.intern))
+        self.unwrap_diag(self.sema.check_return(ret, expr, self.intern))
     }
     fn checked_initializer(&self, target: &Ty, init: &Initializer<'a>) -> Initializer<'a> {
         if self.failed() {
             return Initializer::recover();
         }
-        self.unwrap_diag(self.sema.check_initializer(target, init, &self.intern))
+        self.unwrap_diag(self.sema.check_initializer(target, init, self.intern))
     }
     /// Record a located error and return a poison value for the
     /// enclosing construct.
@@ -1088,7 +1088,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let span = self.span_since(decl_start);
             match specifiers.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
+                    if self.sema.structs.get(id.0 as usize).is_none_or(|s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -1432,11 +1432,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut found = None;
         loop {
             for suffix in &d.direct.suffixes {
-                if let DirectSuffix::Function(f) = suffix {
-                    if !f.is_old_style {
+                if let DirectSuffix::Function(f) = suffix
+                    && !f.is_old_style {
                         found = Some(f);
                     }
-                }
             }
             match &d.direct.base {
                 DirectBase::Paren(inner) => d = inner,
@@ -1453,11 +1452,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut found = None;
         loop {
             for suffix in &d.direct.suffixes {
-                if let DirectSuffix::Function(f) = suffix {
-                    if f.is_old_style {
+                if let DirectSuffix::Function(f) = suffix
+                    && f.is_old_style {
                         found = Some(f);
                     }
-                }
             }
             match &d.direct.base {
                 DirectBase::Paren(inner) => d = inner,
@@ -1470,11 +1468,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut found: Option<*mut FunctionDeclarator> = None;
         loop {
             for suffix in &mut d.direct.suffixes {
-                if let DirectSuffix::Function(f) = suffix {
-                    if f.is_old_style {
+                if let DirectSuffix::Function(f) = suffix
+                    && f.is_old_style {
                         found = Some(f as *mut FunctionDeclarator);
                     }
-                }
             }
             match &mut d.direct.base {
                 DirectBase::Paren(inner) => d = inner,
@@ -1523,7 +1520,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let span = self.span_since(decl_start);
             match specs.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
+                    if self.sema.structs.get(id.0 as usize).is_none_or(|s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -1866,11 +1863,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.expect_punct(Punctuator::RParen);
         self.expect_punct(Punctuator::Semi);
         for input in &inputs {
-            if let Some(tie) = input.tie() {
-                if tie >= outputs.len() {
+            if let Some(tie) = input.tie()
+                && tie >= outputs.len() {
                     return self.fail(input.span, "asm operand number out of range");
                 }
-            }
         }
         for output in &outputs {
             if !output.constraint.starts_with('=') && !output.constraint.starts_with('+') {
@@ -2054,7 +2050,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         if parts.is_empty() {
             return self.fail(span, format!("expected string literal for asm {what}"));
         }
-        match crate::eval::string_bytes(&parts, &self.intern) {
+        match crate::eval::string_bytes(&parts, self.intern) {
             Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             None => self.fail(span, format!("invalid string literal for asm {what}")),
         }
@@ -2139,7 +2135,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     } else {
                         None
                     };
-                    fold_constant_if(&cond, &mut then, &mut els, &self.sema, &self.intern);
+                    fold_constant_if(&cond, &mut then, &mut els, self.sema, self.intern);
                     let span = self.span_since(start);
                     let stmt = Stmt::If {
                         cond,
@@ -2171,7 +2167,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     } else {
                         None
                     };
-                    fold_constant_if(&cond, &mut then, &mut els, &self.sema, &self.intern);
+                    fold_constant_if(&cond, &mut then, &mut els, self.sema, self.intern);
                     Stmt::If {
                         cond,
                         then: self.alloc(then),
@@ -2417,7 +2413,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // enumerator values).
                 let expr = self.parse_conditional_expression();
                 let checked = self.checked_expr(&expr);
-                if !matches!(crate::eval::eval_const(&checked, self.sema, &self.intern), Some(crate::eval::Value::Int(_))) {
+                if !matches!(crate::eval::eval_const(&checked, self.sema, self.intern), Some(crate::eval::Value::Int(_))) {
                     return self.fail(checked.span, "case label is not an integer constant expression");
                 }
                 // GNU `case lo ... hi:`: both bounds are integer
@@ -2426,7 +2422,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.tokens.advance();
                     let expr = self.parse_conditional_expression();
                     let checked = self.checked_expr(&expr);
-                    if !matches!(crate::eval::eval_const(&checked, self.sema, &self.intern), Some(crate::eval::Value::Int(_))) {
+                    if !matches!(crate::eval::eval_const(&checked, self.sema, self.intern), Some(crate::eval::Value::Int(_))) {
                         return self.fail(checked.span, "case range bound is not an integer constant expression");
                     }
                     Some(checked)
@@ -2478,7 +2474,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             None => {
                 let span = self.peek_span();
-                return self.fail(span, "unterminated statement");
+                self.fail(span, "unterminated statement")
             }
             _ => {
                 let expr = self.parse_expression();
@@ -2548,7 +2544,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         // contributes both endpoints (its interior is
                         // not compared, like GCC's overlap warning).
                         for label in core::iter::once(label).chain(hi.as_ref()) {
-                            if let Some(v) = crate::eval::const_as(promoted, label, self.sema, &self.intern) {
+                            if let Some(v) = crate::eval::const_as(promoted, label, self.sema, self.intern) {
                                 if let Some((_, prev)) = values.iter().find(|(u, _)| *u == v) {
                                     return self.fail_secondary(*span, "duplicate `case` value in `switch`", *prev, "previous `case` here");
                                 }
@@ -2752,12 +2748,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             Stmt::Break { span, .. } => {
                 if !ctx.in_loop && !ctx.in_switch {
-                    return self.fail(*span, "break statement not within loop or switch");
+                    self.fail(*span, "break statement not within loop or switch")
                 }
             }
             Stmt::Continue { span, .. } => {
                 if !ctx.in_loop {
-                    return self.fail(*span, "continue statement not within a loop");
+                    self.fail(*span, "continue statement not within a loop")
                 }
             }
             Stmt::Goto { label, span } => {
@@ -2805,7 +2801,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Initializer::Expr(expr) => self.check_flow_expr(expr, &mut Vec::new(), gotos, scope, fv),
             Initializer::List { items, .. } => {
                 for item in *items {
-                    self.check_flow_init(&item.init, gotos, scope, fv);
+                    self.check_flow_init(item.init, gotos, scope, fv);
                 }
             }
         }
@@ -3678,7 +3674,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let span = self.span_since(decl_start);
             match specifiers.type_specifier.as_slice() {
                 [TypeSpecifier::Struct(id)] => {
-                    if self.sema.structs.get(id.0 as usize).map_or(true, |s| s.tag.is_none()) {
+                    if self.sema.structs.get(id.0 as usize).is_none_or(|s| s.tag.is_none()) {
                         return self.fail(span, "declaration does not declare anything");
                     }
                 }
@@ -3755,7 +3751,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 if specifiers.type_qualifier.contains(TypeQualifiers::RESTRICT) && !matches!(ty, Ty::Pointer { .. }) {
                     return self.fail(specifiers.span, "invalid use of 'restrict'");
                 }
-                ty = Ty::qualified(specifiers.type_qualifier.clone(), ty);
+                ty = Ty::qualified(specifiers.type_qualifier, ty);
                 inferred_init = Some(init);
                 ty
             } else {
@@ -3800,8 +3796,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 if specifiers.constexpr {
                     let value = match &checked {
                         Initializer::Expr(expr) => {
-                            let value = crate::eval::eval_static_init(expr, self.sema, &self.intern);
-                            if value.is_none() && !crate::eval::is_constant_initializer(expr, self.sema, &self.intern) {
+                            let value = crate::eval::eval_static_init(expr, self.sema, self.intern);
+                            if value.is_none() && !crate::eval::is_constant_initializer(expr, self.sema, self.intern) {
                                 self.fail::<()>(specifiers.span.merge(declarator.span()), "`constexpr` initializer is not a constant expression");
                             }
                             value
@@ -3827,13 +3823,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // file scope, where statement expressions cannot
                 // appear, so there is nothing to visit. (The clone
                 // dodges a borrow of `self` against the map below.)
-                if self.function_return.is_some() {
-                    if let Some(init) = self.sema.inits.get(&id).cloned() {
+                if self.function_return.is_some()
+                    && let Some(init) = self.sema.inits.get(&id).cloned() {
                         let mut pending = mem::take(&mut self.pending_gotos);
                         self.check_flow_init(&init, &mut pending, 0, &mut FlowVla::new());
                         self.pending_gotos = pending;
                     }
-                }
             }
             ids.push(id);
             if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
@@ -3878,7 +3873,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         let count: u64 = match init {
             Initializer::Expr(expr) => match &expr.kind {
-                CheckedExprKind::Str(parts) => match crate::eval::string_length(parts, &self.intern) {
+                CheckedExprKind::Str(parts) => match crate::eval::string_length(parts, self.intern) {
                     Some(len) => len.saturating_add(1),
                     None => return,
                 },
@@ -3897,7 +3892,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         match designator {
                             Designator::Index { index, .. } if !designated => {
                                 designated = true;
-                                match crate::eval::eval_const(index, self.sema, &self.intern) {
+                                match crate::eval::eval_const(index, self.sema, self.intern) {
                                     Some(crate::eval::Value::Int(n)) if n >= 0 => {
                                         pos = u64::try_from(n).unwrap_or(u64::MAX);
                                     }
@@ -3998,7 +3993,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             if linkage != Linkage::NoLinkage {
                 return self.fail(span, "variably modified object with linkage");
             }
-            if (block_static || specifiers.thread_local) && self.sema.is_vla_type(&ty, &self.intern) {
+            if (block_static || specifiers.thread_local) && self.sema.is_vla_type(&ty, self.intern) {
                 return self.fail(span, "variably modified object with static storage duration");
             }
         }
@@ -4094,8 +4089,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 span,
             },
         );
-        let id = self.unwrap_diag(declared);
-        id
+        
+        self.unwrap_diag(declared)
     }
     /// Linkage for one declaration (C17 §6.2.2): `typedef` never has
     /// any; `static` at file scope is internal (a block-scope `static`
@@ -4133,12 +4128,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             return self.fail(specifiers.span, "multiple storage class specifiers");
         }
         if specifiers.has_storage(StorageClass::Auto) || specifiers.has_storage(StorageClass::Register) {
-            return self.fail(specifiers.span, "`auto`/`register` at file scope");
+            self.fail(specifiers.span, "`auto`/`register` at file scope")
         }
     }
     fn check_specifiers_block_scope(&self, specifiers: &DeclarationSpecifiers) {
         if specifiers.class.len() > 1 {
-            return self.fail(specifiers.span, "multiple storage class specifiers");
+            self.fail(specifiers.span, "multiple storage class specifiers")
         }
     }
     /// `inline` and `_Noreturn` only declare functions (C17 §6.7.4p2).
@@ -4150,7 +4145,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             return self.fail(specifiers.span, "`inline` on non-function declaration");
         }
         if specifiers.is_noreturn() {
-            return self.fail(specifiers.span, "`_Noreturn` on non-function declaration");
+            self.fail(specifiers.span, "`_Noreturn` on non-function declaration")
         }
     }
     /// Whether a function declarator is followed by a body: `{`
@@ -4173,11 +4168,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut d = declarator;
         loop {
             for suf in d.direct.suffixes.iter() {
-                if let DirectSuffix::Function(f) = suf {
-                    if f.is_old_style {
+                if let DirectSuffix::Function(f) = suf
+                    && f.is_old_style {
                         return true;
                     }
-                }
             }
             match &d.direct.base {
                 DirectBase::Paren(inner) => d = inner,
@@ -4382,7 +4376,7 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     /// Fold a range designator bound: GNU requires an integer constant.
     fn fold_designator(&mut self, expr: &CheckedExpr<'a>) -> u64 {
-        match crate::eval::eval_const(expr, self.sema, &self.intern) {
+        match crate::eval::eval_const(expr, self.sema, self.intern) {
             Some(crate::eval::Value::Int(n)) if n >= 0 => u64::try_from(n).unwrap_or(u64::MAX),
             _ => self.fail(expr.span, "range designator bounds must be constant"),
         }
@@ -4530,14 +4524,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         loop {
             match self.tokens.peek().map(|x| &x.val) {
                 Some(Token::Punctuator(Punctuator::LBracket)) => {
-                    let open = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+                    let open = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
                     self.tokens.advance();
                     let mut suffix = self.parse_array_suffix();
                     suffix.span = open.merge(suffix.span);
                     suffixes.push(DirectSuffix::Array(suffix));
                 }
                 Some(Token::Punctuator(Punctuator::LParen)) => {
-                    let open = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+                    let open = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
                     self.tokens.advance();
                     let mut suffix = self.parse_function_suffix();
                     suffix.span = open.merge(suffix.span);
@@ -4553,7 +4547,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// `Sema::is_variably_modified`): a parser-side shorthand threading
     /// the interner.
     fn ty_is_variably_modified(&self, ty: &Ty) -> bool {
-        self.sema.is_variably_modified(ty, &self.intern)
+        self.sema.is_variably_modified(ty, self.intern)
     }
     pub fn parse_array_suffix(&mut self) -> ArrayDeclarator {
         // Entry is just past the consumed `[` (the caller merges its span
@@ -4564,20 +4558,17 @@ impl<'a, 'b> Parser<'a, 'b> {
         // `[*]`: a `*` closed immediately by `]` marks an unspecified
         // variable-length bound (C17 §6.7.6.2p2). Any other `*` (e.g. the
         // `*p` in `[ *p ]`) starts an assignment expression instead.
-        match (self.tokens.peek().map(|x| &x.val), self.tokens.peek_nth(1).map(|x| &x.val)) {
-            (Some(Token::Punctuator(Punctuator::Star)), Some(Token::Punctuator(Punctuator::RBracket))) => {
-                self.tokens.advance();
-                self.tokens.advance();
-                // `[*]` lives only in prototype scope (C17 §6.7.6p3).
-                if self.prototype_depth == 0 {
-                    let span = self.span_since(start);
-                    return self.fail(span, "`[*]` outside function prototype scope");
-                }
-                suffix.bound = Some(ArrayBound::Star);
-                suffix.span = self.span_since(start);
-                return suffix;
+        if let (Some(Token::Punctuator(Punctuator::Star)), Some(Token::Punctuator(Punctuator::RBracket))) = (self.tokens.peek().map(|x| &x.val), self.tokens.peek_nth(1).map(|x| &x.val)) {
+            self.tokens.advance();
+            self.tokens.advance();
+            // `[*]` lives only in prototype scope (C17 §6.7.6p3).
+            if self.prototype_depth == 0 {
+                let span = self.span_since(start);
+                return self.fail(span, "`[*]` outside function prototype scope");
             }
-            _ => {}
+            suffix.bound = Some(ArrayBound::Star);
+            suffix.span = self.span_since(start);
+            return suffix;
         }
         if matches!(self.tokens.peek().map(|x| &x.val), Some(Token::Keyword(Keyword::Static))) {
             self.tokens.advance();
@@ -4608,7 +4599,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // that does not fold is variable-length: its checked
                 // expression is retained in `Sema::vla_bounds` for
                 // runtime evaluation (allocation, `sizeof`, strides).
-                suffix.bound = Some(match crate::eval::eval_const(&bound, self.sema, &self.intern) {
+                suffix.bound = Some(match crate::eval::eval_const(&bound, self.sema, self.intern) {
                     Some(crate::eval::Value::Int(n)) if n < 0 => return self.fail(bound.span, "negative array bound"),
                     Some(crate::eval::Value::Int(n)) => ArrayBound::Fixed(u64::try_from(n).unwrap_or(u64::MAX)),
                     _ => {
@@ -5248,13 +5239,13 @@ impl<'a, 'b> Parser<'a, 'b> {
     // pointers to itself, and is completed afterwards. Without a body it
     // only references — or implicitly forward-declares — the tag.
     pub fn parse_struct_specifier(&mut self, is_union: bool) -> TypeSpecifier {
-        let kw_span = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+        let kw_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
         self.tokens.advance();
         // Prefix attributes (`struct __attribute__((packed)) S {...}`):
         // decoded effects apply to the definition below.
         let mut attrs = self.parse_gnu_annotations();
         let tag = if let Some(Located { val: Token::Identifier(s), .. }) = self.tokens.peek().copied() {
-            let tag_span = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+            let tag_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
             self.tokens.advance();
             Some((s, tag_span))
         } else {
@@ -5570,7 +5561,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.expect_punct(Punctuator::LParen);
         let arg = self.parse_assignment_expression();
         let checked = self.checked_expr(&arg);
-        let value = crate::eval::eval_const(&checked, self.sema, &self.intern);
+        let value = crate::eval::eval_const(&checked, self.sema, self.intern);
         let msg = if self.eat_punct(Punctuator::Comma) {
             let Some(Token::StringLiteral(lit)) = self.tokens.peek_val() else {
                 let span = self.peek_span();
@@ -5634,14 +5625,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.expect_punct(Punctuator::LParen);
         let n = if self.token_starts_type_name(self.tokens.peek().map(|t| &t.val)) {
             let ty = self.parse_type_name();
-            match self.sema.type_align(&ty, &self.intern) {
+            match self.sema.type_align(&ty, self.intern) {
                 Some(align) => align,
                 None => return self.fail(kw_span, "alignment of incomplete type requested"),
             }
         } else {
             let arg = self.parse_assignment_expression();
             let checked = self.checked_expr(&arg);
-            match crate::eval::eval_const(&checked, self.sema, &self.intern) {
+            match crate::eval::eval_const(&checked, self.sema, self.intern) {
                 Some(crate::eval::Value::Int(0)) => 0,
                 Some(crate::eval::Value::Int(n)) if n > 0 => u64::try_from(n).unwrap_or(u64::MAX),
                 _ => return self.fail(kw_span, "`_Alignas` needs an integer constant expression or a type name"),
@@ -5762,7 +5753,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     } else {
                         let arg = self.parse_assignment_expression();
                         let checked = self.checked_expr(&arg);
-                        match crate::eval::eval_const(&checked, self.sema, &self.intern) {
+                        match crate::eval::eval_const(&checked, self.sema, self.intern) {
                             Some(crate::eval::Value::Int(n)) if n >= 0 => u64::try_from(n).unwrap_or(u64::MAX),
                             _ => {
                                 return self.fail(name_span, format!("attribute `{normalized}` needs a non-negative integer constant"));
@@ -5779,7 +5770,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.tokens.advance();
                     let arg = self.parse_assignment_expression();
                     let checked = self.checked_expr(&arg);
-                    match crate::eval::eval_const(&checked, self.sema, &self.intern) {
+                    match crate::eval::eval_const(&checked, self.sema, self.intern) {
                         Some(crate::eval::Value::Int(n)) if n > 0 => {
                             let n = u64::try_from(n).unwrap_or(u64::MAX);
                             if n.is_power_of_two() {
@@ -5856,11 +5847,11 @@ impl<'a, 'b> Parser<'a, 'b> {
     // a body it only references — or implicitly forward-declares — the
     // tag, mirroring struct specifiers.
     pub fn parse_enum_specifier(&mut self) -> TypeSpecifier {
-        let kw_span = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+        let kw_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
         self.tokens.advance();
         self.skip_gnu_suffixes();
         let tag = if let Some(Located { val: Token::Identifier(s), .. }) = self.tokens.peek().copied() {
-            let tag_span = self.tokens.peek().map(|t| t.span()).unwrap_or(Span::dummy());
+            let tag_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
             self.tokens.advance();
             Some((s, tag_span))
         } else {
@@ -6029,7 +6020,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // their bindings, so each value is known when the next
             // parses.
             let const_value: i128 = match &value_expr {
-                Some(expr) => match crate::eval::eval_const(expr, self.sema, &self.intern) {
+                Some(expr) => match crate::eval::eval_const(expr, self.sema, self.intern) {
                     Some(crate::eval::Value::Int(v)) => v,
                     _ => {
                         return self.fail(span, "enumerator value is not an integer constant expression");
@@ -6197,7 +6188,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // stored expressions).
                 let mut bitfield = None;
                 if let Some(width) = &bitfield_expr {
-                    let folded = crate::eval::eval_const(width, self.sema, &self.intern);
+                    let folded = crate::eval::eval_const(width, self.sema, self.intern);
                     match folded {
                         Some(crate::eval::Value::Int(v)) => {
                             if v < 0 {
@@ -6688,8 +6679,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         // GNU label address (`&&label`): only a prefix form, so `a &&
         // b` still parses as logical and (the `&&` there is consumed
         // by the binary loop, never seen here).
-        if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::AmpAmp))) {
-            if let Some(Token::Identifier(label)) = self.tokens.peek_nth(1).map(|located| &located.val) {
+        if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::AmpAmp)))
+            && let Some(Token::Identifier(label)) = self.tokens.peek_nth(1).map(|located| &located.val) {
                 let label = *label;
                 self.tokens.advance();
                 self.tokens.advance();
@@ -6698,7 +6689,6 @@ impl<'a, 'b> Parser<'a, 'b> {
                     span: self.span_since(start),
                 };
             }
-        }
         if self.peek_is_static_assert_expression() {
             let span = self.parse_static_assert_condition();
             return Expr::StaticAssert { span };
@@ -6879,8 +6869,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // only): drop the call, keep the value. The other
                     // arguments are still evaluated, so they become
                     // comma operands: `(c, x)`.
-                    if matches!(&expr, Expr::Ident { name, .. } if self.intern.resolve(*name) == Some("__builtin_expect")) {
-                        if !args.is_empty() {
+                    if matches!(&expr, Expr::Ident { name, .. } if self.intern.resolve(*name) == Some("__builtin_expect"))
+                        && !args.is_empty() {
                             let mut value = args.remove(0);
                             for side in args.drain(..) {
                                 let span = side.span().merge(value.span());
@@ -6894,7 +6884,6 @@ impl<'a, 'b> Parser<'a, 'b> {
                             expr = value;
                             continue;
                         }
-                    }
                     // `__builtin_unreachable()` is abnormal termination
                     // if ever reached: `abort()`. A trap would do as
                     // well, but a call needs no block-terminator
@@ -6916,8 +6905,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // symbol the same way. Anything else keeps its callee
                     // below (and its clear "undeclared" error until a
                     // real lowering exists).
-                    if let Expr::Ident { name, .. } = &expr {
-                        if let Some(text) = self.intern.resolve(*name) {
+                    if let Expr::Ident { name, .. } = &expr
+                        && let Some(text) = self.intern.resolve(*name) {
                             let target = text
                                 .strip_prefix("__builtin_")
                                 .filter(|libc| Self::libc_prototype(libc, &self.sema.target.size_type()).is_some())
@@ -6934,7 +6923,6 @@ impl<'a, 'b> Parser<'a, 'b> {
                                 expr = Expr::Ident { name: id, span };
                             }
                         }
-                    }
                     // Implicit GCC builtins behind <stdarg.h> (`va_start`
                     // expands to `__builtin_va_start`, ...): declare on
                     // first call so the later check resolves. Anything
@@ -7215,8 +7203,8 @@ impl<'a, 'b> Parser<'a, 'b> {
         // like GCC rejects them there).
         if let Some(Token::Identifier(sym)) = self.tokens.peek_val() {
             let predefined = matches!(self.intern.resolve(*sym), Some("__func__" | "__FUNCTION__" | "__PRETTY_FUNCTION__"));
-            if predefined {
-                if let Some(func) = self.function_name {
+            if predefined
+                && let Some(func) = self.function_name {
                     let text = self.intern.resolve(func).unwrap_or("?").to_string();
                     let spelling = self.intern.get_or_intern(format!("\"{text}\""));
                     self.tokens.advance();
@@ -7228,7 +7216,6 @@ impl<'a, 'b> Parser<'a, 'b> {
                         span: self.span_since(start),
                     };
                 }
-            }
         }
         // A statement expression opens `({` — unambiguous, since
         // neither casts, calls, nor groupings start that way.
@@ -7240,14 +7227,14 @@ impl<'a, 'b> Parser<'a, 'b> {
         match self.tokens.peek_val() {
             Some(Token::Identifier(_)) => {
                 let (name, span) = match self.tokens.advance().map(|located| located.val) {
-                    Some(Token::Identifier(name)) => (name, self.tokens.prev().map(|t| t.span()).unwrap_or(Span::dummy())),
+                    Some(Token::Identifier(name)) => (name, self.tokens.prev().map(|t| t.span()).unwrap_or_default()),
                     _ => unreachable!("identifier peeked"),
                 };
                 Expr::Ident { name, span }
             }
             Some(Token::Constant(_)) => {
                 let (constant, span) = match self.tokens.advance().map(|located| located.val) {
-                    Some(Token::Constant(constant)) => (constant, self.tokens.prev().map(|t| t.span()).unwrap_or(Span::dummy())),
+                    Some(Token::Constant(constant)) => (constant, self.tokens.prev().map(|t| t.span()).unwrap_or_default()),
                     _ => unreachable!("constant peeked"),
                 };
                 match constant {
@@ -7276,7 +7263,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             _ => {
                 let span = self.peek_span();
-                return self.fail(span, format!("expected expression, got {:?}", self.tokens.peek().map(|located| &located.val)));
+                self.fail(span, format!("expected expression, got {:?}", self.tokens.peek().map(|located| &located.val)))
             }
         }
     }
@@ -7293,12 +7280,12 @@ impl<'a, 'b> Parser<'a, 'b> {
         // pointer (C17 §6.7.3.1p2): `restrict int *p` qualifies the
         // pointee and is rejected, while `typedef int *P; restrict P p`
         // merges into the pointer and stays legal.
-        let mut ty = Ty::qualified(specs.type_qualifier.clone(), base);
+        let mut ty = Ty::qualified(specs.type_qualifier, base);
         let mut d = decl;
         loop {
             for ptr in &d.pointer {
                 ty = Ty::Pointer {
-                    qualifiers: ptr.qualifiers.clone(),
+                    qualifiers: ptr.qualifiers,
                     size: ptr.size,
                     pointee: Box::new(ty),
                 };
@@ -7313,7 +7300,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         }
                         ty = Ty::Array {
                             elem: Box::new(ty),
-                            quals: a.qualifiers.clone(),
+                            quals: a.qualifiers,
                             // Bounds arrive already folded to a count
                             // (`Fixed`) or a VLA slot (`Vla`, indexing
                             // `Sema::vla_bounds`); no expression — and no
@@ -8868,12 +8855,11 @@ fn fold_constant_if<'a>(cond: &CheckedExpr<'a>, then: &mut Stmt<'a>, els: &mut O
             }
         }
         // The then arm is never taken; the else stays where it is.
-        Some(crate::eval::Value::Int(_)) => {
-            if !stmt_has_label(then) {
+        Some(crate::eval::Value::Int(_))
+            if !stmt_has_label(then) => {
                 let span = then.span();
                 *then = Stmt::Empty { span };
             }
-        }
         _ => {}
     }
 }
@@ -9049,7 +9035,7 @@ impl Ty {
             Ty::Array { elem, bound, .. } => Ty::Array {
                 elem: Box::new(elem.unqualified_owned()),
                 quals: TypeQualifiers::empty(),
-                bound: bound.clone(),
+                bound: *bound,
             },
             ty => ty.clone(),
         }

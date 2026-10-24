@@ -352,7 +352,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     /// Write a local's slot and, when it holds a pointer, mirror the
     /// value into the local's root slot.
     pub(super) fn write_local(&mut self, id: usize, val: mir::Value) -> KResult<()> {
-        self.store(self.slots[id], val.clone())?;
+        self.store(self.slots[id], val)?;
         if let Some(slot) = self.local_slots[id] {
             self.pin(slot, val)?;
         }
@@ -396,7 +396,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             HirPatKind::Tuple(fields) => {
                 let layout = self.lw.types.tuple_layout(&pat.ty.substitute(&self.sub), pat.span)?;
                 for (i, f) in fields.iter().enumerate() {
-                    let addr = self.offset_addr(value.clone(), layout.offsets[i])?;
+                    let addr = self.offset_addr(value, layout.offsets[i])?;
                     let v = self.load(addr, &layout.field_tys[i])?;
                     self.bind_pattern(f, v, fail)?;
                 }
@@ -404,7 +404,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
             }
             HirPatKind::Ctor { ctor, fields, .. } => {
                 let layout = self.lw.types.data_layout(&pat.ty.substitute(&self.sub), pat.span)?;
-                let tag = self.load(value.clone(), &mir::Ty::int(32))?;
+                let tag = self.load(value, &mir::Ty::int(32))?;
                 let want = self.iconst(32, *ctor as i128);
                 let cond = self.emit(
                     mir::InstKind::Icmp {
@@ -418,7 +418,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 let base = self.offset_addr(value, layout.payload_offsets[*ctor])?;
                 for (i, f) in fields.iter().enumerate() {
                     let fty = layout.field_tys[*ctor][i].clone();
-                    let addr = self.offset_addr(base.clone(), layout.field_offsets[*ctor][i])?;
+                    let addr = self.offset_addr(base, layout.field_offsets[*ctor][i])?;
                     let v = self.load(addr, &fty)?;
                     self.bind_pattern(f, v, fail)?;
                 }

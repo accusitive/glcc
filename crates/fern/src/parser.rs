@@ -980,15 +980,14 @@ impl Parser {
                 };
                 let upper = member.as_bytes()[0].is_ascii_uppercase();
                 let span = atom.span.to(self.prev_span());
-                if upper {
-                    if let Some(path) = expr_path(&atom) {
+                if upper
+                    && let Some(path) = expr_path(&atom) {
                         atom = Expr {
                             kind: ExprKind::Ctor { name: format!("{path}.{member}") },
                             span,
                         };
                         continue;
                     }
-                }
                 atom = Expr {
                     kind: ExprKind::Field {
                         base: Box::new(atom),

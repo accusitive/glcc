@@ -792,7 +792,6 @@ fn append_debug_sections(object: &mut Object, sections: Sections<DebugSection>, 
         debug_loclists,
         debug_str,
         debug_frame,
-        eh_frame: _,
         ..
     } = sections;
     // (gimli section, ELF name, contents). `.eh_frame` is owned by
