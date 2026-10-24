@@ -145,6 +145,8 @@ pub enum Fam {
     C23,
     /// GNU (or C23 for the standardized spelling).
     GnuOrC23,
+    /// GNU (or C2y for reserved spellings accepted there).
+    GnuOrC2y,
 }
 
 impl Fam {
@@ -156,6 +158,7 @@ impl Fam {
             Fam::C11 => lang.standard_includes(Std::C11),
             Fam::C23 => lang.standard_includes(Std::C23),
             Fam::GnuOrC23 => lang.gnu || lang.std.level() >= Std::C23.level(),
+            Fam::GnuOrC2y => lang.gnu || lang.std.level() >= Std::C2y.level(),
         }
     }
 }
@@ -169,6 +172,9 @@ pub fn spelling_family(word: &str) -> Fam {
         // accepting them liberally, and unchanged defaults (GNU on)
         // keep doing so.
         "thread_local" | "typeof" => Fam::GnuOrC23,
+        // GNU's `__auto_type` predates C23 `auto`; glcc accepts the
+        // reserved spelling in C2y too.
+        "__auto_type" => Fam::GnuOrC2y,
         "__int8" | "__int16" | "__int32" | "__int64" | "__declspec" | "_declspec" | "__pragma" | "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
         | "__clrcall" | "__forceinline" | "__ptr32" | "__ptr64" | "__unaligned" => Fam::Ms,
         "_Float32" | "_Float64" => Fam::Clang,

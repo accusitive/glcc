@@ -2110,6 +2110,14 @@ impl<'a> Sema<'a> {
                 })
             }
             Expr::Int { lit, .. } => {
+                // C2y's `0o`/`0O` octal spelling; GNU and clang accept
+                // it as an extension in older dialects.
+                if lit.radix == crate::lexer::Radix::Oct
+                    && interner.resolve(lit.spelling).is_some_and(|s| s.starts_with("0o") || s.starts_with("0O"))
+                    && !(self.lang.standard_includes(crate::lang::Std::C2y) || self.lang.gnu || self.lang.clang)
+                {
+                    return Err(CompileError::new("`0o` octal constants require C2y", span));
+                }
                 // The type comes from the value, not the suffix alone:
                 // decimal `3000000000` is `long`, hex `0xFFFFFFFF` is
                 // `unsigned int` (C17 §6.4.4.1). A GNU imaginary suffix
@@ -2510,10 +2518,11 @@ impl<'a> Sema<'a> {
                 if !is_scalar(&operand.ty) {
                     return Err(CompileError::new("operand of `++`/`--` must have scalar type", operand.span));
                 }
-                // Increment operands are real or pointer (C17
-                // §6.5.3.1p1): complex has no `++`/`--`.
-                if is_complex(&operand.ty) {
-                    return Err(CompileError::new("operand of `++`/`--` must have real or pointer type", operand.span));
+                // Increment operands are real, complex, or pointer
+                // (C17 §6.5.3.1p1; C2y adds complex, stepping the real
+                // part). GNU and clang accept complex as an extension.
+                if is_complex(&operand.ty) && !(self.lang.standard_includes(crate::lang::Std::C2y) || self.lang.gnu || self.lang.clang) {
+                    return Err(CompileError::new("increment or decrement of a complex operand requires C2y", operand.span));
                 }
                 let ty = operand.ty.clone();
                 Ok(CheckedExpr {

@@ -125,6 +125,9 @@ fn c23_language_probes() {
     }
     rejects("C2y _Countof", std, "int f(void) { int a[3]; return (int)_Countof(a); }\n");
     rejects("C2y expression static_assert", std, "int f(void) { return (static_assert(1), 5); }\n");
+    rejects("C2y 0o octal", std, "int x = 0o17;\n");
+    rejects("C2y complex increment", std, "int f(void) { double _Complex z = 1.0; z++; return 0; }\n");
+    rejects("C2y __auto_type", std, "int f(void) { __auto_type x = 1; return x; }\n");
 }
 
 #[test]
@@ -141,6 +144,11 @@ fn c2y_language_probes() {
         ("delimited UCN identifier", "int \\u{e9} = 1;\n"),
         ("bit-precise enum", "enum E : _BitInt(5) { A = 1 };\n"),
         ("expression static_assert", "int f(void) { return (static_assert(1), 5); }\n"),
+        ("0o octal literal", "int f(void) { return 0o17; }\n"),
+        ("0O octal literal", "int f(void) { return 0O17; }\n"),
+        ("octal digit separator", "int f(void) { return 0o1'7; }\n"),
+        ("complex increment", "int f(void) { double _Complex z = 1.0; z++; --z; return (int)__real__ z; }\n"),
+        ("__auto_type", "int f(void) { __auto_type x = 1; return x; }\n"),
     ] {
         accepts(name, std, src);
     }

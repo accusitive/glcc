@@ -355,7 +355,14 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
     let (text, radix) = match lit.radix {
         crate::lexer::Radix::Dec => (digits, 10),
         crate::lexer::Radix::Hex => (digits.strip_prefix("0x").or_else(|| digits.strip_prefix("0X"))?, 16),
-        crate::lexer::Radix::Oct => (digits.strip_prefix('0').unwrap_or(digits), 8),
+        crate::lexer::Radix::Oct => (
+            digits
+                .strip_prefix("0o")
+                .or_else(|| digits.strip_prefix("0O"))
+                .or_else(|| digits.strip_prefix('0'))
+                .unwrap_or(digits),
+            8,
+        ),
         crate::lexer::Radix::Bin => (digits.strip_prefix("0b").or_else(|| digits.strip_prefix("0B"))?, 2),
     };
     let text = if text.is_empty() { "0" } else { text };

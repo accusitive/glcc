@@ -2667,25 +2667,23 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             cur
                         };
                     }
+                    if is_complex(&inner.ty) {
+                        // C2y `++`/`--` on a complex lvalue steps the
+                        // real part by one and leaves the imaginary part
+                        // untouched.
+                        let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner, &self.sema.decls));
+                        let comp_fe = complex_component(&inner.ty);
+                        let comp_mir = lower_ty(&comp_fe, self.sema, self.interner);
+                        let re = self.complex_extract(func, frame, cur, &inner.ty, 0);
+                        let im = self.complex_extract(func, frame, cur, &inner.ty, 1);
+                        let one = self.one_value(func, &comp_mir);
+                        let next_re = self.complex_add(func, frame, re, one, &comp_mir, matches!(op, PreInc | PostInc));
+                        let next = self.complex_build(func, frame, &inner.ty, next_re, im);
+                        self.store(func, frame, addr, next, access_volatile(inner, &self.sema.decls));
+                        return if matches!(op, PreInc | PreDec) { next } else { cur };
+                    }
                     let cur = self.load(func, frame, addr, inner_ty.clone(), access_volatile(inner, &self.sema.decls));
-                    let one = match &inner_ty {
-                        mir::Ty::Float(_) => {
-                            // 1.0 at the operand width: long double uses
-                            // the target representation (f80 bytes or
-                            // quad bits) through the shared const fold.
-                            let bits = match float_kind(&inner_ty) {
-                                mir::FloatKind::F32 => u128::from(1.0f32.to_bits()),
-                                mir::FloatKind::F64 => u128::from(1.0f64.to_bits()),
-                                mir::FloatKind::F80 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F80), &inner_ty),
-                                mir::FloatKind::F128 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F128), &inner_ty),
-                            };
-                            func.push_const(mir::Const::Float {
-                                kind: float_kind(&inner_ty),
-                                bits,
-                            })
-                        }
-                        _ => self.iconst(func, int_bits(&inner_ty), 1),
-                    };
+                    let one = self.one_value(func, &inner_ty);
                     let kind = match (op, &inner_ty) {
                         (PreInc | PostInc, mir::Ty::Float(_)) => mir::InstKind::FAdd(cur, one),
                         (PreDec | PostDec, mir::Ty::Float(_)) => mir::InstKind::FSub(cur, one),
@@ -6812,6 +6810,28 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         self.emit(func, frame, mir::InstKind::InsertValue { agg: with_re, elem: im, index: 1 }, pair)
     }
 
+    /// The constant one at a scalar type's width: `1` for integers,
+    /// `1.0` for floats (long double uses the target representation
+    /// through the shared const fold). Complex increments step their
+    /// real component with this.
+    fn one_value(&self, func: &mut mir::Function, ty: &mir::Ty) -> mir::Value {
+        match ty {
+            mir::Ty::Float(_) => {
+                let bits = match float_kind(ty) {
+                    mir::FloatKind::F32 => u128::from(1.0f32.to_bits()),
+                    mir::FloatKind::F64 => u128::from(1.0f64.to_bits()),
+                    mir::FloatKind::F80 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F80), ty),
+                    mir::FloatKind::F128 => float_bits(fe::eval::FloatValue::long_double_one_in(fe::target::LongDoubleKind::F128), ty),
+                };
+                func.push_const(mir::Const::Float {
+                    kind: float_kind(ty),
+                    bits,
+                })
+            }
+            _ => self.iconst(func, int_bits(ty), 1),
+        }
+    }
+
     /// The zero of a complex component type: integer zero, or
     /// floating `+0.0` in the component's precision (all-zero bits,
     /// which is `+0.0` for every supported float representation).
@@ -10905,6 +10925,60 @@ mod tests {
                            + 8 * _Generic((enum E)0, enum E: 1, default: 0);\n\
                    }";
         assert_eq!(jit_run_main(lower_module_c2y(src)), 15);
+    }
+
+    #[test]
+    fn c2y_octal_literals_lower() {
+        assert_eq!(jit_run_main(lower_module_c2y("int main(void) { return 0o17 + 0O10; }")), 23);
+        assert_eq!(jit_run_main(lower_module_c2y("int main(void) { return 0o1'7; }")), 15);
+    }
+
+    #[test]
+    fn c2y_complex_increment_decrement_lower() {
+        // Each step changes only the real part.
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) { double _Complex z = 1.0 + 2.0i; ++z; z++; --z; return (int)(__real__ z * 10 + __imag__ z); }"
+            )),
+            22
+        );
+        // Postfix yields the old value; prefix yields the new one.
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) {\n\
+                     double _Complex z = 1.0 + 2.0i;\n\
+                     double _Complex old = z++;\n\
+                     return (int)(__real__ old * 10 + __imag__ old)\n\
+                         + (int)(__real__ ++z * 10 + __imag__ z);\n\
+                 }"
+            )),
+            44
+        );
+        // Integer and single-precision components step at their own
+        // width.
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) { int _Complex z = 1 + 2i; ++z; return (int)(__real__ z * 10 + __imag__ z); }"
+            )),
+            22
+        );
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void) { float _Complex z = 1.0f + 2.0fi; --z; return (int)(__real__ z * 10 + __imag__ z); }"
+            )),
+            2
+        );
+    }
+
+    #[test]
+    fn gnu_auto_type_lowers() {
+        assert_eq!(jit_run_main(lower_module("int main(void) { __auto_type x = 7; return x; }")), 7);
+        assert_eq!(
+            jit_run_main(lower_module(
+                "int main(void) { int a[3] = {1, 2, 3}; __auto_type p = a; return p[2]; }"
+            )),
+            3
+        );
     }
 
     #[test]

@@ -46,8 +46,10 @@ the conformance plan have since landed:
 * Digraphs and trigraphs work; `<tgmath.h>` is glcc-owned and works in
   C99 and later.
 * C2y `_Countof`, selection declarations, named loops, `_Generic` type
-  operands, delimited escapes, bit-precise enums, and expression
-  `static_assert` are implemented.
+  operands, delimited escapes, bit-precise enums, expression
+  `static_assert`, `0o` octal literals, and complex `++`/`--` are
+  implemented.
+* GNU `__auto_type` is accepted in GNU modes and in C2y.
 * `-pedantic-errors` rejects implicit `int` and implicit function
   declarations in C99 and later; the permissive default keeps the old
   warning-only behavior.

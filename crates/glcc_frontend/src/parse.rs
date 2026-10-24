@@ -3187,6 +3187,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         | "_Float64"
                         | "__complex__"
                         | "__complex"
+                        | "__auto_type"
                         | "typeof"
                         | "__typeof__"
                         | "__typeof"
@@ -5103,6 +5104,13 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             // C23 `auto` is a type specifier, not a storage class.
             if self.sema.lang.standard_includes(Std::C23) && matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::Auto))) {
+                ds.auto_infer = true;
+                self.tokens.advance();
+                continue;
+            }
+            // GNU `__auto_type` (also accepted in C2y): the same
+            // inference from a single initialized declarator.
+            if ds.type_specifier.is_empty() && self.peek_is_gnu("__auto_type") {
                 ds.auto_infer = true;
                 self.tokens.advance();
                 continue;
@@ -7976,7 +7984,8 @@ pub struct DeclarationSpecifiers {
     /// Thread-local storage (`_Thread_local`, `__thread`,
     /// `thread_local`): combines with `static`/`extern` like GCC.
     pub(crate) thread_local: bool,
-    /// C23 `auto` as a type specifier: infer from the initializer.
+    /// C23 `auto` as a type specifier (and GNU `__auto_type`): infer
+    /// from the initializer.
     pub(crate) auto_infer: bool,
     /// C23 `constexpr`: the object is const and its initializer must be
     /// a constant expression.

@@ -348,6 +348,14 @@ fn c23_binary_literals_and_digit_separators() {
 }
 
 #[test]
+fn c2y_octal_literals() {
+    assert_eq!(
+        lex_raw("0o17 0O17 0o1'7 0o17u 0O777ll"),
+        ["i:0o17", "i:0O17", "i:0o17", "i:0o17u", "i:0O777ll"]
+    );
+}
+
+#[test]
 fn literal_metadata() {
     let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
@@ -3843,6 +3851,9 @@ fn int_literal_values() {
     assert_eq!(lit("3000000000", Radix::Dec, IntSuffix::None), Some((Long, 3_000_000_000)));
     assert_eq!(lit("0xFFFFFFFF", Radix::Hex, IntSuffix::None), Some((UnsignedInt, 0xFFFF_FFFF)));
     assert_eq!(lit("010", Radix::Oct, IntSuffix::None), Some((Int, 8)));
+    assert_eq!(lit("0o17", Radix::Oct, IntSuffix::None), Some((Int, 15)));
+    assert_eq!(lit("0O777", Radix::Oct, IntSuffix::None), Some((Int, 511)));
+    assert_eq!(lit("0o1010", Radix::Oct, IntSuffix::None), Some((Int, 520)));
     assert_eq!(lit("0b1010", Radix::Bin, IntSuffix::None), Some((Int, 10)));
     assert_eq!(lit("0B11111111", Radix::Bin, IntSuffix::None), Some((Int, 255)));
     assert_eq!(lit("1ull", Radix::Dec, IntSuffix::ULL), Some((UnsignedLongLong, 1)));
@@ -9247,6 +9258,9 @@ fn complex_types_check() {
     assert_eq!(check_with(&["double _Complex x;"], "~x").ty, c(Double));
     // Equality applies; everything else rejects complex operands.
     assert_eq!(check_with(&["double _Complex x;"], "x == x").ty, Int);
+    // `++`/`--` keep the complex type (C2y, and a GNU/clang extension).
+    assert_eq!(check_with(&["double _Complex x;"], "x++").ty, c(Double));
+    assert_eq!(check_with(&["double _Complex x;"], "--x").ty, c(Double));
     for (decls, expr) in [
         (vec!["double x;"], "__real__ x"),
         (vec!["double x;"], "__imag__ x"),
@@ -9254,7 +9268,6 @@ fn complex_types_check() {
         (vec!["double _Complex x;"], "x & x"),
         (vec!["double _Complex x;"], "x << 1"),
         (vec!["double _Complex x;"], "x < 2.0"),
-        (vec!["double _Complex x;"], "x++"),
         (vec!["int *p;"], "(double _Complex)p"),
         (vec!["double _Complex x;"], "(int *)x"),
         (vec!["double _Complex x;"], "x %= 2.0"),

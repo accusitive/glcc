@@ -1522,6 +1522,27 @@ impl<'a> Lexer<'a> {
             };
         }
 
+        // C2y octal (`0o17`): the `0o`/`0O` prefix, like C++.
+        if first == '0' && matches!(self.peek_char(0), Some('o') | Some('O')) {
+            self.bump_into(&mut buf);
+            self.lex_digit_run(&mut buf, |d| matches!(d, '0'..='7'));
+            let mut suffix = self.lex_int_suffix(&mut buf);
+            let imag = self.lex_imaginary_suffix();
+            if imag && suffix == IntSuffix::None {
+                suffix = self.lex_int_suffix(&mut buf);
+            }
+            return Located {
+                loc: start,
+                end: self.loc,
+                val: Token::Constant(Constant::Int(IntLiteral {
+                    spelling: self.intern.get_or_intern(buf),
+                    radix: Radix::Oct,
+                    suffix,
+                    imag,
+                })),
+            };
+        }
+
         // Hex integer or hex float.
         if first == '0' && matches!(self.peek_char(0), Some('x') | Some('X')) {
             self.bump_into(&mut buf);
