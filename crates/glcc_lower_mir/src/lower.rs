@@ -6621,23 +6621,18 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
             }
         }
-        let next = if designators.len() == 1 {
-            match &designators[0] {
-                fe::parse::Designator::Index { index, .. } => match fe::eval::eval_const(index, self.sema, self.interner) {
-                    Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
-                    _ => cursor,
-                },
-                des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. }) => {
-                    // Only exact when the field addresses this level;
-                    // nested paths keep the cursor (pathological).
-                    match (fe_ty.unqualified(), mir_ty) {
-                        (fe::parse::Ty::Struct(id), mir::Ty::Struct { .. }) => designated_member(self.sema, *id, des) as u64 + 1,
-                        _ => cursor,
-                    }
-                }
-            }
-        } else {
-            cursor
+        // A following bare item continues after the outermost member
+        // the chain names, however deep the rest of the path goes.
+        let next = match designators.first() {
+            Some(fe::parse::Designator::Index { index, .. }) => match fe::eval::eval_const(index, self.sema, self.interner) {
+                Some(fe::eval::Value::Int(k)) => (k as u64) + 1,
+                _ => cursor,
+            },
+            Some(des @ (fe::parse::Designator::Field { .. } | fe::parse::Designator::AnonField { .. })) => match (fe_ty.unqualified(), mir_ty) {
+                (fe::parse::Ty::Struct(id), mir::Ty::Struct { .. }) => designated_member(self.sema, *id, des) as u64 + 1,
+                _ => cursor,
+            },
+            None => cursor,
         };
         (off, fe, mi, next, bf)
     }
@@ -9424,6 +9419,37 @@ mod tests {
             run_main("struct I{int v;}; struct S{struct I i; int x:3;}; int main(){struct S s = {.i.v = 7, .x = 2}; return s.i.v + s.x;}"),
             9
         );
+    }
+
+    #[test]
+    fn anonymous_member_initializers_flatten() {
+        // Flat positional items descend through anonymous members in
+        // both locals and globals (C17 §6.7.9p20).
+        assert_eq!(
+            run_main("struct S{struct{int a,b;};int c;}; int main(){struct S s={5,6,7}; return s.a+s.b*10+s.c*100;}"),
+            765
+        );
+        assert_eq!(run_main("struct S{struct{int a,b;};int c;} s={5,6,7}; int main(){return s.a+s.b*10+s.c*100;}"), 765);
+        // Nested anonymous structs and array members in the same run.
+        assert_eq!(
+            run_main("struct S{struct{struct{int a;} i; int b[2];};int c;}; int main(){struct S s={1,2,3,4}; return s.i.a+s.b[0]*10+s.b[1]*100+s.c*1000;}"),
+            4321
+        );
+        assert_eq!(
+            run_main("struct S{struct{struct{int a;} i; int b[2];};int c;} s={1,2,3,4}; int main(){return s.i.a+s.b[0]*10+s.b[1]*100+s.c*1000;}"),
+            4321
+        );
+        // Braced members keep their own grouping, and flat items
+        // resume at the enclosing struct.
+        assert_eq!(
+            run_main("struct S{struct{int a,b;};int c;}; int main(){struct S s={{1,2},3}; return s.a+s.b*10+s.c*100;}"),
+            321
+        );
+        assert_eq!(run_main("struct S{struct{int a,b;};int c;} s={{1,2},3}; int main(){return s.a+s.b*10+s.c*100;}"), 321);
+        // An anonymous union stays one member: the next flat item
+        // initializes the following member, not another union field.
+        assert_eq!(run_main("struct S{union{int a;int b;};int c;}; int main(){struct S s={1,2}; return s.a*10+s.c;}"), 12);
+        assert_eq!(run_main("struct S{union{int a;int b;};int c;} s={1,2}; int main(){return s.a*10+s.c;}"), 12);
     }
 
     /// C text all the way to MIR verification, without executing:

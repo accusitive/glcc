@@ -1493,9 +1493,10 @@ impl<'a> Sema<'a> {
                             },
                             interner,
                         )?;
+                        let designators = self.alloc_slice(self.cursor_designators(id, &cursor, item.span));
                         self.advance_cursor(id, &mut cursor);
                         checked.push(InitItem {
-                            designators: &[],
+                            designators,
                             init: self.alloc(init),
                             span: item.span,
                         });
@@ -1504,9 +1505,10 @@ impl<'a> Sema<'a> {
                     }
                 }
                 let init = self.check_initializer(&member_ty, item.init, interner)?;
+                let designators = self.alloc_slice(self.cursor_designators(id, &cursor, item.span));
                 self.advance_cursor(id, &mut cursor);
                 checked.push(InitItem {
-                    designators: &[],
+                    designators,
                     init: self.alloc(init),
                     span: item.span,
                 });
@@ -1648,6 +1650,43 @@ impl<'a> Sema<'a> {
             found = Some(member);
         }
         found
+    }
+
+    /// Explicit member path for a positional item at `cursor`. The
+    /// backend addresses members positionally and does not descend
+    /// anonymous aggregates on its own, so bare items that land inside
+    /// one carry those hops as designators. Plain root members stay
+    /// bare: their position still covers them, and positional items
+    /// skip unnamed bit-fields.
+    fn cursor_designators(&self, root: StructId, cursor: &[usize], span: Span) -> Vec<Designator<'a>> {
+        if let [index] = cursor
+            && self.structs[root.0 as usize]
+                .members
+                .get(*index)
+                .is_some_and(|member| member.name.is_some() || member.bitfield.is_some())
+        {
+            return Vec::new();
+        }
+        let mut designators = Vec::with_capacity(cursor.len());
+        let mut id = root;
+        for (depth, &index) in cursor.iter().enumerate() {
+            let Some(member) = self.structs[id.0 as usize].members.get(index) else {
+                break;
+            };
+            if depth + 1 == cursor.len() {
+                designators.push(match member.name {
+                    Some(name) => Designator::Field { name, span },
+                    None => Designator::AnonField { index: index as u32, span },
+                });
+            } else {
+                designators.push(Designator::AnonField { index: index as u32, span });
+                let Ty::Struct(next) = member.ty.unqualified() else {
+                    break;
+                };
+                id = *next;
+            }
+        }
+        designators
     }
 
     /// Descend a cursor into anonymous *struct* members (which bare
