@@ -17,6 +17,7 @@
 extern crate alloc;
 
 pub mod check;
+pub mod diag;
 pub mod dump;
 pub mod eval;
 pub mod lang;

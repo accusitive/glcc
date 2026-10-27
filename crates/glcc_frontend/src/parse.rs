@@ -24,6 +24,7 @@ use string_interner::symbol::SymbolU32;
 
 use crate::{
     check::{CheckedExpr, CheckedExprKind, is_integer},
+    diag::{DiagCode, did_you_mean},
     lang::Std,
     lexer::{IntLiteral, IntSuffix, Interner, Keyword, Located, Location, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
     sema::{Binding, BindingKind, DeclId, EnumId, Enumerator, Linkage, Member, Sema, StructId},
@@ -566,6 +567,14 @@ impl<'a, 'b> Parser<'a, 'b> {
             None => Span::point(self.bof),
         }
     }
+    /// Describe a token for an `expected ...` diagnostic. `None` is the
+    /// end of the token stream.
+    fn describe_token(&self, token: Option<Token>) -> String {
+        match token {
+            Some(token) => token.describe(self.intern),
+            None => String::from("end of input"),
+        }
+    }
     /// Span from a `mark()` to the end of the most recently consumed
     /// token. Empty when nothing was consumed since the mark (in which
     /// case it is a point at the mark, never an inverted range).
@@ -600,7 +609,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             labels.push(Label::secondary(self.file_id(secondary.span), byte_range(source, secondary.span)).with_message(secondary.message.clone()));
         }
-        let diag = Diagnostic::error().with_message(err.message.clone()).with_labels(labels).with_notes(err.notes.clone());
+        let mut notes = err.notes.clone();
+        notes.extend(err.helps.iter().map(|help| format!("help: {help}")));
+        let mut diag = Diagnostic::error().with_message(err.message.clone()).with_labels(labels).with_notes(notes);
+        if let Some(code) = err.code {
+            diag = diag.with_code(code.as_str());
+        }
         match err.severity {
             crate::span::Severity::Error => diag,
             crate::span::Severity::Warning => Diagnostic {
@@ -750,6 +764,12 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.report(CompileError::new(msg.to_string(), span));
         T::recover()
     }
+    /// Like [`Parser::fail`], but attaches a code to a formatted message
+    /// shared by several parse paths.
+    fn fail_code<T: Recover>(&self, span: Span, code: DiagCode, msg: impl fmt::Display) -> T {
+        self.report(CompileError::new(msg.to_string(), span).with_code(code));
+        T::recover()
+    }
     /// Emit a non-fatal diagnostic (a warning): rendered like an error
     /// but parsing continues. GCC-equivalent warnings with no error
     /// counterpart use this (an overlong string initializer); constraint
@@ -789,7 +809,9 @@ impl<'a, 'b> Parser<'a, 'b> {
         };
         if self.sema.std_attrs.get(&id).is_some_and(|attrs| attrs.contains(StdAttributes::NODISCARD)) {
             let text = self.intern.resolve(*name).unwrap_or("?");
-            self.warn(expr.span(), format!("ignoring return value of '{text}', declared with attribute 'nodiscard'"));
+            let err = CompileError::warning(format!("ignoring return value of '{text}', declared with attribute 'nodiscard'"), expr.span())
+                .with_help("cast the result to `(void)` to discard it explicitly");
+            self.report_warning(err);
         }
     }
     /// Render warnings collected during checking (see `Sema::warnings`)
@@ -822,7 +844,16 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             out.push_str("{\"severity\":\"");
             out.push_str(err.severity.as_str());
-            out.push_str("\",\"message\":\"");
+            out.push_str("\",\"code\":");
+            match err.code {
+                Some(code) => {
+                    out.push('"');
+                    out.push_str(code.as_str());
+                    out.push('"');
+                }
+                None => out.push_str("null"),
+            }
+            out.push_str(",\"message\":\"");
             push_escaped(&mut out, &err.message);
             out.push('"');
             out.push_str(",\"primary\":");
@@ -841,6 +872,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 out.push('"');
                 push_escaped(&mut out, note);
+                out.push('"');
+            }
+            out.push_str("],\"helps\":[");
+            for (j, help) in err.helps.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push('"');
+                push_escaped(&mut out, help);
                 out.push('"');
             }
             out.push_str("]}");
@@ -1057,7 +1097,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             let sym = *sym;
             if self.is_typedef_name(sym) || self.is_gnu_type_keyword(sym) {
                 let span = self.peek_span();
-                return self.fail(span, format!("expected external declaration, got {:?}", self.tokens.peek().map(|x| &x.val)));
+                return self.fail(span, format!("expected external declaration, got {}", self.describe_token(self.tokens.peek().map(|t| t.val))));
             }
             // C89 implicit `int` (`main () { ... }`, `f (x, y) { ... }`):
             // a bare identifier that is neither a typedef name nor a
@@ -1075,7 +1115,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
         } else {
             let span = self.peek_span();
-            return self.fail(span, format!("expected external declaration, got {:?}", self.tokens.peek().map(|x| &x.val)));
+            return self.fail(span, format!("expected external declaration, got {}", self.describe_token(self.tokens.peek().map(|t| t.val))));
         };
         if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Semi))) {
             self.tokens.advance();
@@ -1958,7 +1998,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Some(Token::Identifier(sym)) => sym,
             other => {
                 let span = self.peek_span();
-                return self.fail(span, format!("expected asm operand name, got {other:?}"));
+                return self.fail(span, format!("expected asm operand name, got {}", self.describe_token(other)));
             }
         };
         self.expect_punct(Punctuator::RBracket);
@@ -1991,7 +2031,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 Some(Token::Identifier(sym)) => out.push(self.resolve_label(sym)),
                 other => {
                     let span = self.peek_span();
-                    return self.fail(span, format!("expected label name in asm goto, got {other:?}"));
+                    return self.fail(span, format!("expected label name in asm goto, got {}", self.describe_token(other)));
                 }
             }
             if !self.eat_punct(Punctuator::Comma) {
@@ -2098,7 +2138,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(name)) => name,
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("expected label name, got {other:?}"));
+                            return self.fail(span, format!("expected label name, got {}", self.describe_token(other)));
                         }
                     };
                     let local = self.fresh_label(name);
@@ -2396,7 +2436,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     Some(Token::Identifier(name)) => self.resolve_label(name),
                     other => {
                         let span = self.peek_span();
-                        return self.fail(span, format!("expected label name, got {other:?}"));
+                        return self.fail(span, format!("expected label name, got {}", self.describe_token(other)));
                     }
                 };
                 self.expect_punct(Punctuator::Semi);
@@ -2615,7 +2655,17 @@ impl<'a, 'b> Parser<'a, 'b> {
         for (name, span) in &gotos {
             if !labels.iter().any(|(defined, _)| defined == name) {
                 let text = self.intern.resolve(*name).unwrap_or("?");
-                return self.fail(*span, format!("label '{text}' used but not defined"));
+                let mut err = CompileError::new(format!("label '{text}' used but not defined"), *span).with_code(DiagCode::UndefinedLabel);
+                let candidates = labels.iter().filter_map(|(label, _)| self.intern.resolve(*label));
+                if let Some(similar) = did_you_mean(text, candidates)
+                    && let Some((_, similar_span)) = labels.iter().find(|(label, _)| self.intern.resolve(*label) == Some(similar))
+                {
+                    err = err
+                        .with_secondary(*similar_span, format!("`{similar}` is defined here"))
+                        .with_help(format!("a label with a similar name exists: `{similar}`"));
+                }
+                self.report(err);
+                return;
             }
         }
         for (name, seq, span) in mem::take(&mut fv.gotos) {
@@ -3435,14 +3485,15 @@ impl<'a, 'b> Parser<'a, 'b> {
             None => (Ty::Int, vec![], false, false, "C89 `extern int` assumed"),
         };
         if !text.starts_with("__glccrt_") {
-            if self.sema.lang.rejects_implicit() {
-                self.strict_error(
-                    span,
-                    format!("implicit declaration of function '{text}'; ISO C99 and later do not support implicit function declarations"),
-                );
+            let strict = self.sema.lang.rejects_implicit();
+            let message = if strict {
+                format!("implicit declaration of function '{text}'; ISO C99 and later do not support implicit function declarations")
             } else {
-                self.warn(span, format!("implicit declaration of function '{text}'; {assumption}"));
-            }
+                format!("implicit declaration of function '{text}'; {assumption}")
+            };
+            let err = if strict { CompileError::new(message, span) } else { CompileError::warning(message, span) }
+                .with_help("declare the function before its first use");
+            self.report_warning(err);
         }
         let declared = self.sema.declare_global(
             *name,
@@ -4238,7 +4289,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Some(Token::Punctuator(Punctuator::Assign)) => {}
             other => {
                 let span = self.peek_span();
-                return self.fail(span, format!("expected `=`, got {other:?}"));
+                return self.fail(span, format!("expected `=`, got {}", self.describe_token(other)));
             }
         }
         if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
@@ -4311,7 +4362,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(name)) => name,
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("expected field name, got {other:?}"));
+                            return self.fail(span, format!("expected field name, got {}", self.describe_token(other)));
                         }
                     };
                     designators.push(Designator::Field {
@@ -4722,7 +4773,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     }
                     other => {
                         let span = self.peek_span();
-                        return self.fail(span, format!("expected identifier in identifier list, got {other:?}"));
+                        return self.fail(span, format!("expected identifier in identifier list, got {}", self.describe_token(other.map(|located| located.val))));
                     }
                 }
                 if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
@@ -4916,7 +4967,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         // would name the one *after* it, since `advance` has moved on.
         match self.tokens.advance().map(|t| (t.span(), t.val)) {
             Some((_, Token::Punctuator(found))) if found == expected => {}
-            Some((span, found)) => self.fail(span, format!("expected `{}`, got {:?}", expected.as_str(), found)),
+            Some((span, found)) => self.fail(span, format!("expected `{}`, got {}", expected.as_str(), found.describe(self.intern))),
             None => {
                 let span = self.peek_span();
                 self.fail(span, format!("expected `{}`, got end of input", expected.as_str()))
@@ -4926,7 +4977,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     fn expect_keyword(&mut self, expected: Keyword) {
         match self.tokens.advance().map(|t| (t.span(), t.val)) {
             Some((_, Token::Keyword(found))) if found == expected => {}
-            Some((span, found)) => self.fail(span, format!("expected `{}`, got {:?}", expected.as_str(), found)),
+            Some((span, found)) => self.fail(span, format!("expected `{}`, got {}", expected.as_str(), found.describe(self.intern))),
             None => {
                 let span = self.peek_span();
                 self.fail(span, format!("expected `{}`, got end of input", expected.as_str()))
@@ -5453,10 +5504,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 let (namespace, name) = match self.tokens.advance().map(|located| located.val) {
                     Some(Token::Identifier(sym)) => (None, self.intern.resolve(sym).unwrap_or("").to_string()),
-                    Some(Token::Keyword(keyword)) => (None, format!("{keyword:?}")),
+                    Some(Token::Keyword(keyword)) => (None, keyword.as_str().to_string()),
                     other => {
                         let span = self.peek_span();
-                        self.fail::<()>(span, format!("expected attribute name, got {other:?}"));
+                        self.fail::<()>(span, format!("expected attribute name, got {}", self.describe_token(other)));
                         return out;
                     }
                 };
@@ -5472,7 +5523,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(sym)) => (Some(name), self.intern.resolve(sym).unwrap_or("").to_string()),
                         other => {
                             let span = self.peek_span();
-                            self.fail::<()>(span, format!("expected scoped attribute name, got {other:?}"));
+                            self.fail::<()>(span, format!("expected scoped attribute name, got {}", self.describe_token(other)));
                             return out;
                         }
                     }
@@ -5695,7 +5746,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             return;
         }
         if !n.is_power_of_two() {
-            return self.fail(kw_span, format!("requested alignment '{n}' is not a power of 2"));
+            return self.fail_code(kw_span, DiagCode::InvalidAlignment, format!("requested alignment '{n}' is not a power of 2"));
         }
         attrs.aligned = Some(attrs.aligned.map_or(n, |m: u64| m.max(n)));
     }
@@ -5742,7 +5793,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 Some(Token::Keyword(_)) => None,
                 other => {
                     let span = self.peek_span();
-                    return self.fail(span, format!("expected attribute name, got {other:?}"));
+                    return self.fail(span, format!("expected attribute name, got {}", self.describe_token(other)));
                 }
             };
             let name_span = self.span_since(name_start);
@@ -5775,7 +5826,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::StringLiteral(lit)) => self.string_literal_body(lit),
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("attribute `alias` needs a string literal, got {other:?}"));
+                            return self.fail(span, format!("attribute `alias` needs a string literal, got {}", self.describe_token(other)));
                         }
                     };
                     let target = self.intern.get_or_intern(&body);
@@ -5789,7 +5840,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::StringLiteral(lit)) => self.string_literal_body(lit),
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("attribute `section` needs a string literal, got {other:?}"));
+                            return self.fail(span, format!("attribute `section` needs a string literal, got {}", self.describe_token(other)));
                         }
                     };
                     let name = self.intern.get_or_intern(&body);
@@ -5828,7 +5879,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                             if n.is_power_of_two() {
                                 out.aligned = Some(out.aligned.map_or(n, |m: u64| m.max(n)));
                             } else {
-                                return self.fail(name_span, format!("requested alignment '{n}' is not a power of 2"));
+                                return self.fail_code(name_span, DiagCode::InvalidAlignment, format!("requested alignment '{n}' is not a power of 2"));
                             }
                         }
                         Some(crate::eval::Value::Int(0)) => {
@@ -6055,7 +6106,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 other => {
                     let span = self.peek_span();
-                    return self.fail(span, format!("expected enumerator name, got {other:?}"));
+                    return self.fail(span, format!("expected enumerator name, got {}", self.describe_token(other.map(|located| located.val))));
                 }
             };
             self.skip_gnu_suffixes();
@@ -7020,7 +7071,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(name)) => name,
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("expected member name, got {other:?}"));
+                            return self.fail(span, format!("expected member name, got {}", self.describe_token(other)));
                         }
                     };
                     expr = Expr::Member {
@@ -7130,7 +7181,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Some(Token::Identifier(name)) => name,
             other => {
                 let span = self.peek_span();
-                return self.fail(span, format!("expected field name, got {other:?}"));
+                return self.fail(span, format!("expected field name, got {}", self.describe_token(other)));
             }
         };
         designators.push(Designator::Field {
@@ -7146,7 +7197,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(name)) => name,
                         other => {
                             let span = self.peek_span();
-                            return self.fail(span, format!("expected field name, got {other:?}"));
+                            return self.fail(span, format!("expected field name, got {}", self.describe_token(other)));
                         }
                     };
                     designators.push(Designator::Field {
@@ -7341,7 +7392,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             _ => {
                 let span = self.peek_span();
-                self.fail(span, format!("expected expression, got {:?}", self.tokens.peek().map(|located| &located.val)))
+                self.fail(span, format!("expected expression, got {}", self.describe_token(self.tokens.peek().map(|t| t.val))))
             }
         }
     }

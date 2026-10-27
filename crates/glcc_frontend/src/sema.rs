@@ -674,6 +674,12 @@ impl<'a> Sema<'a> {
     pub fn lookup_symbol(&self, sym: SymbolU32) -> Option<DeclId> {
         self.scopes.iter().find_map(|scope| scope.ordinary.get(&sym).copied())
     }
+    /// Ordinary identifiers visible from the current scope, innermost
+    /// first. May repeat a spelling when an inner scope shadows an
+    /// outer one; used only for "did you mean" suggestions.
+    pub fn visible_symbols(&self) -> impl Iterator<Item = SymbolU32> + '_ {
+        self.scopes.iter().flat_map(|scope| scope.ordinary.keys().copied())
+    }
     /// Innermost visible binding *with* linkage (C17 §6.2.2p4's "prior
     /// declaration ... visible"): skipped `NoLinkage` locals do not
     /// count, so a block-scope `extern` finds the file-scope entity

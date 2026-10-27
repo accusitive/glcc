@@ -684,6 +684,29 @@ pub enum Token {
     StringLiteral(StringLiteral),
     Punctuator(Punctuator),
 }
+
+impl Token {
+    /// Human-readable spelling for diagnostics: keywords and punctuators
+    /// as their source text, identifiers and literals by their spelling.
+    pub fn describe(&self, interner: &Interner) -> String {
+        match self {
+            Token::Keyword(keyword) => format!("`{}`", keyword.as_str()),
+            Token::Punctuator(punct) => format!("`{}`", punct.as_str()),
+            Token::Identifier(name) => match interner.resolve(*name) {
+                Some(text) => format!("identifier `{text}`"),
+                None => String::from("identifier"),
+            },
+            Token::Constant(constant) => match interner.resolve(constant.spelling()) {
+                Some(text) => format!("`{text}`"),
+                None => String::from("constant"),
+            },
+            Token::StringLiteral(literal) => match interner.resolve(literal.spelling) {
+                Some(text) => format!("string literal `{text}`"),
+                None => String::from("string literal"),
+            },
+        }
+    }
+}
 #[derive(Debug, Clone, Copy)]
 pub enum Constant {
     Int(IntLiteral),

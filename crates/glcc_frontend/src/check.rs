@@ -23,9 +23,10 @@ use alloc::{boxed::Box, format, vec};
 use string_interner::symbol::SymbolU32;
 
 use crate::{
+    diag::{DiagCode, did_you_mean},
     lexer::{CharPrefix, FloatSuffix, Interner},
     parse::{ArrayBound, AssignOp, BinaryOp, BlockItem, Designator, Expr, GenericAssoc, InitItem, Initializer, PtrSize, StdAttributes, Ty, TypeQualifiers, UnaryOp},
-    sema::{Binding, BindingKind, Member, Sema, StructId, types_compatible},
+    sema::{Binding, BindingKind, DeclId, Member, Sema, StructId, types_compatible},
     span::{CompileError, HasSpan, Span},
     target::{Arch, Os},
 };
@@ -1816,13 +1817,10 @@ impl<'a> Sema<'a> {
                 (Designator::Field { name, span }, Ty::Struct(cid)) => {
                     let path = match self.find_field(*cid, *name, &mut visiting) {
                         FieldHit::Found(path) => self.alloc_slice(path),
-                        FieldHit::Miss => {
-                            let text = interner.resolve(*name).unwrap_or("?");
-                            return Err(CompileError::new(format!("no member named '{text}'"), *span));
-                        }
+                        FieldHit::Miss => return Err(self.no_member_error(*cid, *name, *span, interner)),
                         FieldHit::Ambiguous => {
                             let text = interner.resolve(*name).unwrap_or("?");
-                            return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), *span));
+                            return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), *span).with_code(DiagCode::AmbiguousMember));
                         }
                     };
                     if outer.is_none() {
@@ -1857,7 +1855,7 @@ impl<'a> Sema<'a> {
                 }
                 (Designator::Field { name, .. }, _) => {
                     let text = interner.resolve(*name).unwrap_or("?");
-                    return Err(CompileError::new(format!("no member named '{text}'"), designator.span()));
+                    return Err(CompileError::new(format!("no member named '{text}'"), designator.span()).with_code(DiagCode::NoSuchMember));
                 }
                 (Designator::AnonField { span, .. }, _) => {
                     return Err(CompileError::new("field designator for non-struct type", *span));
@@ -2145,6 +2143,65 @@ impl<'a> Sema<'a> {
         }
     }
 
+    /// The visible ordinary identifier whose spelling is closest to
+    /// `name`, plus a noun for its kind (used in the suggestion).
+    fn similar_symbol(&self, name: SymbolU32, interner: &Interner) -> Option<(DeclId, &'static str)> {
+        let needle = interner.resolve(name)?;
+        let best = did_you_mean(needle, self.visible_symbols().filter_map(|symbol| interner.resolve(symbol)))?;
+        let symbol = self.visible_symbols().find(|symbol| interner.resolve(*symbol) == Some(best))?;
+        let id = self.lookup_symbol(symbol)?;
+        let kind = match self.decls[id.0 as usize].kind {
+            BindingKind::Typedef => "a type",
+            BindingKind::Func => "a function",
+            BindingKind::Var => "a variable",
+            BindingKind::EnumConst { .. } => "an enum constant",
+        };
+        Some((id, kind))
+    }
+
+    /// Member names reachable from `id`, descending through anonymous
+    /// struct/union members (which promote their members).
+    fn collect_field_candidates(&self, id: StructId, out: &mut Vec<(SymbolU32, Span)>, visiting: &mut Vec<StructId>) {
+        if visiting.contains(&id) {
+            return;
+        }
+        let Some(def) = self.structs.get(id.0 as usize) else {
+            return;
+        };
+        visiting.push(id);
+        for member in &def.members {
+            match member.name {
+                Some(name) => out.push((name, member.span)),
+                None => {
+                    if let Ty::Struct(inner) = member.ty.unqualified() {
+                        self.collect_field_candidates(*inner, out, visiting);
+                    }
+                }
+            }
+        }
+        visiting.pop();
+    }
+
+    fn similar_field(&self, id: StructId, name: SymbolU32, interner: &Interner) -> Option<(SymbolU32, Span)> {
+        let needle = interner.resolve(name)?;
+        let mut candidates = Vec::new();
+        self.collect_field_candidates(id, &mut candidates, &mut Vec::new());
+        let best = did_you_mean(needle, candidates.iter().filter_map(|(symbol, _)| interner.resolve(*symbol)))?;
+        candidates.into_iter().find(|(symbol, _)| interner.resolve(*symbol) == Some(best))
+    }
+
+    fn no_member_error(&self, id: StructId, name: SymbolU32, span: Span, interner: &Interner) -> CompileError {
+        let text = interner.resolve(name).unwrap_or("?");
+        let mut err = CompileError::new(format!("no member named '{text}'"), span).with_code(DiagCode::NoSuchMember);
+        if let Some((similar, similar_span)) = self.similar_field(id, name, interner) {
+            let similar = interner.resolve(similar).unwrap_or("?");
+            err = err
+                .with_secondary(similar_span, format!("`{similar}` is defined here"))
+                .with_help(format!("a field with a similar name exists: `{similar}`"));
+        }
+        err
+    }
+
     /// Check a `return` value against the enclosing function's return
     /// type, converting as if by assignment. In a `void` function the
     /// value is legal only when it is itself `void` (`return f();`,
@@ -2169,12 +2226,21 @@ impl<'a> Sema<'a> {
             Expr::Ident { name, .. } => {
                 let Some(id) = self.lookup_symbol(*name) else {
                     let text = interner.resolve(*name).unwrap_or("?");
-                    return Err(CompileError::new(format!("use of undeclared identifier '{text}'"), span));
+                    let mut err = CompileError::new(format!("use of undeclared identifier '{text}'"), span).with_code(DiagCode::UndeclaredIdentifier);
+                    if let Some((id, kind)) = self.similar_symbol(*name, interner) {
+                        let binding = &self.decls[id.0 as usize];
+                        if let Some(similar) = binding.name.and_then(|symbol| interner.resolve(symbol)) {
+                            err = err
+                                .with_secondary(binding.span, format!("`{similar}` is defined here"))
+                                .with_help(format!("{kind} with a similar name exists: `{similar}`"));
+                        }
+                    }
+                    return Err(err);
                 };
                 let binding = &self.decls[id.0 as usize];
                 if binding.kind == BindingKind::Typedef {
                     let text = interner.resolve(*name).unwrap_or("?");
-                    return Err(CompileError::new(format!("typedef name '{text}' used as a value"), span));
+                    return Err(CompileError::new(format!("typedef name '{text}' used as a value"), span).with_code(DiagCode::TypedefUsedAsValue));
                 }
                 if self.std_attrs.get(&id).is_some_and(|attrs| attrs.contains(StdAttributes::DEPRECATED)) {
                     let text = interner.resolve(*name).unwrap_or("?");
@@ -3197,7 +3263,7 @@ impl<'a> Sema<'a> {
             "clear" => return self.check_atomic_clear(args, interner, span),
             _ => {}
         }
-        Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span))
+        Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span).with_code(DiagCode::UnsupportedAtomicBuiltin))
     }
 
     /// The clang C11 atomics (`__c11_atomic_*`), what `<stdatomic.h>`
@@ -3223,7 +3289,7 @@ impl<'a> Sema<'a> {
             "is_lock_free" => return self.check_atomic_lock_free(args, interner, span, false, name),
             _ => {}
         }
-        Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span))
+        Err(CompileError::new(format!("unsupported atomic builtin `{name}`"), span).with_code(DiagCode::UnsupportedAtomicBuiltin))
     }
 
     /// C11 `void __c11_atomic_init(T *ptr, T val)`: like a store with
@@ -3618,7 +3684,7 @@ impl<'a> Sema<'a> {
             "fetch_nand" | "nand_fetch" => RmwOp::Nand,
             "fetch_min" | "min_fetch" => RmwOp::Min,
             "fetch_max" | "max_fetch" => RmwOp::Max,
-            _ => return Err(CompileError::new(format!("unsupported atomic builtin `{what}`"), span)),
+            _ => return Err(CompileError::new(format!("unsupported atomic builtin `{what}`"), span).with_code(DiagCode::UnsupportedAtomicBuiltin)),
         };
         let [ptr, val, order] = args else {
             return Err(CompileError::new(format!("`{what}` takes a pointer, a value, and a memory order"), span));
@@ -4198,13 +4264,10 @@ impl<'a> Sema<'a> {
         let mut visiting = Vec::new();
         let path = match self.find_field(id, field, &mut visiting) {
             FieldHit::Found(path) => path,
-            FieldHit::Miss => {
-                let text = interner.resolve(field).unwrap_or("?");
-                return Err(CompileError::new(format!("no member named '{text}'"), span));
-            }
+            FieldHit::Miss => return Err(self.no_member_error(id, field, span, interner)),
             FieldHit::Ambiguous => {
                 let text = interner.resolve(field).unwrap_or("?");
-                return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), span));
+                return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), span).with_code(DiagCode::AmbiguousMember));
             }
         };
         let mut ty = Ty::Struct(id);
@@ -4423,13 +4486,10 @@ impl<'a> Sema<'a> {
                     };
                     let path = match self.find_field(*cid, *name, &mut visiting) {
                         FieldHit::Found(path) => self.alloc_slice(path),
-                        FieldHit::Miss => {
-                            let text = interner.resolve(*name).unwrap_or("?");
-                            return Err(CompileError::new(format!("no member named '{text}'"), *span));
-                        }
+                        FieldHit::Miss => return Err(self.no_member_error(*cid, *name, *span, interner)),
                         FieldHit::Ambiguous => {
                             let text = interner.resolve(*name).unwrap_or("?");
-                            return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), *span));
+                            return Err(CompileError::new(format!("ambiguous member '{text}' (found in several anonymous members)"), *span).with_code(DiagCode::AmbiguousMember));
                         }
                     };
                     let mut at = *cid;

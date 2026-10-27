@@ -7,7 +7,8 @@
 //! …) are covered by the span of the parent struct that contains them.
 //!
 //! [`CompileError`] is the structured diagnostic payload: a message plus
-//! one primary and any number of secondary labeled spans, tagged with a
+//! one primary and any number of secondary labeled spans, an optional
+//! rust-style [`DiagCode`], and `help:` suggestions, tagged with a
 //! [`Severity`]. The parser renders errors through codespan-reporting
 //! (see `Parser::emit`), accumulates them instead of aborting, and
 //! exposes the whole set via `Parser::diagnostics`; a machine-readable
@@ -22,6 +23,7 @@ use core::ops::Range;
 
 use string_interner::symbol::SymbolU32;
 
+use crate::diag::{DiagCode, help_for_message};
 use crate::lexer::Location;
 
 /// A source range, start-inclusive to end-exclusive, in the lexer's
@@ -203,14 +205,21 @@ pub struct SpanLabel {
 
 /// A structured compile error: a message, one primary labeled span, and
 /// any number of secondary labels (e.g. "previously declared here" for
-/// redeclaration conflicts).
+/// redeclaration conflicts), plus an optional stable code and
+/// rust-style `help:` suggestions.
 #[derive(Debug, Clone)]
 pub struct CompileError {
     pub severity: Severity,
+    /// Stable code (`E0301`) shared by every site reporting the same
+    /// semantic error; `None` for diagnostics without a code.
+    pub code: Option<DiagCode>,
     pub message: String,
     pub primary: SpanLabel,
     pub secondary: Vec<SpanLabel>,
     pub notes: Vec<String>,
+    /// Actionable suggestions, rendered after the notes as
+    /// `help: <text>` and serialized separately for editors.
+    pub helps: Vec<String>,
 }
 
 impl CompileError {
@@ -225,13 +234,34 @@ impl CompileError {
     }
 
     fn at(severity: Severity, message: impl Into<String>, span: Span) -> Self {
+        let message = message.into();
+        let code = match severity {
+            Severity::Error => DiagCode::for_message(&message),
+            Severity::Warning => None,
+        };
+        let helps = help_for_message(&message).map(String::from).into_iter().collect();
         Self {
             severity,
-            message: message.into(),
+            code,
+            message,
             primary: SpanLabel { span, message: String::new() },
             secondary: Vec::new(),
             notes: Vec::new(),
+            helps,
         }
+    }
+
+    /// Override or supply the diagnostic code: needed for formatted
+    /// messages, which [`DiagCode::for_message`] cannot match.
+    pub fn with_code(mut self, code: DiagCode) -> Self {
+        self.code = Some(code);
+        self
+    }
+
+    /// Attach a `help:` suggestion.
+    pub fn with_help(mut self, help: impl Into<String>) -> Self {
+        self.helps.push(help.into());
+        self
     }
 
     pub fn with_secondary(mut self, span: Span, message: impl Into<String>) -> Self {

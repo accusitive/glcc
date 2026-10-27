@@ -1,6 +1,7 @@
 mod conformance;
 
 use crate::check::{CheckedExpr, CheckedExprKind};
+use crate::diag::DiagCode;
 use crate::lang::{LangOpts, Std};
 use crate::layout::StructLayout;
 use crate::lexer::{CharLiteral, CharPrefix, Constant, FloatLiteral, FloatSuffix, IntLiteral, IntSuffix, Interner, Lexer, Punctuator, Radix, StringPrefix, Token};
@@ -1737,7 +1738,7 @@ fn c89_thread_local_standard_spelling() {
     let mut interner = Interner::new();
     let mut parser = test_parser("_Thread_local int y;", &mut sema, &mut interner);
     parser.parse_translation_unit();
-    assert_parse_error(&parser, "expected `;`, got Keyword(Int)");
+    assert_parse_error(&parser, "expected `;`, got `int`");
 }
 
 #[test]
@@ -5725,7 +5726,7 @@ fn c23_attributes_parse_and_drive_warnings() {
     assert!(
         diagnostics
             .iter()
-            .any(|d| d.severity == Severity::Warning && d.message.contains("ignoring return value of 'f'")),
+            .any(|d| d.severity == Severity::Warning && d.message.contains("ignoring return value of 'f'") && d.helps.iter().any(|help| help.contains("`(void)`"))),
         "{diagnostics:#?}"
     );
     assert!(
@@ -8339,6 +8340,27 @@ fn single_label_error_renders_source_snippet() {
 }
 
 #[test]
+fn rendered_diagnostics_show_code_and_help() {
+    let mut sema = Sema::leak_for_tests();
+    let mut interner = Interner::new();
+    let parser = test_parser("int;", &mut sema, &mut interner);
+    let file = parser.intern.get_or_intern("<__glcc_source>");
+    let err = CompileError::new(
+        "declaration does not declare anything",
+        Span {
+            file: Some(file),
+            start_ln: 1,
+            start_col: 0,
+            end_ln: 1,
+            end_col: 4,
+        },
+    );
+    let out = parser.emit_to_string(&err);
+    assert!(out.contains("error[E0104]"), "{out:?}");
+    assert!(out.contains("help: remove the declaration or add a declarator"), "{out:?}");
+}
+
+#[test]
 fn conflicting_redeclaration_renders_both_sites() {
     let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
@@ -10603,4 +10625,85 @@ fn recovery_reports_lexer_parser_and_sema_errors_together() {
     assert!(messages.iter().any(|m| m.contains("universal character name")), "{messages:?}");
     assert!(messages.iter().any(|m| m.contains("expected expression")), "{messages:?}");
     assert!(messages.iter().any(|m| m.contains("missing")), "{messages:?}");
+}
+
+/// A misspelled variable gets a `help:` suggestion and a label on the
+/// declaration that was probably meant.
+#[test]
+fn undeclared_identifier_suggests_a_similar_name() {
+    let diagnostics = tu_diagnostics("int main(void) { int count = 1; return cout; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("undeclared identifier")).expect("an undeclared identifier error");
+    assert_eq!(err.code, Some(DiagCode::UndeclaredIdentifier));
+    assert!(err.helps.iter().any(|help| help == "a variable with a similar name exists: `count`"), "{:#?}", err.helps);
+    assert!(err.secondary.iter().any(|label| label.message == "`count` is defined here"), "{:#?}", err.secondary);
+}
+
+/// A misspelled member gets the same treatment, searching the struct's
+/// members (including those promoted from anonymous members).
+#[test]
+fn unknown_member_suggests_a_similar_field() {
+    let diagnostics = tu_diagnostics("struct S { int value; }; int main(void) { struct S s; return s.valuee; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("no member named")).expect("a member error");
+    assert_eq!(err.code, Some(DiagCode::NoSuchMember));
+    assert!(err.helps.iter().any(|help| help == "a field with a similar name exists: `value`"), "{:#?}", err.helps);
+    assert!(err.secondary.iter().any(|label| label.message == "`value` is defined here"), "{:#?}", err.secondary);
+}
+
+/// A `goto` naming an undefined label suggests the near-miss label.
+#[test]
+fn undefined_label_suggests_a_similar_label() {
+    let diagnostics = tu_diagnostics("int main(void) { don: ; goto done; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("used but not defined")).expect("an undefined label error");
+    assert_eq!(err.code, Some(DiagCode::UndefinedLabel));
+    assert!(err.helps.iter().any(|help| help == "a label with a similar name exists: `don`"), "{:#?}", err.helps);
+}
+
+/// Parse diagnostics spell tokens the way they appear in source instead
+/// of dumping their `Debug` representation.
+#[test]
+fn parse_errors_spell_tokens() {
+    let diagnostics = expr_diagnostics("1 + return");
+    let err = diagnostics.iter().find(|d| d.message.contains("expected expression")).expect("an expression error");
+    assert!(err.message.contains("got `return`"), "{}", err.message);
+    assert!(!err.message.contains("Keyword"), "{}", err.message);
+
+    let diagnostics = tu_diagnostics("int x\nreturn 0;");
+    let err = diagnostics.iter().find(|d| d.message.contains("expected `;`")).expect("a missing semicolon error");
+    assert!(err.message.contains("got `return`"), "{}", err.message);
+    assert!(!err.message.contains("Keyword"), "{}", err.message);
+}
+
+/// A declaration without a declarator gets a `help:` line.
+#[test]
+fn empty_declaration_has_a_help_suggestion() {
+    let diagnostics = tu_diagnostics("int;");
+    let err = diagnostics.iter().find(|d| d.message.contains("declaration does not declare anything")).expect("a declaration error");
+    assert_eq!(err.code, Some(DiagCode::DeclarationDoesNotDeclareAnything));
+    assert!(err.helps.iter().any(|help| help.contains("add a declarator")), "{:#?}", err.helps);
+}
+
+/// Semantically identical errors share one code no matter where they
+/// are reported.
+#[test]
+fn errors_carry_stable_codes() {
+    let diagnostics = tu_diagnostics("int f(void) { return 1; } int f(void) { return 2; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("redefinition")).expect("a redefinition error");
+    assert_eq!(err.code, Some(DiagCode::Redefinition));
+
+    let diagnostics = tu_diagnostics("int main(void) { int *p; return p + p; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("invalid operands to binary operator")).expect("an operand error");
+    assert_eq!(err.code, Some(DiagCode::InvalidBinaryOperands));
+}
+
+/// The machine-readable form carries the code and helps separately so
+/// editors can present them without parsing the message text.
+#[test]
+fn diagnostics_json_includes_codes_and_helps() {
+    let mut sema = Sema::leak_for_tests();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int main(void) { int count = 1; return cout; }", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    let json = parser.diagnostics_json();
+    assert!(json.contains("\"code\":\"E0201\""), "{json}");
+    assert!(json.contains("\"helps\":[\"a variable with a similar name exists: `count`\"]"), "{json}");
 }
