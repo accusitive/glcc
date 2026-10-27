@@ -1266,6 +1266,12 @@ fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits:
             arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
             fallback: fallback.map(|e| &*arena.alloc(remap_expr_ident(e, arena, inits, map))),
         },
+        CheckedExprKind::Rotate { left, arg, count, bits } => CheckedExprKind::Rotate {
+            left: *left,
+            arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
+            count: arena.alloc(remap_expr_ident(count, arena, inits, map)),
+            bits: *bits,
+        },
         CheckedExprKind::FpClass { op, arg } => CheckedExprKind::FpClass {
             op: *op,
             arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),

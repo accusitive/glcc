@@ -257,6 +257,18 @@ pub enum CheckedExprKind<'a> {
         arg: &'a CheckedExpr<'a>,
         fallback: Option<&'a CheckedExpr<'a>>,
     },
+    /// A type-generic C23/C2y rotate
+    /// (`__builtin_stdc_rotate_left`/`_right`): the value keeps its
+    /// declared unsigned width, and `bits` is that width (a bit-field's
+    /// declared width or a `_BitInt`'s precision). The count keeps its
+    /// own integer type so a wide count is reduced modulo `bits` without
+    /// truncation.
+    Rotate {
+        left: bool,
+        arg: &'a CheckedExpr<'a>,
+        count: &'a CheckedExpr<'a>,
+        bits: u32,
+    },
     /// A folded `__builtin_constant_p(arg)`: whether `arg` is a
     /// compile-time constant. The argument is checked but discarded
     /// (GCC never evaluates it, side effects included), so only the
@@ -456,6 +468,16 @@ pub(crate) fn int_type_size(ty: &Ty, target: &crate::target::Target) -> Option<u
 
 pub fn is_integer(ty: &Ty) -> bool {
     int_rank(ty).is_some()
+}
+
+/// Whether `ty` is an unsigned integer type suitable for a rotate:
+/// standard unsigned types and unsigned bit-precise types, excluding
+/// `_Bool` (GCC rejects its boolean type).
+fn is_unsigned_integer(ty: &Ty) -> bool {
+    matches!(
+        ty.unqualified(),
+        Ty::UnsignedChar | Ty::UnsignedShort | Ty::UnsignedInt | Ty::UnsignedLong | Ty::UnsignedLongLong | Ty::UnsignedInt128
+    ) || matches!(ty.unqualified(), Ty::BitInt { signed: false, .. })
 }
 
 fn is_real_float(ty: &Ty) -> bool {
@@ -2995,6 +3017,8 @@ impl<'a> Sema<'a> {
                 // optional `int` zero-fallback second argument.
                 Some("__builtin_clzg") => return self.check_clzg(args, interner, span, false),
                 Some("__builtin_ctzg") => return self.check_clzg(args, interner, span, true),
+                Some("__builtin_stdc_rotate_left") => return self.check_rotate(args, interner, span, true),
+                Some("__builtin_stdc_rotate_right") => return self.check_rotate(args, interner, span, false),
                 Some("__builtin_constant_p") => return self.check_constant_p(args, interner, span),
                 Some("__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl") => {
                     return self.check_fp_class(args, interner, span, FpPredicate::IsNan, "__builtin_isnan");
@@ -3774,6 +3798,72 @@ impl<'a> Sema<'a> {
                 ctz,
                 arg: self.alloc(arg),
                 fallback,
+            },
+        })
+    }
+
+    /// `__builtin_stdc_rotate_left`/`_right`: type-generic rotation of
+    /// an unsigned integer at its own width. A bit-field keeps its
+    /// declared type and width (GCC rotates `unsigned s : 5` over five
+    /// bits rather than the promoted `int`). The count may be any
+    /// integer except an enum and keeps enough width that reducing it
+    /// modulo the operand width does not lose count bits.
+    fn check_rotate(&self, args: &[Expr<'a>], interner: &Interner, span: Span, left: bool) -> Result<CheckedExpr<'a>, CompileError> {
+        let what = if left { "`__builtin_stdc_rotate_left`" } else { "`__builtin_stdc_rotate_right`" };
+        let [arg, count] = args else {
+            return Err(CompileError::new(format!("{what} takes exactly two arguments"), span));
+        };
+        let arg = self.decay_checked(self.check_expr(arg, interner)?);
+        let (ty, bits) = match &arg.kind {
+            CheckedExprKind::Member {
+                bitfield: Some((_, width)),
+                decl_ty,
+                ..
+            } => {
+                if !is_unsigned_integer(decl_ty) {
+                    return Err(CompileError::new(format!("{what} requires an unsigned integer argument"), arg.span));
+                }
+                (decl_ty.unqualified().clone(), *width)
+            }
+            _ => {
+                if !is_unsigned_integer(&arg.ty) {
+                    return Err(CompileError::new(format!("{what} requires an unsigned integer argument"), arg.span));
+                }
+                let ty = arg.ty.unqualified().clone();
+                let bits = match ty {
+                    Ty::BitInt { width, .. } => width,
+                    ref ty => u32::from(int_type_size(ty, &self.target).expect("unsigned integer has a size")) * 8,
+                };
+                (ty, bits)
+            }
+        };
+        let count = self.check_expr(count, interner)?;
+        let count_ty = count.ty.unqualified().clone();
+        if !is_integer(&count_ty) || matches!(count_ty, Ty::Enum(_)) {
+            return Err(CompileError::new(format!("{what} requires an integer count"), count.span));
+        }
+        // Keep the count's value: narrow types widen losslessly to
+        // `unsigned int`, while wide signed types switch to their
+        // unsigned counterpart so the modulo stays bit-exact.
+        let count_ty = if is_signed_int_in(&count_ty, self.target.char_signed).unwrap_or(false) {
+            corresponding_unsigned(&count_ty)
+        } else {
+            count_ty
+        };
+        let count_ty = if int_type_size(&count_ty, &self.target).is_some_and(|size| size < 4) {
+            Ty::UnsignedInt
+        } else {
+            count_ty
+        };
+        let count = self.convert_for_assignment(&count_ty, count, interner)?;
+        Ok(CheckedExpr {
+            ty,
+            span,
+            kind: CheckedExprKind::Rotate {
+                left,
+                arg: self.alloc(arg),
+                count: self.alloc(count),
+                bits,
             },
         })
     }

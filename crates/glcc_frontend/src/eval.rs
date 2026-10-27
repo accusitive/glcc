@@ -1023,6 +1023,32 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             };
             eval_const(codes[index], sema, interner)
         }
+        // `__builtin_stdc_rotate_left`/`_right`: fold an unsigned
+        // constant at the operand's declared width, with the count
+        // reduced modulo that width.
+        CheckedExprKind::Rotate { left, arg, count, bits } => {
+            let Some(Value::Int(value)) = eval_const(arg, sema, interner) else {
+                return None;
+            };
+            let Some(Value::Int(count)) = eval_const(count, sema, interner) else {
+                return None;
+            };
+            let bits = *bits;
+            if bits == 0 || bits > 128 {
+                return None;
+            }
+            let shift = count.rem_euclid(i128::from(bits)) as u32;
+            let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+            let value = (value as u128) & mask;
+            let rotated = if shift == 0 {
+                value
+            } else if *left {
+                ((value << shift) | (value >> (bits - shift))) & mask
+            } else {
+                ((value >> shift) | (value << (bits - shift))) & mask
+            };
+            Some(Value::Int(rotated as i128))
+        }
         CheckedExprKind::Call { .. }
         | CheckedExprKind::VaArg { .. }
         | CheckedExprKind::Atomic { .. }

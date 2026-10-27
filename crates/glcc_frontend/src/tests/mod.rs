@@ -3314,6 +3314,138 @@ fn c2y_static_assert_expressions() {
 }
 
 #[test]
+fn c2y_implicit_constexpr_const_integers() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    let src = "static const int n = 3;\n\
+               int a[n];\n\
+               enum { E = n + 1 };\n\
+               _Static_assert(n == 3, \"n\");\n\
+               _Static_assert(_Generic(n, int: 1, default: 0), \"generic\");\n\
+               static_assert(_Generic(n + 1, int: 1, default: 0));\n\
+               int f(int x) { switch (x) { case n: return E; default: return 0; } }\n\
+               int g(void) {\n\
+                   const int m = 4;\n\
+                   int b[m];\n\
+                   static const int s = {5};\n\
+                   int c[s];\n\
+                   const int t = m * 2;\n\
+                   _Static_assert(_Generic(t, int: 1, default: 0), \"t\");\n\
+                   return (int)(sizeof b + sizeof c + sizeof(int[t]));\n\
+               }\n\
+               int h(void) { const int q = 6; static const int r = q; int d[r]; return (int)sizeof d; }\n";
+    let diags = tu_diagnostics_with_lang(src, c2y);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+
+    // External-linkage `const` is not a named constant; const-volatile
+    // and atomic objects are excluded too.
+    let diags = tu_diagnostics_with_lang("const int ext = 3; int a[ext];\n", c2y);
+    assert!(
+        diags.iter().any(|d| d.is_error() && d.message.contains("variably modified type at file scope")),
+        "{diags:#?}"
+    );
+    let diags = tu_diagnostics_with_lang("const volatile int cv = 3; enum { E = cv };\n", c2y);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.is_error() && d.message.contains("enumerator value is not an integer constant expression")),
+        "{diags:#?}"
+    );
+    let diags = tu_diagnostics_with_lang("_Atomic const int at = 3; enum { E = at };\n", c2y);
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.is_error() && d.message.contains("enumerator value is not an integer constant expression")),
+        "{diags:#?}"
+    );
+
+    // The promotion is C2y-only.
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    let diags = tu_diagnostics_with_lang("static const int n = 3; int a[n];\n", c23);
+    assert!(
+        diags.iter().any(|d| d.is_error() && d.message.contains("variably modified type at file scope")),
+        "{diags:#?}"
+    );
+}
+
+#[test]
+fn c2y_selection_declaration_attributes() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    let src = "int f(void) { if ([[maybe_unused]] int x = 1; x) return x; return 0; }\n\
+               int g(void) { if (int x [[maybe_unused]] = 1; x) return x; return 0; }\n\
+               int h(void) { switch ([[maybe_unused]] int x = 2; x) { default: return x; } }\n";
+    let diags = tu_diagnostics_with_lang(src, c2y);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+
+    // GNU attribute spellings reach the same positions in permissive
+    // dialects.
+    let gnu = LangOpts { gnu: true, ..c2y };
+    let src = "int f(void) { if (__attribute__((unused)) int x = 1; x) return x; return 0; }\n\
+               int g(void) { if (int x __attribute__((unused)) = 1; x) return x; return 0; }\n";
+    let diags = tu_diagnostics_with_lang(src, gnu);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+}
+
+#[test]
+fn c2y_stdc_rotate_builtins() {
+    use crate::lang::Std;
+    let c2y = LangOpts {
+        std: Std::C2y,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    let src = "struct S { unsigned s : 5; };\n\
+               _Static_assert(_Generic(__builtin_stdc_rotate_left((unsigned char)1, 1), unsigned char: 1, default: 0), \"uchar\");\n\
+               _Static_assert(_Generic(__builtin_stdc_rotate_right((unsigned)1, 1), unsigned: 1, default: 0), \"uint\");\n\
+               _Static_assert(_Generic(__builtin_stdc_rotate_left((unsigned _BitInt(7))1, 1), unsigned _BitInt(7): 1, default: 0), \"bitint\");\n\
+               unsigned f(struct S s) { return __builtin_stdc_rotate_left(s.s, 3); }\n\
+               _Static_assert(__builtin_stdc_rotate_left(1u, 1) == 2, \"fold\");\n\
+               _Static_assert(__builtin_stdc_rotate_right(2u, 1) == 1, \"fold\");\n";
+    let diags = tu_diagnostics_with_lang(src, c2y);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+
+    for (name, src) in [
+        ("signed value", "int f(void) { return __builtin_stdc_rotate_left(1, 1); }\n"),
+        ("bool value", "int f(void) { return __builtin_stdc_rotate_left((_Bool)1, 1); }\n"),
+        ("argument count", "int f(void) { return __builtin_stdc_rotate_left(1u); }\n"),
+        ("enum count", "enum E { E0 }; int f(void) { return __builtin_stdc_rotate_left(1u, (enum E)E0); }\n"),
+        ("float count", "int f(void) { return __builtin_stdc_rotate_left(1u, 0.0); }\n"),
+        (
+            "signed bit-field",
+            "struct S { int s : 5; }; int f(struct S s) { return __builtin_stdc_rotate_left(s.s, 1); }\n",
+        ),
+        (
+            "bool bit-field",
+            "struct S { _Bool s : 1; }; int f(struct S s) { return __builtin_stdc_rotate_left(s.s, 1); }\n",
+        ),
+    ] {
+        let diags = tu_diagnostics_with_lang(src, c2y);
+        assert!(diags.iter().any(|d| d.is_error()), "{name} should be rejected: {diags:#?}");
+    }
+}
+
+#[test]
 fn c2y_bit_precise_enum_underlying_types() {
     use crate::lang::Std;
     let c2y = LangOpts {

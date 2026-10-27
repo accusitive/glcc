@@ -2878,6 +2878,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.check_flow_expr(fb, labels, gotos, scope, fv);
                 }
             }
+            CheckedExprKind::Rotate { arg, count, .. } => {
+                self.check_flow_expr(arg, labels, gotos, scope, fv);
+                self.check_flow_expr(count, labels, gotos, scope, fv);
+            }
             CheckedExprKind::FpClass { arg, .. } => {
                 self.check_flow_expr(arg, labels, gotos, scope, fv);
             }
@@ -3012,19 +3016,23 @@ impl<'a, 'b> Parser<'a, 'b> {
         self.sema.lang.standard_includes(Std::C2y) || self.sema.lang.gnu || self.sema.lang.clang
     }
 
-    /// Like `can_start_declaration`, but `__extension__` is ambiguous:
-    /// it can precede a declaration or an expression. Look past the
-    /// marker (and GNU attribute groups) before deciding.
+    /// Like `can_start_declaration`, but annotations between the header
+    /// parenthesis and the declaration are skipped first: `__extension__`
+    /// is ambiguous (it can precede a declaration or an expression),
+    /// and `if ([[maybe_unused]] int x = 1; ...)` opens with a standard
+    /// attribute group rather than a specifier.
     fn selection_header_starts_declaration(&mut self) -> bool {
-        if !self.peek_is_gnu("__extension__") {
-            return self.can_start_declaration();
-        }
         let mut n = 0;
         loop {
             match self.tokens.peek_nth(n).map(|located| &located.val) {
-                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("__extension__") => n += 1,
+                Some(Token::Identifier(sym)) if self.sema.lang.gnu && self.intern.resolve(*sym) == Some("__extension__") => n += 1,
+                Some(Token::Punctuator(Punctuator::LBracket)) if self.sema.lang.standard_includes(Std::C23) => match self.std_attribute_group_end(n) {
+                    Some(end) => n = end,
+                    None => return false,
+                },
                 Some(Token::Identifier(sym))
-                    if matches!(self.intern.resolve(*sym), Some("__attribute__" | "__attribute"))
+                    if self.sema.lang.gnu
+                        && matches!(self.intern.resolve(*sym), Some("__attribute__" | "__attribute"))
                         && matches!(self.tokens.peek_nth(n + 1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen))) =>
                 {
                     match self.balanced_paren_end(n + 1) {
@@ -3810,6 +3818,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                     if let Some(value) = value {
                         self.sema.constexprs.insert(id, value);
                     }
+                } else if self.sema.lang.standard_includes(Std::C2y)
+                    && let Some(value) = self.implicit_constexpr_value(id, specifiers, &checked)
+                {
+                    self.sema.constexprs.insert(id, value);
                 }
                 // An array of unknown size takes its size from the
                 // initializer (see `complete_array_bound`).
@@ -3853,6 +3865,45 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
     fn is_plain_auto_declarator(declarator: &Declarator) -> bool {
         declarator.pointer.is_empty() && declarator.direct.suffixes.is_empty() && matches!(declarator.direct.base, DirectBase::Ident(_))
+    }
+
+    /// N3693: an initialized `const` integer object with no linkage or
+    /// internal linkage is an implicitly `constexpr` named constant in
+    /// C2y. `const volatile`, `_Atomic`, and external-linkage objects
+    /// are excluded, as are non-integer types and initializers that are
+    /// not integer constant expressions.
+    fn implicit_constexpr_value(&self, id: DeclId, specifiers: &DeclarationSpecifiers, init: &Initializer<'a>) -> Option<crate::eval::Value> {
+        if specifiers.atomic {
+            return None;
+        }
+        let binding = self.sema.decls.get(id.0 as usize)?;
+        if binding.kind != BindingKind::Var || binding.linkage == Linkage::External {
+            return None;
+        }
+        let Ty::Qualified { quals, inner } = &binding.ty else {
+            return None;
+        };
+        if !quals.contains(TypeQualifiers::CONST) || quals.contains(TypeQualifiers::VOLATILE) || !crate::check::is_integer(inner) {
+            return None;
+        }
+        match Self::constant_initializer_value(init, self.sema, self.intern) {
+            Some(value @ crate::eval::Value::Int(_)) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The value of an initializer that is a single scalar constant
+    /// expression, optionally wrapped in braces (N3693 admits both, plus
+    /// the empty initializer as zero).
+    fn constant_initializer_value(init: &Initializer<'a>, sema: &Sema, interner: &Interner) -> Option<crate::eval::Value> {
+        match init {
+            Initializer::Expr(expr) => crate::eval::eval_const(expr, sema, interner),
+            Initializer::List { items, .. } => match *items {
+                [] => Some(crate::eval::Value::Int(0)),
+                [item] if item.designators.is_empty() => Self::constant_initializer_value(item.init, sema, interner),
+                _ => None,
+            },
+        }
     }
 
     /// Complete an array of unknown size from its initializer (C17
@@ -4523,7 +4574,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut suffixes = Vec::new();
         loop {
             match self.tokens.peek().map(|x| &x.val) {
-                Some(Token::Punctuator(Punctuator::LBracket)) => {
+                Some(Token::Punctuator(Punctuator::LBracket)) if !self.peek_std_attributes() => {
                     let open = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
                     self.tokens.advance();
                     let mut suffix = self.parse_array_suffix();
@@ -4948,6 +4999,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // modeled, so both spellings erase to the operand type.
             if matches!(self.tokens.peek_val(), Some(Token::Keyword(Keyword::_Atomic))) {
                 self.tokens.advance();
+                ds.atomic = true;
                 if self.eat_punct(Punctuator::LParen) {
                     let ty = self.parse_type_name();
                     self.expect_punct(Punctuator::RParen);
@@ -6608,6 +6660,32 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    /// End index (exclusive) of the `[[...]]` attribute group starting
+    /// at token `n`, or `None` when it is not one or is unterminated.
+    fn std_attribute_group_end(&self, n: usize) -> Option<usize> {
+        if !matches!(self.tokens.peek_nth(n).map(|located| &located.val), Some(Token::Punctuator(Punctuator::LBracket)))
+            || !matches!(self.tokens.peek_nth(n + 1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::LBracket)))
+        {
+            return None;
+        }
+        let mut depth = 0u32;
+        let mut i = n;
+        loop {
+            match self.tokens.peek_nth(i).map(|located| &located.val) {
+                Some(Token::Punctuator(Punctuator::LBracket)) => depth += 1,
+                Some(Token::Punctuator(Punctuator::RBracket)) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                None => return None,
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
     /// Whether one token starts a declaration specifier: a basic type
     /// keyword, or an identifier naming a typedef or a GNU builtin
     /// type. Shared by the cast/group disambiguation above.
@@ -8002,6 +8080,10 @@ pub struct DeclarationSpecifiers {
     /// C23 `constexpr`: the object is const and its initializer must be
     /// a constant expression.
     pub(crate) constexpr: bool,
+    /// C11 `_Atomic` as a qualifier or `_Atomic(type-name)` specifier.
+    /// Atomic semantics are not modeled; N3693 excludes atomic types
+    /// from implicit `constexpr`, so the spelling is tracked here.
+    pub(crate) atomic: bool,
     /// GNU attributes interleaved with the specifiers
     /// (`__attribute__((weak)) int x;`): declaration-level effects
     /// (`weak` here) apply to every declarator in the list.

@@ -3508,6 +3508,63 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mir_ty,
                 )
             }
+            fe::check::CheckedExprKind::Rotate { left, arg, count, bits } => {
+                // Rotate at the operand's declared width. Reduce the
+                // count modulo that width in the count's own type: a
+                // narrow `_BitInt` width or a bit-field width is not the
+                // storage width, and converting first would drop count
+                // bits that matter modulo the width.
+                let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
+                let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                let count_ty = count.ty.clone();
+                let count_mir = lower_ty(&count_ty, self.sema, self.interner);
+                let count_storage = int_bits(&count_mir);
+                let count = self.expr_value(module, func, frame, funcs, externs, globals, count);
+                let work_ty = fe::parse::Ty::UnsignedLongLong;
+                let work_mir = mir::Ty::int(64);
+                let width = self.iconst(func, 64, i128::from(*bits));
+                // The count is unsigned after checking, so a 64-bit
+                // work type holds every count up to 64 bits exactly.
+                // Wider counts split into halves: 128-bit remainder
+                // has no backend lowering.
+                let shift = if count_storage > 64 {
+                    let half = self.iconst(func, count_storage, 64);
+                    let high = self.emit(func, frame, mir::InstKind::LShr(count, half), count_mir);
+                    let low64 = self.convert(func, frame, count, &count_ty, &work_ty);
+                    let high64 = self.convert(func, frame, high, &count_ty, &work_ty);
+                    let low_mod = self.emit(func, frame, mir::InstKind::Urem(low64, width), work_mir.clone());
+                    let high_mod = self.emit(func, frame, mir::InstKind::Urem(high64, width), work_mir.clone());
+                    let factor = self.iconst(func, 64, ((1u128 << 64) % u128::from(*bits)) as i128);
+                    let scaled = self.emit(func, frame, mir::InstKind::Mul(high_mod, factor), work_mir.clone());
+                    let sum = self.emit(func, frame, mir::InstKind::Add(scaled, low_mod), work_mir.clone());
+                    self.emit(func, frame, mir::InstKind::Urem(sum, width), work_mir.clone())
+                } else {
+                    let count = if count_storage < 64 {
+                        self.convert(func, frame, count, &count_ty, &work_ty)
+                    } else {
+                        count
+                    };
+                    self.emit(func, frame, mir::InstKind::Urem(count, width), work_mir.clone())
+                };
+                let complement = self.emit(func, frame, mir::InstKind::Sub(width, shift), work_mir.clone());
+                let complement = self.emit(func, frame, mir::InstKind::Urem(complement, width), work_mir);
+                let shift = self.convert(func, frame, shift, &work_ty, &arg.ty);
+                let complement = self.convert(func, frame, complement, &work_ty, &arg.ty);
+                let (near, far) = if *left { (shift, complement) } else { (complement, shift) };
+                let low = self.emit(func, frame, mir::InstKind::Shl(value, near), operand_mir.clone());
+                let high = self.emit(func, frame, mir::InstKind::LShr(value, far), operand_mir.clone());
+                let raw = self.emit(func, frame, mir::InstKind::Or(low, high), operand_mir.clone());
+                // A bit-field or `_BitInt` narrower than its storage
+                // keeps only its declared precision.
+                let raw = if *bits < int_bits(&operand_mir) {
+                    let mask = if *bits == 128 { u128::MAX } else { (1u128 << *bits) - 1 };
+                    let mask = self.iconst(func, int_bits(&operand_mir), mask as i128);
+                    self.emit(func, frame, mir::InstKind::And(raw, mask), operand_mir.clone())
+                } else {
+                    raw
+                };
+                self.convert(func, frame, raw, &arg.ty, &expr.ty)
+            }
             other => todo!("expression lowering for {other:?}"),
         }
     }
@@ -10415,6 +10472,66 @@ mod tests {
         assert_eq!(
             jit_run_main(lower_module_c23("int main(void){ unsigned _BitInt(40) x = 1uwb; return __builtin_clzg(x); }")),
             39
+        );
+    }
+
+    #[test]
+    fn stdc_rotate_builtins_rotate_at_operand_width() {
+        assert_eq!(run_main("int main(){return __builtin_stdc_rotate_left(0x12345678U, 4) == 0x23456781U;}"), 1);
+        assert_eq!(run_main("int main(){return __builtin_stdc_rotate_right(0x12345678U, 4) == 0x81234567U;}"), 1);
+        // Counts reduce modulo the width, including a count equal to
+        // the width and one larger than a byte-wide operand.
+        assert_eq!(run_main("int main(){return __builtin_stdc_rotate_left(0x12345678U, 32) == 0x12345678U;}"), 1);
+        assert_eq!(run_main("int main(){return __builtin_stdc_rotate_left((unsigned char)0x81, 4) == 0x18;}"), 1);
+        assert_eq!(run_main("int main(){return __builtin_stdc_rotate_right((unsigned short)0x8001, 1) == 0xC000;}"), 1);
+        assert_eq!(
+            run_main("int main(){return __builtin_stdc_rotate_left(0x0123456789ABCDEFULL, 8) == 0x23456789ABCDEF01ULL;}"),
+            1
+        );
+        // A `_BitInt(N)` rotates over its value precision, not its
+        // padded storage width.
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void){ unsigned _BitInt(7) x = 1; \
+                 return (__builtin_stdc_rotate_left(x, 1) == 2) \
+                      + (__builtin_stdc_rotate_left(x, 260) == 2) * 2; }"
+            )),
+            3
+        );
+        // A wide count reduces modulo the precision before shifting,
+        // rather than truncating to `unsigned int` first (2^32 mod 7
+        // is 4, so rotating 1 left by four is 16, not 1).
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void){ unsigned _BitInt(7) x = 1; \
+                 unsigned long long n = 0x100000000ULL; \
+                 return (__builtin_stdc_rotate_left(x, n) == 16) \
+                      + (__builtin_stdc_rotate_left(x, n + 3) == 1) * 2; }"
+            )),
+            3
+        );
+        // A 128-bit count has no native remainder lowering; the two
+        // 64-bit halves still reduce exactly ((2^64 + 4) mod 7 is 6).
+        assert_eq!(
+            jit_run_main(lower_module_c2y(
+                "int main(void){ unsigned _BitInt(7) x = 1; \
+                 unsigned __int128 n = ((unsigned __int128)1 << 64) + 4; \
+                 return (__builtin_stdc_rotate_left(x, n) == 64) \
+                      + (__builtin_stdc_rotate_left(x, n + 1) == 1) * 2; }"
+            )),
+            3
+        );
+        // A bit-field rotates over its declared width, and its result
+        // keeps the declared unsigned type (not the promoted `int`).
+        assert_eq!(
+            run_main(
+                "struct S { unsigned s : 5; }; \
+                 int main(void){ struct S s = { 0x12 }; int n = 1; \
+                 return (__builtin_stdc_rotate_left(s.s, 3) == 0x14) \
+                      + (__builtin_stdc_rotate_right(s.s, 2) == 0x14) * 2 \
+                      + (__builtin_stdc_rotate_right(s.s, n) == 0x9) * 4; }"
+            ),
+            7
         );
     }
 

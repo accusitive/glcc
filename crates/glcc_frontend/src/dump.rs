@@ -275,6 +275,13 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             }
             format!("({} {} :{})", if *ctz { "ctz" } else { "clz" }, parts.join(" "), t)
         }
+        CheckedExprKind::Rotate { left, arg, count, .. } => format!(
+            "({} {} {} :{})",
+            if *left { "rotate-left" } else { "rotate-right" },
+            dump_ex(arg, sema, interner),
+            dump_ex(count, sema, interner),
+            t
+        ),
         CheckedExprKind::ConstantP(b) => format!("(constant-p {} :{})", i32::from(*b), t),
         CheckedExprKind::ClassifyType(code) => format!("(classify-type {} :{})", code, t),
         CheckedExprKind::FpClass { op, arg } => {

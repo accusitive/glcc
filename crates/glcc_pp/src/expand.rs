@@ -198,6 +198,8 @@ fn has_builtin(name: &str) -> bool {
             | "__builtin_bswap16"
             | "__builtin_bswap32"
             | "__builtin_bswap64"
+            | "__builtin_stdc_rotate_left"
+            | "__builtin_stdc_rotate_right"
             | "__builtin_abs"
             | "__builtin_labs"
             | "__builtin_llabs"
