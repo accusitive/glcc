@@ -86,7 +86,7 @@ fn analyze(func: &Function, dom: &DomInfo, header: Block, set: &HashSet<Block>) 
         return None;
     }
 
-    let (body, body_args, exit, exit_args) = header_edges(func, header, set)?;
+    let (body, body_args, exit, exit_args, cond_continues) = header_edges(func, header, set)?;
     let mut backedges = Vec::new();
     for &block in set {
         if block == header {
@@ -137,7 +137,7 @@ fn analyze(func: &Function, dom: &DomInfo, header: Block, set: &HashSet<Block>) 
     let trip_count = header_params
         .iter()
         .enumerate()
-        .find_map(|(index, param)| trip_count(func, *param, pred, lhs, rhs, init_args[index], back_args[index]))
+        .find_map(|(index, param)| trip_count(func, *param, pred, lhs, rhs, init_args[index], back_args[index], cond_continues))
         .filter(|count| *count <= MAX_TRIP_COUNT)?;
 
     let order = loop_order(func, header, set)?;
@@ -175,8 +175,10 @@ fn preheader_of(func: &Function, dom: &DomInfo, header: Block, set: &HashSet<Blo
 
 /// The header's conditional branch split into its in-loop successor
 /// (the body) and its out-of-loop successor (the exit), with the edge
-/// arguments belonging to each.
-fn header_edges(func: &Function, header: Block, set: &HashSet<Block>) -> Option<(Block, SmallVec<[Value; 4]>, Block, SmallVec<[Value; 4]>)> {
+/// arguments belonging to each. The final flag reports whether the
+/// branch condition is true when control continues into the body; it is
+/// false for a loop whose header condition is the exit test.
+fn header_edges(func: &Function, header: Block, set: &HashSet<Block>) -> Option<(Block, SmallVec<[Value; 4]>, Block, SmallVec<[Value; 4]>, bool)> {
     let Terminator::CondBr {
         then_block,
         else_block,
@@ -188,8 +190,8 @@ fn header_edges(func: &Function, header: Block, set: &HashSet<Block>) -> Option<
         return None;
     };
     match (set.contains(&then_block), set.contains(&else_block)) {
-        (true, false) => Some((then_block, then_args, else_block, else_args)),
-        (false, true) => Some((else_block, else_args, then_block, then_args)),
+        (true, false) => Some((then_block, then_args, else_block, else_args, true)),
+        (false, true) => Some((else_block, else_args, then_block, then_args, false)),
         _ => None,
     }
 }
@@ -208,9 +210,12 @@ fn icmp_of_cond(func: &Function, header: Block, cond: Value) -> Option<(IcmpPred
 }
 
 /// Trip count of a loop whose header compares `param` with a constant
-/// and whose latch updates it by a constant step. The simulation stops
-/// at the unroll cap, so a non-terminating update is rejected.
-fn trip_count(func: &Function, param: Value, pred: IcmpPred, lhs: Value, rhs: Value, init: Value, back: Value) -> Option<usize> {
+/// and whose latch updates it by a constant step. `cond_continues`
+/// says whether the header condition is the loop's continue test; when
+/// it is the exit test (the body is the else-successor), the simulated
+/// condition is negated. The simulation stops at the unroll cap, so a
+/// non-terminating update is rejected.
+fn trip_count(func: &Function, param: Value, pred: IcmpPred, lhs: Value, rhs: Value, init: Value, back: Value, cond_continues: bool) -> Option<usize> {
     let step = update_step(func, param, back)?;
     let (bits, mut iv) = int_const(func, init)?;
     let (_, bound) = if lhs == param {
@@ -222,12 +227,13 @@ fn trip_count(func: &Function, param: Value, pred: IcmpPred, lhs: Value, rhs: Va
     };
     let mut count = 0usize;
     loop {
-        let live = if lhs == param {
+        let cond = if lhs == param {
             eval_icmp(pred, bits, iv, bound)
         } else {
             eval_icmp(pred, bits, bound, iv)
         };
-        if !live {
+        let continues = if cond_continues { cond } else { !cond };
+        if !continues {
             return Some(count);
         }
         count += 1;
@@ -475,6 +481,14 @@ mod tests {
     }
 
     fn counted_loop(start: i128, bound: i128) -> (Module, Func) {
+        counted_loop_with(start, bound, true)
+    }
+
+    /// `body_on_true` selects which header successor is the loop body:
+    /// the usual `i < bound` continue test, or the goto shape whose
+    /// condition is the exit test (`i >= bound` with the body as the
+    /// else-successor).
+    fn counted_loop_with(start: i128, bound: i128, body_on_true: bool) -> (Module, Func) {
         let mut module = Module::new();
         let sig = Signature::new(vec![], Ty::int(32));
         let (mut func, entry) = Function::new("main", sig);
@@ -492,11 +506,18 @@ mod tests {
         });
 
         let bound = func.push_const(Const::Int { bits: 32, value: bound });
+        let body_args: SmallVec<[Value; 4]> = Default::default();
+        let exit_args: SmallVec<[Value; 4]> = [sum].into_iter().collect();
+        let (pred, then_block, then_args, else_block, else_args) = if body_on_true {
+            (IcmpPred::Slt, body, body_args, exit, exit_args)
+        } else {
+            (IcmpPred::Sge, exit, exit_args, body, body_args)
+        };
         let cond = emit(
             &mut func,
             header,
             InstKind::Icmp {
-                pred: IcmpPred::Slt,
+                pred,
                 lhs: i,
                 rhs: bound,
             },
@@ -504,10 +525,10 @@ mod tests {
         );
         func.blocks[header].term = Some(Terminator::CondBr {
             cond,
-            then_block: body,
-            else_block: exit,
-            then_args: Default::default(),
-            else_args: [sum].into_iter().collect(),
+            then_block,
+            else_block,
+            then_args,
+            else_args,
         });
 
         let one = func.push_const(Const::Int { bits: 32, value: 1 });
@@ -527,6 +548,18 @@ mod tests {
     #[test]
     fn a_small_counted_loop_folds_to_its_sum() {
         let (mut module, func) = counted_loop(100, 2);
+        optimize(&mut module, OptLevel::Speed);
+        let main = &module.funcs[func];
+        let Terminator::Return { val: Some(value) } = main.blocks[main.entry].term.clone().unwrap() else {
+            panic!("expected a value return");
+        };
+        assert_eq!(main.const_value(value), Some(&Const::Int { bits: 32, value: 102 }));
+        assert!(crate::verify::verify_module(&module).is_empty());
+    }
+
+    #[test]
+    fn a_counted_loop_whose_header_tests_the_exit_folds_to_its_sum() {
+        let (mut module, func) = counted_loop_with(100, 2, false);
         optimize(&mut module, OptLevel::Speed);
         let main = &module.funcs[func];
         let Terminator::Return { val: Some(value) } = main.blocks[main.entry].term.clone().unwrap() else {
