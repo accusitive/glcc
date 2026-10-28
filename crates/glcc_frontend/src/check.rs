@@ -416,32 +416,62 @@ pub(crate) fn is_signed_int_in(ty: &Ty, char_signed: bool) -> Option<bool> {
 /// The bit-field precision of an expression, if any: gcc performs an
 /// operation on bit-fields in the precision of the widest operand, so
 /// `unsigned long long b : 40` keeps 40 bits through `b << 32` and
-/// `b.u33 + b.u33` wraps at 33. Only fields wider than 32 bits carry
-/// the precision — a narrower field promotes to `int`, which drops it
-/// — and a binary operation with a non-bit-field operand lands in the
-/// common type's full precision. Shifts take the left operand's.
-pub fn bitfield_precision<'a>(expr: &CheckedExpr<'a>) -> Option<u32> {
+/// `b.u33 + b.u33` wraps at 33. A non-bit-field operand contributes
+/// the width of its (promoted) type: `b - 8` wraps at 40 bits because
+/// `int` is narrower, while `b - 8ull` computes at 64. Only fields
+/// wider than 32 bits carry a reduced precision — a narrower field
+/// promotes to `int`, whose 32 bits are already the common width.
+/// Shifts take the left operand's.
+pub fn bitfield_precision<'a>(expr: &CheckedExpr<'a>, target: &crate::target::Target) -> Option<u32> {
     use crate::parse::{BinaryOp, UnaryOp};
     match &expr.kind {
         CheckedExprKind::Member { bitfield: Some((_, width)), .. } if *width > 32 => Some(*width),
         CheckedExprKind::Unary(op, operand) => match op {
-            UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => bitfield_precision(operand),
+            UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::PreInc | UnaryOp::PreDec | UnaryOp::PostInc | UnaryOp::PostDec => bitfield_precision(operand, target),
             _ => None,
         },
         CheckedExprKind::Binary(op, lhs, rhs) => match op {
-            BinaryOp::Shl | BinaryOp::Shr => bitfield_precision(lhs),
+            BinaryOp::Shl | BinaryOp::Shr => bitfield_precision(lhs, target),
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem | BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                match (bitfield_precision(lhs), bitfield_precision(rhs)) {
-                    (Some(a), Some(b)) => Some(a.max(b)),
-                    _ => None,
-                }
+                Some(operand_precision(lhs, target)?.max(operand_precision(rhs, target)?))
             }
             _ => None,
         },
-        CheckedExprKind::Assign(_, lhs, _) => bitfield_precision(lhs),
-        CheckedExprKind::CompoundAssign { lhs, .. } => bitfield_precision(lhs),
+        CheckedExprKind::Assign(_, lhs, _) => bitfield_precision(lhs, target),
+        CheckedExprKind::CompoundAssign { lhs, .. } => bitfield_precision(lhs, target),
+        // The usual arithmetic conversions wrap operands in `Convert`
+        // nodes; the reduced precision rides along (an explicit `Cast`
+        // is a separate node and resets it).
+        CheckedExprKind::Convert { expr, .. } => bitfield_precision(expr, target),
         _ => None,
     }
+}
+
+/// An integer operand's arithmetic precision: a bit-field's declared
+/// width, or the width of its type after the integer promotions. The
+/// usual arithmetic conversions wrap operands in `Convert` nodes;
+/// those do not widen the contribution, but a conversion that *is* an
+/// integer promotion does (a `char` operand counts as `int`).
+fn operand_precision<'a>(expr: &CheckedExpr<'a>, target: &crate::target::Target) -> Option<u32> {
+    let int_rank = |ty: &Ty| int_rank(ty).unwrap_or(u8::MAX);
+    let mut cur = expr;
+    let mut promoted = false;
+    while let CheckedExprKind::Convert { expr: inner, ty } = &cur.kind {
+        if matches!(ty.unqualified(), Ty::Int | Ty::UnsignedInt) && int_rank(&inner.ty) < int_rank(&Ty::Int) {
+            promoted = true;
+        }
+        cur = inner;
+    }
+    if !is_integer(&cur.ty) {
+        return None;
+    }
+    if let Some(bits) = bitfield_precision(cur, target) {
+        return Some(bits);
+    }
+    if promoted {
+        return int_type_size(&Ty::Int, target).map(|bytes| bytes * 8);
+    }
+    int_type_size(&cur.ty, target).map(|bytes| bytes * 8)
 }
 
 /// Byte size of an integer type under `target`. Only `long` varies

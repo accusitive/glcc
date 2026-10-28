@@ -594,7 +594,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     fn func_sig(&self, binding: &fe::sema::Binding) -> mir::Signature {
-        let fe::parse::Ty::Func { params, variadic, .. } = binding.ty.unqualified() else {
+        let fe::parse::Ty::Func { params, variadic, prototyped, .. } = binding.ty.unqualified() else {
             panic!("function binding without a Func type");
         };
         // An async function's public symbol returns its boxed
@@ -611,7 +611,11 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             lower_ty(self.declared_ret(binding), self.sema, self.interner)
         };
         let mut sig = mir::Signature::new(params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(), ret);
-        sig.variadic = *variadic;
+        // An unprototyped declaration (`int f()`, C89 implicit
+        // `extern int f()`) fixes no parameter list: calls supply any
+        // arguments, default-promoted. The variadic ABI is exactly
+        // that shape, so callee and caller agree on the count.
+        sig.variadic = *variadic || !*prototyped;
         sig
     }
 
@@ -5363,14 +5367,14 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::parse::Ty::Func { .. } => callee.ty.clone(),
             _ => panic!("indirect call to non-function"),
         };
-        let fe::parse::Ty::Func { ret, params, variadic, .. } = func_ty.unqualified() else {
+        let fe::parse::Ty::Func { ret, params, variadic, prototyped } = func_ty.unqualified() else {
             panic!("indirect call to non-function");
         };
         let mut sig = mir::Signature::new(
             params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(),
             lower_ty(ret, self.sema, self.interner),
         );
-        sig.variadic = *variadic;
+        sig.variadic = *variadic || !*prototyped;
         sig
     }
 
@@ -5487,7 +5491,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// precision: `unsigned long long b : 40` wraps at 40 bits through
     /// `<<`, `+`, `-`, and so on (see `check::bitfield_precision`).
     fn reduce_bitfield_precision(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, expr: &fe::check::CheckedExpr, mir_ty: mir::Ty) -> mir::Value {
-        let Some(bits) = fe::check::bitfield_precision(expr) else {
+        let Some(bits) = fe::check::bitfield_precision(expr, &self.sema.target) else {
             return value;
         };
         self.reduce_to_bits(func, frame, value, bits, is_signed(&expr.ty, self.sema), mir_ty)
@@ -9476,6 +9480,61 @@ mod tests {
             run_main("struct I{int v;}; struct S{struct I i; int x:3;}; int main(){struct S s = {.i.v = 7, .x = 2}; return s.i.v + s.x;}"),
             9
         );
+        // GCC computes bit-field arithmetic at the widest operand's
+        // precision: an `int` or `unsigned` operand keeps a 40-bit
+        // field at 40 bits, while `unsigned long long` widens to 64.
+        assert_eq!(
+            run_main(
+                "struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 2; return (unsigned long long)(w.u - 8) == 0xfffffffffaULL;}"
+            ),
+            1
+        );
+        assert_eq!(
+            run_main("struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 2; return (unsigned long long)((w.u - 8) + 8) == 2;}"),
+            1
+        );
+        assert_eq!(
+            run_main(
+                "struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 2; return (unsigned long long)(w.u - 8ULL) == 0xfffffffffffffffaULL;}"
+            ),
+            1
+        );
+        assert_eq!(
+            run_main(
+                "struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 2; return ((unsigned long long)(w.u - 8)) + 8 == 0x10000000002ULL;}"
+            ),
+            1
+        );
+        assert_eq!(
+            run_main(
+                "struct W{unsigned long long u:40;}; int main(){struct W w; w.u = 2; unsigned int eight = 8; return (unsigned long long)(w.u - eight) == 0xfffffffffaULL;}"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn unprototyped_signatures_admit_arguments() {
+        // A C89 implicit declaration (`extern int f()`) fixes no
+        // parameter list: the import's signature must accept the
+        // default-promoted actuals.
+        let module = lower_module("int main(){return foo(1, 2);}");
+        let import = module.externs.iter().find(|e| e.name == "foo").expect("foo import");
+        assert!(import.sig.variadic && import.sig.params.is_empty(), "{:?}", import.sig);
+
+        // The same holds for an indirect call through a function
+        // pointer declared without a prototype.
+        let module = lower_module("int main(){int (*p)() = 0; return p(1, 2);}");
+        let indirect = module
+            .funcs
+            .iter()
+            .flat_map(|f| f.insts.iter())
+            .find_map(|inst| match &inst.kind {
+                mir::InstKind::CallIndirect { sig, .. } => Some(sig),
+                _ => None,
+            })
+            .expect("indirect call");
+        assert!(indirect.variadic && indirect.params.is_empty(), "{indirect:?}");
     }
 
     #[test]
