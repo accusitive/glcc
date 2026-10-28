@@ -383,7 +383,7 @@ pub fn int_constant(lit: &IntLiteral, interner: &Interner, long_size: u64) -> Op
         let signed = lit.suffix == IntSuffix::Wb;
         let width = if signed { magnitude_bits + 1 } else { magnitude_bits };
         let width = width.max(if signed { 2 } else { 1 });
-        if width > 64 {
+        if width > 128 {
             return None;
         }
         return Some((Ty::BitInt { width, signed }, magnitude as i128));
@@ -1117,7 +1117,9 @@ fn width(ty: &Ty, target: Target) -> Option<u32> {
 
 /// The low `width(ty)` bits of `v` as an unsigned pattern.
 fn to_bits(v: i128, ty: &Ty, target: Target) -> Option<u128> {
-    let bits = width(ty, target)?;
+    // Constant evaluation is i128-limited, so a wider integer wraps at
+    // 128 bits rather than failing.
+    let bits = width(ty, target)?.min(128);
     let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
     Some((v as u128) & mask)
 }
@@ -1126,7 +1128,7 @@ fn to_bits(v: i128, ty: &Ty, target: Target) -> Option<u128> {
 /// sign-extended when signed, `_Bool` collapsing to 0/1. Plain `char`
 /// follows `char_signed` (see [`char_constant_in`]).
 fn from_bits(bits: u128, ty: &Ty, target: Target) -> Option<i128> {
-    let bitlen = width(ty, target)?;
+    let bitlen = width(ty, target)?.min(128);
     let mask = if bitlen == 128 { u128::MAX } else { (1u128 << bitlen) - 1 };
     let bits = bits & mask;
     if *ty == Ty::Bool {

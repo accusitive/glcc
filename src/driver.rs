@@ -1272,9 +1272,9 @@ fn lower_source_to_mir(
     glcc_mir::pass::PassManager::new()
         .add_module_pass(glcc_mir::coroutine::LowerCoroutines)
         .run(&mut mir_module);
-    // Optimization pipeline (optimized builds only). The pass list
-    // lives in `glcc_mir::optimize`, shared by every consumer; `-O0`
-    // runs no MIR passes for best debug fidelity.
+    // The canonical pipeline shared with every other consumer. It always
+    // runs wide-integer legalization; at `-O0` that is the only pass
+    // (best debug fidelity).
     glcc_mir::optimize(&mut mir_module, opt_level);
     let errors = glcc_mir::verify::verify_module(&mir_module);
     if !errors.is_empty() {

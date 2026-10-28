@@ -9,6 +9,7 @@ fn ty_str(ty: &Ty) -> String {
         Ty::Void => "void".to_string(),
         Ty::Bool => "bool".to_string(),
         Ty::Int { bits } => format!("i{bits}"),
+        Ty::WideInt { bits } => format!("i{bits}"),
         Ty::Float(k) => format!("{k:?}").to_lowercase(),
         Ty::Ptr { pointee, bits } => {
             if *bits == 64 {

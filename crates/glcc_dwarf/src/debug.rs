@@ -182,13 +182,16 @@ fn wrap_qual(unit: &mut Unit, parent: UnitEntryId, qual: Qualifier, inner: UnitE
 }
 
 /// Emit one base-type DIE.
-fn base_die(unit: &mut Unit, parent: UnitEntryId, name: &str, encoding: gimli::constants::DwAte, size: u64) -> UnitEntryId {
+fn base_die(unit: &mut Unit, parent: UnitEntryId, name: &str, encoding: gimli::constants::DwAte, size: u64, bit_size: Option<u64>) -> UnitEntryId {
     use gimli::constants::*;
     let id = unit.add(parent, DW_TAG_base_type);
     let entry = unit.get_mut(id);
     entry.set(DW_AT_name, AttributeValue::String(name.as_bytes().to_vec()));
     entry.set(DW_AT_encoding, AttributeValue::Encoding(encoding));
     entry.set(DW_AT_byte_size, AttributeValue::Udata(size));
+    if let Some(bits) = bit_size {
+        entry.set(DW_AT_bit_size, AttributeValue::Udata(bits));
+    }
     id
 }
 
@@ -218,7 +221,7 @@ fn ty_die(unit: &mut Unit, root: UnitEntryId, cache: &mut [Option<UnitEntryId>],
     }
     let ty = types.get(index)?;
     let die = match ty {
-        DebugType::Base { name, encoding, size } => base_die(unit, root, name, ate(*encoding), *size),
+        DebugType::Base { name, encoding, size, bit_size } => base_die(unit, root, name, ate(*encoding), *size, *bit_size),
         DebugType::Pointer { pointee } => {
             // LP64: every pointer is 8 bytes.
             let pointee_id = pointee.and_then(|p| ty_die(unit, root, cache, types, p));

@@ -46,18 +46,24 @@ impl OptLevel {
 }
 
 /// Run the canonical MIR optimization pipeline at `level`.
+///
+/// Wide-integer legalization is not an optimization: the backend only
+/// lowers scalars, so it runs first at every level, before any pass
+/// that assumes `Ty::Int` fits in a register.
 pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool)> {
-    let mut pm = PassManager::new();
+    let mut report = PassManager::new()
+        .add_module_pass(passes::LegalizeWideInts::new())
+        .run(module);
     if !level.optimize() {
-        return pm.run(module);
+        return report;
     }
-    pm = pm
+    let pm = PassManager::new()
         .add_module_pass(passes::Inline::small())
         .add_module_pass(passes::LowerLibcMemory)
         .add_module_pass(passes::GlobalConstProp)
         .add_module_pass(passes::MergeReadOnlyGlobals)
         .add_module_pass(passes::DeadModuleItems);
-    let mut report = function_pipeline(pm).run(module);
+    report.extend(function_pipeline(pm).run(module));
     // Function passes turn aggregate loads and stores into copies, so
     // give module-level propagation another look at the settled IR. A
     // copied read-only global can then expose its field initializers.

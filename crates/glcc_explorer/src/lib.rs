@@ -353,8 +353,9 @@ fn mir_module_verify_notes(_module: &glcc_mir::Module) -> Vec<String> {
 }
 
 /// Driver-equivalent MIR pipeline (`glcc_mir::optimize`), so the
-/// explorer always matches the other consumers. `-O0` runs no passes,
-/// so the optimized view matches the raw dump.
+/// explorer always matches the other consumers. At `-O0` only the
+/// mandatory wide-integer legalization runs, so the optimized view
+/// matches the raw dump apart from it.
 fn run_mir_passes(module: &mut glcc_mir::Module, opt: OptLevel) {
     glcc_mir::optimize(module, opt);
 }

@@ -122,11 +122,9 @@ fn run(opts: &Options) -> Result<(), String> {
     if opts.debug {
         eprintln!("--- mir (frontend output) ---\n{}", glcc_mir::display::dump_module(&module));
     }
-    if opts.opt.optimize() {
-        // The canonical pipeline shared with the C driver, explorer,
-        // and runtime; it is a no-op at `-O0`.
-        glcc_mir::optimize(&mut module, opts.opt);
-    }
+    // The canonical pipeline is a no-op at `-O0` apart from wide-integer
+    // legalization, which every level needs.
+    glcc_mir::optimize(&mut module, opts.opt);
     if opts.debug {
         eprintln!("--- mir (after passes) ---\n{}", glcc_mir::display::dump_module(&module));
     }

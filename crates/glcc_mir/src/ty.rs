@@ -11,6 +11,14 @@ pub enum FloatKind {
     F128,
 }
 
+/// Width of one limb in a [`Ty::WideInt`]. Also the largest integer the
+/// backend lowers natively (with [`MAX_SCALAR_INT_BITS`]).
+pub const LIMB_BITS: u32 = 64;
+
+/// Integers wider than this stay [`Ty::Int`]: Cranelift handles them as
+/// scalar `i128` values. Anything wider is legalized to [`Ty::WideInt`].
+pub const MAX_SCALAR_INT_BITS: u32 = 128;
+
 /// Middle IR type. Scalars mirror Cranelift 1:1; aggregates are structural
 /// so optimizations see through them instead of opaque byte blobs.
 ///
@@ -24,6 +32,16 @@ pub enum Ty {
     Void,
     Bool,
     Int {
+        bits: u32,
+    },
+    /// An integer wider than [`MAX_SCALAR_INT_BITS`], after
+    /// legalization. It is an aggregate: its in-memory and SSA
+    /// representation is a little-endian sequence of [`LIMB_BITS`]-bit
+    /// limbs, so every arithmetic operation has been rewritten to limb
+    /// operations by the legalization pass. `bits` keeps the integer's
+    /// storage width (a multiple of 8), so sizes and pointer arithmetic
+    /// match the pre-legalization [`Ty::Int`] exactly.
+    WideInt {
         bits: u32,
     },
     Float(FloatKind),
@@ -81,7 +99,32 @@ impl Ty {
     }
 
     pub fn is_aggregate(&self) -> bool {
-        matches!(self, Ty::Array { .. } | Ty::Struct { .. })
+        matches!(self, Ty::Array { .. } | Ty::Struct { .. } | Ty::WideInt { .. })
+    }
+
+    pub fn is_wide_int(&self) -> bool {
+        matches!(self, Ty::WideInt { .. })
+    }
+
+    /// Number of [`LIMB_BITS`]-sized limbs in a wide integer.
+    pub fn limb_count(&self) -> u32 {
+        match self {
+            Ty::WideInt { bits } => (*bits).div_ceil(LIMB_BITS),
+            _ => panic!("limb count of a non-wide integer"),
+        }
+    }
+
+    /// Type of limb `index`: a full-width limb everywhere but the last
+    /// one, which holds the remaining `bits % LIMB_BITS` bits (or a full
+    /// limb when the width divides evenly).
+    pub fn limb_ty(&self, index: u32) -> Ty {
+        let Ty::WideInt { bits } = self else {
+            panic!("limb type of a non-wide integer");
+        };
+        let full = index + 1 < self.limb_count();
+        Ty::Int {
+            bits: if full { LIMB_BITS } else { bits - index * LIMB_BITS },
+        }
     }
 
     pub fn is_scalar(&self) -> bool {
@@ -96,6 +139,7 @@ impl Ty {
             Ty::Void => 0,
             Ty::Bool => 1,
             Ty::Int { bits } => ((*bits).max(8) / 8) as u64,
+            Ty::WideInt { bits } => ((*bits).max(8) / 8) as u64,
             Ty::Float(k) => match k {
                 FloatKind::F32 => 4,
                 FloatKind::F64 => 8,
@@ -133,6 +177,7 @@ impl Signature {
             (Ty::Array { elem, .. }, GepIndex::Index(_) | GepIndex::ConstIndex(_)) => Some(elem.as_ref().clone()),
             (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr { .. }, GepIndex::ConstIndex(_)) => Some(ty.clone()),
             (Ty::Int { .. } | Ty::Float(_) | Ty::Bool | Ty::Ptr { .. }, GepIndex::Index(_)) => Some(ty.clone()),
+            (Ty::WideInt { .. }, GepIndex::ConstIndex(_) | GepIndex::Index(_)) => Some(ty.clone()),
             _ => None,
         }
     }
@@ -178,6 +223,10 @@ pub fn ty_align(ty: &Ty) -> u64 {
     match ty {
         Ty::Void | Ty::Bool => 1,
         Ty::Int { bits } => ((*bits).max(8) / 8).min(16) as u64,
+        // `_BitInt` storage only aligns to 8 past the first 8-byte unit,
+        // even when the object spans several of them (clang does the
+        // same), so a wide value never demands 16-byte alignment.
+        Ty::WideInt { bits } => ((*bits).max(8) / 8).min(8) as u64,
         Ty::Float(k) => match k {
             FloatKind::F32 => 4,
             FloatKind::F64 => 8,

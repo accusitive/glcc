@@ -7,6 +7,8 @@
 //! DWARF-shaped details filled in by lowering. Passes carry the
 //! records along; only the final DWARF writer interprets them.
 
+use std::borrow::Cow;
+
 use crate::ir::{Global, Value};
 
 /// One source position: file index into [`crate::ir::Module::files`],
@@ -80,9 +82,13 @@ pub type DebugTypeId = u32;
 #[derive(Debug, Clone)]
 pub enum DebugType {
     Base {
-        name: &'static str,
+        name: Cow<'static, str>,
         encoding: BaseEncoding,
         size: u64,
+        /// Declared precision when the object's storage holds padding
+        /// bits (`_BitInt(300)` in a 40-byte slot), so debuggers mask
+        /// the padding off. `None` when `size * 8` is the precision.
+        bit_size: Option<u64>,
     },
     Pointer {
         /// `None` for `void *`, like gcc.

@@ -98,6 +98,19 @@ impl Drop for VisitGuard<'_> {
     }
 }
 
+/// Storage size in bytes of a `_BitInt(width)`, matching clang: powers
+/// of two up to 8 bytes, then whole 8-byte units.
+pub fn bitint_size(width: u32) -> u64 {
+    let bytes = u64::from(width).div_ceil(8);
+    if bytes <= 8 { bytes.next_power_of_two() } else { bytes.div_ceil(8) * 8 }
+}
+
+/// Alignment of a `_BitInt(width)`. Above 8 bytes it stays 8, like
+/// clang's x86-64 layout.
+pub fn bitint_align(width: u32) -> u64 {
+    bitint_size(width).min(8)
+}
+
 fn align_up(pos: u64, align: u64) -> Option<u64> {
     debug_assert!(align > 0);
     let extra = (align - pos % align) % align;
@@ -144,7 +157,7 @@ impl<'a> Sema<'a> {
             Ty::Long | Ty::UnsignedLong => Some(t.long_size),
             Ty::LongLong | Ty::UnsignedLongLong => Some(t.long_long_size),
             Ty::Int128 | Ty::UnsignedInt128 => Some(t.int128_size),
-            Ty::BitInt { width, .. } => Some(u64::from(*width).div_ceil(8).next_power_of_two().min(8)),
+            Ty::BitInt { width, .. } => Some(bitint_size(*width)),
             Ty::Nullptr => Some(t.pointer_size),
             Ty::Float => Some(t.float_size),
             Ty::Double => Some(t.double_size),
@@ -183,7 +196,7 @@ impl<'a> Sema<'a> {
             Ty::Long | Ty::UnsignedLong => Some(t.long_align),
             Ty::LongLong | Ty::UnsignedLongLong => Some(t.long_long_align),
             Ty::Int128 | Ty::UnsignedInt128 => Some(t.int128_align),
-            Ty::BitInt { width, .. } => Some(u64::from(*width).div_ceil(8).next_power_of_two().min(8)),
+            Ty::BitInt { width, .. } => Some(bitint_align(*width)),
             Ty::Nullptr => Some(t.pointer_align),
             Ty::Float => Some(t.float_align),
             Ty::Double => Some(t.double_align),

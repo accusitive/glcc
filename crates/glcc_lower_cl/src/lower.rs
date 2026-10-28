@@ -714,7 +714,13 @@ fn write_const(bytes: &mut [u8], off: usize, c: &mir::Const) {
     match c {
         mir::Const::Int { bits, value } => {
             let len = ((*bits).max(8) / 8) as usize;
-            bytes[off..off + len].copy_from_slice(&value.to_le_bytes()[..len]);
+            // Constants are i128 even for wider MIR types: sign-extend
+            // the stored value over the full byte width.
+            let image = value.to_le_bytes();
+            let head = len.min(image.len());
+            bytes[off..off + head].copy_from_slice(&image[..head]);
+            let fill = if *value < 0 { 0xff } else { 0 };
+            bytes[off + head..off + len].fill(fill);
         }
         mir::Const::Float { kind, bits } => {
             let len = match kind {
@@ -1159,6 +1165,19 @@ fn materialize_const(builder: &mut FunctionBuilder, c: &mir::Const, ty: &mir::Ty
         let addr = builder.ins().stack_addr(types::I64, slot, 0);
         match c {
             mir::Const::Bytes(content) => store_const_bytes(builder, addr, content),
+            // A wide integer constant is a sign-extended scalar pattern
+            // in a byte image at the type's own width.
+            mir::Const::Int { value, .. } if ty.is_wide_int() => {
+                let len = ty.size_bytes() as usize;
+                let mut image = vec![0u8; len];
+                let raw = value.to_le_bytes();
+                let copy = raw.len().min(len);
+                image[..copy].copy_from_slice(&raw[..copy]);
+                if *value < 0 {
+                    image[copy..].fill(0xff);
+                }
+                store_const_bytes(builder, addr, &image);
+            }
             // Fresh slots hold garbage: zeroinit must clear explicitly.
             _ => zero_range(builder, addr, ty.size_bytes()),
         }
@@ -2696,7 +2715,7 @@ fn gep_addr(body: &mut Body, builder: &mut FunctionBuilder, base: ClifValue, poi
                 }
                 // Element step over a pointed-to scalar: `p++` scales by
                 // the pointee size, not by bytes.
-                mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } => {
+                mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } | mir::Ty::WideInt { .. } => {
                     fixed += (*k * ty.size_bytes()) as i64;
                 }
                 _ => panic!("constant step into aggregate"),
@@ -2705,7 +2724,7 @@ fn gep_addr(body: &mut Body, builder: &mut FunctionBuilder, base: ClifValue, poi
                 let (scale, next) = match &ty {
                     mir::Ty::Array { elem, .. } => (elem.size_bytes(), elem.as_ref().clone()),
                     // Pointer arithmetic over a single element.
-                    mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } => (ty.size_bytes(), ty.clone()),
+                    mir::Ty::Int { .. } | mir::Ty::Float(_) | mir::Ty::Bool | mir::Ty::Ptr { .. } | mir::Ty::WideInt { .. } => (ty.size_bytes(), ty.clone()),
                     _ => panic!("dynamic step into aggregate"),
                 };
                 let idx = operand(body, builder, *v);
@@ -2748,6 +2767,12 @@ fn field_offset(ty: &mir::Ty, index: u32) -> (u64, mir::Ty) {
             (offsets[slot], fields[slot].clone())
         }
         mir::Ty::Array { elem, .. } => (u64::from(index) * elem.size_bytes(), elem.as_ref().clone()),
+        mir::Ty::WideInt { .. } => {
+            if index >= ty.limb_count() {
+                panic!("limb index out of range");
+            }
+            (u64::from(index) * u64::from(mir::ty::LIMB_BITS / 8), ty.limb_ty(index))
+        }
         _ => panic!("extract step into scalar"),
     }
 }

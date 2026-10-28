@@ -533,7 +533,7 @@ fn classify_value(target: Target, ty: &mir::Ty, counters: &mut Counters, is_ret:
                 ValueClass::Regs(vec![(0, types::F128)])
             }
         },
-        mir::Ty::Array { .. } | mir::Ty::Struct { .. } => classify_aggregate(target, ty, counters, variadic),
+        mir::Ty::Array { .. } | mir::Ty::Struct { .. } | mir::Ty::WideInt { .. } => classify_aggregate(target, ty, counters, variadic),
     }
 }
 
@@ -559,6 +559,7 @@ fn mir_align(ty: &mir::Ty) -> u64 {
     match ty {
         mir::Ty::Void | mir::Ty::Bool => 1,
         mir::Ty::Int { bits } => ((*bits).max(8) / 8).min(16) as u64,
+        mir::Ty::WideInt { bits } => ((*bits).max(8) / 8).min(8) as u64,
         mir::Ty::Float(k) => match k {
             mir::FloatKind::F32 => 4,
             mir::FloatKind::F64 => 8,
@@ -584,7 +585,7 @@ enum LeafClass {
 
 fn aggregate_leaves(ty: &mir::Ty, base: u64, out: &mut Vec<(u64, u64, LeafClass)>) {
     match ty {
-        mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::Ptr { .. } => out.push((base, ty.size_bytes(), LeafClass::Int)),
+        mir::Ty::Bool | mir::Ty::Int { .. } | mir::Ty::WideInt { .. } | mir::Ty::Ptr { .. } => out.push((base, ty.size_bytes(), LeafClass::Int)),
         mir::Ty::Float(mir::FloatKind::F32) | mir::Ty::Float(mir::FloatKind::F64) => out.push((base, ty.size_bytes(), LeafClass::Sse)),
         mir::Ty::Float(mir::FloatKind::F128) => out.push((base, 16, LeafClass::Quad)),
         mir::Ty::Float(mir::FloatKind::F80) | mir::Ty::Void | mir::Ty::BuiltinVaList { .. } => {

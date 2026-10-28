@@ -965,6 +965,7 @@ fn ty_size(ty: &mir::Ty) -> u64 {
     match ty {
         mir::Ty::Bool => 1,
         mir::Ty::Int { bits } => u64::from(bits.div_ceil(8)).max(1),
+        mir::Ty::WideInt { bits } => u64::from(bits.div_ceil(8)).max(1),
         mir::Ty::Float(mir::FloatKind::F32) => 4,
         mir::Ty::Float(mir::FloatKind::F64) => 8,
         mir::Ty::Float(_) => 16,

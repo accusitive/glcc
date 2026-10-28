@@ -251,7 +251,6 @@ fn scalar_info(ty: &fe::parse::Ty) -> Option<(&'static str, mir::BaseEncoding, u
         Ty::UnsignedLongLong => ("unsigned long long", Unsigned, 8),
         Ty::Int128 => ("__int128", Signed, 16),
         Ty::UnsignedInt128 => ("unsigned __int128", Unsigned, 16),
-        Ty::BitInt { width, signed } => ("_BitInt", if *signed { Signed } else { Unsigned }, u64::from(*width).div_ceil(8).next_power_of_two().min(8)),
         Ty::Nullptr => ("nullptr_t", Unsigned, 8),
         Ty::Float => ("float", Float, 4),
         Ty::Double => ("double", Float, 8),
@@ -304,8 +303,38 @@ fn lower_ty_debug(
         cache.push((ty.clone(), id));
         return Some(id);
     }
+    if let Ty::BitInt { width, signed } = ty {
+        let size = fe::layout::bitint_size(*width);
+        let encoding = if *signed {
+            mir::BaseEncoding::Signed
+        } else {
+            mir::BaseEncoding::Unsigned
+        };
+        // Clang names the DIE after the declared precision, and marks
+        // the padding when the storage is wider than that precision.
+        let name = format!("{}_BitInt({width})", if *signed { "" } else { "unsigned " });
+        let id = push_type(
+            module,
+            mir::DebugType::Base {
+                name: name.into(),
+                encoding,
+                size,
+                bit_size: (*width as u64 != size * 8).then_some(*width as u64),
+            },
+        );
+        cache.push((ty.clone(), id));
+        return Some(id);
+    }
     if let Some((name, encoding, size)) = scalar_info(ty) {
-        let id = push_type(module, mir::DebugType::Base { name, encoding, size });
+        let id = push_type(
+            module,
+            mir::DebugType::Base {
+                name: name.into(),
+                encoding,
+                size,
+                bit_size: None,
+            },
+        );
         cache.push((ty.clone(), id));
         return Some(id);
     }
@@ -486,9 +515,10 @@ fn lower_ty_debug(
             let id = push_type(
                 module,
                 mir::DebugType::Base {
-                    name: "__builtin_va_list",
+                    name: "__builtin_va_list".into(),
                     encoding: mir::BaseEncoding::Unsigned,
                     size,
+                    bit_size: None,
                 },
             );
             cache.push((ty.clone(), id));

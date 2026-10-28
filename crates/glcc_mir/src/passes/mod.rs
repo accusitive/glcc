@@ -8,6 +8,7 @@ pub mod mem;
 pub mod sccp;
 pub mod sroa;
 pub mod unroll;
+pub mod wide_int;
 
 pub use constmerge::ConstMerge;
 pub use cse::Cse;
@@ -19,6 +20,7 @@ pub use mem::LowerLibcMemory;
 pub use sccp::Sccp;
 pub use sroa::Sroa;
 pub use unroll::LoopUnroll;
+pub use wide_int::LegalizeWideInts;
 
 use crate::ir::{Block, Const, Def, FcmpPred, Function, IcmpPred, Inst, InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, remap_inst};
 use crate::pass::{FunctionPass, ModulePass};

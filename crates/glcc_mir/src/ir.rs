@@ -79,7 +79,13 @@ impl Const {
 
     pub fn ty(&self) -> Ty {
         match self {
-            Const::Int { bits, .. } => Ty::int(*bits),
+            Const::Int { bits, .. } => {
+                if *bits > crate::ty::MAX_SCALAR_INT_BITS {
+                    Ty::WideInt { bits: *bits }
+                } else {
+                    Ty::int(*bits)
+                }
+            }
             Const::Float { kind, .. } => Ty::Float(*kind),
             Const::Null => Ty::ptr(Ty::Void),
             Const::Undef => Ty::Void,

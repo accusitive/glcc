@@ -31,6 +31,10 @@ use crate::{
     span::{CompileError, HasSpan, Span, byte_range},
 };
 
+/// Widest `_BitInt(N)` glcc accepts, matching x86-64's
+/// `__BITINT_MAXWIDTH__`.
+pub const MAX_BITINT_WIDTH: u32 = 8_388_608;
+
 /// The preprocessed TU viewed as many files sharing one buffer.
 ///
 /// The lexer tags every token with its real file (from `# linemarker`
@@ -4752,13 +4756,9 @@ impl<'a, 'b> Parser<'a, 'b> {
         // the names are recorded in `idents` for `parse_function_definition`
         // to rewrite into a prototype; `is_old_style` still marks the
         // declarator unprototyped until that rewrite runs.
-        if matches!(
-            self.tokens.peek_val(),
-            Some(Token::Identifier(sym))
-                if !self.is_typedef_name(*sym)
-                    && !self.is_gnu_type_keyword(*sym)
-                    && !self.is_future_specifier(*sym)
-        ) && self.peek_gnu_qualifier().is_none()
+        if matches!(self.tokens.peek_val(), Some(Token::Identifier(_)))
+            && !self.token_starts_type_name(self.tokens.peek_val())
+            && self.peek_gnu_qualifier().is_none()
         {
             let mut idents = Vec::new();
             loop {
@@ -5135,10 +5135,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let width_expr = self.checked_expr(&width_expr);
                 self.expect_punct(Punctuator::RParen);
                 let width = match crate::eval::eval_const(&width_expr, self.sema, self.intern) {
-                    Some(crate::eval::Value::Int(width)) if (1..=64).contains(&width) => width as u32,
+                    Some(crate::eval::Value::Int(width)) if (1..=i128::from(MAX_BITINT_WIDTH)).contains(&width) => width as u32,
                     Some(crate::eval::Value::Int(width)) => {
                         let span = width_expr.span;
-                        self.fail::<()>(span, format!("`_BitInt({width})` is not supported; widths from 1 to 64 are implemented"));
+                        self.fail::<()>(span, format!("`_BitInt({width})` is not supported; widths from 1 to {MAX_BITINT_WIDTH} are implemented"));
                         break;
                     }
                     _ => {
@@ -6049,6 +6049,11 @@ impl<'a, 'b> Parser<'a, 'b> {
             return matches!(value, 0 | 1);
         }
         if let Ty::BitInt { width, signed } = ty {
+            // Constant evaluation is i128-limited: at 128 bits and
+            // above the range already covers (or equals) every i128.
+            if *width >= 128 {
+                return if *signed { true } else { value >= 0 };
+            }
             return if *signed {
                 let bound = 1i128 << (*width - 1);
                 value >= -bound && value < bound
@@ -7936,8 +7941,8 @@ pub fn resolve_type_specifiers(specs: &[TypeSpecifier], span: Span) -> Result<Ty
         if n_short > 0 || n_long > 0 || n_char > 0 || n_int > 0 || n_float > 0 || n_double > 0 || n_bool > 0 || n_complex > 0 || n_void > 0 || n_int128 > 0 {
             bail!("`_BitInt` with other type specifiers");
         }
-        if width == 0 || width > 64 {
-            bail!("`_BitInt({width})` is not supported; widths from 1 to 64 are implemented");
+        if width == 0 || width > MAX_BITINT_WIDTH {
+            bail!("`_BitInt({width})` is not supported; widths from 1 to {MAX_BITINT_WIDTH} are implemented");
         }
         let signed = n_unsigned == 0;
         if signed && width < 2 {

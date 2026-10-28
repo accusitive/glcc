@@ -487,10 +487,7 @@ pub(crate) fn int_type_size(ty: &Ty, target: &crate::target::Target) -> Option<u
         Ty::Long | Ty::UnsignedLong => target.long_size,
         Ty::LongLong | Ty::UnsignedLongLong => target.long_long_size,
         Ty::Int128 | Ty::UnsignedInt128 => target.int128_size,
-        Ty::BitInt { width, .. } => {
-            let bytes = u64::from(*width).div_ceil(8);
-            bytes.next_power_of_two().min(8)
-        }
+        Ty::BitInt { width, .. } => crate::layout::bitint_size(*width),
         Ty::Enum(_) => target.enum_size,
         _ => return None,
     };

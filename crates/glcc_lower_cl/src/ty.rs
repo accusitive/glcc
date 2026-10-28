@@ -29,7 +29,7 @@ pub fn clif_ty(ty: &mir::Ty) -> Option<Type> {
         // as a value (only its address does).
         mir::Ty::BuiltinVaList { size, .. } if *size == 8 => Some(types::I64),
         mir::Ty::BuiltinVaList { .. } => panic!("va_list has no value type"),
-        mir::Ty::Array { .. } | mir::Ty::Struct { .. } => None,
+        mir::Ty::Array { .. } | mir::Ty::Struct { .. } | mir::Ty::WideInt { .. } => None,
     }
 }
 

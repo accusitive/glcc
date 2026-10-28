@@ -5800,9 +5800,26 @@ fn c23_bitint_types_and_suffixes() {
         .is_empty()
     );
     assert!(tu_diagnostics_with_lang("_BitInt(0) x;", c23).iter().any(|d| d.is_error()));
-    assert!(tu_diagnostics_with_lang("_BitInt(65) x;", c23).iter().any(|d| d.is_error()));
+    assert!(tu_diagnostics_with_lang("_BitInt(8388609) x;", c23).iter().any(|d| d.is_error()));
     assert!(tu_diagnostics_with_lang("signed _BitInt(1) x;", c23).iter().any(|d| d.is_error()));
     assert!(!tu_diagnostics("_BitInt(8) x;").is_empty());
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(sizeof(_BitInt(65)) == 16, \"two 8-byte units\");\n\
+         _Static_assert(sizeof(_BitInt(129)) == 24, \"three 8-byte units\");\n\
+         _Static_assert(sizeof(_BitInt(256)) == 32, \"four 8-byte units\");\n\
+         _Static_assert(_Alignof(_BitInt(4096)) == 8, \"wide alignment stays 8\");\n\
+         int takes_bitint(_BitInt(65) a);\n\
+         int takes_bool(bool b);\n\
+         int main(void) {\n\
+             _BitInt(256) a = 1;\n\
+             unsigned _BitInt(4096) b = 2;\n\
+             return (int)(a + b) + takes_bitint(0) + takes_bool(0);\n\
+         }",
+            c23
+        )
+        .is_empty()
+    );
 }
 
 #[test]

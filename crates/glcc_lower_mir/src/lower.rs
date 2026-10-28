@@ -2523,9 +2523,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     /// Keep a `_BitInt(N)` value sign- or zero-extended from its
-    /// declared precision. MIR carries the padded storage width
-    /// (8/16/32/64), so arithmetic on a 33..63-bit value must mask
-    /// here to wrap at N bits rather than at the storage width.
+    /// declared precision. MIR carries the padded storage width, so
+    /// arithmetic on a value narrower than its storage must mask here
+    /// to wrap at N bits rather than at the storage width.
     fn normalize_bitint(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, ty: &fe::parse::Ty) -> mir::Value {
         let ty = match ty.unqualified() {
             fe::parse::Ty::Enum(id) => self.sema.enums[id.0 as usize].repr.unqualified(),
@@ -2545,8 +2545,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let up = self.emit(func, frame, mir::InstKind::Shl(value, shift), int_ty.clone());
             self.emit(func, frame, mir::InstKind::AShr(up, shift), int_ty)
         } else {
-            let mask = (1u128 << *width) - 1;
-            let mask = self.iconst(func, storage, mask as i128);
+            let mask = self.low_bits_mask(func, frame, storage, *width);
             self.emit(func, frame, mir::InstKind::And(value, mask), int_ty)
         }
     }
@@ -3561,8 +3560,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 // A bit-field or `_BitInt` narrower than its storage
                 // keeps only its declared precision.
                 let raw = if *bits < int_bits(&operand_mir) {
-                    let mask = if *bits == 128 { u128::MAX } else { (1u128 << *bits) - 1 };
-                    let mask = self.iconst(func, int_bits(&operand_mir), mask as i128);
+                    let mask = self.low_bits_mask(func, frame, int_bits(&operand_mir), *bits);
                     self.emit(func, frame, mir::InstKind::And(raw, mask), operand_mir.clone())
                 } else {
                     raw
@@ -5510,9 +5508,25 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let up = self.emit(func, frame, mir::InstKind::Shl(value, shift), mir_ty.clone());
             self.emit(func, frame, mir::InstKind::AShr(up, shift), mir_ty)
         } else {
-            let mask = self.iconst(func, width, ((1u128 << bits) - 1) as i128);
+            let mask = self.low_bits_mask(func, frame, width, bits);
             self.emit(func, frame, mir::InstKind::And(value, mask), mir_ty)
         }
+    }
+
+    /// Constant mask with the low `bits` bits set in a value of
+    /// `width` bits. Widths past 128 build the mask with `not 0` and a
+    /// shift so it never has to fit an i128 constant.
+    fn low_bits_mask(&self, func: &mut mir::Function, frame: &mut Frame, width: u32, bits: u32) -> mir::Value {
+        debug_assert!(bits < width);
+        if bits >= 128 {
+            let ty = mir::Ty::int(width);
+            let zero = self.iconst(func, width, 0);
+            let all = self.emit(func, frame, mir::InstKind::Not(zero), ty.clone());
+            let shift = self.iconst(func, width, i128::from(width - bits));
+            return self.emit(func, frame, mir::InstKind::LShr(all, shift), ty);
+        }
+        let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
+        self.iconst(func, width, mask as i128)
     }
 
     /// Storage unit of a bit-field: the declared type's byte size in
@@ -8560,6 +8574,83 @@ mod tests {
     }
 
     #[test]
+    fn bitint_arbitrary_width_arithmetic() {
+        let src = "int main(void) {\n\
+                   int ok = 0;\n\
+                   unsigned _BitInt(256) a = 1;\n\
+                   a = a << 200;\n\
+                   if ((a >> 200) == 1 && (a >> 199) == 2) ok |= 1;\n\
+                   unsigned _BitInt(256) c = a + 5;\n\
+                   if ((c >> 200) == 1 && (unsigned long long)c == 5) ok |= 2;\n\
+                   if (c - a == 5) ok |= 4;\n\
+                   unsigned _BitInt(256) e = a * 3;\n\
+                   if ((e >> 200) == 3 && e / a == 3 && c % a == 5) ok |= 8;\n\
+                   _BitInt(200) s = -5;\n\
+                   if (s * 3 == -15 && (s * 3) / 2 == -7 && (s * 3) % 4 == -3) ok |= 16;\n\
+                   unsigned _BitInt(4096) big = (unsigned _BitInt(4096))1 << 4095;\n\
+                   if (big > 0 && (big >> 4095) == 1) ok |= 32;\n\
+                   unsigned _BitInt(4096) q = ((unsigned _BitInt(4096))123456789 << 1000) / 123456789;\n\
+                   if (q == ((unsigned _BitInt(4096))1 << 1000)) ok |= 64;\n\
+                   return ok;\n\
+               }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 127);
+    }
+
+    #[test]
+    fn bitint_float_conversions() {
+        let src = "int main(void) {\n\
+                   int ok = 0;\n\
+                   unsigned _BitInt(256) a = (unsigned _BitInt(256))1 << 200;\n\
+                   double d = (double)a;\n\
+                   if (d > 1.6e60 && d < 1.61e60) ok |= 1;\n\
+                   _BitInt(256) n = -(_BitInt(256))a;\n\
+                   if ((double)n < 0.0) ok |= 2;\n\
+                   unsigned _BitInt(256) b = (unsigned _BitInt(256))1.0e20;\n\
+                   if ((b >> 64) == 5 && (unsigned long long)b == 7766279631452241920ull) ok |= 4;\n\
+                   _BitInt(200) s = (_BitInt(200))-12.99;\n\
+                   if (s == -12) ok |= 8;\n\
+                   float f = 16777216.0f;\n\
+                   unsigned _BitInt(200) g = (unsigned _BitInt(200))f;\n\
+                   if ((g >> 24) == 1) ok |= 16;\n\
+                   return ok;\n\
+               }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 31);
+    }
+
+    #[test]
+    fn bitint_aggregate_storage() {
+        let src = "static _BitInt(256) gn = -7;\n\
+                   struct S { unsigned _BitInt(256) a; _BitInt(300) b; char tag; };\n\
+                   int main(void) {\n\
+                       int ok = 0;\n\
+                       if (gn == -7) ok |= 1;\n\
+                       struct S s;\n\
+                       s.a = (unsigned _BitInt(256))5 << 200;\n\
+                       s.b = -123456789012345678901234567890wb;\n\
+                       s.tag = 9;\n\
+                       if (s.tag == 9 && (s.a >> 200) == 5 && s.b < 0) ok |= 2;\n\
+                       if ((s.b % 1000) == -890) ok |= 4;\n\
+                       unsigned _BitInt(256) arr[3];\n\
+                       for (int i = 0; i < 3; i++) arr[i] = (unsigned _BitInt(256))i << 128;\n\
+                       if ((arr[2] >> 128) == 2) ok |= 8;\n\
+                       struct S t = s;\n\
+                       t.tag = 1;\n\
+                       if (s.tag == 9 && t.tag == 1 && t.a == s.a && t.b == s.b) ok |= 16;\n\
+                       return ok;\n\
+                   }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 31);
+    }
+
+    #[test]
+    fn bitint_wide_division_synthesizes_a_helper() {
+        let mut module = lower_module_c23("int main(void) { unsigned _BitInt(256) a = 7, b = 2; return (int)(a / b) + (int)(a % b); }");
+        mir::optimize(&mut module, mir::OptLevel::None);
+        assert!(module.funcs.iter().any(|f| f.name == "__glcc_wide_udiv$256"));
+        assert!(module.funcs.iter().any(|f| f.name == "__glcc_wide_urem$256"));
+        assert_eq!(jit_run_main(module), 4);
+    }
+
+    #[test]
     fn nullptr_t_is_distinct_and_pointer_sized() {
         let src = "typedef typeof(nullptr) nullptr_t;\n\
                    nullptr_t g = nullptr;\n\
@@ -8580,10 +8671,13 @@ mod tests {
     }
 
     /// JIT `mir_module` and call its `main`.
-    fn jit_run_main(mir_module: mir::Module) -> i32 {
+    fn jit_run_main(mut mir_module: mir::Module) -> i32 {
         unsafe {
             let errors = mir::verify::verify_module(&mir_module);
             assert!(errors.is_empty(), "verify errors: {errors:?}");
+            // The driver runs the shared pipeline before lowering; the
+            // JIT helper bypasses it, so legalize wide integers here.
+            mir::optimize(&mut mir_module, mir::OptLevel::None);
             // The variadic prelude reads the frame pointer, like the
             // driver (which sets preserve_frame_pointers), and Win64
             // F128/I128 follow LLVM's ABI there.
