@@ -4,7 +4,8 @@
 
 use crate::expr::Expr;
 use crate::insn::*;
-use crate::regs::{self, Reg, RegClass};
+use crate::insn::op;
+use crate::regs;
 
 #[derive(Debug)]
 pub struct ParseError {
@@ -287,24 +288,7 @@ fn is_directive(name: &str) -> bool {
 /// A bare identifier at line start is a label unless it names an
 /// instruction (nasm gives mnemonics priority over colon-less labels).
 fn is_mnemonic(name: &str) -> bool {
-    const M: &[&str] = &[
-        "mov", "movabs", "movzx", "movsx", "movsxd", "lea", "add", "or", "adc", "sbb", "and",
-        "sub", "xor", "cmp", "test", "inc", "dec", "push", "pop", "call", "jmp", "ret", "leave",
-        "nop", "syscall", "int", "int3", "ud2", "cdq", "cqo", "cwde", "cdqe", "neg", "not",
-        "mul", "imul", "div", "idiv", "shl", "sal", "shr", "sar", "rol", "ror", "rcl", "rcr",
-    ];
-    M.contains(&name)
-        || name.strip_prefix('j').map_or(false, is_cc)
-        || name.strip_prefix("set").map_or(false, is_cc)
-}
-
-fn is_cc(s: &str) -> bool {
-    matches!(
-        s,
-        "o" | "no" | "b" | "c" | "nae" | "ae" | "nb" | "nc" | "e" | "z" | "ne" | "nz" | "be"
-            | "na" | "a" | "nbe" | "s" | "ns" | "p" | "pe" | "np" | "po" | "l" | "nge" | "ge"
-            | "nl" | "le" | "ng" | "g" | "nle"
-    )
+    crate::parse::opcode_index(name).is_some()
 }
 
 pub fn parse_module(src: &str) -> Result<Vec<Stmt>, Vec<ParseError>> {
@@ -420,10 +404,11 @@ fn expand_stmt_locals(stmt: &mut Stmt, parent: &str) {
         }
     }
     fn expand_operand(op: &mut Operand, parent: &str) {
-        match op {
-            Operand::Imm(e) => expand_expr(e, parent),
-            Operand::Mem { disp, .. } => expand_expr(disp, parent),
-            _ => {}
+        if let Some(e) = &mut op.imm {
+            expand_expr(e, parent);
+        }
+        if let Some(d) = &mut op.disp {
+            expand_expr(d, parent);
         }
     }
     match stmt {
@@ -606,19 +591,40 @@ fn parse_directive(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
 // Instruction parsing
 // ---------------------------------------------------------------------
 
-const SIZE_PREFIXES: [(&str, u8); 7] = [
-    ("byte", 1),
-    ("word", 2),
-    ("dword", 4),
-    ("qword", 8),
-    ("oword", 16),
-    ("yword", 32),
-    ("zword", 64),
+const SIZE_PREFIXES: [(&str, u64); 7] = [
+    ("byte", op::BITS8),
+    ("word", op::BITS16),
+    ("dword", op::BITS32),
+    ("qword", op::BITS64),
+    ("oword", op::BITS128),
+    ("yword", op::BITS256),
+    ("zword", op::BITS512),
+];
+
+pub fn opcode_index(mnemonic: &str) -> Option<usize> {
+    crate::insns_gen::MNEMONICS.iter().position(|m| *m == mnemonic)
+}
+
+const PREFIXES: [&str; 11] = [
+    "lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack", "xacquire", "xrelease",
+    "hint_nop",
 ];
 
 fn parse_instruction(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
-    let Some(Tok::Ident(mn)) = t.bump() else {
-        return Err("expected instruction".into());
+    let mut prefixes = Vec::new();
+    let mn = loop {
+        let Some(Tok::Ident(word)) = t.bump() else {
+            return Err("expected instruction".into());
+        };
+        let lower = word.to_ascii_lowercase();
+        if PREFIXES.contains(&lower.as_str()) {
+            prefixes.push(lower);
+        } else {
+            break lower;
+        }
+    };
+    let Some(opcode) = opcode_index(&mn) else {
+        return Err(format!("unknown or unsupported instruction `{mn}'"));
     };
     let mut operands = Vec::new();
     if t.pos < t.toks.len() {
@@ -629,75 +635,117 @@ fn parse_instruction(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
             }
         }
     }
-    Ok(Stmt::Insn(Insn { mnemonic: mn.to_ascii_lowercase(), operands, line: line_no }))
+    Ok(Stmt::Insn(Insn { opcode, prefixes, operands, line: line_no }))
 }
 
 fn parse_operand(t: &mut Toks) -> Result<Operand, String> {
-    // Branch distance keywords carry no encoding here (short vs long is
-    // chosen by the relaxation pass).
+    // Branch distance keywords carry no encoding here; jump matching
+    // picks short or long forms itself.
     if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("short")
         || n.eq_ignore_ascii_case("near"))
     {
         t.bump();
     }
-    if t.eat_punct("[") {
-        let mut size = None;
-        if let Some(Tok::Ident(n)) = t.peek() {
-            if let Some((_, s)) = SIZE_PREFIXES.iter().find(|(p, _)| n.eq_ignore_ascii_case(p)) {
-                size = Some(*s);
-                t.bump();
-            }
+    let mut size_bits: Option<u64> = None;
+    if let Some(Tok::Ident(n)) = t.peek() {
+        let lower = n.to_ascii_lowercase();
+        if let Some((_, bits)) = SIZE_PREFIXES.iter().find(|(p, _)| *p == lower) {
+            size_bits = Some(*bits);
+            t.bump();
         }
+    }
+    if t.eat_punct("[") {
         let mem = parse_mem_body(t)?;
         if !t.eat_punct("]") {
             return Err("expected `]'".into());
         }
-        return Ok(Operand::Mem { size, base: mem.base, index: mem.index, scale: mem.scale, disp: mem.disp });
+        return Ok(mem_operand(mem, size_bits));
+    }
+    if let Some(bits) = size_bits {
+        let e = parse_expr(t, 0)?;
+        let mut o = Operand::imm(e);
+        o.ty |= bits;
+        return Ok(o);
     }
     if let Some(Tok::Ident(n)) = t.peek() {
-        let lower = n.to_ascii_lowercase();
-        if let Some((_, s)) = SIZE_PREFIXES.iter().find(|(p, _)| *p == lower) {
-            let size = *s;
+        if let Some(r) = regs::lookup(&n.to_ascii_lowercase()) {
             t.bump();
-            if t.eat_punct("[") {
-                let mem = parse_mem_body(t)?;
-                if !t.eat_punct("]") {
-                    return Err("expected `]'".into());
-                }
-                return Ok(Operand::Mem { size: Some(size), base: mem.base, index: mem.index, scale: mem.scale, disp: mem.disp });
-            }
-            let e = parse_expr(t, 0)?;
-            let _ = size;
-            return Ok(Operand::Imm(e));
-        }
-        if let Some(r) = regs::lookup(n) {
-            t.bump();
-            return Ok(Operand::Reg(r));
+            return Ok(Operand::reg(r as i32, regs::flags(r)));
         }
     }
-    Ok(Operand::Imm(parse_expr(t, 0)?))
+    Ok(Operand::imm(parse_expr(t, 0)?))
 }
 
 /// Parses the inside of `[...]`: registers, scaled indexes, and a
 /// displacement expression, combined with +/-.
 struct MemParts {
-    base: Option<Reg>,
-    index: Option<Reg>,
+    base: Option<i32>,
+    index: Option<i32>,
     scale: u8,
     disp: Expr,
+    rel: bool,
+}
+
+fn mem_operand(mem: MemParts, size_bits: Option<u64>) -> Operand {
+    // nasm's mref_set_optype: a memory operand claims all r/m classes,
+    // then narrows by the registers involved.
+    let mut ty = op::MEMORY_ANY;
+    if let Some(bits) = size_bits {
+        ty |= bits;
+    }
+    // `[rel expr]` (or a bare rip base) is rip-relative: no base
+    // register, the flag tells process_ea to encode rip-relative.
+    let (basereg, eaflags) = if mem.rel {
+        (-1, crate::insn::eaf::REL)
+    } else {
+        (mem.base.unwrap_or(-1), 0)
+    };
+    let mut operand = Operand {
+        ty,
+        basereg,
+        indexreg: mem.index.unwrap_or(-1),
+        scale: mem.scale,
+        seg: -1,
+        disp: Some(mem.disp),
+        imm: None,
+        eaflags,
+    };
+    if basereg != -1 {
+        operand.ty &= regs::flags(basereg as usize) | !op::RN_L16;
+    } else if operand.indexreg == -1 {
+        operand.ty |= if eaflags & crate::insn::eaf::REL != 0 {
+            op::IP_REL
+        } else {
+            op::MEM_OFFS
+        };
+    }
+    if operand.indexreg != -1 {
+        operand.ty &= regs::flags(operand.indexreg as usize) | !op::RN_L16;
+    }
+    if operand.ty & op::SIZE_MASK == 0 {
+        operand.ty |= op::RM_SEL;
+    }
+    operand
 }
 
 fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
-    let mut base: Option<Reg> = None;
-    let mut index: Option<Reg> = None;
+    let mut base: Option<i32> = None;
+    let mut index: Option<i32> = None;
     let mut scale: u8 = 1;
+    let mut rel = false;
     let mut terms: Vec<(bool, Expr)> = Vec::new();
     // `[rel expr]` is rip-relative.
     if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("rel"))
         && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_)))
     {
         t.bump();
-        base = Some(Reg::rip());
+        rel = true;
+    }
+    // `[abs expr]` forces absolute addressing.
+    if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("abs"))
+        && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_)))
+    {
+        t.bump();
     }
     loop {
         let mut neg = false;
@@ -712,12 +760,18 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
         let term = parse_expr(t, 6)?;
         match &term {
             Expr::Sym(name) => {
-                if let Some(r) = regs::lookup(name) {
-                    if r.is_64() || r.class == RegClass::Rip {
+                if name == regs::RIP {
+                    if base.is_none() {
+                        rel = true;
+                    } else {
+                        return Err("cannot scale rip".into());
+                    }
+                } else if let Some(r) = regs::lookup(name) {
+                    if regs::flags(r) & op::BITS64 != 0 {
                         if base.is_none() {
-                            base = Some(r);
+                            base = Some(r as i32);
                         } else if index.is_none() {
-                            index = Some(r);
+                            index = Some(r as i32);
                         } else {
                             return Err("too many registers in address".into());
                         }
@@ -744,9 +798,9 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
                             return Err(format!("invalid scale {k}"));
                         }
                         if base.is_none() && k == 1 {
-                            base = Some(r);
+                            base = Some(r as i32);
                         } else if index.is_none() {
-                            index = Some(r);
+                            index = Some(r as i32);
                             scale = k as u8;
                         } else {
                             return Err("too many registers in address".into());
@@ -769,7 +823,7 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
             Expr::Add(Box::new(disp), Box::new(e))
         };
     }
-    Ok(MemParts { base, index, scale, disp })
+    Ok(MemParts { base, index, scale, disp, rel })
 }
 
 impl Expr {

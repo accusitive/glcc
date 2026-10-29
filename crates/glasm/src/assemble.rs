@@ -31,6 +31,9 @@ pub struct Section {
 pub struct Symbol {
     pub name: String,
     pub defined: bool,
+    /// Defined in any earlier pass; values from previous passes are
+    /// valid estimates for forward references.
+    pub seen: bool,
     pub extern_: bool,
     pub global: bool,
     pub sect: Option<usize>,
@@ -74,6 +77,7 @@ impl SymLookup for SymTab<'_> {
                 extern_: s.extern_,
                 sect: s.sect,
                 value: s.value,
+                seen: s.seen,
             }
         });
         if found.is_none() {
@@ -200,6 +204,7 @@ fn intern(symbols: &mut Vec<Symbol>, name: &str) -> usize {
     symbols.push(Symbol {
         name: name.to_string(),
         defined: false,
+        seen: false,
         extern_: false,
         global: false,
         sect: None,
@@ -239,6 +244,7 @@ fn run_pass(
                     errors.push(AsmError { line: *line, msg: format!("symbol `{name}' redefined") });
                 }
                 s.defined = true;
+                s.seen = true;
                 s.extern_ = false;
                 s.sect = Some(cur_sect);
                 s.value = cur_off;
@@ -261,7 +267,8 @@ fn run_pass(
             }
             Stmt::Align(e, line) => {
                 let tab = SymTab { syms: symbols, undefined };
-                let ctx = EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true };
+                let ctx =
+                    EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true, unknown_hit: None };
                 match e.eval(&ctx) {
                     Ok(RValue::Const(a)) if a > 0 && (a & (a - 1)) == 0 => {
                         let pad = pad_to(cur_off, a);
@@ -276,7 +283,8 @@ fn run_pass(
             }
             Stmt::Data { size, items, line } => {
                 let tab = SymTab { syms: symbols, undefined };
-                let ctx = EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true };
+                let ctx =
+                    EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true, unknown_hit: None };
                 let mut vals: Vec<(Option<RValue>, u8, Vec<u8>)> = Vec::new();
                 for item in items {
                     match item {
@@ -305,7 +313,8 @@ fn run_pass(
             }
             Stmt::Reserve { size, count, line } => {
                 let tab = SymTab { syms: symbols, undefined };
-                let ctx = EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true };
+                let ctx =
+                    EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true, unknown_hit: None };
                 let evaluated = count.eval(&ctx);
                 drop(ctx);
                 match evaluated {
@@ -339,7 +348,8 @@ fn run_pass(
             }
             Stmt::Times { count, inner, line } => {
                 let tab = SymTab { syms: symbols, undefined };
-                let ctx = EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true };
+                let ctx =
+                    EvalCtx { cur_sect, cur_off, syms: &tab, optimistic: true, unknown_hit: None };
                 let count = match count.eval(&ctx) {
                     Ok(RValue::Const(n)) if n >= 0 => n,
                     Ok(_) => {
@@ -609,6 +619,7 @@ fn emit_insn(
         cur_off: *cur_off,
         syms: &tab,
         optimistic: true,
+        unknown_hit: None,
     };
     let encoded = encoding::encode(insn, &ctx, long);
     drop(ctx);
@@ -633,3 +644,4 @@ fn emit_insn(
         Err(m) => errors.push(AsmError { line: insn.line, msg: m }),
     }
 }
+

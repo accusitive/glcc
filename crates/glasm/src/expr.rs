@@ -43,6 +43,8 @@ pub struct SymbolVal {
     /// Index of this symbol in the module's symbol table.
     pub index: usize,
     pub defined: bool,
+    /// Defined in any earlier pass (estimate available).
+    pub seen: bool,
     pub extern_: bool,
     /// Index into the module's section table; None for absolute symbols.
     pub sect: Option<usize>,
@@ -57,6 +59,9 @@ pub struct EvalCtx<'a> {
     /// zero so sizes can be estimated, and let the pass loop re-encode
     /// once real values are known.
     pub optimistic: bool,
+    /// Set when evaluation hit an undefined (not merely forward) symbol
+    /// in optimistic mode; nasm's OPFLAG_UNKNOWN.
+    pub unknown_hit: Option<&'a std::cell::Cell<bool>>,
 }
 
 impl Expr {
@@ -81,6 +86,9 @@ impl Expr {
                     // Forward reference: fall back to the previous pass's
                     // value as an estimate; the pass loop re-encodes until
                     // estimates and real values agree.
+                    if !sym.seen && let Some(flag) = ctx.unknown_hit {
+                        flag.set(true);
+                    }
                     match sym.sect {
                         Some(sect) => Ok(RValue::SectVal { sect, off: sym.value }),
                         None => Ok(RValue::Const(sym.value)),

@@ -8,9 +8,11 @@ pub mod assemble;
 pub mod elf;
 pub mod encoding;
 pub mod expr;
+pub mod insns_gen;
 pub mod insn;
 pub mod parse;
 pub mod regs;
+pub mod table;
 
 pub use assemble::{AsmError, Module};
 pub use insn::Stmt;
