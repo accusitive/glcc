@@ -1,0 +1,25 @@
+[package]
+name = "glasm"
+version = "0.1.0"
+edition = "2024"
+
+# Native assembler for glcc, ported from nasm (reference submodule at the
+# repo root's `nasm/`). nasm Intel syntax is the core frontend; a GAS
+# compatibility frontend handles glcc's generated asm. First target:
+# x86-64, ELF64 relocatable objects.
+
+[lib]
+name = "glasm"
+
+[[bin]]
+name = "glasm"
+path = "src/bin/glasm.rs"
+
+[dependencies]
+# ELF64 writing (sections, symbol table, relocations), same version the
+# workspace already uses for Cranelift object output.
+object = { version = "0.40.0", default-features = false, features = ["write", "std"] }
+
+[dev-dependencies]
+# Read-back of emitted objects in tests.
+object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "std"] }
