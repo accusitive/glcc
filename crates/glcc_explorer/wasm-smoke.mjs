@@ -67,6 +67,22 @@ check('async emits object bytes', asyncObject.length > 0, `${asyncObject.length}
 const { json: offJson } = compile('__attribute__((async)) int one(void) { return 1; }', 0, 0, 0);
 check('async flag off ignores the attribute', offJson.success && !offJson.mir.includes('$resume'), JSON.stringify(offJson.errors));
 
+// `-std=` rides bits 1..3 of flags (0 = default, 1 = c89, ... 5 = c23):
+// C89 rejects `_Static_assert`, C23 accepts it.
+const STATIC_ASSERT_SRC = '_Static_assert(1, "ok");\nint x;';
+const { json: c89Json } = compile(STATIC_ASSERT_SRC, 0, 0, 1 << 1);
+check('std=c89 rejects _Static_assert', !c89Json.success, JSON.stringify(c89Json.errors));
+const { json: c23Json } = compile(STATIC_ASSERT_SRC, 0, 0, 5 << 1);
+check('std=c23 accepts _Static_assert', c23Json.success, JSON.stringify(c23Json.errors));
+
+// The standard also reaches `__STDC_VERSION__` through the bundled
+// predefines (clang is not available inside wasm).
+const versionSrc = '#if __STDC_VERSION__ >= 202311L\nint f(void) { return 1; }\n#else\nint f(void) { return 2; }\n#endif';
+const { json: c23PpJson } = compile(versionSrc, 0, 0, 5 << 1);
+check('std=c23 defines __STDC_VERSION__ 202311L', c23PpJson.success && c23PpJson.mir.includes('i32(1)'), JSON.stringify(c23PpJson.errors));
+const { json: defaultPpJson } = compile(versionSrc, 0, 0, 0);
+check('default keeps the C17 __STDC_VERSION__', defaultPpJson.success && defaultPpJson.mir.includes('i32(2)'), JSON.stringify(defaultPpJson.errors));
+
 // Frontend errors are recoverable: they come back as JSON diagnostics
 // (not a trap), and the same instance keeps compiling.
 const { json: badJson } = compile('int x = ;', 0, 0);

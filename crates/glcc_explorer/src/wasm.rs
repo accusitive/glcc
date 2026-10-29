@@ -13,7 +13,7 @@
 
 use std::sync::{Mutex, Once};
 
-use crate::{Options, opt_from_code, output_json, target_from_code};
+use crate::{Options, opt_from_code, output_json, std_from_code, target_from_code};
 
 static RESULT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 static OBJECT: Mutex<Vec<u8>> = Mutex::new(Vec::new());
@@ -56,9 +56,9 @@ pub unsafe extern "C" fn glcc_free(ptr: *mut u8, len: usize) {
 /// Returns the JSON length; the pointer is [`glcc_result_ptr`].
 ///
 /// `opt`: 0 = -O0, 1 = speed, 2 = size. `target`: 0 = x86_64,
-/// 1 = aarch64, 2 = riscv64. `flags`: bit 0 = `-fglcc-async`.
-/// Preprocessing always goes through `glcc_pp`; clang is not available
-/// inside wasm.
+/// 1 = aarch64, 2 = riscv64. `flags`: bit 0 = `-fglcc-async`, bits
+/// 1..=3 = standard (`std_from_code`). Preprocessing always goes
+/// through `glcc_pp`; clang is not available inside wasm.
 ///
 /// # Safety
 /// `src` must point to `len` readable bytes.
@@ -77,6 +77,7 @@ pub unsafe extern "C" fn glcc_compile(src: *const u8, len: usize, opt: u32, targ
         pp_native: Some(true),
         cpp_args: Vec::new(),
         async_enabled: flags & 1 != 0,
+        std: std_from_code((flags >> 1) & 0b111),
     };
     let out = crate::compile_object(&source, &opts);
     let json = output_json(&out);

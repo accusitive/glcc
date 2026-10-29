@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use glcc_frontend::lang::Std;
 use glcc_frontend::lexer::{Interner, Lexer};
 use glcc_frontend::parse::Parser;
 use glcc_frontend::sema::Sema;
@@ -40,11 +41,21 @@ pub struct Options {
     /// coroutine, and `_Future(T)`/`__builtin_await` become usable.
     /// Off by default, exactly like the driver flag.
     pub async_enabled: bool,
+    /// `-std=`: which C dialect the parser gates constructs on and the
+    /// preprocessor reports in `__STDC_VERSION__`. `None` keeps the
+    /// permissive default (C17 with every extension family), exactly
+    /// like the driver without `-std=`.
+    pub std: Option<Std>,
 }
 
 impl Options {
     pub fn target_or_native(&self) -> FrontendTarget {
         self.target.unwrap_or_else(FrontendTarget::native)
+    }
+
+    /// The `-std=` spelling for [`Options::std`], for the preprocessor.
+    pub fn std_flag(&self) -> Option<&'static str> {
+        self.std.map(Std::flag)
     }
 }
 
@@ -99,7 +110,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
     let mut errors: Vec<String> = Vec::new();
 
     let text: String = if opts.preprocess && needs_preprocess(source) {
-        match run_preprocessor(source, target, &opts.cpp_args, use_native_pp(opts)) {
+        match run_preprocessor(source, target, &opts.cpp_args, use_native_pp(opts), opts.std_flag()) {
             Ok(t) => t,
             Err(e) => {
                 return Err(Output {
@@ -120,7 +131,7 @@ pub fn prepare(source: &str, opts: &Options) -> Result<Prepared, Output> {
         source.to_string()
     };
 
-    let (mut mir_module, mir_raw, mir_raw_full, diagnostics) = match lower_to_mir(&text, target, opts.async_enabled) {
+    let (mut mir_module, mir_raw, mir_raw_full, diagnostics) = match lower_to_mir(&text, target, opts.async_enabled, opts.std) {
         Ok(v) => v,
         Err(e) => {
             return Err(Output {
@@ -232,6 +243,22 @@ pub fn opt_from_code(code: u32) -> OptLevel {
     }
 }
 
+/// Standard code carried in bits 1..=3 of `glcc_compile`'s `flags`:
+/// 0 = default (no `-std=`), 1 = c89, 2 = c99, 3 = c11, 4 = c17,
+/// 5 = c23, 6 = c2y. The GNU variants are spelled through `-std=` on
+/// the CLI; the page only needs the ISO levels.
+pub fn std_from_code(code: u32) -> Option<Std> {
+    match code {
+        1 => Some(Std::C89),
+        2 => Some(Std::C99),
+        3 => Some(Std::C11),
+        4 => Some(Std::C17),
+        5 => Some(Std::C23),
+        6 => Some(Std::C2y),
+        _ => None,
+    }
+}
+
 struct MirFailure {
     errors: Vec<String>,
     partial_mir: String,
@@ -261,15 +288,16 @@ fn use_native_pp(opts: &Options) -> bool {
     }
 }
 
-fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], native: bool) -> Result<String, String> {
+fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], native: bool, std: Option<&str>) -> Result<String, String> {
     if native {
         let cpp: Vec<std::ffi::OsString> = extra.iter().map(std::ffi::OsString::from).collect();
         let mut popts = glcc_pp::cpp_flags_to_opts(&cpp, "input.c");
         popts.linemarkers = true;
         popts.target = Some(target);
-        popts.predefined = glcc_pp::predefines(Some(target.triple()), None);
+        popts.std = std.map(str::to_string);
+        popts.predefined = glcc_pp::predefines(Some(target.triple()), std);
         if !popts.no_std_includes {
-            popts.include_paths.extend(glcc_pp::native_include_paths(Some(target.triple()), None));
+            popts.include_paths.extend(glcc_pp::native_include_paths(Some(target.triple()), std));
         }
         return glcc_pp::preprocess(source, "input.c", &popts).map_err(|e| e.to_string());
     }
@@ -283,6 +311,9 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
     for a in extra {
         cmd.arg(a);
     }
+    if let Some(flag) = std {
+        cmd.arg(flag);
+    }
     cmd.arg(&dir);
     let out = cmd.output().map_err(|e| format!("cannot run preprocessor: {e}"))?;
     let _ = std::fs::remove_file(&dir);
@@ -292,13 +323,16 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
     Ok(glcc_frontend::decode_source(&out.stdout))
 }
 
-fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool) -> Result<(glcc_mir::Module, String, String, String), MirFailure> {
+fn lower_to_mir(source: &str, target: FrontendTarget, async_enabled: bool, std: Option<Std>) -> Result<(glcc_mir::Module, String, String, String), MirFailure> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
         || -> Result<(glcc_mir::Module, String, String, String), (Vec<String>, String)> {
             let mut interner = Interner::new();
             let arena = glcc_frontend::bumpalo::Bump::new();
             let mut sema = Sema::with_target(target, &arena);
             sema.async_enabled = async_enabled;
+            if let Some(std) = std {
+                sema.lang.std = std;
+            }
             let tokens = Lexer::new(source, &mut interner).lex_all();
             let mut parser = Parser::new(source, tokens, &arena, &mut sema, &mut interner);
             // The explorer reports diagnostics through `Output::errors` and
@@ -686,6 +720,26 @@ mod tests {
         assert_eq!(target_from_code(0), FrontendTarget::X86_64);
         assert_eq!(target_from_code(1), FrontendTarget::AARCH64);
         assert_eq!(target_from_code(2), FrontendTarget::RISCV64);
+        assert_eq!(std_from_code(0), None);
+        assert_eq!(std_from_code(1), Some(Std::C89));
+        assert_eq!(std_from_code(4), Some(Std::C17));
+        assert_eq!(std_from_code(5), Some(Std::C23));
+        assert_eq!(std_from_code(6), Some(Std::C2y));
+        assert_eq!(std_from_code(7), None);
+    }
+
+    /// `-std=` reaches the parser's dialect gates, not just the
+    /// preprocessor: C89 rejects `_Static_assert` (added in C11), the
+    /// default and C23 accept it.
+    #[test]
+    fn std_gates_the_parser_dialect() {
+        let src = "_Static_assert(1, \"ok\");\nint x;\n";
+        let c89 = Options { std: Some(Std::C89), ..opts() };
+        let out = compile(src, &c89);
+        assert!(!out.success, "C89 must reject _Static_assert, got: {:?}", out.errors);
+        let c23 = Options { std: Some(Std::C23), ..opts() };
+        let out = compile(src, &c23);
+        assert!(out.success, "C23 errors: {:?}", out.errors);
     }
 
     #[test]

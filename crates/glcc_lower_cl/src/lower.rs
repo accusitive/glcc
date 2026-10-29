@@ -126,9 +126,10 @@ fn lower_module_impl<M: Module>(
     }
     // Imports for declared externs use plain named-only signatures;
     // each call site builds its own signature from actuals. The
-    // call-site layout still records variadic-ness on x86-64: variadic
-    // foreign calls must route through the `%al` trampoline (see
-    // `emit_call`), which only a variadic layout triggers.
+    // call-site layout keeps the declared variadic-ness on every
+    // target: it selects the indirect per-call signature, since the
+    // actuals may outnumber the named params. On x86-64 it also routes
+    // the call through the `%al` trampoline (see `emit_call`).
     //
     // Only imports the module actually references are declared: an
     // unused declaration would leave an undefined object-file symbol
@@ -176,8 +177,7 @@ fn lower_module_impl<M: Module>(
             .declare_function(&ext.name, import_linkage(ext.weak), &sig)
             .unwrap_or_else(|e| panic!("cannot declare extern {}: {e}", ext.name));
         extern_ids.insert(id, clif_id);
-        let call_variadic = ext.sig.variadic && target.arch == Arch::X86_64;
-        extern_layouts.insert(id, abi::layout_sig(target, &ext.sig.params, &ext.sig.ret, call_variadic));
+        extern_layouts.insert(id, abi::layout_sig(target, &ext.sig.params, &ext.sig.ret, ext.sig.variadic));
     }
     let mut data_ids = HashMap::new();
     // Thread-local globals address through `tls_value`, not
@@ -3420,6 +3420,50 @@ mod tests {
             .collect();
         assert!(opcodes.contains(&Opcode::Call), "{opcodes:?}");
         assert!(!opcodes.contains(&Opcode::FuncAddr), "{opcodes:?}");
+    }
+
+    #[test]
+    fn variadic_extern_calls_stay_indirect_off_x86() {
+        use cranelift_codegen::ir::Opcode;
+
+        let mut module = mir::Module::new();
+        let mut sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::int(8))], mir::Ty::int(32));
+        sig.variadic = true;
+        let ext = module.push_extern("printf", sig);
+        let (mut f, entry) = mir::Function::new("f", i32_sig(1));
+        let fmt = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(8)), 0);
+        let one = iconst(&mut f, 32, 1);
+        let value = emit(
+            &mut f,
+            entry,
+            mir::InstKind::CallExtern {
+                target: ext,
+                args: [fmt, one].into_iter().collect(),
+            },
+            mir::Ty::int(32),
+        );
+        ret(&mut f, entry, Some(value));
+        module.push_func(f);
+
+        // The declared import has one named parameter, but the actuals
+        // outnumber it, so the call must use its own signature. Only
+        // x86-64 has the `%al` trampoline to route that through; other
+        // targets call the address directly.
+        for triple in ["aarch64-unknown-linux-gnu", "riscv64gc-unknown-linux-gnu"] {
+            let target = crate::abi::Target::from_triple(triple).expect("target");
+            let mut sink = RecordingModule::new();
+            lower_module(&module, &mut sink, target);
+            let func = &sink.funcs[0];
+            let opcodes: Vec<_> = func
+                .layout
+                .blocks()
+                .flat_map(|block| func.layout.block_insts(block))
+                .map(|inst| func.dfg.insts[inst].opcode())
+                .collect();
+            assert!(opcodes.contains(&Opcode::FuncAddr), "{triple}: {opcodes:?}");
+            assert!(opcodes.contains(&Opcode::CallIndirect), "{triple}: {opcodes:?}");
+            assert!(!opcodes.contains(&Opcode::Call), "{triple}: {opcodes:?}");
+        }
     }
 
     #[test]

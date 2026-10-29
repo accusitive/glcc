@@ -49,6 +49,24 @@ impl Std {
         matches!(self, Std::Gnu89 | Std::Gnu99 | Std::Gnu11 | Std::Gnu17 | Std::Gnu23 | Std::Gnu2y)
     }
 
+    /// The canonical `-std=` spelling for this dialect.
+    pub fn flag(self) -> &'static str {
+        match self {
+            Std::C89 => "-std=c89",
+            Std::C99 => "-std=c99",
+            Std::C11 => "-std=c11",
+            Std::C17 => "-std=c17",
+            Std::C23 => "-std=c23",
+            Std::C2y => "-std=c2y",
+            Std::Gnu89 => "-std=gnu89",
+            Std::Gnu99 => "-std=gnu99",
+            Std::Gnu11 => "-std=gnu11",
+            Std::Gnu17 => "-std=gnu17",
+            Std::Gnu23 => "-std=gnu23",
+            Std::Gnu2y => "-std=gnu2y",
+        }
+    }
+
     /// A `-std=` value without its prefix (the ISO spellings match
     /// gcc's list; the gnu-vs-c prefix decides the variant).
     pub fn parse(text: &str) -> Option<Std> {
@@ -213,6 +231,27 @@ mod tests {
         assert_eq!(Std::parse("c1y"), None);
         assert_eq!(Std::parse(""), None);
         assert_eq!(Std::parse("iso9899:1991"), None);
+    }
+
+    #[test]
+    fn std_flags_roundtrip_through_parse() {
+        for std in [
+            Std::C89,
+            Std::C99,
+            Std::C11,
+            Std::C17,
+            Std::C23,
+            Std::C2y,
+            Std::Gnu89,
+            Std::Gnu99,
+            Std::Gnu11,
+            Std::Gnu17,
+            Std::Gnu23,
+            Std::Gnu2y,
+        ] {
+            let flag = std.flag();
+            assert_eq!(Std::parse(flag.trim_start_matches("-std=")), Some(std), "{flag}");
+        }
     }
 
     #[test]

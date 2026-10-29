@@ -38,6 +38,7 @@ fn main() {
     let mut want_asm = true;
     let mut opt = OptLevel::None;
     let mut target: Option<glcc_frontend::target::Target> = None;
+    let mut std = None;
     let mut async_enabled = false;
     let mut files: Vec<String> = Vec::new();
     let mut i = 0;
@@ -68,6 +69,17 @@ fn main() {
             "-O1" | "-O2" | "-O3" | "-O" => opt = OptLevel::Speed,
             "-Os" | "-Oz" => opt = OptLevel::Size,
             "-fglcc-async" => async_enabled = true,
+            "-ansi" => std = Some(glcc_frontend::lang::Std::C89),
+            s if s.starts_with("-std=") || s.starts_with("--std=") => {
+                let name = s.split_once('=').expect("std flag has a value").1;
+                match glcc_frontend::lang::Std::parse(name) {
+                    Some(v) => std = Some(v),
+                    None => {
+                        eprintln!("glcc-explorer: unsupported standard '{name}' (expected e.g. c17, c23, gnu23)");
+                        std::process::exit(1);
+                    }
+                }
+            }
             s if s.starts_with("--target=") => match glcc_frontend::target::Target::from_name(&s["--target=".len()..]) {
                 Some(t) => target = Some(t),
                 None => {
@@ -110,6 +122,7 @@ fn main() {
         pp_native: None,
         cpp_args: Vec::new(),
         async_enabled,
+        std,
     };
     let out = compile(&source, &opts);
     for e in &out.errors {
@@ -194,6 +207,9 @@ Godbolt-like inspector: C source in, MIR and assembly out.
   -O0/-O1/-O2/-O3/-Os/-Oz   opt level (default -O0)
   -fglcc-async      enable the async extension: `__attribute__((async))`,
                     `_Future(T)`, `__builtin_await` (off by default)
+  -std=<std>        C standard (e.g. c89, c99, c11, c17, c23, c2y, or
+                    the gnu variants). Also selects `__STDC_VERSION__`
+                    (default: no flag, C17 with every extension family)
   --target=T        x86_64, aarch64, riscv64, or x86_64-windows (default native)
   --serve [--port N]  serve the browser page on 0.0.0.0:N (default 7666)
   --wasm FILE       wasm compiler module to serve (default: {WASM_NAME} next

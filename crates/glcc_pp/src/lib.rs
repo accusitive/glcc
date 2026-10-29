@@ -130,9 +130,13 @@ fn seed(triple: Option<&str>, std_flag: Option<&str>) -> Seed {
             && *k == key {
                 return v.clone();
             }
-    let got = clang_seed(triple, std_flag).unwrap_or_else(|| Seed {
-        predefined: fallback_predefines(triple),
-        includes: fallback_include_paths(triple),
+    let got = clang_seed(triple, std_flag).unwrap_or_else(|| {
+        let mut predefined = fallback_predefines(triple);
+        apply_std_predefines(&mut predefined, std_flag);
+        Seed {
+            predefined,
+            includes: fallback_include_paths(triple),
+        }
     });
     if let Ok(mut cache) = CACHE.lock() {
         *cache = Some((key, got.clone()));
@@ -373,6 +377,27 @@ pub fn fallback_predefines(triple: Option<&str>) -> Vec<(String, String)> {
         X86_64
     };
     parse_d_m_defined(text)
+}
+
+/// Adjust a fallback seed's `__STDC_VERSION__` to `std_flag`, matching
+/// what clang reports for that dialect (C89 has no version macro). The
+/// clang seed needs no adjustment; this keeps the bundled snapshot
+/// honest when clang is unavailable, e.g. inside wasm.
+fn apply_std_predefines(predefined: &mut Vec<(String, String)>, std_flag: Option<&str>) {
+    let Some(flag) = std_flag else { return };
+    let text = if flag == "-ansi" { "c89" } else { flag.strip_prefix("-std=").unwrap_or(flag) };
+    let version = match Std::parse(text) {
+        Some(Std::C89 | Std::Gnu89) => None,
+        Some(Std::C99 | Std::Gnu99) => Some("199901L"),
+        Some(Std::C11 | Std::Gnu11) => Some("201112L"),
+        Some(Std::C17 | Std::Gnu17) | None => Some("201710L"),
+        Some(Std::C23 | Std::Gnu23) => Some("202311L"),
+        Some(Std::C2y | Std::Gnu2y) => Some("202400L"),
+    };
+    predefined.retain(|(name, _)| name != "__STDC_VERSION__");
+    if let Some(version) = version {
+        predefined.push(("__STDC_VERSION__".to_string(), version.to_string()));
+    }
 }
 
 /// `__has_feature` / `__has_extension` answers: a table probed from
@@ -1522,6 +1547,21 @@ mod tests {
         assert_eq!(get("__x86_64__").as_deref(), Some("1"));
         // Function-like builtins keep their parameter lists.
         assert!(defs.iter().any(|(k, _)| k == "__INTMAX_C(c)"), "has INTMAX_C");
+    }
+
+    #[test]
+    fn fallback_predefines_follow_the_std_flag() {
+        let version = |flag: &str| {
+            let mut pre = fallback_predefines(Some("x86_64-linux-gnu"));
+            apply_std_predefines(&mut pre, Some(flag));
+            pre.iter().find(|(name, _)| name == "__STDC_VERSION__").map(|(_, value)| value.clone())
+        };
+        assert_eq!(version("-std=c99").as_deref(), Some("199901L"));
+        assert_eq!(version("-std=c11").as_deref(), Some("201112L"));
+        assert_eq!(version("-std=c23").as_deref(), Some("202311L"));
+        assert_eq!(version("-std=gnu2y").as_deref(), Some("202400L"));
+        assert_eq!(version("-std=c89"), None);
+        assert_eq!(version("-ansi"), None);
     }
 
     #[test]

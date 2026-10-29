@@ -26,6 +26,7 @@
   <span class="tag" title="the compiler runs here, in wasm; only objdump is proxied">glcc-in-wasm</span>
   <label>opt <select id="opt"><option value="0">-O0</option><option value="1">-O2</option><option value="2">-Oz</option></select></label>
   <label>target <select id="target"><option value="0" selected>x86_64</option><option value="1">aarch64</option><option value="2">riscv64</option></select></label>
+  <label title="-std=: parser dialect and __STDC_VERSION__">std <select id="std"><option value="0" selected>default</option><option value="1">c89</option><option value="2">c99</option><option value="3">c11</option><option value="4">c17</option><option value="5">c23</option><option value="6">c2y</option></select></label>
   <label title="-fglcc-async: __attribute__((async)) coroutines, _Future(T), __builtin_await"><input type="checkbox" id="asyncflag" checked> async</label>
   <button id="go">Compile</button>
   <span id="status">loading Monaco…</span>
@@ -259,7 +260,8 @@ async function go() {
     const ptr = wasm.glcc_alloc(bytes.length);
     try {
       new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
-      const jsonLen = wasm.glcc_compile(ptr, bytes.length, Number($('opt').value), Number($('target').value), $('asyncflag').checked ? 1 : 0);
+      const flags = ($('asyncflag').checked ? 1 : 0) | (Number($('std').value) << 1);
+      const jsonLen = wasm.glcc_compile(ptr, bytes.length, Number($('opt').value), Number($('target').value), flags);
       json = JSON.parse(decoder.decode(wasmBytes(wasm.glcc_result_ptr(), jsonLen)));
       object = wasmBytes(wasm.glcc_object_ptr(), wasm.glcc_object_len());
     } finally {
