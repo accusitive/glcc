@@ -1,4 +1,4 @@
-//! Generates `src/insns_gen.rs` from nasm's pre-generated tables
+//! Generates `glasm_data/src/insns_gen.rs` from nasm's pre-generated tables
 //! (`x86/insnsa.c`, `x86/insnsb.c`, `x86/regflags.c`, `x86/regvals.c`,
 //! `x86/insnsi.h`, `x86/iflag.c`, `include/opflags.h`,
 //! `x86/iflaggen.h`). Run nasm's `./configure && make` in the `nasm/`
@@ -19,7 +19,10 @@ fn main() {
                 .unwrap()
                 .join("nasm")
         });
-    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/insns_gen.rs");
+    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("glasm_data/src/insns_gen.rs");
     let src = Tables::read(&root);
     std::fs::write(&out, emit(&src)).expect("write insns_gen.rs");
     println!(

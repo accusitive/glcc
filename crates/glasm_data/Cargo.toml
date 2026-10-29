@@ -1,0 +1,8 @@
+[package]
+name = "glasm_data"
+version = "0.1.0"
+edition = "2024"
+
+# Generated data tables for glasm, ported from nasm's pre-generated
+# sources. Kept in its own crate so editing the assembler does not
+# recompile the ~3 MB table file (and vice versa).

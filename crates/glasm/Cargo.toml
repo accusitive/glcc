@@ -16,6 +16,9 @@ name = "glasm"
 path = "src/bin/glasm.rs"
 
 [dependencies]
+# Generated nasm instruction/register tables (own crate so the ~3 MB
+# table does not recompile on every assembler edit).
+glasm_data = { path = "../glasm_data" }
 # ELF64 writing (sections, symbol table, relocations), same version the
 # workspace already uses for Cranelift object output.
 object = { version = "0.40.0", default-features = false, features = ["write", "std"] }

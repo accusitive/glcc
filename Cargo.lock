@@ -399,8 +399,13 @@ dependencies = [
 name = "glasm"
 version = "0.1.0"
 dependencies = [
+ "glasm_data",
  "object",
 ]
+
+[[package]]
+name = "glasm_data"
+version = "0.1.0"
 
 [[package]]
 name = "glcc"

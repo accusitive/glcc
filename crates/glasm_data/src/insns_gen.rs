@@ -1,8 +1,6 @@
 //! Generated from nasm's pre-generated tables by `gen-insns`.
 //! Do not edit; regenerate with `cargo run -p glasm --bin gen-insns`.
 
-#![allow(clippy::all)]
-
 pub static BYTECODES: [u8; 73487] = [
     168,243,127,  8,192,  1,240, 72,198,  0, 31,  0,168,243,255,  8,192,  1,240, 72,198,  0, 63,  0,
     160,244,125, 24,192,208,  1,131,136,190,  0,168,244,125,  8,192,208,  1,131,128,189,  0,160,244,
