@@ -3,7 +3,9 @@
 
 use crate::assemble::{Module, Target};
 use crate::insn::SectionFlags;
-use object::elf::{R_X86_64_32S, R_X86_64_64, R_X86_64_PC32};
+use object::elf::{
+    R_X86_64_32S, R_X86_64_64, R_X86_64_PC32, STB_GLOBAL, STB_WEAK, STV_DEFAULT,
+};
 use object::write::{Object, Relocation, Symbol, SymbolFlags, SymbolSection};
 use object::write::SectionId;
 use object::{
@@ -49,15 +51,23 @@ pub fn write_elf64(module: &Module) -> Result<Vec<u8>, String> {
             Some(_) => SymbolKind::Data,
             None => SymbolKind::Unknown,
         };
+        // Explicit flags: the object crate maps Scope::Linkage to
+        // STV_HIDDEN (its Cranelift heritage), but GNU as emits
+        // STV_DEFAULT for plain globals, and NOTYPE types unless a
+        // .type directive says otherwise.
+        let bind = if sym.weak { STB_WEAK } else { STB_GLOBAL };
         let id = obj.add_symbol(Symbol {
             name: sym.name.as_bytes().to_vec(),
             value: sym.value as u64,
             size: 0,
             kind,
             scope,
-            weak: false,
+            weak: sym.weak,
             section,
-            flags: SymbolFlags::None,
+            flags: SymbolFlags::Elf {
+                st_info: bind | object::elf::STT_NOTYPE,
+                st_other: STV_DEFAULT.into(),
+            },
         });
         symbol_ids[i] = Some(id);
     }

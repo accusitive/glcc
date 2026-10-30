@@ -323,7 +323,7 @@ impl NumLabels {
 // ---------------------------------------------------------------------
 
 const IGNORED_DIRECTIVES: &[&str] = &[
-    "file", "ident", "size", "type", "local", "extern", "weak", "previous", "end", "appfile",
+    "file", "ident", "size", "type", "local", "extern", "previous", "end", "appfile",
     "appline", "line", "loc", "eject", "psize", "noformat", "nolist", "list", "title", "sbttl",
     "version", "warn", "err", "print", "popsection", "pushsection_nop", "stabn", "stabs", "stabd",
 ];
@@ -456,7 +456,7 @@ fn parse_directive(
         "bss" => Ok(section_stmt(".bss", SectionKind::Bss, None)),
         "rodata" => Ok(section_stmt(".rodata", SectionKind::Rodata, None)),
         "section" => parse_section(&mut t),
-        "globl" | "global" => {
+        "globl" | "global" | "weak" => {
             let mut names = Vec::new();
             while let Some(GTok::Ident(n)) = t.bump() {
                 names.push(n.clone());
@@ -465,7 +465,11 @@ fn parse_directive(
                 }
                 break;
             }
-            Ok(Stmt::Global(names, line_no))
+            if name == "weak" {
+                Ok(Stmt::Weak(names, line_no))
+            } else {
+                Ok(Stmt::Global(names, line_no))
+            }
         }
         "comm" | "lcomm" => {
             let global = name == "comm";

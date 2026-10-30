@@ -36,6 +36,8 @@ pub struct Symbol {
     pub seen: bool,
     pub extern_: bool,
     pub global: bool,
+    /// GAS `.weak`: weak binding in the emitted object.
+    pub weak: bool,
     pub sect: Option<usize>,
     pub value: i64,
 }
@@ -113,6 +115,14 @@ pub fn assemble(stmts: &[Stmt]) -> Result<Module, Vec<AsmError>> {
                 for n in names {
                     let sym = intern(&mut symbols, n);
                     symbols[sym].global = true;
+                }
+            }
+            Stmt::Weak(names, _line) => {
+                for n in names {
+                    let sym = intern(&mut symbols, n);
+                    let s = &mut symbols[sym];
+                    s.global = true;
+                    s.weak = true;
                 }
             }
             Stmt::Extern(names, line) => {
@@ -208,6 +218,7 @@ fn intern(symbols: &mut Vec<Symbol>, name: &str) -> usize {
         seen: false,
         extern_: false,
         global: false,
+        weak: false,
         sect: None,
         value: 0,
     });
@@ -250,7 +261,7 @@ fn run_pass(
                 s.sect = Some(cur_sect);
                 s.value = cur_off;
             }
-            Stmt::Global(..) | Stmt::Extern(..) => {}
+            Stmt::Global(..) | Stmt::Weak(..) | Stmt::Extern(..) => {}
             Stmt::Section(spec) => {
                 cur_sect = ensure_section(sections, &spec.name, spec.flags.clone());
                 if let Some(a) = spec.align {

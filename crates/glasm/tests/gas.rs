@@ -1,6 +1,7 @@
 //! GAS/AT&T frontend tests: semantic link-and-run checks against the
 //! system assembler's behavior, plus the asm glcc's own driver emits.
 
+use object::read::{Object, ObjectSymbol};
 use std::process::Command;
 
 fn assemble(src: &str, obj: &std::path::Path) -> Result<(), String> {
@@ -127,4 +128,31 @@ marker: .quad 1234
     )
     .expect("parse");
     assert!(stmts.iter().any(|s| matches!(s, glasm::Stmt::Label(n, _) if n == "marker")));
+}
+
+#[test]
+fn weak_symbols_reach_the_symbol_table() {
+    // Regression: `.weak` was silently dropped, so glcc's out-of-line
+    // inline-asm wrappers came out undefined and failed to link.
+    let src = r#"
+        .text
+        .weak __glcc_asm_add
+        .globl caller
+__glcc_asm_add:
+        ret
+caller:
+        call __glcc_asm_add
+        ret
+    "#;
+    let bytes = glasm::gas::assemble_to_elf64(src).expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    let mut saw_weak = false;
+    for sym in obj.symbols() {
+        if sym.name().unwrap_or("") == "__glcc_asm_add" {
+            assert!(sym.is_weak(), "wrapper must be weak");
+            assert!(sym.is_definition(), "wrapper must be defined");
+            saw_weak = true;
+        }
+    }
+    assert!(saw_weak, "wrapper missing from symbol table");
 }

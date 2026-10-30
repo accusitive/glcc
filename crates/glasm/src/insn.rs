@@ -191,6 +191,8 @@ pub enum Stmt {
     Align(Expr, u32),
     Insn(Insn),
     Global(Vec<String>, u32),
+    /// GAS `.weak`: global binding with weak precedence at link time.
+    Weak(Vec<String>, u32),
     Extern(Vec<String>, u32),
     Section(SectionSpec),
     /// Default operand size (`bits 16/32/64`); only 64 is supported.
@@ -209,6 +211,7 @@ impl Stmt {
             | Stmt::Reserve { line: l, .. }
             | Stmt::Align(_, l)
             | Stmt::Global(_, l)
+            | Stmt::Weak(_, l)
             | Stmt::Extern(_, l)
             | Stmt::Bits(_, l)
             | Stmt::Times { line: l, .. }

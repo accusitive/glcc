@@ -2912,6 +2912,7 @@ pub fn run(argv: Vec<OsString>, flavor: Flavor) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object::read::{Object, ObjectSymbol};
 
     fn args(words: &[&str]) -> Vec<OsString> {
         words.iter().map(OsString::from).collect()
@@ -4003,7 +4004,11 @@ fn integrated_as_assembles_s_and_generated_text() {
     let dir = std::env::temp_dir().join(format!("glcc-ia-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let s = dir.join("ia.s");
-    std::fs::write(&s, ".text\n.globl f\nf: mov $60, %rax\nmov $5, %rdi\nsyscall\n").unwrap();
+    std::fs::write(
+        &s,
+        ".text\n.globl f\n.weak __glcc_asm_wrapper\n__glcc_asm_wrapper: ret\nf: mov $60, %rax\nmov $5, %rdi\nsyscall\n",
+    )
+    .unwrap();
     let obj = dir.join("ia.o");
     let job = parse(&["-fintegrated-as", "-c"]);
     let out = assemble_in_process(s.as_os_str(), &obj);
@@ -4012,6 +4017,15 @@ fn integrated_as_assembles_s_and_generated_text() {
     assert_eq!(&bytes[..4], &[
         0x7f, b'E', b'L', b'F',
     ]);
+    // The symbol table must carry through: a .weak definition (the shape
+    // glcc's inline-asm wrappers take) has to come out defined and weak,
+    // not undefined, or the link fails.
+    let file = object::File::parse(&*bytes).unwrap();
+    let f = file
+        .symbols()
+        .find(|s| s.name() == Ok("__glcc_asm_wrapper"))
+        .expect("weak wrapper missing from symbol table");
+    assert!(f.is_weak() && f.is_definition());
     std::fs::remove_dir_all(&dir).ok();
 }
 
