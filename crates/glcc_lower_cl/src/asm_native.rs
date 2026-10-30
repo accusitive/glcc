@@ -42,6 +42,8 @@ struct NativeOperand {
     width: u64,
     /// Canonical 64-bit name of the pinned register, if any.
     fixed: Option<&'static str>,
+    /// `"Q"`: a high-byte-capable register class (rax/rcx/rdx/rbx).
+    high: bool,
     kind: NativeKind,
 }
 
@@ -106,9 +108,6 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
             }
             Kind::Mem | Kind::Reg => {}
         }
-        if parsed.high {
-            return Err("the \"Q\" high-byte class is not native yet".into());
-        }
         if i < outputs && parsed.kind != Kind::Reg {
             return Err("only register outputs are native yet".into());
         }
@@ -123,6 +122,7 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
         operands.push(NativeOperand {
             width,
             fixed: parsed.named,
+            high: parsed.high,
             kind: match parsed.kind {
                 Kind::Reg => NativeKind::Reg,
                 Kind::Mem => NativeKind::Mem,
@@ -169,6 +169,8 @@ fn fork_constraint(constraint: &str, parsed: &crate::asm::Constraint) -> Result<
             'd' => 'd',
             'S' => 'S',
             'D' => 'D',
+            'Q' => 'Q',
+            'R' => 'R',
             'i' | 'n' => 'i',
             'm' | 'o' | 'V' => 'm',
             _ => {
@@ -200,7 +202,11 @@ fn translate_template(template: &str, operands: &[NativeOperand]) -> Result<Stri
                 chars.next();
                 out.push_str("%%");
             }
-            Some('=') => return Err("'%=' unique labels are not native yet".into()),
+            Some('=') => {
+                // The fork expands %= to a per-instantiation number.
+                chars.next();
+                out.push_str("%=");
+            }
             Some('[') => return Err("named operand references (%[name]) are not native yet".into()),
             Some('l') => return Err("template labels (%l[name]) are not native yet".into()),
             Some(c) if c.is_ascii_alphabetic() => {
@@ -208,6 +214,13 @@ fn translate_template(template: &str, operands: &[NativeOperand]) -> Result<Stri
                 chars.next();
                 let index = take_operand_index(&mut chars)?;
                 let op = operand_at(operands, index)?;
+                if op.high {
+                    // A "Q" operand is allocated within rax/rcx/rdx/rbx by
+                    // the register allocator; the fork renders the
+                    // modifier from the allocated register itself.
+                    out.push_str(&format!("%{modifier}{index}"));
+                    continue;
+                }
                 let fixed = op.fixed.ok_or_else(|| {
                     "the template modifier needs a fixed-register operand (a/b/c/d/S/D) on the native path".to_string()
                 })?;
@@ -345,9 +358,10 @@ mod tests {
     fn narrow_fixed_operands_substitute_mode_sized_names() {
         let native = Block::new("addl $1, %0", 1, &["=a"]).plan(&[I32]).expect("native");
         assert_eq!(native.template, "addl $1, %eax");
-        let native = Block::new("movb %b0, %h0", 1, &["=Q"]).plan(&[I32]);
-        // "Q" needs a high-byte register the fork cannot pick.
-        assert!(native.unwrap_err().contains("\"Q\""));
+        // "Q" operands are allocated within rax/rcx/rdx/rbx and modifier
+        // references render fork-side from the allocated register.
+        let native = Block::new("movb %b0, %h0", 1, &["=Q"]).plan(&[I32]).expect("Q is native");
+        assert_eq!(native.template, "movb %b0, %h0");
         let native = Block::new("inb %w1, %b0", 1, &["=a", "d"]).plan(&[I32, I32]).expect("native");
         assert_eq!(native.template, "inb %dx, %al");
     }
@@ -357,6 +371,22 @@ mod tests {
         let native = Block::new("movq %1, %0\n\tnotq %0", 1, &["=r", "r"]).plan(&[I64, I64]).expect("native");
         assert_eq!(native.template, "movq %1, %0\n\tnotq %0");
         assert_eq!(native.constraints, ["=r", "r"]);
+    }
+
+    #[test]
+    fn high_byte_q_passes_through() {
+        // The fork renders %h from the allocated Q-class register.
+        let native = Block::new("xorb $0xf0, %h0", 1, &["+Q"])
+            .plan(&[I32])
+            .expect("native");
+        assert_eq!(native.template, "xorb $0xf0, %h0");
+        assert_eq!(native.constraints, ["+Q"]);
+    }
+
+    #[test]
+    fn unique_label_passes_through() {
+        let native = Block::new("jmp %=f\n%=:", 0, &[]).plan(&[]).expect("native");
+        assert_eq!(native.template, "jmp %=f\n%=:");
     }
 
     #[test]
@@ -400,7 +430,6 @@ mod tests {
         basic.is_basic = true;
         assert!(basic.plan(&[]).unwrap_err().contains("basic asm"));
         // Template features the fork cannot expand.
-        assert!(Block::new("%=1:", 0, &[]).plan(&[]).unwrap_err().contains("%="));
         assert!(Block::new("movl %1, %[out]", 1, &["=r", "r"]).plan(&[I64, I64]).unwrap_err().contains("%[name]"));
         // A fixed register also named as a clobber.
         assert!(Block::new("nop", 1, &["=a"]).clobbers(&["rax"]).plan(&[I32]).unwrap_err().contains("clobbered register"));
