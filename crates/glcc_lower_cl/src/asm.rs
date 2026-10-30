@@ -988,7 +988,7 @@ pub(crate) fn ty_size(ty: &mir::Ty) -> u64 {
 }
 
 /// Integer value of an immediate operand's MIR value.
-fn const_int(func: &mir::Function, value: mir::Value) -> i128 {
+pub(crate) fn const_int(func: &mir::Function, value: mir::Value) -> i128 {
     match &func.values[value].def {
         mir::Def::Const(mir::Const::Int { value, .. }) => *value,
         _ => panic!("asm operand constraint requires an integer constant"),
@@ -997,7 +997,7 @@ fn const_int(func: &mir::Function, value: mir::Value) -> i128 {
 
 /// Whether the MIR value is an integer constant, i.e. usable as an
 /// immediate operand.
-fn is_int_const(func: &mir::Function, value: mir::Value) -> bool {
+pub(crate) fn is_int_const(func: &mir::Function, value: mir::Value) -> bool {
     matches!(&func.values[value].def, mir::Def::Const(mir::Const::Int { .. }))
 }
 

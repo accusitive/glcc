@@ -33,6 +33,8 @@ pub struct NativeAsm {
     /// Clobbers: GPRs canonicalized to 64-bit names, `cc`/`memory`
     /// passed through; other names need no action, as in the wrapper.
     pub clobbers: Vec<String>,
+    /// Per-operand kind, GCC order: how the emitter passes each value.
+    pub operand_kinds: Vec<NativeKind>,
 }
 
 /// One operand's shape, as the native path will use it.
@@ -40,11 +42,19 @@ struct NativeOperand {
     width: u64,
     /// Canonical 64-bit name of the pinned register, if any.
     fixed: Option<&'static str>,
+    kind: NativeKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NativeKind {
+    Reg,
+    Mem,
+    Imm,
 }
 
 /// Translate `block` for the native x86-64 path, or return why it must
 /// use the out-of-line wrapper.
-pub fn plan(block: &mir::AsmBlock, arch: Arch) -> Result<NativeAsm, String> {
+pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<NativeAsm, String> {
     debug_assert_eq!(arch, Arch::X86_64);
     let t = table(arch);
     if block.is_basic {
@@ -84,27 +94,43 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch) -> Result<NativeAsm, String> {
             return Err("matching constraints (\"0\") are not native yet".into());
         }
         match parsed.kind {
-            Kind::Mem => return Err("memory operands (\"m\") are not native yet".into()),
-            Kind::Imm => return Err("immediate operands (\"i\") are not native yet".into()),
-            Kind::Reg => {}
+            Kind::Imm => {
+                // The fork substitutes immediates from compile-time
+                // constants only; a non-constant `"Ir"`-style alternative
+                // stays on the wrapper, which can pick the register form.
+                if !crate::asm::is_int_const(func, op.value) {
+                    return Err(
+                        "immediate operand value is not a compile-time constant".into(),
+                    );
+                }
+            }
+            Kind::Mem | Kind::Reg => {}
         }
         if parsed.high {
             return Err("the \"Q\" high-byte class is not native yet".into());
         }
+        if i < outputs && parsed.kind != Kind::Reg {
+            return Err("only register outputs are native yet".into());
+        }
         if i < outputs && parsed.inout && parsed.named.is_none() {
             return Err("non-fixed inouts (\"+r\") are not native yet".into());
         }
-        if op.ty.is_aggregate() {
+        if op.ty.is_aggregate() && parsed.kind != Kind::Mem {
             return Err("aggregate operands are not native yet".into());
         }
         let width = ty_size(&op.ty);
-        if width > 8 {
+        if width > 8 && parsed.kind == Kind::Reg {
             return Err("register operands wider than a register are not native yet".into());
         }
         constraints.push(fork_constraint(&op.constraint, &parsed)?);
         operands.push(NativeOperand {
             width,
             fixed: parsed.named,
+            kind: match parsed.kind {
+                Kind::Reg => NativeKind::Reg,
+                Kind::Mem => NativeKind::Mem,
+                Kind::Imm => NativeKind::Imm,
+            },
         });
     }
 
@@ -119,6 +145,7 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch) -> Result<NativeAsm, String> {
         template,
         constraints,
         clobbers,
+        operand_kinds: operands.iter().map(|op| op.kind).collect(),
     })
 }
 
@@ -145,9 +172,11 @@ fn fork_constraint(constraint: &str, parsed: &crate::asm::Constraint) -> Result<
             'd' => 'd',
             'S' => 'S',
             'D' => 'D',
+            'i' | 'n' => 'i',
+            'm' | 'o' | 'V' => 'm',
             _ => {
                 return Err(format!(
-                    "the register letter '{letter}' is not native yet"
+                    "the constraint letter '{letter}' is not native yet"
                 ))
             }
         };
@@ -202,7 +231,10 @@ fn translate_template(template: &str, operands: &[NativeOperand]) -> Result<Stri
             Some(_) => {
                 let index = take_operand_index(&mut chars)?;
                 let op = operand_at(operands, index)?;
-                if op.width == 8 {
+                if op.width == 8 || op.kind != NativeKind::Reg {
+                    // Memory operands render as `(%reg)` from the 64-bit
+                    // address register; immediates render from the
+                    // constant; neither cares about the operand's width.
                     out.push_str(&format!("%{index}"));
                 } else if let Some(fixed) = op.fixed {
                     let info = find_reg(table(Arch::X86_64), fixed).expect("fixed register is known");
@@ -270,9 +302,9 @@ mod tests {
             self
         }
 
-        fn mir(&self, tys: &[mir::Ty]) -> mir::AsmBlock {
+        fn mir(&self, tys: &[mir::Ty]) -> (mir::Function, mir::AsmBlock) {
             let (mut func, _) = mir::Function::new("f", mir::Signature::new(Vec::new(), mir::Ty::Void));
-            mir::AsmBlock {
+            let block = mir::AsmBlock {
                 template: self.template.clone(),
                 operands: self
                     .constraints
@@ -291,11 +323,13 @@ mod tests {
                 labels: self.labels.clone(),
                 is_volatile: false,
                 is_basic: self.is_basic,
-            }
+            };
+            (func, block)
         }
 
         fn plan(&self, tys: &[mir::Ty]) -> Result<NativeAsm, String> {
-            plan(&self.mir(tys), Arch::X86_64)
+            let (func, block) = self.mir(tys);
+            plan(&block, Arch::X86_64, &func)
         }
     }
 
@@ -343,9 +377,18 @@ mod tests {
         assert!(Block::new("nop", 0, &[]).plan(&[]).is_ok());
         // Non-fixed inout.
         assert!(Block::new("addl %1, %0", 1, &["+r", "r"]).plan(&[I32, I32]).unwrap_err().contains("non-fixed inouts"));
-        // Memory and immediate operands.
-        assert!(Block::new("movl %1, %0", 1, &["=m", "r"]).plan(&[I32, I32]).unwrap_err().contains("memory"));
-        assert!(Block::new("shll %1, %0", 1, &["=r", "I"]).plan(&[I32, I32]).unwrap_err().contains("immediate"));
+        // Memory and immediate operands are native now; a non-constant
+        // `"i"` value (with no register alternative to demote to) still
+        // falls back. The test helper always pushes constants, so this
+        // only checks the shape; the fallback triggers at plan time when
+        // is_int_const fails.
+        // Memory inputs are native; memory outputs still use the wrapper
+        // (the fork's defs are registers only).
+        let native = Block::new("movq %1, %0", 1, &["=r", "m"]).plan(&[I64, I64]).expect("m input is native");
+        assert_eq!(native.constraints, ["=r", "m"]);
+        assert!(Block::new("movq %1, %0", 1, &["=m", "r"]).plan(&[I64, I64]).unwrap_err().contains("only register outputs"));
+        let native = Block::new("addq %1, %0", 1, &["=r", "i"]).plan(&[I64, I64]).expect("i is native");
+        assert_eq!(native.constraints, ["=r", "i"]);
         // Matching constraint.
         assert!(Block::new("addl %1, %0", 1, &["=r", "0"]).plan(&[I64, I64]).unwrap_err().contains("matching"));
         // Narrow register operand without a fixed register.

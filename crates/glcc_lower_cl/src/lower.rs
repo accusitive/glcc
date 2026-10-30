@@ -860,6 +860,7 @@ fn lower_function<M: Module>(
             rt,
             layouts,
             extern_layouts,
+            mir_func,
             block_id,
             wrappers,
         );
@@ -1087,13 +1088,14 @@ fn lower_block<M: Module>(
     rt: &Rt,
     layouts: &HashMap<mir::Func, SigLayout>,
     extern_layouts: &HashMap<mir::Extern, SigLayout>,
+    mir_func: &mir::Function,
     id: mir::Block,
     wrappers: &mut Wrappers,
 ) {
     let block = &body.func.blocks[id];
     let insts = block.insts.clone();
     for inst in insts {
-        emit_inst(body, builder, clif, func_ids, extern_ids, data_ids, tls_data, rt, layouts, extern_layouts, inst, wrappers);
+        emit_inst(body, builder, clif, func_ids, extern_ids, data_ids, tls_data, rt, layouts, extern_layouts, mir_func, inst, wrappers);
     }
     let Some(term) = block.term.clone() else {
         panic!("unterminated MIR block");
@@ -1468,6 +1470,7 @@ fn emit_inst<M: Module>(
     rt: &Rt,
     layouts: &HashMap<mir::Func, SigLayout>,
     extern_layouts: &HashMap<mir::Extern, SigLayout>,
+    mir_func: &mir::Function,
     inst: mir::Inst,
     wrappers: &mut Wrappers,
 ) {
@@ -1491,11 +1494,6 @@ fn emit_inst<M: Module>(
             let x = operand(body, builder, a);
             let y = operand(body, builder, b);
             Some(builder.ins().imul(x, y))
-        }
-        mir::InstKind::Umulhi(a, b) => {
-            let x = operand(body, builder, a);
-            let y = operand(body, builder, b);
-            Some(builder.ins().umulhi(x, y))
         }
         mir::InstKind::Udiv(a, b) => {
             let x = operand(body, builder, a);
@@ -2371,21 +2369,6 @@ fn emit_inst<M: Module>(
             }
             None
         }
-        mir::InstKind::Aggregate { elems } => {
-            let mir_ty = result_ty.clone().expect("aggregate needs a result type");
-            let slot = stack_slot(builder, &mir_ty);
-            let dst = builder.ins().stack_addr(types::I64, slot, 0);
-            for (index, &elem) in elems.iter().enumerate() {
-                let val = operand(body, builder, elem);
-                let (off, elem_ty) = field_offset(&mir_ty, index as u32);
-                if elem_ty.is_aggregate() {
-                    emit_memcpy_offset(body, builder, dst, off, val, elem_ty.size_bytes());
-                } else {
-                    builder.ins().store(memflags::notrap(), val, dst, Offset32::new(off as i32));
-                }
-            }
-            Some(dst)
-        }
         mir::InstKind::GlobalAddr { global } => {
             let id = data_ids[&global];
             let gv = clif.declare_data_in_func(id, builder.func);
@@ -2575,7 +2558,7 @@ fn emit_inst<M: Module>(
             builder.ins().fence();
             None
         }
-        mir::InstKind::InlineAsm { block } => emit_inline_asm(body, builder, clif, &block, wrappers),
+        mir::InstKind::InlineAsm { block } => emit_inline_asm(body, builder, clif, mir_func, &block, wrappers),
         mir::InstKind::GetFramePointer => Some(builder.ins().get_frame_pointer(result_clif(&result_ty))),
     };
     match (data.result, lowered) {
@@ -2595,10 +2578,10 @@ fn emit_inst<M: Module>(
 /// wrapper (see [`crate::asm`]). An `asm goto` block's result is the
 /// label selector (0 = fallthrough), which the MIR terminator
 /// dispatches on.
-fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, clif: &mut M, block: &mir::AsmBlock, wrappers: &mut Wrappers) -> Option<ClifValue> {
+fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, clif: &mut M, mir_func: &mir::Function, block: &mir::AsmBlock, wrappers: &mut Wrappers) -> Option<ClifValue> {
     if body.target.arch == Arch::X86_64 {
-        match crate::asm_native::plan(block, body.target.arch) {
-            Ok(native) => return emit_native_inline_asm(body, builder, block, native),
+        match crate::asm_native::plan(block, body.target.arch, mir_func) {
+            Ok(native) => return emit_native_inline_asm(body, builder, mir_func, block, native),
             Err(reason) => wrappers.note_fallback(&reason),
         }
     }
@@ -2680,7 +2663,13 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
 /// full 64-bit registers the fork passes operands in), outputs become
 /// the instruction's `i64` results, reduced back to the C type and
 /// stored through the output lvalue's address.
-fn emit_native_inline_asm(body: &mut Body, builder: &mut FunctionBuilder, block: &mir::AsmBlock, native: crate::asm_native::NativeAsm) -> Option<ClifValue> {
+fn emit_native_inline_asm(
+    body: &mut Body,
+    builder: &mut FunctionBuilder,
+    mir_func: &mir::Function,
+    block: &mir::AsmBlock,
+    native: crate::asm_native::NativeAsm,
+) -> Option<ClifValue> {
     let mut contents = cranelift_codegen::ir::InlineAsmContents::new(native.template, true);
     for constraint in &native.constraints {
         contents = contents.operand(constraint.clone());
@@ -2702,9 +2691,27 @@ fn emit_native_inline_asm(body: &mut Body, builder: &mut FunctionBuilder, block:
         let value = load_operand(builder, &op.ty, addr);
         args.push(widen_operand(builder, &op.ty, value));
     }
-    for op in &block.operands[outputs..] {
-        let value = operand(body, builder, op.value);
-        args.push(widen_operand(builder, &op.ty, value));
+    for (op, kind) in block.operands[outputs..]
+        .iter()
+        .zip(&native.operand_kinds[outputs..])
+    {
+        match *kind {
+            crate::asm_native::NativeKind::Reg => {
+                let value = operand(body, builder, op.value);
+                args.push(widen_operand(builder, &op.ty, value));
+            }
+            crate::asm_native::NativeKind::Mem => {
+                // The fork's "m" semantics: the template sees the memory
+                // at the address held in the input value.
+                args.push(operand(body, builder, op.value));
+            }
+            crate::asm_native::NativeKind::Imm => {
+                let v = crate::asm::const_int(mir_func, op.value);
+                let imm = i64::try_from(v)
+                    .unwrap_or_else(|_| panic!("asm immediate {v} does not fit in i64"));
+                args.push(builder.ins().iconst(types::I64, imm));
+            }
+        }
     }
     let inst = builder.ins().inline_asm(asm_ref, &args);
     let results: Vec<ClifValue> = builder.inst_results(inst).to_vec();
