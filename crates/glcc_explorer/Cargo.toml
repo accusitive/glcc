@@ -22,10 +22,10 @@ glcc_pp = { path = "../glcc_pp" }
 glcc_mir = { path = "../glcc_mir" }
 glcc_lower_mir = { path = "../glcc_lower_mir" }
 glcc_lower_cl = { path = "../glcc_lower_cl" }
-cranelift-codegen = { path = "/home/gl/data/p/wasmtime-asm/cranelift/codegen", default-features = false, features = ["x86", "arm64", "riscv64"] }
-cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
-cranelift-native = { path = "/home/gl/data/p/wasmtime-asm/cranelift/native" }
-cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
+cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64"] }
+cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-native = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 [[bin]]
 name = "glcc-explorer"
 path = "src/main.rs"

@@ -10,13 +10,13 @@ edition = "2024"
 [dependencies]
 glcc_mir = { path = "../glcc_mir" }
 glcc_dwarf = { path = "../glcc_dwarf" }
-cranelift-codegen = { path = "/home/gl/data/p/wasmtime-asm/cranelift/codegen", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
-cranelift-frontend = { path = "/home/gl/data/p/wasmtime-asm/cranelift/frontend" }
-cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
+cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
+cranelift-frontend = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 smallvec = "1.16.3"
 
 [dev-dependencies]
-cranelift-jit = { path = "/home/gl/data/p/wasmtime-asm/cranelift/jit" }
-cranelift-native = { path = "/home/gl/data/p/wasmtime-asm/cranelift/native" }
-cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
+cranelift-jit = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-native = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 object = "0.40.0"

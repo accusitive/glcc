@@ -12,7 +12,7 @@ edition = "2024"
 
 [dependencies]
 glcc_mir = { path = "../glcc_mir" }
-cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
-cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
+cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 gimli = { version = "0.33.0", default-features = false, features = ["read", "write"] }
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "write", "std"] }
