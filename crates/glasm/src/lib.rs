@@ -8,6 +8,7 @@ pub mod assemble;
 pub mod elf;
 pub mod encoding;
 pub mod expr;
+pub mod gas;
 pub use glasm_data::insns_gen;
 pub mod insn;
 pub mod parse;

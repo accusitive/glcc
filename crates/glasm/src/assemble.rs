@@ -93,6 +93,7 @@ struct Fixup {
     size: u8,
     val: RValue,
     pcrel: bool,
+    tail: u32,
     /// Which instruction (by occurrence index) produced this, for
     /// branch-length relaxation.
     insn: Option<usize>,
@@ -428,6 +429,62 @@ fn run_pass(
                     }
                 }
             }
+            Stmt::Comm { name, size, align, global, line } => {
+                let tab = SymTab { syms: symbols, undefined };
+                let ctx = EvalCtx {
+                    cur_sect,
+                    cur_off,
+                    syms: &tab,
+                    optimistic: true,
+                    unknown_hit: None,
+                };
+                let default_align = |n: i64| {
+                    (1..=63)
+                        .find(|p| (1i64 << p) >= n)
+                        .map_or(16, |p| (1i64 << p).min(16))
+                };
+                let (size, align) = match (size.eval(&ctx), align) {
+                    (Ok(RValue::Const(n)), a) if n > 0 => {
+                        (n, a.unwrap_or(default_align(n) as u64) as i64)
+                    }
+                    (Ok(_), _) => {
+                        errors.push(AsmError {
+                            line: *line,
+                            msg: format!("common symbol `{name}' needs a positive size"),
+                        });
+                        (0, 1)
+                    }
+                    (Err(m), _) => {
+                        errors.push(AsmError { line: *line, msg: m });
+                        (0, 1)
+                    }
+                };
+                drop(ctx);
+                // Carve the block out of .bss regardless of the current
+                // section.
+                let bss = ensure_section(sections, ".bss", SectionFlags::Bss);
+                let bss_off = sections[bss].data.len() as i64;
+                let pad = pad_to(bss_off, align as i64);
+                for _ in 0..pad {
+                    sections[bss].data.push(0);
+                }
+                let i = intern(symbols, name);
+                let sym = &mut symbols[i];
+                if sym.defined || sym.extern_ {
+                    errors.push(AsmError {
+                        line: *line,
+                        msg: format!("symbol `{name}' redefined"),
+                    });
+                }
+                sym.defined = true;
+                sym.seen = true;
+                sym.global = *global;
+                sym.sect = Some(bss);
+                sym.value = sections[bss].data.len() as i64;
+                for _ in 0..size {
+                    sections[bss].data.push(0);
+                }
+            }
             Stmt::Insn(insn) => {
                 emit_insn(
                     sections,
@@ -507,6 +564,7 @@ fn emit_field(
                 size,
                 val: v.clone(),
                 pcrel: false,
+                tail: 0,
                 insn: None,
             });
             for _ in 0..size {
@@ -542,13 +600,17 @@ fn finalize(
             }
             RValue::SectVal { sect: target, off } => {
                 if f.pcrel && *target == f.section {
-                    let d = off - (pos + f.size as i64);
+                    let d = off - (pos + f.size as i64 + f.tail as i64);
                     if f.size == 1 && !(-128..=127).contains(&d) {
                         continue; // relaxation should have handled this
                     }
                     patch(&mut sections[f.section].data, pos as usize, d, f.size);
                 } else {
-                    let addend = if f.pcrel { off - f.size as i64 } else { *off };
+                    let addend = if f.pcrel {
+                        off - f.size as i64 - f.tail as i64
+                    } else {
+                        *off
+                    };
                     if f.size == 1 {
                         errors.push(AsmError {
                             line: 0,
@@ -567,7 +629,11 @@ fn finalize(
                 }
             }
             RValue::ExternRef { sym, off } => {
-                let addend = if f.pcrel { off - f.size as i64 } else { *off };
+                let addend = if f.pcrel {
+                    off - f.size as i64 - f.tail as i64
+                } else {
+                    *off
+                };
                 if f.size < 4 {
                     errors.push(AsmError {
                         line: 0,
@@ -633,6 +699,7 @@ fn emit_insn(
                     size: f.size,
                     val: f.val,
                     pcrel: f.pcrel,
+                    tail: f.tail,
                     insn: insn_index,
                 });
             }

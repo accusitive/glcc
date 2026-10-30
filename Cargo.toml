@@ -8,6 +8,7 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+glasm = { path = "crates/glasm" }
 glcc_frontend = { path = "crates/glcc_frontend" }
 glcc_pp = { path = "crates/glcc_pp" }
 glcc_mir = { path = "crates/glcc_mir" }

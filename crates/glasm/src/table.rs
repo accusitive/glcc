@@ -575,11 +575,13 @@ impl Encoder {
         self.bytes.push(b);
     }
     fn field(&mut self, val: &Val, size: u8, pcrel: bool) {
+        let tail = (self.inslen - self.bytes.len() as i64 - size as i64).max(0) as u32;
         self.fixups.push(FixupReq {
             at: self.bytes.len(),
             size,
             val: val.to_rvalue(),
             pcrel,
+            tail,
         });
         self.bytes.extend(std::iter::repeat_n(0, size as usize));
     }
@@ -1077,7 +1079,9 @@ fn walk(
                 }
                 process_ea(&mut o, rfield, rflags, ins)?;
                 ins.rex |= ins.ea.rex;
-                length += ins.ea.bytes as i64;
+                length += 1
+                    + i64::from(ins.ea.sib_present)
+                    + ins.ea.bytes as i64;
                 if let Some(e) = &mut enc {
                     emit_rex(e, ins);
                     e.raw(ins.ea.modrm);

@@ -197,6 +197,8 @@ pub enum Stmt {
     Bits(u8, u32),
     /// `times N <inner>`; N must eventually be constant.
     Times { count: Expr, inner: Box<Stmt>, line: u32 },
+    /// GAS `.comm`/`.lcomm`: tentative definition carved out of .bss.
+    Comm { name: String, size: Expr, align: Option<u64>, global: bool, line: u32 },
 }
 
 impl Stmt {
@@ -209,7 +211,8 @@ impl Stmt {
             | Stmt::Global(_, l)
             | Stmt::Extern(_, l)
             | Stmt::Bits(_, l)
-            | Stmt::Times { line: l, .. } => *l,
+            | Stmt::Times { line: l, .. }
+            | Stmt::Comm { line: l, .. } => *l,
             Stmt::Insn(i) => i.line,
             Stmt::Section(_) => 0,
         }

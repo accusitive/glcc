@@ -391,6 +391,10 @@ pub struct Job {
     /// `-fno-pie` select direct addressing; the PIC/PIE spelling
     /// variants share one switch, last wins.
     pub pic: bool,
+    /// `-fintegrated-as` / `-integrated-as`: assemble raw `.s` inputs and
+    /// generated asm text with the built-in glasm assembler instead of
+    /// spawning `as` (x86-64 ELF targets only). Default off like gcc.
+    pub integrated_as: bool,
     /// Keep intermediate files (`-save-temps[=cwd|=obj]`): `<stem>.i`
     /// preprocessed C for every C input, plus `<stem>.int.c` raw
     /// EDG-lowered C for C++ inputs.
@@ -510,6 +514,7 @@ impl Default for Job {
             debug: true,
             opt_level: OptLevel::None,
             pic: true,
+            integrated_as: false,
             save_temps: SaveTemps::Off,
             target: Target::native(),
             lang_std: None,
@@ -970,6 +975,13 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                 } else if matches!(s.as_ref(), "-fno-pic" | "-fno-PIC" | "-fno-pie" | "-fno-PIE") {
                     job.pic = false;
                     job.cpp.push(arg.clone());
+                } else if matches!(
+                    s.as_ref(),
+                    "-fintegrated-as" | "-integrated-as" | "-fasm"
+                ) {
+                    job.integrated_as = true;
+                } else if matches!(s.as_ref(), "-fno-integrated-as" | "-fno-asm") {
+                    job.integrated_as = false;
                 } else if s.starts_with("-f") {
                     // Spelling and machine-independent codegen flags:
                     // nothing to configure.
@@ -1469,6 +1481,29 @@ fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, 
     }
 }
 
+/// Assembles GAS-syntax text with the built-in glasm assembler
+/// (`-fintegrated-as`). Only x86-64 ELF is supported; anything else
+/// returns an error so the caller can fall back to the external
+/// assembler.
+fn assemble_in_process(input: &OsStr, output: &Path) -> Result<(), String> {
+    let src = std::fs::read_to_string(input)
+        .map_err(|e| format!("cannot read '{}': {e}", Path::new(input).display()))?;
+    let bytes = glasm::gas::assemble_to_elf64(&src).map_err(|errs| {
+        errs.iter()
+            .map(|e| format!("line {}: {}", e.line, e.msg))
+            .collect::<Vec<_>>()
+            .join("\n")
+    })?;
+    std::fs::write(output, bytes)
+        .map_err(|e| format!("cannot write '{}': {e}", output.display()))
+}
+
+/// Whether `-fintegrated-as` can serve this job: glasm targets x86-64
+/// ELF64 only.
+fn integrated_as_ok(job: &Job) -> bool {
+    job.integrated_as && job.target.is_native() && cfg!(target_arch = "x86_64")
+}
+
 /// Dedicated assembler for raw `.s` input and glcc's generated asm
 /// text: `$GLCC_AS` when set, the host `as` natively, otherwise the
 /// target's `<triple>-as` if the cross binutils are installed. `None`
@@ -1490,6 +1525,11 @@ fn assembler_for(job: &Job) -> Option<OsString> {
 /// `.S` to the link driver, whose preprocessor runs first.
 fn assemble_cmd(job: &Job, input: &OsStr, output: &Path) -> (OsString, Vec<OsString>) {
     let preprocessed = Path::new(input).extension().is_some_and(|e| e == "S");
+    if !preprocessed && integrated_as_ok(job) {
+        // Handled in-process by the caller before reaching here; the
+        // fallback keeps the signature honest for diagnostics.
+        return (OsString::from("glasm-integrated"), Vec::new());
+    }
     if !preprocessed
         && let Some(prog) = assembler_for(job) {
             let mut args = Vec::new();
@@ -1694,6 +1734,11 @@ fn assemble_asm_text(ctx: &Ctx, job: &Job, text: &str, stem: &str, dir: &Path) -
     let s_path = dir.join(format!("{stem}.s"));
     let o_path = dir.join(format!("{stem}.o"));
     std::fs::write(&s_path, text).map_err(|e| fail(format!("cannot write '{}': {e}", s_path.display())))?;
+    if integrated_as_ok(job) {
+        return assemble_in_process(s_path.as_os_str(), &o_path)
+            .map_err(|e| fail(format!("assembling '{}' failed:\n{e}", s_path.display())))
+            .map(|_| o_path);
+    }
     let (prog, args) = assemble_cmd(job, s_path.as_os_str(), &o_path);
     let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run assembler driver: {e}")))?.unwrap();
     if !out.status.success() {
@@ -2388,6 +2433,16 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
             let out = pairs.iter().find(|(p, _)| p == &input.path).unwrap().1.clone();
             match input.lang {
                 Lang::Assembler => {
+                    if integrated_as_ok(job) {
+                        assemble_in_process(&input.path, &out).map_err(|e| {
+                            fail(format!(
+                                "assembling '{}' failed:\n{e}",
+                                Path::new(&input.path).display()
+                            ))
+                        })?;
+                        produced.push((input.path.clone(), out));
+                        continue;
+                    }
                     let (prog, args) = assemble_cmd(job, &input.path, &out);
                     let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run assembler driver: {e}")))?.unwrap();
                     if !out.status.success() {
@@ -2681,6 +2736,9 @@ Environment: GLCC_PP (native preprocessor by default; 'clang' or a
   lib.exe),
   GLCC_AS (assembler for .s and generated asm; default as, or the
   target's <triple>-as when installed for --target=; .S stays on GLCC_CC),
+  -fintegrated-as / -fno-integrated-as: use the built-in glasm
+  assembler (x86-64 ELF) instead of spawning `as` for .s inputs and
+  generated asm text; default off, like gcc
   GLCC_RT (runtime override for either target: glccrt.o, default
   ~/.local/lib/glcc/glccrt.o then /usr/lib/glcc/glccrt.o; or
   glccrt-win64.lib, default ~/.local/lib/glcc/glccrt-win64.lib)
@@ -3929,4 +3987,32 @@ int main(void) { return add1(1); }
             .0;
         assert!(!has_section(&bytes, b"$resume"), "no split without the flag");
     }
+#[test]
+fn integrated_as_flag() {
+    assert!(!parse(&["a.c"]).integrated_as);
+    assert!(parse(&["-fintegrated-as", "a.c"]).integrated_as);
+    assert!(parse(&["-integrated-as", "a.c"]).integrated_as);
+    assert!(parse(&["-fintegrated-as", "-fno-integrated-as", "a.c"])
+        .integrated_as
+        .eq(&false));
+}
+
+#[test]
+fn integrated_as_assembles_s_and_generated_text() {
+    // Raw .s through the in-process assembler (the file is GAS syntax).
+    let dir = std::env::temp_dir().join(format!("glcc-ia-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let s = dir.join("ia.s");
+    std::fs::write(&s, ".text\n.globl f\nf: mov $60, %rax\nmov $5, %rdi\nsyscall\n").unwrap();
+    let obj = dir.join("ia.o");
+    let job = parse(&["-fintegrated-as", "-c"]);
+    let out = assemble_in_process(s.as_os_str(), &obj);
+    assert!(out.is_ok(), "{out:?}");
+    let bytes = std::fs::read(&obj).unwrap();
+    assert_eq!(&bytes[..4], &[
+        0x7f, b'E', b'L', b'F',
+    ]);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 }

@@ -14,7 +14,7 @@ pub struct ParseError {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum Tok {
+pub(crate) enum Tok {
     Ident(String),
     Int(i64),
     Str(Vec<u8>),
@@ -184,17 +184,21 @@ impl<'a> Lexer<'a> {
 // Expression parsing
 // ---------------------------------------------------------------------
 
-struct Toks {
+pub(crate) struct Toks {
     toks: Vec<Tok>,
     pos: usize,
 }
 
 impl Toks {
-    fn peek(&self) -> Option<&Tok> {
+    pub(crate) fn new(toks: Vec<Tok>) -> Toks {
+        Toks { toks, pos: 0 }
+    }
+
+    pub(crate) fn peek(&self) -> Option<&Tok> {
         self.toks.get(self.pos)
     }
 
-    fn bump(&mut self) -> Option<Tok> {
+    pub(crate) fn bump(&mut self) -> Option<Tok> {
         let t = self.toks.get(self.pos).cloned();
         if t.is_some() {
             self.pos += 1;
@@ -202,7 +206,7 @@ impl Toks {
         t
     }
 
-    fn eat_punct(&mut self, p: &str) -> bool {
+    pub(crate) fn eat_punct(&mut self, p: &str) -> bool {
         if matches!(self.peek(), Some(Tok::Punct(q)) if *q == p) {
             self.pos += 1;
             true
@@ -212,7 +216,7 @@ impl Toks {
     }
 }
 
-fn parse_expr(t: &mut Toks, min_prec: u8) -> Result<Expr, String> {
+pub(crate) fn parse_expr(t: &mut Toks, min_prec: u8) -> Result<Expr, String> {
     let mut lhs = parse_unary(t)?;
     loop {
         let (op, prec) = match t.peek() {

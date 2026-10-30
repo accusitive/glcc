@@ -11,6 +11,9 @@ pub struct FixupReq {
     pub size: u8,
     pub val: RValue,
     pub pcrel: bool,
+    /// Bytes of the instruction after the field; PC-relative memory
+    /// displacements are relative to the end of the whole instruction.
+    pub tail: u32,
 }
 
 pub struct Encoded {

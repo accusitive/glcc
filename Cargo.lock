@@ -416,6 +416,7 @@ dependencies = [
  "cranelift-native",
  "cranelift-object",
  "gimli",
+ "glasm",
  "glcc_dwarf",
  "glcc_frontend",
  "glcc_lower_cl",

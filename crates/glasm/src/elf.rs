@@ -46,7 +46,8 @@ pub fn write_elf64(module: &Module) -> Result<Vec<u8>, String> {
         };
         let kind = match sym.sect.map(|si| &module.sections[si].flags) {
             Some(SectionFlags::Text) => SymbolKind::Text,
-            _ => SymbolKind::Unknown,
+            Some(_) => SymbolKind::Data,
+            None => SymbolKind::Unknown,
         };
         let id = obj.add_symbol(Symbol {
             name: sym.name.as_bytes().to_vec(),
