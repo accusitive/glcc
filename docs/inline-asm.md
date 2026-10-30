@@ -4,6 +4,15 @@
 This note is about the real feature: enough inline asm to write bare-metal
 applications with full access to the CPU.
 
+**Update (native path):** the wasmtime fork at `inline-asm-prototype` now
+ships a native Cranelift `inline_asm` instruction for x86-64 (see
+`cranelift/docs/inline-asm.md` in the fork). On x86-64, glcc lowers blocks
+whose constraints and templates fit that surface in place
+(`glcc_lower_cl::asm_native`); everything else — and every block on
+aarch64/riscv64 — still uses the out-of-line wrapper below, with a
+one-line stderr note per fallback reason. The wrapper stays the
+reference design for the other targets.
+
 ## Goal
 
 Not "the tests pass". The target is C that can do:

@@ -1,13 +1,18 @@
 //! Inline-asm wrapper generation (Design A in `docs/inline-asm.md`).
 //!
-//! Cranelift has no inline asm, so each [`mir::InstKind::InlineAsm`]
-//! block becomes a call to a small out-of-line function emitted into
-//! the per-TU assembler text. The caller passes the address of a stack
-//! area holding every operand's value (or address, for memory
-//! operands); the wrapper loads the operand registers, runs the
-//! template with `%N` substituted, stores the outputs back into the
-//! area, and returns. Only the call reaches Cranelift, so the template
-//! never touches the register allocator.
+//! The fallback path for blocks the native lowering
+//! ([`crate::asm_native`]) cannot express: every aarch64/riscv64 block,
+//! and on x86-64 every block using features the Cranelift fork's
+//! `inline_asm` instruction does not take yet (basic asm, `asm goto`,
+//! memory/immediate/matching constraints, non-fixed inouts, `Q`,
+//! narrow non-fixed operands). Each such block becomes a call to a
+//! small out-of-line function emitted into the per-TU assembler text.
+//! The caller passes the address of a stack area holding every
+//! operand's value (or address, for memory operands); the wrapper
+//! loads the operand registers, runs the template with `%N`
+//! substituted, stores the outputs back into the area, and returns.
+//! Only the call reaches Cranelift, so the template never touches the
+//! register allocator.
 //!
 //! Operand registers are allocated statically, per site: outputs first
 //! (they are the more constrained), then inputs; ties share; named
@@ -42,7 +47,7 @@ pub struct Site {
 
 /// How an operand reaches the template.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Reg,
     Mem,
     Imm,
@@ -50,16 +55,16 @@ enum Kind {
 
 /// One register with every spelling a template modifier can ask for;
 /// empty strings are widths the register does not have.
-struct RegInfo {
-    q: &'static str,
-    b: &'static str,
-    w: &'static str,
-    k: &'static str,
-    h: &'static str,
-    callee_saved: bool,
+pub(crate) struct RegInfo {
+    pub q: &'static str,
+    pub b: &'static str,
+    pub w: &'static str,
+    pub k: &'static str,
+    pub h: &'static str,
+    pub callee_saved: bool,
 }
 
-struct Table {
+pub(crate) struct Table {
     /// The target these letters and syntax belong to.
     arch: Arch,
     /// Register-name sigil: `%` on x86-64, empty elsewhere.
@@ -745,7 +750,7 @@ const RISCV64: Table = Table {
     ],
 };
 
-fn table(arch: Arch) -> &'static Table {
+pub(crate) fn table(arch: Arch) -> &'static Table {
     match arch {
         Arch::X86_64 => &X86,
         Arch::Aarch64 => &AARCH64,
@@ -753,7 +758,7 @@ fn table(arch: Arch) -> &'static Table {
     }
 }
 
-fn find_reg(table: &Table, name: &str) -> Option<&'static RegInfo> {
+pub(crate) fn find_reg(table: &Table, name: &str) -> Option<&'static RegInfo> {
     table.regs.iter().find(|info| info.q == name)
 }
 
@@ -798,18 +803,18 @@ struct Operand {
 
 /// Parse and classify one operand's constraint. Returns the kind, a
 /// pinned register, a tie index, and the `+` flag.
-struct Constraint {
-    kind: Kind,
-    named: Option<&'static str>,
-    tie: Option<u32>,
-    inout: bool,
+pub(crate) struct Constraint {
+    pub kind: Kind,
+    pub named: Option<&'static str>,
+    pub tie: Option<u32>,
+    pub inout: bool,
     /// `"Q"`: only a register with a high-byte form.
-    high: bool,
+    pub high: bool,
     /// The constraint also names a register class (`"Ir"`, `"rm"`):
     /// an operand whose value is not a constant can ride it.
-    reg_alt: bool,
+    pub reg_alt: bool,
     /// The constraint also names a memory class (`"im"`).
-    mem_alt: bool,
+    pub mem_alt: bool,
 }
 
 /// What one constraint letter selects on a target. The frontend keeps
@@ -872,6 +877,12 @@ fn letter_class(arch: Arch, letter: &str) -> Option<LetterClass> {
 }
 
 fn parse_constraint(table: &Table, constraint: &str) -> Constraint {
+    try_parse_constraint(table, constraint).unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// [`parse_constraint`] without the panics: the native lowering turns
+/// the reasons into fallback diagnostics instead.
+pub(crate) fn try_parse_constraint(table: &Table, constraint: &str) -> Result<Constraint, String> {
     let mut rest = constraint;
     let mut inout = false;
     loop {
@@ -887,7 +898,7 @@ fn parse_constraint(table: &Table, constraint: &str) -> Constraint {
         }
     }
     if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-        return Constraint {
+        return Ok(Constraint {
             kind: Kind::Reg,
             named: None,
             tie: rest.parse().ok(),
@@ -895,7 +906,7 @@ fn parse_constraint(table: &Table, constraint: &str) -> Constraint {
             high: false,
             reg_alt: true,
             mem_alt: false,
-        };
+        });
     }
     let mut named = None;
     let mut kind = None;
@@ -928,13 +939,13 @@ fn parse_constraint(table: &Table, constraint: &str) -> Constraint {
             }
             Some(LetterClass::Imm) => (Some(Kind::Imm), None),
             Some(LetterClass::Unsupported(what)) => {
-                panic!("asm constraint '{letter}' selects {what}, which is not supported")
+                return Err(format!("asm constraint '{letter}' selects {what}, which is not supported"))
             }
-            None => panic!("unsupported asm constraint '{letter}'"),
+            None => return Err(format!("unsupported asm constraint '{letter}'")),
         };
         if let Some(n) = n {
             if find_reg(table, n).is_none() {
-                panic!("asm constraint '{letter}' is not valid on this target");
+                return Err(format!("asm constraint '{letter}' is not valid on this target"));
             }
             named = Some(n);
         }
@@ -949,19 +960,19 @@ fn parse_constraint(table: &Table, constraint: &str) -> Constraint {
     if named.is_some() {
         kind = Some(Kind::Reg);
     }
-    Constraint {
-        kind: kind.unwrap_or_else(|| panic!("empty asm constraint")),
+    Ok(Constraint {
+        kind: kind.ok_or_else(|| "empty asm constraint".to_string())?,
         named,
         tie: None,
         inout,
         high,
         reg_alt,
         mem_alt,
-    }
+    })
 }
 
 /// Size in bytes of an operand's type.
-fn ty_size(ty: &mir::Ty) -> u64 {
+pub(crate) fn ty_size(ty: &mir::Ty) -> u64 {
     match ty {
         mir::Ty::Bool => 1,
         mir::Ty::Int { bits } => u64::from(bits.div_ceil(8)).max(1),
@@ -1367,7 +1378,7 @@ fn area_ref(arch: Arch, base: &str, offset: u64) -> String {
 
 /// The name of `info` at the operand's own width: x86-64 uses the exact
 /// sub-register, aarch64 uses `wN` up to 4 bytes and `xN` at 8.
-fn mode_name(info: &RegInfo, size: u64, arch: Arch) -> &'static str {
+pub(crate) fn mode_name(info: &RegInfo, size: u64, arch: Arch) -> &'static str {
     match arch {
         Arch::X86_64 => match size {
             1 => info.b,

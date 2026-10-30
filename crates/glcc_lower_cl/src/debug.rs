@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use cranelift_codegen::ir::StackSlot;
+use cranelift_codegen::ir::{SourceLoc, StackSlot};
 use cranelift_codegen::{CompiledCode, MachBufferFrameLayout};
 use cranelift_module::{DataId, FuncId};
 use glcc_dwarf::{FuncDebug, LoweredDebug, SrcLocRow, VarLoc};
@@ -55,11 +55,11 @@ pub(crate) fn collect_function_debug(
             .buffer
             .get_srclocs_sorted()
             .iter()
-            .filter(|row| !row.loc.is_default())
+            .filter(|row| row.loc.is_abs() && row.loc.as_abs() != SourceLoc::default())
             .map(|row| SrcLocRow {
                 start: row.start,
                 end: row.end,
-                loc: row.loc.bits(),
+                loc: row.loc.as_abs().bits(),
             })
             .collect(),
         external: !func.local,

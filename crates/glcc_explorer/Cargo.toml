@@ -22,11 +22,10 @@ glcc_pp = { path = "../glcc_pp" }
 glcc_mir = { path = "../glcc_mir" }
 glcc_lower_mir = { path = "../glcc_lower_mir" }
 glcc_lower_cl = { path = "../glcc_lower_cl" }
-cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64"] }
-cranelift-module = "0.136.0"
-cranelift-native = "0.136.0"
-cranelift-object = "0.136.0"
-
+cranelift-codegen = { path = "/home/gl/data/p/wasmtime-asm/cranelift/codegen", default-features = false, features = ["x86", "arm64", "riscv64"] }
+cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
+cranelift-native = { path = "/home/gl/data/p/wasmtime-asm/cranelift/native" }
+cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
 [[bin]]
 name = "glcc-explorer"
 path = "src/main.rs"

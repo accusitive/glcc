@@ -25,6 +25,7 @@
 
 pub mod abi;
 pub mod asm;
+mod asm_native;
 mod debug;
 pub mod lower;
 mod memflags;

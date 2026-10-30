@@ -11,5 +11,5 @@ edition = "2024"
 fern = { path = "../fern" }
 glcc_mir = { path = "../glcc_mir" }
 glcc_lower_cl = { path = "../glcc_lower_cl" }
-cranelift-jit = "0.136.0"
-cranelift-module = "0.136.0"
+cranelift-jit = { path = "/home/gl/data/p/wasmtime-asm/cranelift/jit" }
+cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }

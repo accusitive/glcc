@@ -1,10 +1,11 @@
 /* Inline asm in glcc: make && make run.
  *
- * Cranelift has no inline asm, so glcc compiles each site to an
- * out-of-line wrapper that runs the template with statically allocated
- * registers (docs/inline-asm.md). Everything here is tier T0/T1:
- * operand templates, fixed registers, clobbers, memory operands, and
- * asm goto. Register variables and reading %rsp are out of scope.
+ * On x86-64, blocks the Cranelift fork's native `inline_asm` instruction
+ * can express (fixed-register operands, 64-bit register operands) lower
+ * in place; everything else falls back to the out-of-line wrapper of
+ * docs/inline-asm.md (asm_add, asm_byteswap, asm_store, asm_barrier,
+ * asm_is_odd — look for the "lowered to the out-of-line wrapper" notes
+ * on stderr). On aarch64/riscv64 every block uses the wrapper.
  */
 #include <stdio.h>
 #include <string.h>
@@ -58,6 +59,14 @@ static void cpu_vendor(char out[13]) {
     memcpy(out + 8, &c, 4);
     out[12] = '\0';
 }
+
+/* Native in-place lowering: a 64-bit output the template reads back
+ * through (the fork prints the full 64-bit register for %0). */
+static unsigned long asm_invert(unsigned long v) {
+    unsigned long r;
+    __asm__("movq %1, %0\n\tnotq %0" : "=r"(r) : "r"(v));
+    return r;
+}
 #endif
 
 int main(void) {
@@ -74,6 +83,7 @@ int main(void) {
     char vendor[13];
     cpu_vendor(vendor);
     printf("cpu vendor                = %s\n", vendor);
+    printf("invert(0x00000000deadbeef) = 0x%lx\n", asm_invert(0x00000000deadbeefUL));
 
     unsigned long long t0 = read_tsc();
     volatile int sink = 0;

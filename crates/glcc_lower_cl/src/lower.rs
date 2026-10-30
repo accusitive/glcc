@@ -272,6 +272,7 @@ fn needs_libc_memcpy(func: &mir::Function) -> bool {
 #[derive(Default)]
 pub struct Wrappers {
     seen: std::collections::HashSet<String>,
+    fallbacks: std::collections::HashSet<String>,
     text: String,
 }
 
@@ -279,6 +280,14 @@ impl Wrappers {
     fn add(&mut self, name: &str, text: &str) {
         if self.seen.insert(name.to_string()) {
             self.text.push_str(text);
+        }
+    }
+
+    /// One note per distinct reason per module, so a unit full of
+    /// `"+r"` blocks reports once.
+    fn note_fallback(&mut self, reason: &str) {
+        if self.fallbacks.insert(reason.to_string()) {
+            eprintln!("glcc: note: inline asm lowered to the out-of-line wrapper: {reason}");
         }
     }
 }
@@ -859,7 +868,14 @@ fn lower_function<M: Module>(
     let config = clif.target_config();
     builder.finalize(config);
     let clif_id = func_ids[&id];
-    if let Err(e) = clif.define_function(clif_id, &mut ctx) {
+    if mir_func.name == "add" {
+        eprintln!("BEFORE DEFINE:\n{}", ctx.func.display());
+    }
+    let def_result = clif.define_function(clif_id, &mut ctx);
+    if mir_func.name == "add" {
+        eprintln!("AFTER DEFINE:\n{}", ctx.func.display());
+    }
+    if let Err(e) = def_result {
         eprintln!(
             "FAILED {}:
 {}",
@@ -922,7 +938,7 @@ fn block_fill_order(func: &mir::Function) -> Vec<mir::Block> {
 
 /// Map entry block params to MIR values: scalars directly, aggregates
 /// reassembled into fresh slots from their pieces, chunk groups stored
-/// whole, and `StructArgument` addresses copied to locals.
+/// whole, and `StructArgument` addresses used in place.
 fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &mir::Function, entry: ClifBlock) {
     let params = builder.block_params(entry).to_vec();
     // Per-owner piece collection: (MIR type, [(offset, ClifValue)]).
@@ -931,6 +947,9 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
     // (`HashMap` iteration would permute them via its random seed).
     let mut pieces: BTreeMap<usize, (mir::Ty, Vec<(u64, ClifValue)>)> = BTreeMap::new();
     let mut addrs: BTreeMap<usize, ClifValue> = BTreeMap::new();
+    // `StructArgument` already points at the callee's own copy in the
+    // incoming stack area, so it can be used in place.
+    let mut stack_addrs: BTreeMap<usize, ClifValue> = BTreeMap::new();
     let mut slot_idx = 0;
     for slot in body.layout.slots.clone() {
         match slot.kind {
@@ -959,7 +978,12 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
                 let mir_ty = param_mir_ty(mir_func, owner);
                 pieces.entry(owner).or_insert_with(|| (mir_ty, Vec::new())).1.push((index * 8, v));
             }
-            abi::SlotKind::StackAddr { owner } | abi::SlotKind::RefAddr { owner } => {
+            abi::SlotKind::StackAddr { owner } => {
+                let v = params[slot_idx];
+                slot_idx += 1;
+                stack_addrs.insert(owner, v);
+            }
+            abi::SlotKind::RefAddr { owner } => {
                 let v = params[slot_idx];
                 slot_idx += 1;
                 addrs.insert(owner, v);
@@ -1016,6 +1040,12 @@ fn map_entry_params(body: &mut Body, builder: &mut FunctionBuilder, mir_func: &m
             let v = builder.ins().load(ty, memflags::notrap(), *addr, Offset32::new(0));
             body.values.insert(mir_param, v);
         }
+    }
+    for (owner, addr) in &stack_addrs {
+        let Some(mir_param) = mir_func.blocks[mir_func.entry].params.get(*owner).copied() else {
+            continue;
+        };
+        body.values.insert(mir_param, *addr);
     }
     // Zero-sized aggregate parameters cross as nothing and so have no
     // slot: bind them to a dummy address of their own, since MIR uses
@@ -1140,6 +1170,28 @@ fn volatile_store(builder: &mut FunctionBuilder, ty: Type, val: ClifValue, addr:
         builder.ins().fence();
         builder.ins().store(MemFlagsData::new(), val, addr, Offset32::new(0));
         builder.ins().fence();
+    }
+}
+
+/// [`atomic_ty`] carries 32/64-bit floats through an integer bitcast
+/// (this Cranelift only takes integers in `atomic_load`); every other
+/// type loads directly.
+fn atomic_load_value(builder: &mut FunctionBuilder, ty: Type, addr: ClifValue) -> ClifValue {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = builder.ins().atomic_load(int_ty, MemFlagsData::new(), addr);
+        if int_ty == ty { raw } else { builder.ins().bitcast(ty, MemFlagsData::new(), raw) }
+    } else {
+        builder.ins().atomic_load(ty, MemFlagsData::new(), addr)
+    }
+}
+
+/// The store counterpart of [`atomic_load_value`].
+fn atomic_store_value(builder: &mut FunctionBuilder, ty: Type, val: ClifValue, addr: ClifValue) {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = if int_ty == ty { val } else { builder.ins().bitcast(int_ty, MemFlagsData::new(), val) };
+        builder.ins().atomic_store(MemFlagsData::new(), raw, addr);
+    } else {
+        builder.ins().atomic_store(MemFlagsData::new(), val, addr);
     }
 }
 
@@ -1439,6 +1491,11 @@ fn emit_inst<M: Module>(
             let x = operand(body, builder, a);
             let y = operand(body, builder, b);
             Some(builder.ins().imul(x, y))
+        }
+        mir::InstKind::Umulhi(a, b) => {
+            let x = operand(body, builder, a);
+            let y = operand(body, builder, b);
+            Some(builder.ins().umulhi(x, y))
         }
         mir::InstKind::Udiv(a, b) => {
             let x = operand(body, builder, a);
@@ -2268,7 +2325,10 @@ fn emit_inst<M: Module>(
             let mir_ty = body.func.values[agg].ty.clone();
             let (off, elem) = field_offset(&mir_ty, index);
             match clif_ty(&elem) {
-                Some(ty) => Some(builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(off as i32))),
+                Some(ty) => {
+                    let addr = if off == 0 { addr } else { builder.ins().iadd_imm_u(addr, off as i64) };
+                    Some(atomic_load_value(builder, ty, addr))
+                }
                 // Nested aggregates address into the base slot.
                 None => Some(if off == 0 { addr } else { builder.ins().iadd_imm_u(addr, off as i64) }),
             }
@@ -2310,6 +2370,21 @@ fn emit_inst<M: Module>(
                 builder.ins().store(memflags::notrap(), fill, d, Offset32::new(i as i32));
             }
             None
+        }
+        mir::InstKind::Aggregate { elems } => {
+            let mir_ty = result_ty.clone().expect("aggregate needs a result type");
+            let slot = stack_slot(builder, &mir_ty);
+            let dst = builder.ins().stack_addr(types::I64, slot, 0);
+            for (index, &elem) in elems.iter().enumerate() {
+                let val = operand(body, builder, elem);
+                let (off, elem_ty) = field_offset(&mir_ty, index as u32);
+                if elem_ty.is_aggregate() {
+                    emit_memcpy_offset(body, builder, dst, off, val, elem_ty.size_bytes());
+                } else {
+                    builder.ins().store(memflags::notrap(), val, dst, Offset32::new(off as i32));
+                }
+            }
+            Some(dst)
         }
         mir::InstKind::GlobalAddr { global } => {
             let id = data_ids[&global];
@@ -2453,7 +2528,7 @@ fn emit_inst<M: Module>(
                 Some(dst)
             } else {
                 let ty = result_clif(&Some(mir_ty));
-                Some(builder.ins().atomic_load(ty, MemFlagsData::new(), a))
+                Some(atomic_load_value(builder, ty, a))
             }
         }
         mir::InstKind::AtomicStore { addr, val } => {
@@ -2465,7 +2540,8 @@ fn emit_inst<M: Module>(
                 emit_memcpy(builder, a, v, mir_ty.size_bytes());
                 builder.ins().fence();
             } else {
-                builder.ins().atomic_store(MemFlagsData::new(), v, a);
+                let ty = clif_ty(&mir_ty).unwrap_or_else(|| panic!("atomic store of non-scalar type {mir_ty:?}"));
+                atomic_store_value(builder, ty, v, a);
             }
             None
         }
@@ -2512,12 +2588,20 @@ fn emit_inst<M: Module>(
     }
 }
 
-/// Lower one inline-asm block: fill the operand area, call the generated
-/// wrapper, and copy the register outputs back out. The wrapper text
-/// goes into `wrappers` and is assembled into the TU's `.s`; see
-/// [`crate::asm`]. An `asm goto` block's result is the label selector
-/// (0 = fallthrough), which the MIR terminator dispatches on.
+/// Lower one inline-asm block. On x86-64, blocks the fork's native
+/// `inline_asm` instruction can express ([`crate::asm_native::plan`])
+/// lower in place; everything else — and every block on aarch64 and
+/// riscv64, where the fork has no inline asm — uses the out-of-line
+/// wrapper (see [`crate::asm`]). An `asm goto` block's result is the
+/// label selector (0 = fallthrough), which the MIR terminator
+/// dispatches on.
 fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, clif: &mut M, block: &mir::AsmBlock, wrappers: &mut Wrappers) -> Option<ClifValue> {
+    if body.target.arch == Arch::X86_64 {
+        match crate::asm_native::plan(block, body.target.arch) {
+            Ok(native) => return emit_native_inline_asm(body, builder, block, native),
+            Err(reason) => wrappers.note_fallback(&reason),
+        }
+    }
     let site = crate::asm::build(block, body.func, body.target);
     let is_goto = !block.labels.is_empty();
     let sig = crate::asm::wrapper_sig(body.target, is_goto);
@@ -2589,6 +2673,64 @@ fn emit_inline_asm<M: Module>(body: &mut Body, builder: &mut FunctionBuilder, cl
         builder.ins().store(user_flags, value, addr, Offset32::new(0));
     }
     selector
+}
+
+/// Lower an inline-asm block with the fork's native `inline_asm`
+/// instruction: inputs become instruction arguments (widened to the
+/// full 64-bit registers the fork passes operands in), outputs become
+/// the instruction's `i64` results, reduced back to the C type and
+/// stored through the output lvalue's address.
+fn emit_native_inline_asm(body: &mut Body, builder: &mut FunctionBuilder, block: &mir::AsmBlock, native: crate::asm_native::NativeAsm) -> Option<ClifValue> {
+    let mut contents = cranelift_codegen::ir::InlineAsmContents::new(native.template, true);
+    for constraint in &native.constraints {
+        contents = contents.operand(constraint.clone());
+    }
+    for clobber in &native.clobbers {
+        contents = contents.clobber(clobber.clone());
+    }
+    let asm_ref = builder.create_inline_asm(contents);
+
+    let outputs = block.outputs as usize;
+    let mut args: Vec<ClifValue> = Vec::new();
+    // The fork consumes input values in GCC order: the read sides of
+    // `+` outputs first, then the plain inputs.
+    for op in &block.operands[..outputs] {
+        if !op.constraint.contains('+') {
+            continue;
+        }
+        let addr = operand(body, builder, op.value);
+        let value = load_operand(builder, &op.ty, addr);
+        args.push(widen_operand(builder, &op.ty, value));
+    }
+    for op in &block.operands[outputs..] {
+        let value = operand(body, builder, op.value);
+        args.push(widen_operand(builder, &op.ty, value));
+    }
+    let inst = builder.ins().inline_asm(asm_ref, &args);
+    let results: Vec<ClifValue> = builder.inst_results(inst).to_vec();
+    for (i, op) in block.operands[..outputs].iter().enumerate() {
+        let addr = operand(body, builder, op.value);
+        let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
+        let value = if ty == types::I64 { results[i] } else { builder.ins().ireduce(ty, results[i]) };
+        builder.ins().store(memflags::notrap(), value, addr, Offset32::new(0));
+    }
+    None
+}
+
+/// The current value of an output lvalue, for a `+` operand's read side.
+fn load_operand(builder: &mut FunctionBuilder, ty: &mir::Ty, addr: ClifValue) -> ClifValue {
+    let clif_ty = clif_ty(ty).expect("asm register operand needs a scalar type");
+    builder.ins().load(clif_ty, memflags::notrap(), addr, Offset32::new(0))
+}
+
+/// Widen an operand value to the 64-bit register the fork passes
+/// operands in; upper bits are unspecified, as in GCC.
+fn widen_operand(builder: &mut FunctionBuilder, ty: &mir::Ty, value: ClifValue) -> ClifValue {
+    match clif_ty(ty) {
+        Some(t) if t == types::I64 => value,
+        Some(_) => builder.ins().uextend(types::I64, value),
+        None => panic!("asm register operand needs a scalar type"),
+    }
 }
 
 /// Clif type of an instruction result, which must be scalar. Aggregates
@@ -3110,6 +3252,112 @@ mod tests {
         module.push_func(f);
         let (jit, ids) = jit_module(&module);
         assert_eq!(run_i32(&jit, &ids, 0, 20), 41);
+    }
+
+    /// One asm operand in GCC order.
+    fn asm_operand(value: mir::Value, constraint: &str, ty: mir::Ty) -> mir::AsmOperand {
+        mir::AsmOperand {
+            value,
+            constraint: constraint.to_string(),
+            ty,
+            tie: None,
+            name: None,
+        }
+    }
+
+    #[test]
+    fn native_inline_asm_executes_in_place() {
+        // x86-64 only: a 64-bit output+input block lowers onto the
+        // fork's `inline_asm` instruction and runs without a wrapper.
+        if crate::abi::Target::native().arch != crate::abi::Arch::X86_64 {
+            return;
+        }
+        let mut module = mir::Module::new();
+        let (mut f, entry) = mir::Function::new("invert", mir::Signature::new(vec![mir::Ty::int(64)], mir::Ty::int(64)));
+        let input = param(&mut f, entry, mir::Ty::int(64), 0);
+        let out = emit(
+            &mut f,
+            entry,
+            mir::InstKind::Alloca {
+                pointee: mir::Ty::int(64),
+                count: 1,
+            },
+            mir::Ty::ptr(mir::Ty::int(64)),
+        );
+        emit_unit(
+            &mut f,
+            entry,
+            mir::InstKind::InlineAsm {
+                block: Box::new(mir::AsmBlock {
+                    template: "movq %1, %0\n\tnotq %0".to_string(),
+                    operands: vec![asm_operand(out, "=r", mir::Ty::int(64)), asm_operand(input, "r", mir::Ty::int(64))],
+                    outputs: 1,
+                    clobbers: Vec::new(),
+                    labels: Vec::new(),
+                    is_volatile: false,
+                    is_basic: false,
+                }),
+            },
+        );
+        let result = emit(&mut f, entry, mir::InstKind::Load { addr: out, flags: mir::MemFlags::plain() }, mir::Ty::int(64));
+        ret(&mut f, entry, Some(result));
+        module.push_func(f);
+        let (jit, ids) = jit_module(&module);
+        let func = unsafe { std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(func_addr(&jit, &ids, 0)) };
+        assert_eq!(func(5), !5i64);
+        assert_eq!(func(0), -1);
+    }
+
+    #[test]
+    fn native_inline_asm_fixed_inout_executes() {
+        // x86-64 only: a 32-bit `"+a"` inout — the fork's fixed-register
+        // inout pattern, with the mode-sized register substituted into
+        // the template statically.
+        if crate::abi::Target::native().arch != crate::abi::Arch::X86_64 {
+            return;
+        }
+        let mut module = mir::Module::new();
+        let (mut f, entry) = mir::Function::new("notl_a", mir::Signature::new(vec![mir::Ty::int(32)], mir::Ty::int(32)));
+        let input = param(&mut f, entry, mir::Ty::int(32), 0);
+        let out = emit(
+            &mut f,
+            entry,
+            mir::InstKind::Alloca {
+                pointee: mir::Ty::int(32),
+                count: 1,
+            },
+            mir::Ty::ptr(mir::Ty::int(32)),
+        );
+        emit_unit(
+            &mut f,
+            entry,
+            mir::InstKind::Store {
+                addr: out,
+                val: input,
+                flags: mir::MemFlags::plain(),
+            },
+        );
+        emit_unit(
+            &mut f,
+            entry,
+            mir::InstKind::InlineAsm {
+                block: Box::new(mir::AsmBlock {
+                    template: "notl %0".to_string(),
+                    operands: vec![asm_operand(out, "+a", mir::Ty::int(32))],
+                    outputs: 1,
+                    clobbers: Vec::new(),
+                    labels: Vec::new(),
+                    is_volatile: false,
+                    is_basic: false,
+                }),
+            },
+        );
+        let result = emit(&mut f, entry, mir::InstKind::Load { addr: out, flags: mir::MemFlags::plain() }, mir::Ty::int(32));
+        ret(&mut f, entry, Some(result));
+        module.push_func(f);
+        let (jit, ids) = jit_module(&module);
+        assert_eq!(run_i32(&jit, &ids, 0, 5), !5i32);
+        assert_eq!(run_i32(&jit, &ids, 0, 0), -1);
     }
 
     #[test]

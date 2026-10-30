@@ -8574,6 +8574,26 @@ mod tests {
     }
 
     #[test]
+    fn bitint_signed_comparison_uses_the_magnitude_of_the_top_limb() {
+        let src = "int main(void) {\n\
+                   int ok = 0;\n\
+                   _BitInt(300) v = -5;\n\
+                   if (v < 0 && v <= 0 && !(v > 0) && !(v >= 0)) ok |= 1;\n\
+                   if (v < -4 && !(v < -5) && v <= -5 && v > -6) ok |= 2;\n\
+                   _BitInt(300) p = 5;\n\
+                   if (p > 0 && p >= 0 && !(p < 0) && !(p <= 0)) ok |= 4;\n\
+                   if (p > 4 && !(p > 5) && p >= 5 && p < 6) ok |= 8;\n\
+                   _BitInt(300) big = (_BitInt(300))1 << 299;\n\
+                   _BitInt(300) small = big - 1;\n\
+                   if (big < 0 && small > 0 && big < small) ok |= 16;\n\
+                   unsigned _BitInt(300) u = (_BitInt(300))-1;\n\
+                   if (u > 0 && u == ~(unsigned _BitInt(300))0) ok |= 32;\n\
+                   return ok;\n\
+               }";
+        assert_eq!(jit_run_main(lower_module_c23(src)), 63);
+    }
+
+    #[test]
     fn bitint_arbitrary_width_arithmetic() {
         let src = "int main(void) {\n\
                    int ok = 0;\n\

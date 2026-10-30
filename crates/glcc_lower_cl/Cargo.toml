@@ -10,13 +10,13 @@ edition = "2024"
 [dependencies]
 glcc_mir = { path = "../glcc_mir" }
 glcc_dwarf = { path = "../glcc_dwarf" }
-cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
-cranelift-frontend = "0.136.0"
-cranelift-module = "0.136.0"
+cranelift-codegen = { path = "/home/gl/data/p/wasmtime-asm/cranelift/codegen", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
+cranelift-frontend = { path = "/home/gl/data/p/wasmtime-asm/cranelift/frontend" }
+cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
 smallvec = "1.16.3"
 
 [dev-dependencies]
-cranelift-jit = "0.136.0"
-cranelift-native = "0.136.0"
-cranelift-object = "0.136.0"
+cranelift-jit = { path = "/home/gl/data/p/wasmtime-asm/cranelift/jit" }
+cranelift-native = { path = "/home/gl/data/p/wasmtime-asm/cranelift/native" }
+cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
 object = "0.40.0"

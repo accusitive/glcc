@@ -15,10 +15,10 @@ glcc_mir = { path = "crates/glcc_mir" }
 glcc_lower_mir = { path = "crates/glcc_lower_mir" }
 glcc_lower_cl = { path = "crates/glcc_lower_cl" }
 glcc_dwarf = { path = "crates/glcc_dwarf" }
-cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64"] }
-cranelift-module = "0.136.0"
-cranelift-native = "0.136.0"
-cranelift-object = "0.136.0"
+cranelift-codegen = { path = "/home/gl/data/p/wasmtime-asm/cranelift/codegen", default-features = false, features = ["x86", "arm64", "riscv64"] }
+cranelift-module = { path = "/home/gl/data/p/wasmtime-asm/cranelift/module" }
+cranelift-native = { path = "/home/gl/data/p/wasmtime-asm/cranelift/native" }
+cranelift-object = { path = "/home/gl/data/p/wasmtime-asm/cranelift/object" }
 # Object read/write for patching 32-bit (`__ptr32`) data relocations the
 # Cranelift data machinery cannot express.
 object = { version = "0.40.0", default-features = false, features = ["write", "std"] }
