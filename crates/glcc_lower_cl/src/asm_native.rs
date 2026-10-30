@@ -6,7 +6,7 @@
 //! block against it and either returns the translation for
 //! `InlineAsmContents` or the reason the block must fall back to the
 //! out-of-line wrapper in [`crate::asm`]. Constraints the fork does not
-//! take yet (`"m"`, `"i"`, matching constraints, non-fixed inouts)
+//! take yet (matching constraints, memory outputs)
 //! stay plain constraint strings here: when the fork learns them, the
 //! corresponding `Err` arm below is all that changes.
 //!
@@ -111,9 +111,6 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
         }
         if i < outputs && parsed.kind != Kind::Reg {
             return Err("only register outputs are native yet".into());
-        }
-        if i < outputs && parsed.inout && parsed.named.is_none() {
-            return Err("non-fixed inouts (\"+r\") are not native yet".into());
         }
         if op.ty.is_aggregate() && parsed.kind != Kind::Mem {
             return Err("aggregate operands are not native yet".into());
@@ -375,8 +372,10 @@ mod tests {
     #[test]
     fn unsupported_shapes_fall_back() {
         assert!(Block::new("nop", 0, &[]).plan(&[]).is_ok());
-        // Non-fixed inout.
-        assert!(Block::new("addl %1, %0", 1, &["+r", "r"]).plan(&[I32, I32]).unwrap_err().contains("non-fixed inouts"));
+        // Non-fixed inout is native now (a Reuse def shares the copy's
+        // register with the read).
+        let native = Block::new("addq %0, %0", 1, &["+r"]).plan(&[I64, I64]).expect("+r is native");
+        assert_eq!(native.constraints, ["+r"]);
         // Memory and immediate operands are native now; a non-constant
         // `"i"` value (with no register alternative to demote to) still
         // falls back. The test helper always pushes constants, so this
