@@ -76,6 +76,11 @@ buf:    resq 4
 /// Skipped quietly when no system linker is available.
 #[test]
 fn link_and_run() {
+    // glasm emits x86-64 ELF: skip hosts without an ELF-capable native
+    // toolchain (Windows ld links PE, non-x86_64 ld links other arches).
+    if cfg!(windows) || cfg!(not(target_arch = "x86_64")) {
+        return;
+    }
     if std::process::Command::new("ld").arg("--version").output().is_err() {
         return;
     }
