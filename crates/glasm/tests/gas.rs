@@ -124,10 +124,18 @@ fn glcc_generated_text() {
 marker: .quad 1234
         .size marker, .-marker
         .section .note.GNU-stack,"",@progbits
+        .pushsection .text.extra,"ax",@progbits
+extra:  ret
+        .popsection
     "#,
     )
     .expect("parse");
     assert!(stmts.iter().any(|s| matches!(s, glasm::Stmt::Label(n, _) if n == "marker")));
+    // .pushsection must place subsequent code in its section.
+    assert!(stmts.iter().any(|s| matches!(
+        s,
+        glasm::Stmt::Section(spec) if spec.name == ".text.extra"
+    )));
 }
 
 #[test]

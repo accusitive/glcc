@@ -324,6 +324,7 @@ impl NumLabels {
 
 const IGNORED_DIRECTIVES: &[&str] = &[
     "file", "ident", "size", "type", "local", "extern", "previous", "end", "appfile",
+    "popsection",
     "appline", "line", "loc", "eject", "psize", "noformat", "nolist", "list", "title", "sbttl",
     "version", "warn", "err", "print", "popsection", "pushsection_nop", "stabn", "stabs", "stabd",
 ];
@@ -455,7 +456,9 @@ fn parse_directive(
         "data" => Ok(section_stmt(".data", SectionKind::Data, None)),
         "bss" => Ok(section_stmt(".bss", SectionKind::Bss, None)),
         "rodata" => Ok(section_stmt(".rodata", SectionKind::Rodata, None)),
-        "section" => parse_section(&mut t),
+        // .pushsection behaves like .section for the common single-level
+        // case; a matching .popsection is a no-op (no section stack).
+        "section" | "pushsection" => parse_section(&mut t),
         "globl" | "global" | "weak" => {
             let mut names = Vec::new();
             while let Some(GTok::Ident(n)) = t.bump() {
