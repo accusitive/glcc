@@ -21,6 +21,7 @@ pub mod debug;
 pub mod display;
 pub mod ir;
 pub mod optimize;
+pub mod parse;
 pub mod pass;
 pub mod passes;
 pub mod ty;
@@ -33,5 +34,6 @@ pub use ir::{
     InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
 pub use optimize::{OptLevel, optimize};
+pub use parse::{MirParseError, parse_module};
 pub use pass::{FunctionPass, ModulePass, PassManager};
 pub use ty::{FloatKind, GepIndex, Signature, Ty, dense_field_offsets, struct_field_offsets};

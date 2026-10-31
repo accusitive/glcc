@@ -1316,78 +1316,93 @@ fn compile_source(
     error_format: ErrorFormat,
 ) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (mir_module, mut asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
-        let cl_target = match target.arch {
-            glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
-            glcc_frontend::target::Arch::Aarch64 => glcc_lower_cl::Arch::Aarch64,
-            glcc_frontend::target::Arch::Riscv64 => glcc_lower_cl::Arch::Riscv64,
-        };
-        let cl_os = match target.os {
-            glcc_frontend::target::Os::Linux => glcc_lower_cl::Os::Linux,
-            glcc_frontend::target::Os::Windows => glcc_lower_cl::Os::Windows,
-        };
-        let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os };
-        use cranelift_codegen::settings::Configurable;
-        let mut flag_builder = cranelift_codegen::settings::builder();
-        flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
-        flag_builder.set("is_pic", if pic { "true" } else { "false" }).expect("pic");
-        flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
-        // Cranelift's MachInst verifier is a dev-time safety net; our own
-        // MIR verifier still runs in every build.
-        flag_builder
-            .set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })
-            .expect("verifier");
-        // TLS access (`tls_value` for the x86-64 foreign-variadic
-        // trampoline) has no lowering unless a model is selected;
-        // `elf_gd` lowers on all supported ISAs, like the legacy
-        // backend.
-        flag_builder.set("tls_model", "elf_gd").expect("tls model");
-        // MSVC has no 128-bit float and no i128: Win64 passes `F128`
-        // (indirectly) and splits `I128` the way LLVM does. Our own
-        // runtime is compiled with the same setting, so internal
-        // `__glcc_*` calls agree by construction.
-        if matches!(target.os, glcc_frontend::target::Os::Windows) {
-            flag_builder.set("enable_llvm_abi_extensions", "true").expect("llvm abi extensions");
-        }
-        let flags = cranelift_codegen::settings::Flags::new(flag_builder);
-        let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() {
-            cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
-        } else {
-            cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
-                .expect("known isa")
-                .finish(flags)
-                .expect("isa flags")
-        };
-        let mut builder = cranelift_object::ObjectBuilder::new(isa, "glcc", cranelift_module::default_libcall_names()).expect("object builder");
-        // Always emit `.eh_frame` so backtraces work with or without
-        // `-g`: the DWARF variable locations are CFA-relative, so gdb
-        // needs the CFI to resolve them too.
-        builder.unwind_info(true);
-        let mut obj = cranelift_object::ObjectModule::new(builder);
-        let mut unwind = Vec::new();
-        Ok(if debug {
-            let (_, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
-            let mut product = obj.finish();
-            if let Err(e) = winunwind::emit(&mut product, &unwind) {
-                eprintln!("glcc: warning: {e}");
-            }
-            apply_narrow_relocs(&mut product, &narrow);
-            (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
-        } else {
-            let narrow = glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
-            let mut product = obj.finish();
-            if let Err(e) = winunwind::emit(&mut product, &unwind) {
-                eprintln!("glcc: warning: {e}");
-            }
-            apply_narrow_relocs(&mut product, &narrow);
-            (product.emit().expect("object emit"), asm_text)
-        })
+        let (mir_module, asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
+        emit_object(mir_module, asm_text, target, debug, pic, opt_level)
     }));
     match outcome {
         Ok(Ok(compiled)) => Ok(compiled),
         Ok(Err(())) => Err(()),
         Err(_) => Err(()),
     }
+}
+
+/// Lower a finished MIR module to object bytes: Clif lowering, unwinding,
+/// narrow-reloc and DWARF patchup. Shared by the C path (frontend-lowered
+/// MIR) and the EDG C++ path (MIR parsed from cpfe's emitter output);
+/// `asm_text` collects per-TU assembly appended by lowering.
+fn emit_object(
+    mir_module: glcc_mir::Module,
+    mut asm_text: String,
+    target: Target,
+    debug: bool,
+    pic: bool,
+    opt_level: OptLevel,
+) -> std::result::Result<(Vec<u8>, String), ()> {
+    let cl_target = match target.arch {
+        glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
+        glcc_frontend::target::Arch::Aarch64 => glcc_lower_cl::Arch::Aarch64,
+        glcc_frontend::target::Arch::Riscv64 => glcc_lower_cl::Arch::Riscv64,
+    };
+    let cl_os = match target.os {
+        glcc_frontend::target::Os::Linux => glcc_lower_cl::Os::Linux,
+        glcc_frontend::target::Os::Windows => glcc_lower_cl::Os::Windows,
+    };
+    let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os };
+    use cranelift_codegen::settings::Configurable;
+    let mut flag_builder = cranelift_codegen::settings::builder();
+    flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
+    flag_builder.set("is_pic", if pic { "true" } else { "false" }).expect("pic");
+    flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
+    // Cranelift's MachInst verifier is a dev-time safety net; our own
+    // MIR verifier still runs in every build.
+    flag_builder
+        .set("enable_verifier", if cfg!(debug_assertions) { "true" } else { "false" })
+        .expect("verifier");
+    // TLS access (`tls_value` for the x86-64 foreign-variadic
+    // trampoline) has no lowering unless a model is selected;
+    // `elf_gd` lowers on all supported ISAs, like the legacy
+    // backend.
+    flag_builder.set("tls_model", "elf_gd").expect("tls model");
+    // MSVC has no 128-bit float and no i128: Win64 passes `F128`
+    // (indirectly) and splits `I128` the way LLVM does. Our own
+    // runtime is compiled with the same setting, so internal
+    // `__glcc_*` calls agree by construction.
+    if matches!(target.os, glcc_frontend::target::Os::Windows) {
+        flag_builder.set("enable_llvm_abi_extensions", "true").expect("llvm abi extensions");
+    }
+    let flags = cranelift_codegen::settings::Flags::new(flag_builder);
+    let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() {
+        cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
+    } else {
+        cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
+            .expect("known isa")
+            .finish(flags)
+            .expect("isa flags")
+    };
+    let mut builder = cranelift_object::ObjectBuilder::new(isa, "glcc", cranelift_module::default_libcall_names()).expect("object builder");
+    // Always emit `.eh_frame` so backtraces work with or without
+    // `-g`: the DWARF variable locations are CFA-relative, so gdb
+    // needs the CFI to resolve them too.
+    builder.unwind_info(true);
+    let mut obj = cranelift_object::ObjectModule::new(builder);
+    let mut unwind = Vec::new();
+    Ok(if debug {
+        let (_, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+        let mut product = obj.finish();
+        if let Err(e) = winunwind::emit(&mut product, &unwind) {
+            eprintln!("glcc: warning: {e}");
+        }
+        apply_narrow_relocs(&mut product, &narrow);
+        (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
+    } else {
+        let narrow = glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+        let mut product = obj.finish();
+        if let Err(e) = winunwind::emit(&mut product, &unwind) {
+            eprintln!("glcc: warning: {e}");
+        }
+        apply_narrow_relocs(&mut product, &narrow);
+        (product.emit().expect("object emit"), asm_text)
+    })
 }
 
 /// Patch a `__ptr32` object's 32-bit address relocations into the
@@ -1996,18 +2011,41 @@ fn cpfe_argv(job: &Job, input_path: &OsStr, mode: EdgMode, extra: &[OsString]) -
     Ok(fe)
 }
 
-/// Run cpfe on an EDG input (`Lang::Cpp` or `Lang::EdgC`); returns
-/// the generated `.int.c` path. cpfe runs with `tu_dir` as cwd so its
-/// `<source>.ti` instantiation file lands there rather than in the
-/// user's directory.
+/// Which cpfe backend runs after translation. `cgen` is the legacy
+/// pipeline (generated C re-parsed by the C frontend); `mir` is the
+/// direct IL → MIR emitter, whose text `glcc_mir::parse` consumes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EdgBackend {
+    Cgen,
+    Mir,
+}
+
+fn edg_backend() -> EdgBackend {
+    // The direct MIR emitter is the default; `GLCPP_EDG_BACKEND=cgen`
+    // falls back to the legacy generated-C pipeline for debugging.
+    if std::env::var_os("GLCPP_EDG_BACKEND").is_some_and(|v| v == "cgen") {
+        EdgBackend::Cgen
+    } else {
+        EdgBackend::Mir
+    }
+}
+
+/// Run cpfe on an EDG input (`Lang::Cpp` or `Lang::EdgC`); returns the
+/// generated file's path (`.int.c` for the cgen backend, `.mir` text for
+/// the mir backend). cpfe runs with `tu_dir` as cwd so its `<source>.ti`
+/// instantiation file lands there rather than in the user's directory.
 fn fe_translate(ctx: &Ctx, job: &Job, input: &Input, idx: usize, scratch: &TempDir, gen_c_out: Option<&Path>) -> Outcome<PathBuf> {
     let tu_dir = scratch.path().join(format!("tu{idx}"));
     std::fs::create_dir_all(&tu_dir).map_err(|e| fail(format!("cannot create {}: {e}", tu_dir.display())))?;
     let stem = stem_of(&input.path);
     let stem_s = stem.to_string_lossy().into_owned();
+    let suffix = match edg_backend() {
+        EdgBackend::Cgen => "int.c",
+        EdgBackend::Mir => "mir",
+    };
     let gen_c = match gen_c_out {
         Some(p) => p.to_path_buf(),
-        None => tu_dir.join(format!("{stem_s}.int.c")),
+        None => tu_dir.join(format!("{stem_s}.{suffix}")),
     };
 
     let mode = edg_mode(input.lang);
@@ -2046,6 +2084,9 @@ fn fe_translate(ctx: &Ctx, job: &Job, input: &Input, idx: usize, scratch: &TempD
 /// user's directory, beside the `.int.c` and the resulting `.o`
 /// (prelink locates `.ti` files by object stem).
 fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path, scratch: &TempDir, obj_out: Option<&Path>) -> Outcome<String> {
+    if edg_backend() == EdgBackend::Mir {
+        return compile_edg_input_mir(ctx, job, input, idx, out, scratch, obj_out);
+    }
     let gen_c = fe_translate(ctx, job, input, idx, scratch, None)?;
     // cpfe's `<stem>.ti` instantiation file stays inside the scratch
     // dir (it is only consumed by edg_prelink, which this pipeline
@@ -2082,6 +2123,55 @@ fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path
     std::fs::write(out, &bytes).map_err(|e| fail(format!("cannot write '{}': {e}", out.display())))?;
 
     Ok(asm_text)
+}
+
+/// C++ path without the generated-C round trip: cpfe's mir backend
+/// writes MIR text, `glcc_mir::parse` builds the module, and the
+/// shared optimize/Clif tail turns it into an object.
+fn compile_edg_input_mir(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path, scratch: &TempDir, obj_out: Option<&Path>) -> Outcome<String> {
+    let mir_path = fe_translate(ctx, job, input, idx, scratch, None)?;
+    let mir_text = std::fs::read_to_string(&mir_path).map_err(|e| fail(format!("cannot read '{}': {e}", mir_path.display())))?;
+    if let Some(dir) = temps_dir(job, obj_out) {
+        let stem = stem_of(&input.path).to_string_lossy().into_owned();
+        save_temp_file(&dir, &format!("{stem}.mir"), mir_text.as_bytes());
+    }
+    let (bytes, asm_text) = compile_mir_source(&mir_text, job).map_err(|()| {
+        take_diagnostic_emitted();
+        Fail::Quiet
+    })?;
+    std::fs::write(out, &bytes).map_err(|e| fail(format!("cannot write '{}': {e}", out.display())))?;
+
+    Ok(asm_text)
+}
+
+/// Parse cpfe's MIR text, run the shared pass pipeline, and emit object
+/// bytes. Same panic containment contract as `compile_source`: parse or
+/// verification failures are backend bugs, so they panic after printing
+/// a line-numbered diagnostic.
+fn compile_mir_source(mir_text: &str, job: &Job) -> std::result::Result<(Vec<u8>, String), ()> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut mir_module = match glcc_mir::parse_module(mir_text) {
+            Ok(module) => module,
+            Err(e) => {
+                eprintln!("glcc: mir parse error at line {}: {}", e.line, e.message);
+                panic!("mir parse failed");
+            }
+        };
+        glcc_mir::optimize(&mut mir_module, job.opt_level);
+        let errors = glcc_mir::verify::verify_module(&mir_module);
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("glcc: mir error: {e}");
+            }
+            panic!("mir verification failed");
+        }
+        emit_object(mir_module, String::new(), job.target, job.debug, job.pic, job.opt_level)
+    }));
+    match outcome {
+        Ok(Ok(compiled)) => Ok(compiled),
+        Ok(Err(())) => Err(()),
+        Err(_) => Err(()),
+    }
 }
 
 #[derive(Clone)]

@@ -90,6 +90,7 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=bridge/edg.cpp");
+    println!("cargo:rerun-if-changed=bridge/mir_gen_be.cpp");
     println!("cargo:rerun-if-changed={}", compiler_src.display());
     println!("cargo:rerun-if-changed={}", macro_root.display());
     println!("cargo:rerun-if-changed={}", workspace_root.join("edg/util/mk_errinfo.c").display());
@@ -166,7 +167,6 @@ fn main() {
     // ---- 3. Compile EDG front end into libedg.a ------------------------------
     let core: &[&str] = &[
         "attribute.c",
-        "c_gen_be.c",
         "cfe.c",
         "class_decl.c",
         "cmd_line.c",
@@ -284,7 +284,39 @@ fn main() {
         }
     }
     build.file(bridge_dir.join("edg.cpp"));
+    build.file(bridge_dir.join("mir_gen_be.cpp"));
     build.compile("edg_frontend");
+
+    // The legacy C-generating back end compiles separately with its
+    // `back_end` symbol renamed, so both back ends can link into one
+    // binary and a dispatcher (in mir_gen_be.cpp) picks between them
+    // at run time via GLCPP_EDG_BACKEND.
+    let mut cgen_build = cc::Build::new();
+    cgen_build
+        .cpp(true)
+        .std("c++14")
+        .opt_level(2)
+        .debug(false)
+        .warnings(false)
+        .flag("-fno-exceptions")
+        .flag("-fno-rtti")
+        .flag("-fno-unwind-tables")
+        .include(&compiler_src)
+        .include(&out_dir)
+        .define("USE_CMAKE_DEFINES", None)
+        .define("back_end", Some("c_gen_be_back_end"));
+    for (k, v) in &defs {
+        match v {
+            Some(val) => {
+                cgen_build.define(k, Some(val.as_str()));
+            }
+            None => {
+                cgen_build.define(k, Some("1"));
+            }
+        }
+    }
+    cgen_build.file(compiler_src.join("c_gen_be.c"));
+    cgen_build.compile("edg_c_gen_be");
 
     // ---- 4. EDG C++ runtime (libC.a) --------------------------------------
     // Exception handling, RTTI, `new`/`delete`, and friends live here
@@ -319,6 +351,7 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:libc_dir={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=edg_frontend");
+    println!("cargo:rustc-link-lib=static=edg_c_gen_be");
     println!("cargo:rustc-link-lib=stdc++");
 }
 
