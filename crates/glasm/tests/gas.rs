@@ -164,3 +164,16 @@ caller:
     }
     assert!(saw_weak, "wrapper missing from symbol table");
 }
+
+#[test]
+fn multi_digit_numeric_labels() {
+    // GNU as allows numeric local labels of any digit count.
+    let bytes = glasm::gas::assemble_to_elf64("jmp 42f\n nop\n42: nop").unwrap();
+    let obj = object::File::parse(&*bytes).unwrap();
+    use object::read::{Object, ObjectSection};
+    let text = obj
+        .sections()
+        .find(|s| s.name().unwrap() == ".text")
+        .unwrap();
+    assert_eq!(text.data().unwrap(), &[0xeb, 0x01, 0x90, 0x90][..]);
+}

@@ -29,7 +29,7 @@ enum GTok {
     Ident(String),
     Int(i64),
     /// Numeric local label reference: `1b` / `1f`.
-    NumRef(u8, bool),
+    NumRef(u32, bool),
     Str(Vec<u8>),
     Reg(String),
     Punct(&'static str),
@@ -90,10 +90,11 @@ fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
                     i += 1;
                 }
                 let text = &line[start..i];
-                // `1b`/`1f` numeric local label references.
+                // `1b`/`1f` (and `42b`/`42f`) numeric local label
+                // references; GNU as allows any number of digits.
                 if let Some(rest) = text.strip_suffix(['b', 'f']) {
-                    if let Ok(digit) = rest.parse::<u8>() {
-                        if digit < 10 && rest.len() == 1 {
+                    if !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_digit()) {
+                        if let Ok(digit) = rest.parse::<u32>() {
                             out.push(GTok::NumRef(digit, text.ends_with('f')));
                             continue;
                         }
@@ -246,14 +247,14 @@ fn lex_string(line: &str, at: usize) -> Result<(Vec<u8>, usize), String> {
 // Numeric local labels (1:, 1b/1f)
 // ---------------------------------------------------------------------
 
-fn numeric_label_name(digit: u8, seq: usize) -> String {
+fn numeric_label_name(digit: u32, seq: usize) -> String {
     format!("..glasm{digit}_{seq}")
 }
 
 /// Maps (line index, direction) to the numeric label's unique name.
 struct NumLabels {
     /// Per line: names of `N:` definitions made on that line.
-    defs: Vec<Vec<(u8, String)>>,
+    defs: Vec<Vec<(u32, String)>>,
 }
 
 impl NumLabels {
@@ -262,31 +263,41 @@ impl NumLabels {
         for line in lines {
             let mut here = Vec::new();
             // Labels only occur before the statement; scan leading
-            // `digit+:` groups.
+            // `digits+:` groups (multi-digit numbers included).
             let mut rest = line.trim_start();
-            while let Some(digit) = rest.chars().next().and_then(|c| c.to_digit(10)) {
-                let Ok(digit) = u8::try_from(digit) else { break };
-                if let Some(after) = rest[1..].strip_prefix(':') {
-                    here.push((digit, String::new()));
-                    rest = after.trim_start();
-                } else {
+            loop {
+                let digits_len = rest.bytes().take_while(|c| c.is_ascii_digit()).count();
+                if digits_len == 0 || rest.as_bytes().get(digits_len) != Some(&b':') {
                     break;
                 }
+                let digit: u32 = rest[..digits_len].parse().unwrap();
+                here.push((digit, String::new()));
+                rest = rest[digits_len + 1..].trim_start();
             }
             defs.push(here);
         }
         // Assign unique names in document order.
-        let mut seqs = [0usize; 10];
+        let mut seqs: Vec<(u32, usize)> = Vec::new();
         for here in &mut defs {
             for (digit, name) in here {
-                *name = numeric_label_name(*digit, seqs[*digit as usize]);
-                seqs[*digit as usize] += 1;
+                let seq = match seqs.iter_mut().find(|(d, _)| d == digit) {
+                    Some((_, seq)) => {
+                        let value = *seq;
+                        *seq += 1;
+                        value
+                    }
+                    None => {
+                        seqs.push((*digit, 1));
+                        0
+                    }
+                };
+                *name = numeric_label_name(*digit, seq);
             }
         }
         NumLabels { defs }
     }
 
-    fn def_on_line(&self, line: usize, digit: u8) -> Option<&str> {
+    fn def_on_line(&self, line: usize, digit: u32) -> Option<&str> {
         self.defs
             .get(line)?
             .iter()
@@ -295,7 +306,7 @@ impl NumLabels {
     }
 
     /// Most recent definition strictly before `line`.
-    fn last_before(&self, line: usize, digit: u8) -> Option<String> {
+    fn last_before(&self, line: usize, digit: u32) -> Option<String> {
         for (l, defs) in self.defs.iter().enumerate().rev() {
             if l >= line {
                 continue;
@@ -308,7 +319,7 @@ impl NumLabels {
     }
 
     /// First definition at or after `line`.
-    fn next_at(&self, line: usize, digit: u8) -> Option<String> {
+    fn next_at(&self, line: usize, digit: u32) -> Option<String> {
         for (_l, defs) in self.defs.iter().enumerate().skip(line) {
             if let Some((_, n)) = defs.iter().find(|(d, _)| *d == digit) {
                 return Some(n.clone());
@@ -408,10 +419,12 @@ fn parse_line(
                 i += 2;
             }
             Some(GTok::Int(digit))
-                if *digit < 10 && g.get(i + 1) == Some(&GTok::Punct(":")) =>
+                if *digit >= 0
+                    && u32::try_from(*digit).is_ok()
+                    && g.get(i + 1) == Some(&GTok::Punct(":")) =>
             {
                 let name = numlabels
-                    .def_on_line(lineno, *digit as u8)
+                    .def_on_line(lineno, *digit as u32)
                     .ok_or("internal: numeric label not scanned")?
                     .to_string();
                 out.push(Stmt::Label(name, line_no));

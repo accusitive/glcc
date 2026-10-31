@@ -111,6 +111,12 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
         if i < outputs && parsed.kind != Kind::Reg {
             return Err("only register outputs are native yet".into());
         }
+        if parsed.inout && parsed.high {
+            // The fork ties inout pairs via a Reuse def (whose allocation
+            // is primary) or fixed use+def; a constrained CLASS like "Q"
+            // can be neither. The wrapper's static registers handle it.
+            return Err("inout \"Q\" operands are not native yet".into());
+        }
         if op.ty.is_aggregate() && parsed.kind != Kind::Mem {
             return Err("aggregate operands are not native yet".into());
         }
@@ -376,11 +382,17 @@ mod tests {
     #[test]
     fn high_byte_q_passes_through() {
         // The fork renders %h from the allocated Q-class register.
-        let native = Block::new("xorb $0xf0, %h0", 1, &["+Q"])
+        // Outputs can be "Q"; "+Q" inouts fall back (the fork cannot tie
+        // a Reuse def to a register-class constraint).
+        let native = Block::new("movb %b0, %h0", 1, &["=Q"])
             .plan(&[I32])
             .expect("native");
-        assert_eq!(native.template, "xorb $0xf0, %h0");
-        assert_eq!(native.constraints, ["+Q"]);
+        assert_eq!(native.template, "movb %b0, %h0");
+        assert_eq!(native.constraints, ["=Q"]);
+        assert!(Block::new("addb %h0, %h0", 1, &["+Q"])
+            .plan(&[I32])
+            .unwrap_err()
+            .contains("inout \"Q\""));
     }
 
     #[test]
