@@ -84,7 +84,21 @@ pub fn lower_module_selected<M: Module>(
 /// Returns the 32-bit (`__ptr32`) address patches the object driver
 /// must apply itself.
 pub fn lower_module_collecting<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target, asm_text: &mut String, unwind: &mut Vec<WinUnwindEntry>) -> Vec<NarrowReloc> {
-    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), &|_| true, &|_| true).1
+    lower_module_collecting_with_ids(mir_module, clif, target, asm_text, unwind).1
+}
+
+/// [`lower_module_collecting`], also returning the Clif id of every MIR
+/// function: the object driver needs the ids of the module's
+/// constructors ([`mir::Module::init_funcs`]) to emit `.init_array`
+/// (see [`crate::initarray::emit_init_array`]).
+pub fn lower_module_collecting_with_ids<M: Module>(
+    mir_module: &mir::Module,
+    clif: &mut M,
+    target: Target,
+    asm_text: &mut String,
+    unwind: &mut Vec<WinUnwindEntry>,
+) -> (HashMap<mir::Func, FuncId>, Vec<NarrowReloc>) {
+    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), &|_| true, &|_| true)
 }
 
 /// [`lower_module_collecting`], also collecting the debug records the
@@ -3110,6 +3124,63 @@ mod tests {
         module.push_func(f);
         let (jit, ids) = jit_module(&module);
         assert_eq!(run_i32(&jit, &ids, 0, 20), 41);
+    }
+
+    /// `f(base, i)` = `gep(base, steps(i)) - base` in bytes, with `i`
+    /// feeding every [`mir::GepIndex::Index`] step. Pins the byte stride
+    /// each step form advances against the result type `gep_step` walks.
+    /// The base is never dereferenced, so any aligned address works.
+    fn run_gep_offset(pointee: mir::Ty, steps: impl FnOnce(mir::Value) -> Vec<mir::GepIndex>, idx_arg: i64) -> i64 {
+        let mut module = mir::Module::new();
+        let sig = mir::Signature::new(vec![mir::Ty::ptr(pointee.clone()), mir::Ty::int(64)], mir::Ty::int(64));
+        let (mut f, entry) = mir::Function::new("gepoff", sig);
+        let base = param(&mut f, entry, mir::Ty::ptr(pointee.clone()), 0);
+        let idx = param(&mut f, entry, mir::Ty::int(64), 1);
+        let indices = steps(idx);
+        let walked = indices.iter().fold(pointee, |ty, step| mir::Signature::gep_step(&ty, step).expect("gep step walks the pointee"));
+        let addr = emit(
+            &mut f,
+            entry,
+            mir::InstKind::GetElementPtr {
+                base,
+                indices: indices.into_iter().collect(),
+            },
+            mir::Ty::ptr(walked),
+        );
+        let base_int = emit(&mut f, entry, mir::InstKind::PtrToInt(base), mir::Ty::int(64));
+        let addr_int = emit(&mut f, entry, mir::InstKind::PtrToInt(addr), mir::Ty::int(64));
+        let diff = emit(&mut f, entry, mir::InstKind::Sub(addr_int, base_int), mir::Ty::int(64));
+        ret(&mut f, entry, Some(diff));
+        module.push_func(f);
+        let (jit, ids) = jit_module(&module);
+        let buf = [0u8; 64];
+        unsafe {
+            let func: extern "C" fn(*const u8, i64) -> i64 = std::mem::transmute(func_addr(&jit, &ids, 0));
+            func(buf.as_ptr(), idx_arg)
+        }
+    }
+
+    #[test]
+    fn gep_step_strides_execute() {
+        let row = mir::Ty::Array { elem: Box::new(mir::Ty::int(32)), len: 3 };
+        let grid = mir::Ty::Array { elem: Box::new(row.clone()), len: 2 };
+        // Index/ConstIndex over an array pointee strides by the ELEMENT
+        // size: it indexes the elements of the pointed-to array,
+        // including backwards (dynamic indices are sign-extended).
+        assert_eq!(run_gep_offset(row.clone(), |_| vec![mir::GepIndex::ConstIndex(2)], 0), 8);
+        assert_eq!(run_gep_offset(row.clone(), |i| vec![mir::GepIndex::Index(i)], 5), 20);
+        assert_eq!(run_gep_offset(row.clone(), |i| vec![mir::GepIndex::Index(i)], -1), -4);
+        // A row step (+12 per row) is spelled on the UNdecayed array
+        // base, where the stepped element is the row itself: the end
+        // pointer of `int m[2][3]` is `m + 2` at +24, never
+        // +2 * sizeof(i32).
+        assert_eq!(run_gep_offset(grid.clone(), |_| vec![mir::GepIndex::ConstIndex(2)], 0), 24);
+        assert_eq!(run_gep_offset(grid.clone(), |i| vec![mir::GepIndex::Index(i)], 2), 24);
+        // Nested subscript `m[i][j]`: one step per dimension.
+        assert_eq!(run_gep_offset(grid.clone(), |i| vec![mir::GepIndex::Index(i), mir::GepIndex::ConstIndex(2)], 1), 20);
+        // Scalar pointees stride by the pointee size.
+        assert_eq!(run_gep_offset(mir::Ty::int(32), |i| vec![mir::GepIndex::Index(i)], 4), 16);
+        assert_eq!(run_gep_offset(mir::Ty::ptr(mir::Ty::int(32)), |_| vec![mir::GepIndex::ConstIndex(3)], 0), 24);
     }
 
     #[test]

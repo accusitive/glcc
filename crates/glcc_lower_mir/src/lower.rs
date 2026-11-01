@@ -5918,7 +5918,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     fe::parse::Ty::BuiltinVaList => self.va_list_is_array(),
                     _ => false,
                 },
-                None => false,
+                // `(p - 1)[i]`, `f()[i]`: the base is a pointer-valued
+                // expression whose step no declaration names. A
+                // pointer-to-array base still addresses the row — the
+                // decayed node's value is the row's address, never a
+                // load.
+                None => matches!(
+                    base.ty.unqualified(),
+                    fe::parse::Ty::Pointer { pointee, .. } if matches!(pointee.unqualified(), fe::parse::Ty::Array { .. })
+                ),
             },
             // Dereference to an object type (`*app` for a `va_list`,
             // `*p` for an array): the value is the address. The
@@ -10502,6 +10510,48 @@ mod tests {
                 return (p - a) * 100 + (p - 2 == a);}"
             ),
             200 + 1
+        );
+    }
+
+    #[test]
+    fn array_row_pointer_arithmetic() {
+        // Rows of `int m[2][3]` step by sizeof(int[3]) = 12, so the end
+        // pointer `m + 2` is begin + 24. A step mis-sized by the inner
+        // element size (+8) walks the wrong rows.
+        assert_eq!(
+            run_main(
+                "int main(){int m[2][3] = {{1,2,3},{4,5,6}}; int sum = 0;\
+                for (int (*p)[3] = m; p != m + 2; ++p)\
+                    for (int j = 0; j < 3; j++) sum += (*p)[j];\
+                return sum;}"
+            ),
+            21
+        );
+        // Row indexing through a `T(*)[N]` pointer, forwards and
+        // backwards from the last row.
+        assert_eq!(
+            run_main("int main(){int m[2][3] = {{1,0,0},{0,5,0}}; int (*p)[3] = m + 1; return p[0][1] + (p - 1)[0][0];}"),
+            6
+        );
+        // Pointer difference over row pointers counts rows, not bytes.
+        assert_eq!(run_main("int main(){int m[2][3]; int (*p)[3] = m; return (m + 2) - p;}"), 2);
+        // A 3-D traversal multiplies the strides per dimension.
+        assert_eq!(
+            run_main(
+                "int main(){int c[2][2][2] = {{{1,2},{3,4}},{{5,6},{7,8}}}; int sum = 0;\
+                for (int i = 0; i < 2; i++)\
+                    for (int (*p)[2] = c[i]; p != c[i] + 2; ++p)\
+                        for (int j = 0; j < 2; j++) sum += (*p)[j];\
+                return sum;}"
+            ),
+            36
+        );
+        // Row storage behind a pointer-valued base the declarations
+        // cannot name: the subscripted row decays to its address, it
+        // is never loaded as a pointer.
+        assert_eq!(
+            run_main("int main(){int m[2][3] = {{1,2,3},{4,5,6}}; int *flat = &m[0][0]; return ((int (*)[3])flat)[1][2];}"),
+            6
         );
     }
 

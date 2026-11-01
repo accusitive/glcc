@@ -1,0 +1,27 @@
+# Programs expected not to compile or run correctly with the EDG -> MIR
+# backend yet. One program name per line (without .cpp); '#' starts a
+# comment. Listed programs report as "xfail (known)" -- or as
+# "XPASS (unexpected pass!)" when they start passing, which fails the run.
+#
+# Triage snapshot 2026-10-31 (see the corpus report for full details):
+# - exceptions: two catch handlers on one try -> Cranelift verifier panic
+#   "uses value v232 from non-dominating inst" (EH-shaped CFG lowering);
+#   a simple single-catch throw/catch compiles but segfaults at runtime
+#   (no unwinder) -- the known EH gap. The surrounding machinery
+#   (setjmp-based cleanup regions, __curr_eh_stack_entry bookkeeping)
+#   now compiles correctly; libstdc++ headers no longer trip on it.
+#
+# Fixed since the corpus landed (keep here only until the next sweep):
+# - 2026-10-31 (1st sweep): aggregate / newarray (variable-index gep
+#   steps on struct/void pointees) and rangefor (gep step-size
+#   miscompile for ptr([N x T])).
+# - 2026-10-31 (2nd sweep): iostream, rtti, std_string, std_vector
+#   XPASSed. Root causes fixed in the emitter: reference types spelling
+#   as pointers, bool logical-not (was bitwise), void ?: arms now
+#   evaluated for side effects, pointer subtraction scaled by the
+#   element size for dynamic (and negative constant) indices,
+#   stmk_constexpr_if (own variant, resolved condition), ck_void
+#   constants, local-static-variable-init constant application,
+#   __builtin_* name mapping, weak inline definitions, and per-TU
+#   EH bookkeeping / __dso_handle data symbols emitted local.
+exceptions

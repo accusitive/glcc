@@ -63,6 +63,7 @@ pub fn parse_module(text: &str) -> Result<Module, MirParseError> {
             ".extern" => parse_extern_decl(&mut builder, &mut names, &mut c)?,
             ".dataextern" => parse_dataextern_decl(&mut builder, &mut names, &mut c)?,
             ".global" => parse_global_decl(&mut builder, &mut names, &mut c)?,
+            ".init" => parse_init_decl(&mut builder, &mut names, &mut c)?,
             // Body directives and instructions are handled in pass two.
             ".params" => {}
             other => return Err(c.err(format!("unknown directive `{other}`"))),
@@ -82,7 +83,7 @@ pub fn parse_module(text: &str) -> Result<Module, MirParseError> {
                 let id = func_by_line[line_no];
                 fctx = Some(FnCtx::new(&builder.module, id, *line_no));
             }
-            ".extern" | ".dataextern" | ".global" => {}
+            ".extern" | ".dataextern" | ".global" | ".init" => {}
             ".params" => {
                 let Some(ctx) = fctx.as_mut() else {
                     return Err(MirParseError { line: *line_no, message: ".params outside of a function".into() });
@@ -550,6 +551,31 @@ fn parse_extern_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Cur
     let id = builder.module.push_extern(name, sig);
     builder.module.externs[id].weak = weak;
     names.externs.insert(name.to_string(), id);
+    Ok(())
+}
+
+/// `.init @name`: register a function defined in this file as a
+/// pre-`main` constructor. The target must already be declared
+/// (single-pass resolution, like reloc symbols); a function may be
+/// registered at most once. List order is the emission order.
+fn parse_init_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Cursor) -> Result<(), MirParseError> {
+    let word = c.word()?;
+    let name = symbol(&word).ok_or_else(|| c.err(format!("expected @name after .init, found `{word}`")))?;
+    expect_done(c)?;
+    let Some(&func) = names.funcs.get(name) else {
+        if names.externs.contains_key(name) {
+            return Err(c.err(format!(".init target @{name} is an .extern; it must be a function defined in this file")));
+        }
+        return Err(c.err(format!("unknown .init target @{name} (missing .func)")));
+    };
+    let sig = &builder.module.funcs[func].sig;
+    if !sig.params.is_empty() || !sig.ret.is_void() {
+        return Err(c.err(format!(".init target @{name} must take no parameters and return void")));
+    }
+    if builder.module.init_funcs.contains(&func) {
+        return Err(c.err(format!("duplicate .init entry @{name}")));
+    }
+    builder.module.init_funcs.push(func);
     Ok(())
 }
 

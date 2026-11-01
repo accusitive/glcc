@@ -442,6 +442,11 @@ impl ModulePass for DeadModuleItems {
 
         let mut live_funcs: Vec<bool> = module.funcs.iter().map(|func| !func.local || func.weak).collect();
         let mut live_globals: Vec<bool> = module.globals.iter().map(|global| !global.local || global.external || global.weak).collect();
+        // Constructors run from `.init_array` without any MIR-level
+        // reference: they are roots.
+        for func in &module.init_funcs {
+            live_funcs[func.index()] = true;
+        }
 
         loop {
             let mut changed = false;
@@ -500,6 +505,10 @@ impl ModulePass for DeadModuleItems {
             new_funcs.push(func);
         }
         module.funcs = IndexVec::from_vec(new_funcs);
+
+        for func in module.init_funcs.iter_mut() {
+            *func = func_map[func.index()].expect("init function survives (it is a root)");
+        }
 
         let old_globals = std::mem::take(&mut module.globals);
         let mut new_globals = Vec::with_capacity(keep_globals);
@@ -1203,5 +1212,27 @@ mod tests {
 
         assert!(!DeadModuleItems.run(&mut module));
         assert_eq!(module.funcs.len(), 1);
+    }
+
+    #[test]
+    fn init_functions_are_roots_and_get_remapped() {
+        let mut module = Module::new();
+        let dead = void_function(&mut module, "dead_fn", true, 0);
+        let (mut ctor_func, ctor_entry) = Function::new("__sti_ctor", Signature::new(vec![], Ty::Void));
+        ctor_func.blocks[ctor_entry].term = Some(Terminator::Return { val: None });
+        ctor_func.local = true;
+        let ctor = module.push_func(ctor_func);
+        let keep = void_function(&mut module, "keep", false, 0);
+        module.init_funcs.push(ctor);
+
+        assert!(DeadModuleItems.run(&mut module));
+        assert_eq!(module.funcs.len(), 2, "the unreferenced local constructor survives");
+        let names: Vec<&str> = module.funcs.iter().map(|func| func.name.as_str()).collect();
+        assert_eq!(names, vec!["__sti_ctor", "keep"]);
+        assert_eq!(module.init_funcs, vec![Func::from_usize(0)], "init entries follow the renumbered functions");
+        assert!(verify_module(&module).is_empty());
+        assert!(!DeadModuleItems.run(&mut module), "second run is a no-op");
+        let _ = keep;
+        let _ = dead;
     }
 }

@@ -174,6 +174,19 @@ bool base_pointee_erased(a_type_ptr base_il) {
          pointee_is_struct(ty->variant.pointer.type);
 }
 
+// Whether an INDEX gep step on a pointer to this pointee must be
+// spelled as explicit byte arithmetic instead. The MIR parser only
+// strides index steps over scalar pointees (by the pointee size) and
+// array pointees (by the ELEMENT size -- wrong for T(*)[N] pointer
+// arithmetic) and rejects them over structs and void entirely.
+bool pointee_index_step_illegal(a_type_ptr pointee) {
+  pointee = skip_typerefs(pointee);
+  a_type_kind kind = pointee->kind;
+  return kind == (a_type_kind)tk_struct || kind == (a_type_kind)tk_class ||
+         kind == (a_type_kind)tk_union || kind == (a_type_kind)tk_array ||
+         kind == (a_type_kind)tk_void || kind == (a_type_kind)tk_routine;
+}
+
 // MIR type text for an IL type. Typerefs are transparent and types are
 // inline, so nothing needs declaring ahead of use.
 std::string ty_name(a_type_ptr type) {
@@ -187,9 +200,9 @@ std::string ty_name(a_type_ptr type) {
     case tk_float:
       return float_kind_name(type->variant.float_kind);
     case tk_pointer:
-      if (type->variant.pointer.is_reference) {
-        unsupported("C++ reference type");
-      }
+      // C++ references (is_reference) have pointer representation
+      // after lowering: a reference lvalue's value is the address of
+      // the referent, so they spell like plain pointers here.
       // Struct pointees erase to void (mirrors glcc_lower_mir's
       // lower_ty): navigating into one re-derives the layout from the
       // IL per hop, and keeping the definition would recurse forever
@@ -407,6 +420,11 @@ std::string address_const_text(a_constant_ptr con) {
 std::string const_init_text(a_constant_ptr con) {
   switch (con->kind) {
     case ck_integer:
+      // A null pointer constant is a zero integer cast to a pointer
+      // type (make_zero_of_proper_type).
+      if (skip_typerefs(con->type)->kind == (a_type_kind)tk_pointer) {
+        return "null";
+      }
       return int_const_text(con);
     case ck_float:
       return float_const_text(con);
@@ -446,6 +464,67 @@ std::map<a_variable_ptr, std::string> var_global_names;
 
 std::string next_anon_name(const char *prefix) {
   return std::string(prefix) + std::to_string(++anon_counter);
+}
+
+// The module symbol for a variable with static storage duration:
+// source name when the front end gave one, otherwise a stable
+// synthesized name (compiler-generated temporaries, including those
+// promoted from function scope to the file scope).
+std::string global_name_for_variable(a_variable_ptr var) {
+  if (var->source_corresp.name != NULL &&
+      var->source_corresp.name[0] != '\0') {
+    return std::string(var->source_corresp.name);
+  }
+  auto it = var_global_names.find(var);
+  if (it != var_global_names.end()) return it->second;
+  std::string name = next_anon_name(".temp.");
+  var_global_names.emplace(var, name);
+  return name;
+}
+
+// Linkage attributes for a data definition: internal for `static`
+// storage and for the EH-lowering bookkeeping definitions (per-TU
+// state that must not collide with the runtime's own copies, crtbegin's
+// __dso_handle included).
+std::string var_data_attrs(a_variable_ptr var, const std::string &name) {
+  std::string attrs;
+  if (var->storage_class == (a_storage_class)sc_static ||
+      name == "__curr_eh_stack_entry" || name == "__eh_curr_region" ||
+      name == "__dso_handle") {
+    attrs += " local";
+  }
+  if (var->alignment > 1) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), " align=%llu",
+                  (unsigned long long)var->alignment);
+    attrs += buf;
+  }
+  return attrs;
+}
+
+// Compiler builtins the back end models itself (never a symbol).
+bool builtin_intercepted(const std::string &name) {
+  return name == "__builtin_is_constant_evaluated" ||
+         name == "__builtin_expect" || name == "__builtin_unreachable";
+}
+
+// The external symbol for a routine: known __builtin_X libc wrappers
+// map to X itself (the compiler does not provide definitions).
+std::string routine_symbol_name(a_routine_ptr rout) {
+  std::string name = entity_name(&rout->source_corresp, "routine");
+  static const char *const libc_builtins[] = {
+      "strlen", "memcpy", "memmove", "memset", "memcmp", "memchr",
+      "strchr", "strrchr", "strcmp", "strncmp", "strcpy", "strncpy",
+      "strcat", "strncat", "strstr", "abort",  "exit",   NULL};
+  if (name.rfind("__builtin_", 0) == 0) {
+    std::string rest = name.substr(10);
+    for (unsigned i = 0; libc_builtins[i] != NULL; i++) {
+      if (rest == libc_builtins[i]) {
+        return rest;
+      }
+    }
+  }
+  return name;
 }
 
 // Synthesized IL type for a string-literal constant: `char [len]`.
@@ -550,6 +629,14 @@ struct FuncEmitter {
   std::map<std::pair<int, int>, std::pair<int, std::string>> block_params;
   std::map<a_dynamic_init_ptr, bool> inits_done_at_decl;
   std::map<a_statement_ptr, int> case_blocks; // stmk_switch_case -> block
+  // Local static variable init entries reachable from the scopes
+  // visited so far: a variable with init_kind initk_function_local
+  // keeps its initializer in one of these (the variable itself lives
+  // in the file-scope region, the initializer in a function-scope
+  // region).
+  std::map<a_variable_ptr, a_local_static_variable_init_ptr> local_static_inits;
+  // Local static variables whose constant initializer has been applied.
+  std::map<a_variable_ptr, bool> flocal_inits_done;
   a_scope_ptr func_scope = NULL;
   a_routine_ptr func_rout = NULL;
 
@@ -909,30 +996,53 @@ struct FuncEmitter {
     // static temporaries (guard objects, troublesome-aggregate
     // constant holders) get a synthesized name and a deferred
     // .global line.
-    std::string name;
-    if (var->source_corresp.name != NULL &&
-        var->source_corresp.name[0] != '\0') {
-      name = var->source_corresp.name;
-    } else {
-      auto it = var_global_names.find(var);
-      if (it != var_global_names.end()) {
-        name = it->second;
-      } else {
-        name = next_anon_name(".temp.");
-        var_global_names.emplace(var, name);
-        if (!declared_globals.count(name)) {
-          declared_globals.emplace(name, true);
-          pending_module_lines.push_back(".global @" + name + " ty=" +
-                                         ty_name(var->type) +
-                                         " init=zeroinit");
-        }
+    std::string name = global_name_for_variable(var);
+    if (!declared_globals.count(name)) {
+      declared_globals.emplace(name, true);
+      // Unnamed static temporaries (guard objects, troublesome
+      // aggregate constants). Most carry initk_function_local --
+      // their initializer lives in a local-static-variable-init
+      // entry, applied at first reference below -- but a plain
+      // static constant can sit on the variable itself.
+      std::string init = "zeroinit";
+      switch (var->init_kind) {
+        case initk_static:
+          init = const_init_text(var->initializer.constant);
+          break;
+        case initk_none:
+        case initk_zero:
+        case initk_dynamic:
+        case initk_function_local:
+          init = "zeroinit";
+          break;
+        default:
+          unsupported_f("init kind %d for an unnamed static temporary",
+                        (int)var->init_kind);
       }
+      pending_module_lines.push_back(".global @" + name +
+                                     var_data_attrs(var, name) + " ty=" +
+                                     ty_name(var->type) +
+                                     " init=" + init);
     }
     ensure_open();
     int n = new_value();
     emit("%%%d:ptr(%s) = globaladdr @%s", n, ty_name(var->type).c_str(),
          name.c_str());
-    return val(n, synth_ptr_il_type(var->type));
+    Val slot = val(n, synth_ptr_il_type(var->type));
+    // A local static variable's constant initializer lives in a
+    // local-static-variable-init entry (its variable is in the
+    // file-scope region); apply it once, at first reference. Dynamic
+    // initializers run through the guarded stmk_init in the body.
+    if (var->init_kind == (an_init_kind)initk_function_local &&
+        !flocal_inits_done.count(var)) {
+      flocal_inits_done.emplace(var, true);
+      auto it = local_static_inits.find(var);
+      if (it != local_static_inits.end() &&
+          it->second->init_kind == (an_init_kind)initk_static) {
+        store_const_into(slot, it->second->initializer.constant, var->type);
+      }
+    }
+    return slot;
   }
 
   Val string_slot(a_constant_ptr con) {
@@ -979,6 +1089,10 @@ struct FuncEmitter {
   void declare_block_locals(a_statement_ptr block);
   void do_dynamic_init(a_dynamic_init_ptr dip);
   void store_const_into(Val addr, a_constant_ptr con, a_type_ptr type);
+  // Value of an address constant (relocation) as an expression
+  // operand: the address of the referenced entity plus the constant's
+  // byte offset.
+  Val address_const_value(a_constant_ptr con);
   int label_block(a_label_ptr label);
 };
 
@@ -986,11 +1100,14 @@ struct FuncEmitter {
 // has no constant instructions, so casts of constants must fold.
 Val FuncEmitter::convert_const(Val v, a_type_ptr from, a_type_ptr to) {
   if (v.const_kind == Val::MiscC) {
-    // null stays null across pointer casts; anything else to an
-    // integer is out of reach for v1.
+    // null stays null across pointer casts; as an integer it is 0.
     if (to->kind == (a_type_kind)tk_pointer) {
       v.ty = to;
       return v;
+    }
+    if (to->kind == (a_type_kind)tk_integer) {
+      // A null pointer constant converted to an integer type.
+      return const_int_val(0, to);
     }
     unsupported("constant pointer used as an integer");
   }
@@ -1194,10 +1311,24 @@ Val FuncEmitter::convert(Val v, a_type_ptr from_il, a_type_ptr to_il) {
 }
 
 // Binary arithmetic/comparison op dispatch, with the signedness taken
-// from the IL operand type.
+// from the IL operand type. Mixed-width operands (lowering hands back
+// widened temporaries) compute in the wider width, then narrow to the
+// result; MIR requires equal operand widths.
 Val FuncEmitter::binop(an_expr_operator_kind op, Val a, Val b,
                        a_type_ptr result_ty, a_type_ptr operand_ty) {
+  a_type_ptr ta = skip_typerefs(a.ty);
+  a_type_ptr tb = skip_typerefs(b.ty);
   a_type_ptr res = skip_typerefs(result_ty);
+  if (res->kind == (a_type_kind)tk_integer &&
+      ta->kind == (a_type_kind)tk_integer &&
+      tb->kind == (a_type_kind)tk_integer &&
+      int_bits(ta) != int_bits(tb)) {
+    a_type_ptr wide_ty = int_bits(ta) > int_bits(tb) ? ta : tb;
+    a = convert(a, a.ty, wide_ty);
+    b = convert(b, b.ty, wide_ty);
+    Val r = binop(op, a, b, wide_ty, wide_ty);
+    return convert(r, wide_ty, result_ty);
+  }
   if (res->kind == (a_type_kind)tk_float) {
     const char *name;
     switch (op) {
@@ -1309,19 +1440,55 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
         case eok_subscript: {
           a_type_ptr base_ty = skip_typerefs(op1->type);
           Val idx = eval(op1->next);
-          bool idx_const =
-              idx.const_kind == Val::IntC && idx.int_val >= 0;
+          bool idx_int_const = idx.const_kind == Val::IntC;
+          bool idx_const_nonneg = idx_int_const && idx.int_val >= 0;
           if (base_ty->kind == (a_type_kind)tk_array) {
             Val base = place(op1);
-            if (idx_const) {
+            if (idx_const_nonneg) {
               return gep(base, skip_typerefs(expr->type),
                          std::to_string(idx.int_val));
             }
-            return gep(base, skip_typerefs(expr->type),
-                       "index %" + std::to_string(idx.n));
+            if (!idx_int_const) {
+              return gep(base, skip_typerefs(expr->type),
+                         "index %" + std::to_string(idx.n));
+            }
+            // Negative constant index into an array lvalue: byte
+            // arithmetic (ConstIndex steps are unsigned), scaled by
+            // the element size.
+            a_type i64t = synth_int_type(64, TRUE);
+            Val wide = convert(idx, idx.ty, &i64t);
+            long long scale =
+                (long long)skip_typerefs(expr->type)->size;
+            if (scale != 1) {
+              Val n_scale = int_const(scale, &i64t);
+              ensure_open();
+              int s = new_value();
+              emit("%%%d:i64 = mul %s, %s", s, opnd(wide).c_str(),
+                   opnd(n_scale).c_str());
+              wide = val(s, &i64t);
+            }
+            Val base_int = convert(base, base.ty, &i64t);
+            ensure_open();
+            int n = new_value();
+            emit("%%%d:i64 = add %s, %s", n, opnd(base_int).c_str(),
+                 opnd(wide).c_str());
+            Val sum = val(n, &i64t);
+            ensure_open();
+            int m = new_value();
+            emit("%%%d:ptr(%s) = inttoptr %s", m, ty_name(expr->type).c_str(),
+                 opnd(sum).c_str());
+            return val(m, synth_ptr_il_type(skip_typerefs(expr->type)));
           }
-          if (!idx_const) {
+          if (!idx_int_const) {
             Val base = eval(op1);
+            if (base_ty->kind == (a_type_kind)tk_pointer &&
+                pointee_index_step_illegal(
+                    skip_typerefs(base_ty->variant.pointer.type))) {
+              a_type_ptr pointee =
+                  skip_typerefs(base_ty->variant.pointer.type);
+              return scaled_byte_addr(base, idx, (unsigned long long)pointee->size,
+                                      skip_typerefs(expr->type));
+            }
             return gep(base, skip_typerefs(expr->type),
                        "index %" + std::to_string(idx.n));
           }
@@ -1335,7 +1502,17 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
                                                             : eval(op1);
           a_type i64t = synth_int_type(64, TRUE);
           if (idx.int_val < 0) {
+            // Scale the negative index by the element size.
             Val wide = convert(idx, idx.ty, &i64t);
+            long long scale = (long long)elem_size;
+            if (scale != 1) {
+              Val n_scale = int_const(scale, &i64t);
+              ensure_open();
+              int s = new_value();
+              emit("%%%d:i64 = mul %s, %s", s, opnd(wide).c_str(),
+                   opnd(n_scale).c_str());
+              wide = val(s, &i64t);
+            }
             Val base_int = convert(base, base.ty, &i64t);
             ensure_open();
             int n = new_value();
@@ -1348,9 +1525,11 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
                  opnd(sum).c_str());
             return val(m, synth_ptr_il_type(skip_typerefs(expr->type)));
           }
-          if (base_pointee_erased(op1->type)) {
-            // The pointee erased to void: gep cannot stride it; scale
-            // bytes explicitly.
+          if (base_ty->kind == (a_type_kind)tk_pointer &&
+              pointee_index_step_illegal(
+                  skip_typerefs(base_ty->variant.pointer.type))) {
+            // The pointee erased to void, or is a struct/array whose
+            // stride gep cannot express: scale bytes explicitly.
             return scaled_byte_addr(base, idx, (unsigned long long)elem_size,
                                     expr->type);
           }
@@ -1395,6 +1574,11 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
       a_constant_ptr con = expr->variant.constant.ptr;
       switch (con->kind) {
         case ck_integer:
+          if (skip_typerefs(con->type)->kind == (a_type_kind)tk_pointer) {
+            // Null pointer constant: a zero integer cast to a pointer
+            // type.
+            return const_misc_val(con->type, "null");
+          }
           return const_int_val(int_const_value(con), con->type);
         case ck_float: {
           unsigned __int128 bits = 0;
@@ -1438,12 +1622,16 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
             Val off = int_const((long long)con->variant.address.offset, &i64);
             ensure_open();
             int n = new_value();
-            emit("%%%d:i64 = add %%%d, %%%d", n, as_int.n, off.n);
+            emit("%%%d:i64 = add %s, %s", n, opnd(as_int).c_str(),
+                 opnd(off).c_str());
             Val sum = val(n, &i64);
             return convert(sum, &i64, expr->type);
           }
           return convert(base, base.ty, expr->type);
         }
+        case ck_void:
+          // A folded "(void)" prvalue; its value is always discarded.
+          return val(-1, con->type);
         default:
           unsupported_f("constant kind %d in an expression", (int)con->kind);
       }
@@ -1468,6 +1656,11 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
     }
     case enk_routine:
       return call_addr(expr->variant.routine.ptr);
+    case enk_object_lifetime:
+      // A temporary lifetime bound around a subexpression; with
+      // exceptions disabled the lifetimes carry no cleanup code, so
+      // just evaluate the wrapped expression.
+      return eval(expr->variant.object_lifetime.expr);
     case enk_operation:
       break; // handled below
     case enk_temp_init:
@@ -1519,10 +1712,12 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
       return eval(op1);
     case eok_not: {
       Val b = to_bool(eval(op1));
-      int n = new_value();
-      ensure_open();
-      emit("%%%d:bool = not %s", n, opnd(b).c_str());
+      // Logical negation: `not` in MIR is bitwise, which would turn a
+      // canonical bool 1 into 0xfe (still truthy). Compare with zero.
       a_type bty = synth_bool_type();
+      ensure_open();
+      int n = new_value();
+      emit("%%%d:bool = icmp.eq %s, 0", n, opnd(b).c_str());
       return convert(val(n, &bty), &bty, result_ty);
     }
     case eok_cast:
@@ -1710,14 +1905,18 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
       int b_end = new_block();
       emit_brif(cond, b_then, -1, b_else, -1);
       start_block(b_then);
+      // A void ?: still evaluates both arms: they carry side effects
+      // (EDG lowers EH-protected statements into a setjmp ?:).
+      Val tv = eval(op2);
       if (has_value) {
-        Val tv = convert(eval(op2), op2->type, result_ty);
+        tv = convert(tv, op2->type, result_ty);
         store_or_copy(slot, tv, result_ty);
       }
       emit_br(b_end);
       start_block(b_else);
+      Val ev = eval(op3);
       if (has_value) {
-        Val ev = convert(eval(op3), op3->type, result_ty);
+        ev = convert(ev, op3->type, result_ty);
         store_or_copy(slot, ev, result_ty);
       }
       emit_br(b_end);
@@ -1761,7 +1960,7 @@ a_type_ptr static_funcptr_type() {
 // Address of a routine (funcaddr when defined in this TU, externaddr
 // otherwise). Function pointers carry no signature in their MIR type.
 Val FuncEmitter::call_addr(a_routine_ptr rout) {
-  std::string name = entity_name(&rout->source_corresp, "routine");
+  std::string name = routine_symbol_name(rout);
   bool defined = rout->function_def_number != NULL_function_def_number;
   ensure_open();
   int n = new_value();
@@ -1804,8 +2003,12 @@ Val FuncEmitter::pointer_arith(an_expr_operator_kind op, Val base, Val idx,
       return pointer_arith((an_expr_operator_kind)eok_psubtract, base, mag,
                            result_ty);
     }
-    if (base_pointee_erased(base.ty)) {
-      return scaled_byte_addr(base, idx, (unsigned long long)elem->size, elem);
+    if (base_ty->kind == (a_type_kind)tk_pointer &&
+        pointee_index_step_illegal(elem)) {
+      // Struct/array/void pointees: gep index steps cannot express the
+      // stride; scale bytes explicitly.
+      return scaled_byte_addr(base, idx, (unsigned long long)elem->size,
+                              result_ty);
     }
     bool is_const;
     return gep(base, elem, gep_step(idx, &is_const));
@@ -1813,14 +2016,22 @@ Val FuncEmitter::pointer_arith(an_expr_operator_kind op, Val base, Val idx,
   a_type i64 = synth_int_type(64, TRUE);
   Val as_int = convert(base, base_ty, &i64);
   Val wide = convert(idx, idx.ty, &i64);
+  long long scale = (long long)skip_typerefs(elem)->size;
   ensure_open();
   int n = new_value();
   if (wide.const_kind != Val::NotConst) {
     // A constant index folds: base - idx*scale as one address add.
-    long long scale = (long long)skip_typerefs(elem)->size;
     Val off = const_int_val(-wide.int_val * scale, &i64);
     emit("%%%d:i64 = add %s, %s", n, opnd(as_int).c_str(), opnd(off).c_str());
   } else {
+    if (scale != 1) {
+      Val n_scale = int_const(scale, &i64);
+      ensure_open();
+      int s = new_value();
+      emit("%%%d:i64 = mul %s, %s", s, opnd(wide).c_str(),
+           opnd(n_scale).c_str());
+      wide = val(s, &i64);
+    }
     emit("%%%d:i64 = neg %%%d", n, wide.n);
     Val neg = val(n, &i64);
     ensure_open();
@@ -1850,7 +2061,22 @@ Val FuncEmitter::call_emit(an_expr_node_ptr selector, an_expr_node_ptr args,
   ensure_open();
   if (selector->kind == (an_expr_node_kind)enk_routine) {
     a_routine_ptr rout = selector->variant.routine.ptr;
-    std::string name = entity_name(&rout->source_corresp, "routine");
+    std::string name = routine_symbol_name(rout);
+    // Compiler builtins the back end must model itself.
+    if (builtin_intercepted(name)) {
+      if (name == "__builtin_is_constant_evaluated") {
+        // Runtime codegen: never inside a constant evaluation.
+        return const_int_val(0, result_ty);
+      }
+      if (name == "__builtin_expect") {
+        // Pure hint: the value is the first argument.
+        return eval(args);
+      }
+      // __builtin_unreachable
+      emit("unreachable");
+      terminated = true;
+      return val(-1, result_ty);
+    }
     bool defined = rout->function_def_number != NULL_function_def_number;
     const char *kw = defined ? "call" : "call.ext";
     if (skip_typerefs(result_ty)->kind == (a_type_kind)tk_void) {
@@ -1906,6 +2132,12 @@ void FuncEmitter::store_const_into(Val addr, a_constant_ptr con,
   }
   switch (con->kind) {
     case ck_integer:
+      if (skip_typerefs(con->type)->kind == (a_type_kind)tk_pointer) {
+        // Null pointer constant: a zero integer cast to a pointer
+        // type.
+        store(addr, const_misc_val(con->type, "null"));
+        return;
+      }
       store(addr, const_int_val(int_const_value(con), con->type));
       return;
     case ck_float: {
@@ -1961,9 +2193,45 @@ void FuncEmitter::store_const_into(Val addr, a_constant_ptr con,
       }
       unsupported_f("aggregate constant of type kind %d", (int)ty->kind);
     }
+    case ck_address:
+      store(addr, convert(address_const_value(con), con->type, type));
+      return;
     default:
       unsupported_f("constant kind %d stored into a local", (int)con->kind);
   }
+}
+
+Val FuncEmitter::address_const_value(a_constant_ptr con) {
+  Val base;
+  switch (con->variant.address.kind) {
+    case abk_variable:
+      base = var_storage(con->variant.address.variant.variable);
+      break;
+    case abk_routine:
+      base = call_addr(con->variant.address.variant.routine);
+      break;
+    case abk_constant: {
+      a_constant_ptr inner = con->variant.address.variant.constant;
+      if (inner->kind != (a_constant_repr_kind)ck_string) {
+        unsupported("address-of-nonstring constant");
+      }
+      base = string_slot(inner);
+      break;
+    }
+    default:
+      unsupported_f("address constant kind %d", (int)con->variant.address.kind);
+  }
+  if (con->variant.address.offset != 0) {
+    a_type i64 = synth_int_type(64, TRUE);
+    Val as_int = convert(base, base.ty, &i64);
+    Val off = int_const((long long)con->variant.address.offset, &i64);
+    ensure_open();
+    int n = new_value();
+    emit("%%%d:i64 = add %s, %s", n, opnd(as_int).c_str(),
+         opnd(off).c_str());
+    return convert(val(n, &i64), &i64, con->type);
+  }
+  return convert(base, base.ty, con->type);
 }
 
 void FuncEmitter::do_dynamic_init(a_dynamic_init_ptr dip) {
@@ -2002,9 +2270,29 @@ void FuncEmitter::declare_block_locals(a_statement_ptr block) {
     scope = block->variant.block.extra_info->assoc_scope;
   }
   if (scope == NULL) return;
+  // Record the local static variable init entries on this scope and
+  // its enclosing function scopes, so initk_function_local variables
+  // can find their initializer (find_local_static_variable_init
+  // searches the same chain).
+  for (a_scope_ptr s = scope;
+       s != NULL && is_local_scope_kind(s->kind); s = s->parent) {
+    for (a_local_static_variable_init_ptr lsvi = s->local_static_variable_inits;
+         lsvi != NULL; lsvi = lsvi->next) {
+      local_static_inits.emplace(lsvi->variable, lsvi);
+    }
+    if (s == func_scope) break;
+  }
   for (a_variable_ptr var = scope->nonstatic_variables; var != NULL;
        var = var->next) {
     if (ignore_variable_in_back_end(var)) continue;
+    a_storage_class sc = var->storage_class;
+    if (sc != (a_storage_class)sc_auto && sc != (a_storage_class)sc_register) {
+      // Static storage duration: no alloca. A constant initializer
+      // from the local-static-variable-init entry is applied by
+      // var_storage at first reference; a dynamic initializer runs
+      // through the guarded stmk_init statement in the body.
+      continue;
+    }
     Val slot = alloca(var->type);
     slots.emplace(var, slot.n);
     if (var->init_kind == (an_init_kind)initk_zero) {
@@ -2066,6 +2354,17 @@ void FuncEmitter::walk_statement(a_statement_ptr stmt) {
         walk_statement(then_stmt);
       }
       start_block(b_end);
+      break;
+    }
+    case stmk_constexpr_if: {
+      // The condition was resolved by the front end; only the live
+      // branch is present in the IL (mirrors c_gen_be's dumping).
+      a_constexpr_if_ptr cip = stmt->variant.constexpr_if;
+      if (cip->value) {
+        walk_statement(cip->then_statement);
+      } else if (cip->else_statement != NULL) {
+        walk_statement(cip->else_statement);
+      }
       break;
     }
     case stmk_while: {
@@ -2227,7 +2526,16 @@ void FuncEmitter::walk_statement(a_statement_ptr stmt) {
           emit("ret");
         }
       } else {
-        emit("ret");
+        a_type_ptr ret_ty =
+            skip_typerefs(func_rout->type)->variant.routine.return_type;
+        if (skip_typerefs(ret_ty)->kind != (a_type_kind)tk_void) {
+          // A value-less return in a non-void function: unreachable
+          // code after a [[noreturn]] call. Keep the terminator well
+          // formed.
+          emit("ret undef");
+        } else {
+          emit("ret");
+        }
       }
       terminated = true;
       break;
@@ -2251,7 +2559,10 @@ void FuncEmitter::walk_statement(a_statement_ptr stmt) {
       unsupported("inline asm statement");
       break;
     default:
-      unsupported_f("statement kind %d", (int)stmt->kind);
+      unsupported_f("statement kind %d (in '%s')", (int)stmt->kind,
+                    func_rout != NULL && func_rout->source_corresp.name != NULL
+                        ? func_rout->source_corresp.name
+                        : "?");
   }
 }
 
@@ -2354,7 +2665,12 @@ void emit_variable(a_variable_ptr var) {
     unsupported_f("variable '%s' with an unwritten type",
                   var->source_corresp.name ? var->source_corresp.name : "?");
   }
-  std::string name = entity_name(&var->source_corresp, "variable");
+  std::string name = global_name_for_variable(var);
+  if (declared_globals.count(name)) {
+    // Already declared: either an earlier data definition in this
+    // walk, or a deferred .temp line created while emitting a body.
+    return;
+  }
   if (var->is_thread_local) {
     unsupported_f("thread_local variable '%s'", name.c_str());
   }
@@ -2398,14 +2714,7 @@ void emit_variable(a_variable_ptr var) {
       unsupported_f("init kind %d for variable '%s'", (int)var->init_kind,
                     name.c_str());
   }
-  std::string attrs;
-  if (var->storage_class == (a_storage_class)sc_static) attrs += " local";
-  if (var->alignment > 1) {
-    char buf[32];
-    std::snprintf(buf, sizeof(buf), " align=%llu",
-                  (unsigned long long)var->alignment);
-    attrs += buf;
-  }
+  std::string attrs = var_data_attrs(var, name);
   if (declared_globals.count(name)) return;
   declared_globals.emplace(name, true);
   std::fprintf(f_out, ".global @%s%s ty=%s init=%s\n", name.c_str(),
@@ -2438,23 +2747,27 @@ void emit_extern_routine(a_routine_ptr rout) {
   std::string sig;
   emit_routine_sig(rout, &sig);
   std::fprintf(f_out, ".extern @%s %s\n",
-               entity_name(&rout->source_corresp, "routine").c_str(),
-               sig.c_str());
+               routine_symbol_name(rout).c_str(), sig.c_str());
 }
 
 void emit_func_def(a_routine_ptr rout, a_scope_ptr scope) {
-  if (rout->special_kind != (a_special_function_kind)sfk_none) {
-    // Constructors/destructors only appear once class support lands.
-    unsupported_f("special member function '%s' (special kind %d)",
-                  rout->source_corresp.name ? rout->source_corresp.name : "?",
-                  (int)rout->special_kind);
-  }
-  if (scope->variant.routine.constructor_inits != NULL) {
-    unsupported("constructor initializers");
-  }
+  // Special member functions (sfk_constructor/destructor/...) are
+  // ordinary routines after lowering: their bodies contain the full
+  // D0/D1/D2, C1/C2 and copy/move lowering, so nothing is filtered
+  // here. The scope's residual constructor_inits list is bookkeeping
+  // only -- lower_ctor_init/lower_dtor_init already expanded every
+  // entry into the body statements -- so it is ignored.
   FuncEmitter em;
   em.func_scope = scope;
   em.func_rout = rout;
+  // The function scope's local static variable init entries: their
+  // constants are in this function's memory region and must be
+  // consumed while it is resident.
+  for (a_local_static_variable_init_ptr lsvi =
+           scope->local_static_variable_inits;
+       lsvi != NULL; lsvi = lsvi->next) {
+    em.local_static_inits.emplace(lsvi->variable, lsvi);
+  }
   for (a_variable_ptr param = scope->variant.routine.parameters;
        param != NULL; param = param->next) {
     em.params.push_back(param);
@@ -2462,6 +2775,11 @@ void emit_func_def(a_routine_ptr rout, a_scope_ptr scope) {
   std::string attrs;
   if (rout->storage_class == (a_storage_class)sc_static) attrs += " local";
   if (rout->is_inline) attrs += " inline";
+  // Inline function definitions are weak (ODR, like g++), so several
+  // TUs (or the C++ runtime archive) can carry the same body.
+  if (rout->is_inline && rout->storage_class != (a_storage_class)sc_static) {
+    attrs += " weak";
+  }
   std::string sig;
   emit_routine_sig(rout, &sig);
   std::fprintf(f_out, ".func @%s%s %s\n",
@@ -2509,6 +2827,40 @@ void flush_pending_strings() {
   pending_string_lines.clear();
 }
 
+// Variables reachable through a static initializer's address constants
+// (recursively through aggregates and address-of-constant). These are
+// the data-definition ordering dependencies: the MIR parser resolves
+// `reloc @sym` in `.global init=` against symbols declared earlier in
+// the file, so a referenced global's definition line must precede the
+// referencing one.
+void scan_const_var_deps(a_constant_ptr con, std::vector<a_variable_ptr> &deps) {
+  if (con == NULL) return;
+  switch (con->kind) {
+    case ck_aggregate:
+      for (a_constant_ptr elem = con->variant.aggregate.first_constant;
+           elem != NULL; elem = elem->next) {
+        scan_const_var_deps(elem, deps);
+      }
+      break;
+    case ck_address:
+      if (con->variant.address.kind == (an_address_base_kind)abk_variable) {
+        deps.push_back(con->variant.address.variant.variable);
+      } else if (con->variant.address.kind ==
+                 (an_address_base_kind)abk_constant) {
+        scan_const_var_deps(con->variant.address.variant.constant, deps);
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+bool var_is_emitted_data(a_variable_ptr var) {
+  if (ignore_variable_in_back_end(var)) return false;
+  if (!needed_flag_is_set(&var->source_corresp)) return false;
+  return true;
+}
+
 void mir_gen_be() {
   // With IL_SHOULD_BE_WRITTEN_TO_FILE (this configuration), fe_wrapup
   // wrote the IL out and freed it; read it back exactly like
@@ -2533,12 +2885,14 @@ void mir_gen_be() {
   for (a_routine_ptr rout = scope->routines; rout != NULL; rout = rout->next) {
     if (ignore_routine_in_back_end(rout) || rout->superseded_external) continue;
     if (!needed_flag_is_set(&rout->source_corresp)) continue;
-    // Implicitly-declared special members (copy/assign ops for
-    // __va_list_tag etc.) are never called unless the program uses
-    // them; if used, their definition exists and is diagnosed when
-    // its body is emitted.
-    if (rout->special_kind != (a_special_function_kind)sfk_none) continue;
+    // Special member functions declared but not defined in this TU are
+    // emitted like any other extern interface; their definitions, when
+    // they exist, are emitted by the body walk.
     if (rout->function_def_number == NULL_function_def_number) {
+      if (rout->source_corresp.name != NULL &&
+          builtin_intercepted(rout->source_corresp.name)) {
+        continue;
+      }
       emit_extern_routine(rout);
     }
   }
@@ -2569,13 +2923,11 @@ void mir_gen_be() {
     }
   }
   flush_pending_strings();
-  // Data definitions and extern data declarations.
-  for (a_variable_ptr var = scope->variables; var != NULL; var = var->next) {
-    if (ignore_variable_in_back_end(var)) continue;
-    if (!needed_flag_is_set(&var->source_corresp)) continue;
-    emit_variable(var);
-  }
-  // Function bodies.
+  // Function bodies. The MIR parser resolves function-body lookups
+  // (call, globaladdr, funcaddr) in its second pass, so bodies may
+  // reference data defined later in the file -- but a data definition
+  // that relocates to a local routine needs that routine's .func line
+  // earlier, so bodies precede data definitions.
   for (a_routine_ptr rout = scope->routines; rout != NULL; rout = rout->next) {
     if (ignore_routine_in_back_end(rout) || rout->superseded_external) continue;
     if (!needed_flag_is_set(&rout->source_corresp)) continue;
@@ -2585,7 +2937,96 @@ void mir_gen_be() {
     if (mem_region_table[region] == NULL) read_memory_region(region);
     emit_func_def(rout, scope_for_routine(rout));
   }
+  // File-scope dynamic initializers run before main. With
+  // SEPARATE_ROUTINES_FOR_FILE_SCOPE_DYNAMIC_INITS FALSE, lowering
+  // gives them the cfront "munch" spelling __sti__<module_id>; wire
+  // them into the .init_array section the object driver builds from
+  // .init entries.
+  for (a_routine_ptr rout = scope->routines; rout != NULL; rout = rout->next) {
+    const char *name = rout->source_corresp.name;
+    if (name != NULL && rout->function_def_number != NULL_function_def_number &&
+        (std::strncmp(name, "__sti__", 7) == 0 ||
+         std::strncmp(name, "__std__", 7) == 0)) {
+      std::fprintf(f_out, ".init @%s\n", name);
+    }
+  }
   flush_pending_strings();
+  // Data definitions. Extern declarations first (defined globals may
+  // relocate to them), then defined globals in dependency order: a
+  // .global init= reloc is resolved against symbols declared earlier
+  // in the file, so referenced globals must precede their referers.
+  for (a_variable_ptr var = scope->variables; var != NULL; var = var->next) {
+    if (!var_is_emitted_data(var)) continue;
+    if (var->storage_class != (a_storage_class)sc_extern) continue;
+    emit_variable(var);
+  }
+  std::vector<a_variable_ptr> defined_vars;
+  for (a_variable_ptr var = scope->variables; var != NULL; var = var->next) {
+    if (!var_is_emitted_data(var)) continue;
+    if (var->storage_class == (a_storage_class)sc_extern) continue;
+    defined_vars.push_back(var);
+  }
+  {
+    // Kahn-style emission: repeatedly emit definitions whose
+    // referenced globals are all declared already. Variables that are
+    // never emitted as data (extern, ignored) count as satisfied
+    // dependencies.
+    std::map<a_variable_ptr, bool> declared;
+    for (a_variable_ptr var = scope->variables; var != NULL;
+         var = var->next) {
+      if (!var_is_emitted_data(var)) {
+        declared.emplace(var, true);
+        continue;
+      }
+      if (var->storage_class == (a_storage_class)sc_extern) {
+        declared.emplace(var, true);
+      }
+    }
+    std::vector<a_variable_ptr> deps;
+    bool progress = true;
+    size_t remaining = defined_vars.size();
+    while (progress && remaining > 0) {
+      progress = false;
+      for (a_variable_ptr var : defined_vars) {
+        if (declared.count(var)) continue;
+        deps.clear();
+        if (var->init_kind == (an_init_kind)initk_static) {
+          scan_const_var_deps(var->initializer.constant, deps);
+        } else if (var->init_kind == (an_init_kind)initk_dynamic) {
+          a_dynamic_init_ptr dip = var->initializer.dynamic;
+          if (dip != NULL &&
+              dip->kind == (a_dynamic_init_kind)dik_constant) {
+            scan_const_var_deps(dip->variant.constant.ptr, deps);
+          }
+        }
+        bool ready = true;
+        for (a_variable_ptr dep : deps) {
+          if (!declared.count(dep)) {
+            ready = false;
+            break;
+          }
+        }
+        if (!ready) continue;
+        emit_variable(var);
+        declared.emplace(var, true);
+        progress = true;
+        remaining--;
+      }
+    }
+    if (remaining > 0) {
+      // A cycle in static initializer references (e.g. void *p = &p)
+      // cannot be ordered for the parser's single-pass reloc
+      // resolution.
+      for (a_variable_ptr var : defined_vars) {
+        if (!declared.count(var)) {
+          unsupported_f("cyclic static initializer reference involving '%s'",
+                        var->source_corresp.name ? var->source_corresp.name
+                                                 : "?");
+        }
+      }
+      unsupported("cyclic static initializer reference");
+    }
+  }
   for (const std::string &line : pending_module_lines) {
     std::fprintf(f_out, "%s\n", line.c_str());
   }

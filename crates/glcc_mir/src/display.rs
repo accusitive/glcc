@@ -270,12 +270,14 @@ pub fn dump_function_full(out: &mut String, func: &Function, module: &Module) ->
     dump_function_inner(out, func, Some(module))
 }
 
-/// Compact text of every function in `module`.
+/// Compact text of every function in `module`, then one `.init @name`
+/// line per registered constructor (same spelling the parser reads).
 pub fn dump_module(module: &Module) -> String {
     let mut out = String::new();
     for func in module.funcs.iter() {
         dump_function(&mut out, func).unwrap();
     }
+    dump_inits(module, &mut out);
     out
 }
 
@@ -287,7 +289,14 @@ pub fn dump_module_full(module: &Module) -> String {
     for func in module.funcs.iter() {
         dump_function_full(&mut out, func, module).unwrap();
     }
+    dump_inits(module, &mut out);
     out
+}
+
+fn dump_inits(module: &Module, out: &mut String) {
+    for func in &module.init_funcs {
+        writeln!(out, ".init @{}", module.funcs[*func].name).unwrap();
+    }
 }
 
 #[cfg(test)]

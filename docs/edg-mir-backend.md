@@ -97,6 +97,7 @@ paren sets `variadic`).
 .extern @name sig=([T1]) -> RT [weak]        # undefined function
 .dataextern @name ty=<T>                     # extern data declaration
 .global @name [local] [weak] [tls] [const] [align=N] ty=<T> init=<init>
+.init @name                                  # run @name before main (.init_array)
 ```
 
 `<init>`: `undef` (no init) | a scalar const | `zeroinit` |
@@ -287,6 +288,110 @@ the MIR path to consume EDG output:
   them; `globaladdr` resolves by name, so module-item order only
   matters for the parser's single-pass name resolution (the emitter
   hoists everything a body references).
+
+#### Format amendments (dynamic initializers / `.init_array`, 2026-10)
+
+C++ dynamic initializers (EDG's `__sti__` routines) are ordinary
+`.func` definitions; the new `.init` directive wires them into the
+ELF `.init_array` startup table. Grammar, authoritative in
+`glcc_mir::parse`:
+
+```
+.init @name
+```
+
+- `@name` must be a function **defined in this file** with `.func`
+  declared on an earlier line (single-pass resolution, like `reloc`
+  symbols). An `.extern` target or an unknown name is a parse error;
+  a `.init` line placed before its `.func` is therefore also a parse
+  error. The recommended emitter placement is immediately after the
+  `__sti__` function's body.
+- The target's signature must be `sig=() -> void` (constructors take
+  no arguments); anything else is a parse error, and
+  `glcc_mir::verify` re-checks the same invariant on the built module.
+- Registering the same function twice is a parse error ("duplicate
+  .init entry"). There is no `[once]` qualifier: the runtime calls
+  each `.init_array` entry exactly once per program/library load, and
+  function-local statics guard themselves in the body.
+- List order is emission order: `Module.init_funcs` keeps the `.init`
+  lines in file order, the object layer writes one 8-byte slot per
+  entry in that order, and the linker concatenates per-TU
+  `.init_array` sections in link order, so the final run order across
+  the program is source order.
+- MIR representation: `glcc_mir::ir::Module::init_funcs: Vec<Func>`.
+  Optimizer contract: `DeadModuleItems` treats every `init_funcs`
+  entry as a root (a constructor is typically `local` with no MIR
+  caller) and remaps the entries when it renumbers functions. Nothing
+  else in the pass pipeline needs to know about them.
+- Object emission: `glcc_lower_cl::emit_init_array(product:
+  &mut cranelift_object::ObjectProduct, init_funcs:
+  &[cranelift_module::FuncId]) -> Result<(), String>` appends the
+  `.init_array` section (PROGBITS, `SHF_ALLOC | SHF_WRITE`, 8-byte
+  aligned, no merge) to the finished `ObjectProduct`, one zeroed
+  8-byte slot per id patched with an `R_X86_64_64` absolute
+  relocation against the function symbol (`product.function_symbol`).
+  The driver maps `Module.init_funcs` through the `mir::Func ->
+  FuncId` table from lowering (`lower_module_with_debug` returns it;
+  `lower_module_collecting_with_ids` is the non-debug variant) and
+  calls the helper right after `obj.finish()`, before narrow-reloc
+  patchup and DWARF emission. Empty `init_funcs` emits no section;
+  non-ELF products are an `Err` (reported as a warning, like the
+  winunwind path). Windows has no story yet: `.CRT$XCU` needs COFF
+  grouping sections with absolute pointer images instead of
+  relocations.
+- This mirrors the C path's existing convention
+  (`glcc_lower_mir::emit_hook_array` emits a `__glcc_init_array`
+  global with a custom `.init_array` section name); the `.init`
+  route produces a proper section from the object writer instead of
+  reusing a data global, and both may coexist in one program.
+
+#### Format amendments (class support, 2026-10-31)
+
+Observed while bringing ctors/dtors/references/virtual dispatch
+through; the parser already accepts all of these spellings, but the
+ORDERING and conventions are now load-bearing:
+
+- **Module-item order.** The parser resolves `reloc` in `.global
+  init=` during pass one, so every symbol a data definition relocates
+  to must be declared earlier in the file. Function bodies are parsed
+  in pass two and may reference anything. The emitter therefore emits:
+  `.extern` routine interfaces, string globals, all `.func` bodies,
+  `.init` entries, `.dataextern` declarations, defined `.global`s in
+  **dependency order** (topological over the variable-to-variable
+  edges of their static initializers; a cycle, e.g. `void *p = &p`,
+  is a hard emitter diagnostic), then the unnamed `@.temp.<n>`
+  globals.
+- **C++ references** spell as their underlying pointer everywhere
+  (`int&` is `ptr(i32)`): after `DO_IL_LOWERING` a reference lvalue's
+  value IS the address of the referent, so params/returns/bindings
+  need no distinct handling.
+- **Null pointer constants** are ck_integer constants carrying a
+  pointer type (EDG's `make_zero_of_proper_type`); in static
+  initializers they print as `null`, and runtime stores spell
+  `store <addr>, null`.
+- **Inline function definitions are weak** (`.func @name inline weak
+  ...`), mirroring the ODR; definitions for the EH bookkeeping
+  variables (`__curr_eh_stack_entry`, `__eh_curr_region`) and
+  `__dso_handle` are emitted `local` so they do not collide with the
+  runtime/crtbegin copies.
+- **Known `__builtin_X` libc wrappers** (`__builtin_strlen`,
+  `__builtin_memcpy`, ...) emit as calls/addresses of `X` itself;
+  `__builtin_is_constant_evaluated` folds to 0, `__builtin_expect` to
+  its first argument, `__builtin_unreachable` to the `unreachable`
+  terminator.
+- GEP **index steps are only emitted over scalar pointees** (the
+  parser strides ConstIndex/Index by the pointee size for scalars and
+  by the ELEMENT size for arrays -- wrong for `T(*)[N]` pointer
+  arithmetic -- and rejects them over structs/void). Struct, array,
+  void and routine pointees navigate with explicit byte arithmetic
+  (`ptrtoint`/`add`/`inttoptr`) instead; likewise all pointer
+  subtraction and negative-index subscripts scale by the element size
+  explicitly.
+- A local static variable's constant initializer lives in a
+  `local-static-variable-init` IL entry (the variable itself sits in
+  the file-scope region, so `init_kind` is `initk_function_local` and
+  the `.global` starts zeroed); the emitter applies the constant with
+  runtime stores at first reference in the body.
 
 ### Aggregate-value convention
 

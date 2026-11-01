@@ -135,6 +135,24 @@ pub fn verify_module(module: &Module) -> Vec<String> {
     for func in module.funcs.iter() {
         errors.extend(verify_func(func));
     }
+    let mut seen = std::collections::HashSet::new();
+    for func in &module.init_funcs {
+        if func.index() >= module.funcs.len() {
+            errors.push(format!(".init target f{} is out of range", func.index()));
+            continue;
+        }
+        if !seen.insert(*func) {
+            errors.push(format!("duplicate .init entry @{}", module.funcs[*func].name));
+            continue;
+        }
+        let sig = &module.funcs[*func].sig;
+        if !sig.params.is_empty() || !sig.ret.is_void() {
+            errors.push(format!(
+                ".init target @{} must take no parameters and return void, got {:?} -> {:?}",
+                module.funcs[*func].name, sig.params, sig.ret,
+            ));
+        }
+    }
     errors
 }
 

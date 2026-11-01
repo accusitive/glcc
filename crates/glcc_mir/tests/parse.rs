@@ -738,3 +738,62 @@ fn error_reloc_bad_addend() {
 fn error_reloc_missing_symbol() {
     err_at(".global @p ty=ptr(i8) init=reloc\n", 1, "@symbol");
 }
+
+#[test]
+fn init_registers_constructors_in_order() {
+    let module = ok(
+        ".func @sti_b sig=() -> void\n\
+         b0:\n\
+         \x20 ret\n\
+         .func @main sig=() -> i32\n\
+         b0:\n\
+         \x20 ret 0\n\
+         .init @sti_b\n\
+         .func @sti_a sig=() -> void\n\
+         b0:\n\
+         \x20 ret\n\
+         .init @sti_a\n",
+    );
+    let names: Vec<&str> = module.init_funcs.iter().map(|f| module.funcs[*f].name.as_str()).collect();
+    assert_eq!(names, vec!["sti_b", "sti_a"], "list order is the emission order");
+}
+
+#[test]
+fn error_init_unknown_symbol() {
+    err_at(".init @missing\n", 1, "unknown .init target @missing");
+}
+
+#[test]
+fn error_init_extern_target() {
+    err_at(".extern @f sig=() -> void\n.init @f\n", 2, "is an .extern");
+}
+
+#[test]
+fn error_init_before_declaration() {
+    err_at(".init @f\n.func @f sig=() -> void\nb0:\n  ret\n", 1, "unknown .init target @f");
+}
+
+#[test]
+fn error_init_duplicate_entry() {
+    err_at(
+        ".func @f sig=() -> void\nb0:\n  ret\n.init @f\n.init @f\n",
+        5,
+        "duplicate .init entry @f",
+    );
+}
+
+#[test]
+fn init_shows_up_in_dump() {
+    let module = ok(
+        ".func @sti sig=() -> void\nb0:\n  ret\n.init @sti\n",
+    );
+    let dump = dump_module(&module);
+    assert!(dump.contains(".init @sti"), "{dump}");
+}
+
+#[test]
+fn error_init_non_void_target() {
+    let module_text = ".func @f sig=() -> i32\nb0:\n  ret 0\n.init @f\n";
+    let error = parse_module(module_text).expect_err("parse should fail");
+    assert!(error.message.contains("must take no parameters and return void"), "{}", error.message);
+}

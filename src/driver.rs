@@ -1387,22 +1387,37 @@ fn emit_object(
     let mut obj = cranelift_object::ObjectModule::new(builder);
     let mut unwind = Vec::new();
     Ok(if debug {
-        let (_, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+        let (ids, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
         let mut product = obj.finish();
+        emit_init_array(&mut product, &mir_module, &ids);
         if let Err(e) = winunwind::emit(&mut product, &unwind) {
             eprintln!("glcc: warning: {e}");
         }
         apply_narrow_relocs(&mut product, &narrow);
         (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
     } else {
-        let narrow = glcc_lower_cl::lower_module_collecting(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+        let (ids, narrow) = glcc_lower_cl::lower_module_collecting_with_ids(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
         let mut product = obj.finish();
+        emit_init_array(&mut product, &mir_module, &ids);
         if let Err(e) = winunwind::emit(&mut product, &unwind) {
             eprintln!("glcc: warning: {e}");
         }
         apply_narrow_relocs(&mut product, &narrow);
         (product.emit().expect("object emit"), asm_text)
     })
+}
+
+/// Append `.init_array` entries for the module's declared constructors.
+/// The lowerings hand back the MIR Func → Cranelift FuncId map; missing
+/// entries or a non-ELF target degrade to a warning, like winunwind.
+fn emit_init_array(product: &mut cranelift_object::ObjectProduct, module: &glcc_mir::Module, ids: &std::collections::HashMap<glcc_mir::Func, cranelift_module::FuncId>) {
+    if module.init_funcs.is_empty() {
+        return;
+    }
+    let mapped: Vec<cranelift_module::FuncId> = module.init_funcs.iter().map(|f| ids[f]).collect();
+    if let Err(e) = glcc_lower_cl::emit_init_array(product, &mapped) {
+        eprintln!("glcc: warning: cannot emit .init_array: {e}");
+    }
 }
 
 /// Patch a `__ptr32` object's 32-bit address relocations into the
@@ -1464,6 +1479,44 @@ fn dump_mir_source(
     match outcome {
         Ok(Ok(text)) => Ok(text),
         Ok(Err(())) => Err(()),
+        Err(_) => Err(()),
+    }
+}
+
+/// Dump the MIR for an EDG-produced `.mir` file: parse, run the shared
+/// pipeline, and print through display like the C `--emit-mir` path.
+fn dump_mir_edg(mir_path: &Path, job: &Job, full: bool) -> std::result::Result<String, ()> {
+    let mir_text = match std::fs::read_to_string(mir_path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("glcc: cannot read '{}': {e}", mir_path.display());
+            return Err(());
+        }
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut module = match glcc_mir::parse_module(&mir_text) {
+            Ok(module) => module,
+            Err(e) => {
+                eprintln!("glcc: cannot parse MIR for '{}': line {}: {}", mir_path.display(), e.line, e.message);
+                panic!("mir parse failed");
+            }
+        };
+        glcc_mir::optimize(&mut module, job.opt_level);
+        let errors = glcc_mir::verify::verify_module(&module);
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("glcc: mir error: {e}");
+            }
+            panic!("mir verification failed");
+        }
+        if full {
+            glcc_mir::display::dump_module_full(&module)
+        } else {
+            glcc_mir::display::dump_module(&module)
+        }
+    }));
+    match outcome {
+        Ok(text) => Ok(text),
         Err(_) => Err(()),
     }
 }
@@ -2409,32 +2462,49 @@ fn do_emit_mir(ctx: &Ctx, job: &Job, full: bool) -> Outcome<()> {
     for item in &job.order {
         let OrderItem::Input(i) = item else { continue };
         let input = &job.inputs[*i];
-        let text = match input.lang {
+        let mir = match input.lang {
             Lang::Assembler => {
                 eprintln!("glcc: warning: '{}': assembler input skipped for {flag}", Path::new(&input.path).display());
                 continue;
             }
-            Lang::Cpp | Lang::EdgC => return Err(fail(format!("{flag} is only supported for C inputs"))),
-            Lang::C => {
-                let bytes = run_preprocess(ctx, job, &input.path)?;
-                if let Some(dir) = temps_dir(job, None) {
-                    let stem = stem_of(&input.path).to_string_lossy().into_owned();
-                    save_temp_file(&dir, &format!("{stem}.i"), &bytes);
+            Lang::Cpp | Lang::EdgC => {
+                // EDG path: cpfe's mir backend translates, then the same
+                // parse/optimize pipeline the compile path runs feeds
+                // display. A scratch dir hosts the `.ti`/`.mir` files.
+                let scratch = TempDir::create().map_err(|e| fail(format!("cannot create temporary directory: {e}")))?;
+                let mir_path = fe_translate(ctx, job, input, *i, &scratch, None)?;
+                if ctx.dry_run {
+                    continue;
                 }
-                decode_source(&bytes)
+                dump_mir_edg(&mir_path, job, full).map_err(|()| {
+                    take_diagnostic_emitted();
+                    Fail::Quiet
+                })?
             }
-            Lang::Preprocessed => {
-                let bytes = std::fs::read(&input.path).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(&input.path).display())))?;
-                decode_source(&bytes)
+            Lang::C | Lang::Preprocessed => {
+                let text = match input.lang {
+                    Lang::C => {
+                        let bytes = run_preprocess(ctx, job, &input.path)?;
+                        if let Some(dir) = temps_dir(job, None) {
+                            let stem = stem_of(&input.path).to_string_lossy().into_owned();
+                            save_temp_file(&dir, &format!("{stem}.i"), &bytes);
+                        }
+                        decode_source(&bytes)
+                    }
+                    _ => {
+                        let bytes = std::fs::read(&input.path).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(&input.path).display())))?;
+                        decode_source(&bytes)
+                    }
+                };
+                if ctx.dry_run {
+                    continue;
+                }
+                dump_mir_source(&text, job.flavor, job.target, job.opt_level, job.async_enabled, language(job), job.error_format, full).map_err(|()| {
+                    take_diagnostic_emitted();
+                    Fail::Quiet
+                })?
             }
         };
-        if ctx.dry_run {
-            continue;
-        }
-        let mir = dump_mir_source(&text, job.flavor, job.target, job.opt_level, job.async_enabled, language(job), job.error_format, full).map_err(|()| {
-            take_diagnostic_emitted();
-            Fail::Quiet
-        })?;
         combined.push_str(&mir);
     }
     match &job.output {

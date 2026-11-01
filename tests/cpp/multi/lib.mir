@@ -1,0 +1,54 @@
+.func @_Z10widget_sumPK6Widgeti sig=(ptr(void), i32) -> i32
+.params %0:ptr(void), %1:i32
+  %2:ptr(ptr(void)) = alloca ptr(void)
+  store %2, %0
+  %3:ptr(i32) = alloca i32
+  store %3, %1
+  %4:ptr(i32) = alloca i32
+  store %4, 0
+  %5:ptr(i32) = alloca i32
+  store %5, 0
+  br b1
+b1:
+  %6:i32 = load %5
+  %7:i32 = load %3
+  %8:bool = icmp.slt %6, %7
+  %9:i32 = zext %8
+  %10:bool = icmp.ne %9, 0
+  brif %10 b2 b4
+b2:
+  %11:i32 = load %4
+  %12:i32 = load %5
+  %13:ptr(void) = load %2
+  %14:i64 = ptrtoint %13
+  %15:i64 = sext %12
+  %16:i64 = mul %15, 4
+  %17:i64 = add %14, %16
+  %18:ptr(struct<4>{0:i32,}) = inttoptr %17
+  %19:ptr(i32) = gep %18 field 0
+  %20:i32 = load %19
+  %21:i32 = add %11, %20
+  store %4, %21
+  br b3
+b3:
+  %22:i32 = load %5
+  %23:i32 = add %22, 1
+  store %5, %23
+  br b1
+b4:
+  %24:i32 = load %4
+  ret %24
+.func @_ZNK6Widget8id_timesEi sig=(ptr(void), i32) -> i32
+.params %0:ptr(void), %1:i32
+  %2:ptr(ptr(void)) = alloca ptr(void)
+  store %2, %0
+  %3:ptr(i32) = alloca i32
+  store %3, %1
+  %4:ptr(void) = load %2
+  %5:i64 = ptrtoint %4
+  %6:ptr(i32) = inttoptr %5
+  %7:i32 = load %6
+  %8:i32 = load %3
+  %9:i32 = mul %7, %8
+  ret %9
+.global @g_shared ty=i32 init=7

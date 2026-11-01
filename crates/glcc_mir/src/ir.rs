@@ -1267,6 +1267,10 @@ pub struct Module {
     pub funcs: IndexVec<Func, Function>,
     pub globals: IndexVec<Global, GlobalData>,
     pub externs: IndexVec<Extern, ExternData>,
+    /// Constructors to run before `main`: the object layer emits each
+    /// target's address into `.init_array`, in this order (link order
+    /// of the per-TU sections then decides the final run order).
+    pub init_funcs: Vec<Func>,
     /// Source file table; [`Location::file`] indexes it.
     pub files: Vec<File>,
     /// Shared debug type table; [`crate::debug::DebugTypeId`] indexes it.
