@@ -311,6 +311,8 @@ pub enum Action {
     /// `--emit-full-mir`: like `EmitMir`, with the source location of
     /// every located instruction annotated.
     EmitFullMir,
+    /// `--emit-lua`: print a runnable Lua 5.1 script to stdout (or `-o`).
+    EmitLua,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -810,6 +812,7 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
             "-fsyntax-only" => job.action = Action::SyntaxOnly,
             "--emit-mir" => job.action = Action::EmitMir,
             "--emit-full-mir" => job.action = Action::EmitFullMir,
+            "--emit-lua" => job.action = Action::EmitLua,
             // Accepted by the pre-scan above (which also rejects it
             // for the C flavor); nothing position-dependent to do here.
             "--edg-c" => {}
@@ -1455,6 +1458,65 @@ fn apply_narrow_relocs(product: &mut cranelift_object::ObjectProduct, narrow: &[
     }
 }
 
+/// `--emit-lua`: lower each C input all the way to a runnable Lua 5.1
+/// script. The fake backend emits one script per input; `-o` writes it.
+fn do_emit_lua(ctx: &Ctx, job: &Job) -> Outcome<()> {
+    if !has_compilable(job) {
+        warn_unused_link_inputs(job, "Lua emission");
+        return Ok(());
+    }
+    let mut combined = String::new();
+    for item in &job.order {
+        let OrderItem::Input(i) = item else { continue };
+        let input = &job.inputs[*i];
+        let lua = match input.lang {
+            Lang::Assembler => {
+                eprintln!("glcc: warning: '{}': assembler input skipped for --emit-lua", Path::new(&input.path).display());
+                continue;
+            }
+            Lang::Cpp | Lang::EdgC => {
+                let scratch = TempDir::create().map_err(|e| fail(format!("cannot create temporary directory: {e}")))?;
+                let mir_path = fe_translate(ctx, job, input, *i, &scratch, None)?;
+                if ctx.dry_run {
+                    continue;
+                }
+                lower_edg_to_lua(&mir_path, job).map_err(|()| {
+                    take_diagnostic_emitted();
+                    Fail::Quiet
+                })?
+            }
+            Lang::C | Lang::Preprocessed => {
+                let text = match input.lang {
+                    Lang::C => {
+                        let bytes = run_preprocess(ctx, job, &input.path)?;
+                        if let Some(dir) = temps_dir(job, None) {
+                            let stem = stem_of(&input.path).to_string_lossy().into_owned();
+                            save_temp_file(&dir, &format!("{stem}.i"), &bytes);
+                        }
+                        decode_source(&bytes)
+                    }
+                    _ => {
+                        let bytes = std::fs::read(&input.path).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(&input.path).display())))?;
+                        decode_source(&bytes)
+                    }
+                };
+                if ctx.dry_run {
+                    continue;
+                }
+                lower_source_to_lua(&text, job.flavor, job.target, job.opt_level, job.async_enabled, language(job), job.error_format).map_err(|()| {
+                    take_diagnostic_emitted();
+                    Fail::Quiet
+                })?
+            }
+        };
+        combined.push_str(&lua);
+    }
+    match &job.output {
+        Some(o) => emit_output(o, combined.as_bytes()),
+        None => emit_stdout(combined.as_bytes()),
+    }
+}
+
 /// MIR text for `--emit-mir`/`--emit-full-mir`, sharing
 /// `compile_source`'s panic handling: the frontend speaks for itself,
 /// so a caught panic becomes `Quiet` instead of double-reporting.
@@ -1475,6 +1537,28 @@ fn dump_mir_source(
         } else {
             glcc_mir::display::dump_module(&module)
         })
+    }));
+    match outcome {
+        Ok(Ok(text)) => Ok(text),
+        Ok(Err(())) => Err(()),
+        Err(_) => Err(()),
+    }
+}
+
+/// Lower a C source all the way to Lua, sharing `compile_source`'s panic
+/// handling.
+fn lower_source_to_lua(
+    src: &str,
+    flavor: Flavor,
+    target: Target,
+    opt_level: OptLevel,
+    async_enabled: bool,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+) -> std::result::Result<String, ()> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
+        Ok::<String, ()>(glcc_lower_lua::lower_module(&module))
     }));
     match outcome {
         Ok(Ok(text)) => Ok(text),
@@ -1514,6 +1598,39 @@ fn dump_mir_edg(mir_path: &Path, job: &Job, full: bool) -> std::result::Result<S
         } else {
             glcc_mir::display::dump_module(&module)
         }
+    }));
+    match outcome {
+        Ok(text) => Ok(text),
+        Err(_) => Err(()),
+    }
+}
+
+/// Parse an EDG-produced `.mir` file and lower it to Lua.
+fn lower_edg_to_lua(mir_path: &Path, job: &Job) -> std::result::Result<String, ()> {
+    let mir_text = match std::fs::read_to_string(mir_path) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("glcc: cannot read '{}': {e}", mir_path.display());
+            return Err(());
+        }
+    };
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut module = match glcc_mir::parse_module(&mir_text) {
+            Ok(module) => module,
+            Err(e) => {
+                eprintln!("glcc: cannot parse MIR for '{}': line {}: {}", mir_path.display(), e.line, e.message);
+                panic!("mir parse failed");
+            }
+        };
+        glcc_mir::optimize(&mut module, job.opt_level);
+        let errors = glcc_mir::verify::verify_module(&module);
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("glcc: mir error: {e}");
+            }
+            panic!("mir verification failed");
+        }
+        glcc_lower_lua::lower_module(&module)
     }));
     match outcome {
         Ok(text) => Ok(text),
@@ -2800,7 +2917,7 @@ Usage: {prog} [options] file...
 Drop-in GCC-style driver: preprocesses C++ to C (EDG cpfe, for glcpp), preprocesses C with clang,
 compiles with the Cranelift backend, and links via the system driver with mold.
 
-Actions (last of -c/-E/-M/-MM/-fsyntax-only/--emit-mir/--emit-full-mir wins):
+Actions (last of -c/-E/-M/-MM/-fsyntax-only/--emit-mir/--emit-full-mir/--emit-lua wins):
   -c                 compile only; one .o per input (<stem>.o, or -o for one)
   -E                 preprocess to stdout (or -o); stops before compiling
   -M/-MM             dependency rules to stdout (or -o); -MM skips system headers
@@ -2812,6 +2929,8 @@ Actions (last of -c/-E/-M/-MM/-fsyntax-only/--emit-mir/--emit-full-mir wins):
   --emit-full-mir    like --emit-mir, but every located instruction gets
                      a `; file:line:column` suffix with the source position
                      DWARF line info is generated from (much larger output)
+  --emit-lua         lower to a runnable Lua 5.1 script (experimental fake
+                     backend: emulated byte-addressed memory and pointers)
   -S                 not supported (assembly listing)
   (default)          compile and link an executable (a.out, or -o)
   -save-temps[=cwd|=obj]
@@ -3048,6 +3167,7 @@ pub fn run(argv: Vec<OsString>, flavor: Flavor) -> i32 {
         Action::SyntaxOnly => do_syntax_only(&ctx, &job),
         Action::EmitMir => do_emit_mir(&ctx, &job, false),
         Action::EmitFullMir => do_emit_mir(&ctx, &job, true),
+        Action::EmitLua => do_emit_lua(&ctx, &job),
         Action::Compile => do_compile(&ctx, &job, None).and_then(|(produced, _)| {
             if job.depgen.is_some() {
                 // `-MT` defaults to the real outputs here.
@@ -3179,6 +3299,9 @@ mod tests {
         assert_eq!(parse(&["--emit-full-mir", "--emit-mir", "a.c"]).action, Action::EmitMir);
         assert_eq!(parse(&["--emit-mir", "--emit-full-mir", "a.c"]).action, Action::EmitFullMir);
         assert_eq!(parse(&["--emit-mir", "-fsyntax-only", "a.c"]).action, Action::SyntaxOnly);
+        assert_eq!(parse(&["--emit-lua", "a.c"]).action, Action::EmitLua);
+        assert_eq!(parse(&["--emit-mir", "--emit-lua", "a.c"]).action, Action::EmitLua);
+        assert_eq!(parse(&["--emit-lua", "--emit-full-mir", "a.c"]).action, Action::EmitFullMir);
     }
 
     #[test]
@@ -3193,6 +3316,175 @@ mod tests {
         for line in plain.lines() {
             assert!(full.contains(line), "compact line missing from full dump:\n{line}");
         }
+    }
+
+    #[test]
+    fn lua_varargs_run() {
+        if std::process::Command::new("lua5.1").arg("-v").output().is_err() {
+            return;
+        }
+        let src = r#"
+typedef __builtin_va_list va_list;
+
+struct pair { int a; int b; };
+
+static int sum_ints(int n, va_list ap) {
+    int total = 0;
+    for (int i = 0; i < n; i++) total += __builtin_va_arg(ap, int);
+    return total;
+}
+
+static int sum_all(int n, ...) {
+    va_list ap;
+    __builtin_va_start(ap, n);
+    int total = sum_ints(n, ap);
+    __builtin_va_end(ap);
+    return total;
+}
+
+static int mixed(int n, ...) {
+    va_list ap;
+    __builtin_va_start(ap, n);
+    double d = __builtin_va_arg(ap, double);
+    struct pair p = __builtin_va_arg(ap, struct pair);
+    va_list copy;
+    __builtin_va_copy(copy, ap);
+    int a = __builtin_va_arg(copy, int);
+    int b = __builtin_va_arg(copy, int);
+    int c = __builtin_va_arg(ap, int);
+    __builtin_va_end(copy);
+    __builtin_va_end(ap);
+    return (int)(d * 2) + p.a + p.b + a + b + c;
+}
+
+int main(void) {
+    struct pair p = {13, 29};
+    int m = mixed(0, 2.5, p, 100, 200);
+    int s = sum_all(3, 1, 2, 3);
+    return m + s;
+}
+"#;
+        let lua = lower_source_to_lua(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("lower C to Lua");
+        assert!(lua.contains("__va_begin"), "varargs were not lowered:\n{lua}");
+        let path = format!("/tmp/opencode/glcc-lua-varargs-{}.lua", std::process::id());
+        std::fs::write(&path, &lua).expect("write Lua script");
+        let out = std::process::Command::new("lua5.1").arg(&path).output().expect("run lua5.1");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(out.stderr, b"", "lua stderr:\n{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.status.code(), Some((5 + 13 + 29 + 100 + 200 + 100 + 1 + 2 + 3) % 256), "generated script:\n{lua}");
+    }
+
+    #[test]
+    fn lua_file_io_run() {
+        if std::process::Command::new("lua5.1").arg("-v").output().is_err() {
+            return;
+        }
+        let data = format!("/tmp/opencode/glcc-lua-io-{}.txt", std::process::id());
+        let src = format!(
+            r#"
+typedef struct _FILE FILE;
+typedef unsigned long size_t;
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+FILE *fopen(const char *, const char *);
+int fclose(FILE *);
+int fputs(const char *, FILE *);
+int fputc(int, FILE *);
+int fgetc(FILE *);
+char *fgets(char *, int, FILE *);
+size_t fread(void *, size_t, size_t, FILE *);
+size_t fwrite(const void *, size_t, size_t, FILE *);
+int fseek(FILE *, long, int);
+long ftell(FILE *);
+int feof(FILE *);
+int fprintf(FILE *, const char *, ...);
+int remove(const char *);
+int rename(const char *, const char *);
+int main(void) {{
+    const char *p = "{data}";
+    FILE *f = fopen(p, "w");
+    if (!f) return 1;
+    if (fputs("hello\n", f) < 0) return 2;
+    if (fputc('X', f) == -1) return 3;
+    if (fclose(f) != 0) return 4;
+
+    f = fopen(p, "r");
+    if (!f) return 5;
+    char line[8];
+    if (!fgets(line, sizeof line, f)) return 6;
+    if (line[0] != 'h' || line[5] != '\n' || line[6] != '\0') return 7;
+    if (fgetc(f) != 'X') return 8;
+    if (fgetc(f) != -1) return 9;
+    if (!feof(f)) return 10;
+
+    if (fseek(f, -4, 2) != 0) return 11;
+    if (ftell(f) != 3) return 12;
+    char tail[4];
+    if (fread(tail, 1, 3, f) != 3) return 13;
+    if (tail[0] != 'l' || tail[1] != 'o' || tail[2] != '\n') return 14;
+    fclose(f);
+
+    const char *q = "{data}.renamed";
+    if (rename(p, q) != 0) return 15;
+    f = fopen(q, "r");
+    if (!f) return 16;
+    if (fgetc(f) != 'h') return 17;
+    fclose(f);
+    if (remove(q) != 0) return 18;
+
+    fprintf(stdout, "out");
+    fprintf(stderr, "err");
+    return 0;
+}}
+"#
+        );
+        let lua = lower_source_to_lua(&src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("lower C to Lua");
+        let path = format!("/tmp/opencode/glcc-lua-io-{}.lua", std::process::id());
+        std::fs::write(&path, &lua).expect("write Lua script");
+        let out = std::process::Command::new("lua5.1").arg(&path).output().expect("run lua5.1");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&data);
+        let _ = std::fs::remove_file(format!("{data}.renamed"));
+        assert_eq!(out.status.code(), Some(0), "generated script:\n{lua}\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(out.stdout, b"out");
+        assert_eq!(out.stderr, b"err");
+    }
+
+    #[test]
+    fn lua_stdin_fgets_run() {
+        use std::io::Write as _;
+        if std::process::Command::new("lua5.1").arg("-v").output().is_err() {
+            return;
+        }
+        let src = r#"
+typedef struct _FILE FILE;
+extern FILE *stdin;
+int fgetc(FILE *);
+char *fgets(char *, int, FILE *);
+int main(void) {
+    char line[8];
+    if (!fgets(line, sizeof line, stdin)) return 1;
+    if (line[0] != 'h' || line[4] != 'o' || line[5] != '\n' || line[6] != '\0') return 2;
+    if (fgetc(stdin) != 'X') return 3;
+    if (fgetc(stdin) != 'Y') return 4;
+    return 0;
+}
+"#;
+        let lua = lower_source_to_lua(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("lower C to Lua");
+        let path = format!("/tmp/opencode/glcc-lua-stdin-{}.lua", std::process::id());
+        std::fs::write(&path, &lua).expect("write Lua script");
+        let mut child = std::process::Command::new("lua5.1")
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("run lua5.1");
+        child.stdin.take().unwrap().write_all(b"hello\nXY").unwrap();
+        let out = child.wait_with_output().expect("wait for lua5.1");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(out.status.code(), Some(0), "generated script:\n{lua}\nstderr:\n{}", String::from_utf8_lossy(&out.stderr));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/glcc_frontend", "crates/glcpp", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/glasm", "crates/glasm_data", "crates/fern", "crates/fernc", "crates/fern_exec", "crates/fern_repl"]
+members = ["crates/glcc_frontend", "crates/glcpp", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/glcc_lower_lua", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/glasm", "crates/glasm_data", "crates/fern", "crates/fernc", "crates/fern_exec", "crates/fern_repl"]
 
 [package]
 name = "glcc"
@@ -14,6 +14,7 @@ glcc_pp = { path = "crates/glcc_pp" }
 glcc_mir = { path = "crates/glcc_mir" }
 glcc_lower_mir = { path = "crates/glcc_lower_mir" }
 glcc_lower_cl = { path = "crates/glcc_lower_cl" }
+glcc_lower_lua = { path = "crates/glcc_lower_lua" }
 glcc_dwarf = { path = "crates/glcc_dwarf" }
 cranelift-codegen = { version = "0.136.0", default-features = false, features = ["x86", "arm64", "riscv64"] }
 cranelift-module = "0.136.0"

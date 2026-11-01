@@ -7,6 +7,7 @@ are not part of `cargo test`: each builds with `make`, cleans with
 | directory | what it shows |
 |---|---|
 | `hello/` | a C hello world compiled with glcc |
+| `lua/` | the experimental `--emit-lua` backend: C compiled to a portable Lua 5.1 script |
 | `kernel/` | a riscv64 bare-metal kernel: M→S→U-mode, Sv39 paging, traps, syscalls, and an unprivileged user program under qemu |
 | `inline-asm/` | glcc's inline asm: register operands, fixed registers, memory operands, `asm goto` |
 | `triangle/` | a C++/SDL2 OpenGL triangle compiled with glcpp |

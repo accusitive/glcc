@@ -1,0 +1,8 @@
+[package]
+name = "glcc_lower_lua"
+version = "0.1.0"
+edition = "2024"
+description = "MIR to portable Lua 5.1 source backend"
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }

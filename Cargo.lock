@@ -420,6 +420,7 @@ dependencies = [
  "glcc_dwarf",
  "glcc_frontend",
  "glcc_lower_cl",
+ "glcc_lower_lua",
  "glcc_lower_mir",
  "glcc_mir",
  "glcc_pp",
@@ -480,6 +481,13 @@ dependencies = [
  "glcc_mir",
  "object",
  "smallvec",
+]
+
+[[package]]
+name = "glcc_lower_lua"
+version = "0.1.0"
+dependencies = [
+ "glcc_mir",
 ]
 
 [[package]]
