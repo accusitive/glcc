@@ -476,10 +476,12 @@ dependencies = [
  "cranelift-module",
  "cranelift-native",
  "cranelift-object",
+ "gimli",
  "glcc_dwarf",
  "glcc_mir",
  "object",
  "smallvec",
+ "target-lexicon",
 ]
 
 [[package]]

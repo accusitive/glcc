@@ -7,8 +7,8 @@ cannot mirror LLVM freely is codegen, because we lower to Cranelift — but
 Cranelift 0.136 turns out to cover the hard part (see "Verified Cranelift
 capabilities").
 
-**Status:** not started. Spike first (S0); everything below it is sequenced
-behind its outcome.
+**Status:** S0 spike done (2026-11-02, aarch64 host); P0 is next. See
+"S0 outcome" below.
 
 ## How to resume
 
@@ -41,6 +41,39 @@ Explicitly out of scope: Windows (SEH/funclets — the existing "no story
 yet" note stands), exception specifications/filters (`throw(int)` is gone
 in C++17; `noexcept` lowers to a catch-all that calls `std::terminate`),
 coroutine/async interplay.
+
+## S0 outcome (2026-11-02, aarch64)
+
+Proven end to end by `crates/glcc_lower_cl/examples/eh_spike.rs`
+(`cargo run -p glcc_lower_cl --example eh_spike`; keep it until P2 makes it
+redundant): a CLIF `try_call` under `SystemV` compiled via cranelift-object,
+with the unwinder walking *into* our frame and catching there, and unwinding
+*through* a plain Cranelift frame. Decisions this settles:
+
+- **CIE strategy: option 2** (emit our own `.eh_frame`). Byte surgery is
+  unnecessary: set `ObjectBuilder::unwind_info(false)`, then after
+  `module.finish()` append to the returned `Object`: a `.eh_frame` built with
+  gimli's write API — `CommonInformationEntry` carries `personality`,
+  `lsda_encoding`, `fde_address_encoding` natively, and FDEs come from
+  `CompiledCode::create_unwind_info(..)` → `systemv::UnwindInfo::to_fde(..)`
+  plus `fde.lsda`. Two CIEs: plain (zR) for non-EH functions, personality
+  (zPLR) for EH ones. Relocations are collected through a custom
+  `RelocateWriter` and translated like cranelift-object's
+  `translate_eh_pe` (absptr → Absolute, pcrel sdata4 → Relative).
+- **Payload types**: `exception_payload_types()` is two *word-sized* values
+  (`I64, I64` on aarch64) — the selector is I64, not I32; the landing-pad
+  block params must match, and `ireduce` for the i32 selector.
+- **LSDA encoding gotchas** (each cost debugging time; encode exactly like
+  gcc): LPStart-omit is `0xff` (not `0x00`, which is absptr); the call-site
+  encoding byte is `0x01` (uleb128 — NOT pcrel, the unwinder adds its own
+  read position for pcrel); the TType uleb points *past the end* of the type
+  table (entry N is read at `base - N*size`); action records are sleb pairs.
+  gcc-style call-site records cover `[prev_ret, this_ret)` with the first
+  record starting at 0, and the personality looks up `ret_addr - 1`.
+- ld canonicalizes an absptr personality to indirect-pcrel-sdata4 + a data
+  slot on its own; `-no-pie` links are the simplest test setup (copy relocs
+  for `_ZTIi` work, and type_info matching is name-based so the copy is
+  harmless).
 
 ## Verified Cranelift capabilities (anchors, 2026-11)
 
