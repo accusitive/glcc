@@ -2,9 +2,9 @@
 //!
 //! The driver and the explorer prefer this preprocessor; `--pp=clang`
 //! (or a `GLCC_PP` value other than `native`) selects the `clang -E`
-//! path instead. When clang is available it is still queried once per
-//! process for the macro and system-include seed; snapshots stand in
-//! when it is not.
+//! path instead. Predefined macros (`predefine.rs`) and the default
+//! system include search (`includes.rs`) are glcc's own, computed
+//! from the target — no clang/gcc dump is consulted.
 //!
 //! # Architecture
 //!
@@ -22,8 +22,9 @@
 //! - `macros.rs` / `substitute.rs`: parameter lists,
 //!   prescan, `#` stringify, `##` paste with re-lex, `__VA_ARGS__`.
 //! - `prepend.rs`: the rescan queue.
-//! - This file: options/flags, `clang -dM -v` macro + include seeding
-//!   with per-target snapshots, the file layer (`#include` search,
+//! - `predefine.rs`: the predefined macro table; `includes.rs`: the
+//!   default system include search.
+//! - This file: options/flags, the file layer (`#include` search,
 //!   `#pragma once`, linemarkers), output rendering, tests.
 //!
 //! Deliberate deviations from a by-the-book C preprocessor:
@@ -33,13 +34,17 @@
 //! `clang -E`; `#if` garbage selects `#else` instead of erroring.
 
 mod expand;
+mod includes;
 mod macros;
+mod predefine;
 mod prepend;
 mod substitute;
 mod timefmt;
 mod tree;
 
 pub use glcc_toolchain::{MsvcDirs, find_clang, msvc_dirs};
+pub use includes::include_paths;
+pub use predefine::predefines;
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -104,308 +109,6 @@ pub fn cpp_flags_to_opts(cpp: &[OsString], filename: &str) -> PpOptions {
         i += 1;
     }
     opts
-}
-
-/// What the seed query learns from the system compiler: predefined
-/// macros and clang's default system include search.
-#[derive(Clone, Default)]
-struct Seed {
-    predefined: Vec<(String, String)>,
-    includes: Vec<PathBuf>,
-}
-
-/// Bootstrap the native preprocessor from the system compiler, so it
-/// sees exactly what `clang -E` would: predefined macros (`clang -dM`)
-/// plus the default system include directories (`clang -v`), where the
-/// resource headers (`stddef.h`, ...) and libc live. `triple` selects
-/// `--target=`; `std_flag` is `-std=...`/`-ansi` when the driver was
-/// given one. Falls back to [`fallback_predefines`] (clang-22 snapshots
-/// in `src/builtins/`) and [`fallback_include_paths`] when clang is
-/// unavailable. Results are cached per (triple, std) for the process.
-fn seed(triple: Option<&str>, std_flag: Option<&str>) -> Seed {
-    static CACHE: std::sync::Mutex<Option<(String, Seed)>> = std::sync::Mutex::new(None);
-    let key = format!("{}|{}", triple.unwrap_or(""), std_flag.unwrap_or(""));
-    if let Ok(cache) = CACHE.lock()
-        && let Some((k, v)) = cache.as_ref()
-            && *k == key {
-                return v.clone();
-            }
-    let got = clang_seed(triple, std_flag).unwrap_or_else(|| {
-        let mut predefined = fallback_predefines(triple);
-        apply_std_predefines(&mut predefined, std_flag);
-        Seed {
-            predefined,
-            includes: fallback_include_paths(triple),
-        }
-    });
-    if let Ok(mut cache) = CACHE.lock() {
-        *cache = Some((key, got.clone()));
-    }
-    got
-}
-
-/// Predefined macros the native preprocessor starts from: exactly what
-/// `clang -dM -E` reports for `triple`/`std_flag`.
-pub fn native_predefines(triple: Option<&str>, std_flag: Option<&str>) -> Vec<(String, String)> {
-    seed(triple, std_flag).predefined
-}
-
-/// Predefined macros glcc compiles against: the native seed with a GNU
-/// version matching the features glcc implements.
-///
-/// Clang reports GNU 4.2.1 for compatibility, which sits just below the
-/// 4.3/4.8 thresholds many libraries use to select `__builtin_bswap{64,16}`
-/// paths. Reporting 4.8 unlocks those while staying below 5.4, whose
-/// overflow builtins glcc lowers conservatively. Users can still override
-/// the version with `-D`.
-pub fn predefines(triple: Option<&str>, std_flag: Option<&str>) -> Vec<(String, String)> {
-    let mut pre = native_predefines(triple, std_flag);
-    for (name, value) in [("__GNUC__", "4"), ("__GNUC_MINOR__", "8"), ("__GNUC_PATCHLEVEL__", "0")] {
-        match pre.iter_mut().find(|(existing, _)| existing == name) {
-            Some(slot) => slot.1 = value.to_string(),
-            None => pre.push((name.to_string(), value.to_string())),
-        }
-    }
-    pre
-}
-
-/// Default system include directories for `triple`/`std_flag`: clang's
-/// `#include <...>` search list, without the user's `-I` directories
-/// (callers prepend those themselves). Callers must skip this under
-/// `-nostdinc` ([`PpOptions::no_std_includes`]).
-pub fn native_include_paths(triple: Option<&str>, std_flag: Option<&str>) -> Vec<PathBuf> {
-    seed(triple, std_flag).includes
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn clang_binary() -> Option<OsString> {
-    match std::env::var_os("GLCC_PP") {
-        Some(v) if !v.is_empty() && v != "native" => Some(v),
-        // No clang on `PATH` (the usual Windows case outside a shell
-        // with the LLVM component): fall back to a discovered one, then
-        // to the bare name so the spawn failure stays visible.
-        _ => Some(find_clang().map(PathBuf::into_os_string).unwrap_or_else(|| OsString::from("clang"))),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn clang_seed(triple: Option<&str>, std_flag: Option<&str>) -> Option<Seed> {
-    // No processes inside a wasm sandbox: `Command::output()` aborts on
-    // wasm32, so the embedded snapshots are the only source there.
-    let _ = (triple, std_flag);
-    None
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn clang_seed(triple: Option<&str>, std_flag: Option<&str>) -> Option<Seed> {
-    let bin = clang_binary()?;
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(["-E", "-v", "-dM"]);
-    if let Some(s) = std_flag {
-        cmd.arg(s);
-    }
-    if let Some(t) = triple {
-        cmd.arg(format!("--target={t}"));
-    }
-    cmd.args(["-x", "c", null_device()]);
-    let out = cmd.output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8(out.stdout).ok()?;
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Some(Seed {
-        predefined: parse_d_m_defined(&text),
-        includes: parse_search_dirs(&stderr),
-    })
-}
-
-/// Empty input for the clang seed query: the platform's null device.
-fn null_device() -> &'static str {
-    if cfg!(windows) { "NUL" } else { "/dev/null" }
-}
-
-/// The `#include <...> search starts here:` block of `clang -E -v`:
-/// default directories in search order (framework entries are skipped).
-/// Entries are absolute paths on every host (`/usr/...` on POSIX,
-/// `C:\...` on Windows).
-fn parse_search_dirs(stderr: &str) -> Vec<PathBuf> {
-    const START: &str = "#include <...> search starts here:";
-    const END: &str = "End of search list.";
-    let mut out = Vec::new();
-    let mut inside = false;
-    for line in stderr.lines() {
-        let t = line.trim();
-        if t == START {
-            inside = true;
-        } else if t == END {
-            inside = false;
-        } else if inside && (Path::new(t).is_absolute() || t.starts_with('/')) && !t.ends_with("(framework directory)") {
-            out.push(PathBuf::from(t));
-        }
-    }
-    out
-}
-
-/// Best-effort system include search when clang is unavailable: the
-/// newest clang resource or gcc include directory (for `stddef.h` and
-/// friends), then the usual host directories. Layouts that differ
-/// (cross sysroots, vendor toolchains) need explicit `-I` flags.
-fn fallback_include_paths(triple: Option<&str>) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if cfg!(windows) {
-        // No fixed POSIX layout: honor the toolchain's `INCLUDE` when a
-        // Developer Command Prompt set it, else use the MSVC + Windows
-        // SDK layout discovered from the Visual Studio install.
-        match std::env::var_os("INCLUDE") {
-            Some(value) => out.extend(std::env::split_paths(&value)),
-            None => {
-                if let Some(msvc) = msvc_dirs() {
-                    out.extend(msvc.includes.iter().cloned());
-                }
-            }
-        }
-    } else {
-        if let Some(dir) = newest_versioned_dir(Path::new("/usr/lib/clang"), "include") {
-            out.push(dir);
-        } else if let Some(dir) = newest_versioned_dir(Path::new("/usr/lib/gcc"), "include") {
-            out.push(dir);
-        }
-        out.push(PathBuf::from("/usr/local/include"));
-        let host = match triple {
-            Some(t) => Some(t.to_string()),
-            None => match std::env::consts::ARCH {
-                "x86_64" => Some("x86_64-linux-gnu".to_string()),
-                "aarch64" => Some("aarch64-linux-gnu".to_string()),
-                "riscv64" => Some("riscv64-linux-gnu".to_string()),
-                _ => None,
-            },
-        };
-        if let Some(t) = host {
-            let multiarch = PathBuf::from(format!("/usr/include/{t}"));
-            if multiarch.is_dir() {
-                out.push(multiarch);
-            }
-        }
-        out.push(PathBuf::from("/usr/include"));
-    }
-    out.retain(|d| d.is_dir());
-    out
-}
-
-/// Newest `<parent>/*/<leaf>` or `<parent>/*/*/<leaf>` (clang keeps
-/// versions directly, gcc nests a host triple in between), chosen by
-/// numeric-leading directory name.
-fn newest_versioned_dir(parent: &Path, leaf: &str) -> Option<PathBuf> {
-    let mut best: Option<(u64, PathBuf)> = None;
-    for entry in std::fs::read_dir(parent).ok()?.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let direct = dir.join(leaf);
-        if direct.is_dir() {
-            consider_versioned(&mut best, &dir, direct);
-        } else if let Ok(sub) = std::fs::read_dir(&dir) {
-            for sub in sub.flatten() {
-                let sub = sub.path();
-                let cand = sub.join(leaf);
-                if cand.is_dir() {
-                    consider_versioned(&mut best, &sub, cand);
-                }
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
-fn consider_versioned(best: &mut Option<(u64, PathBuf)>, name_dir: &Path, candidate: PathBuf) {
-    let key = name_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .and_then(|n| n.split(['.', '-', '_']).next())
-        .and_then(|n| n.parse::<u64>().ok())
-        .unwrap_or(0);
-    if best.as_ref().is_none_or(|(k, _)| key > *k) {
-        *best = Some((key, candidate));
-    }
-}
-
-/// Parse `clang -dM` output (`#define NAME [replacement]`) into
-/// (name, replacement) pairs; `name` may carry `(params)`.
-fn parse_d_m_defined(text: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let Some(body) = line.strip_prefix("#define ") else { continue };
-        let end = body.find([' ', '\t', '(']).unwrap_or(body.len());
-        let name = &body[..end];
-        if !is_ident(name) {
-            continue;
-        }
-        let rest = &body[end..];
-        if rest.starts_with('(') {
-            let Some(close) = rest.find(')') else { continue };
-            let full = &body[..end + close + 1];
-            out.push((full.to_string(), rest[close + 1..].trim_start().to_string()));
-        } else {
-            out.push((name.to_string(), rest.trim_start().to_string()));
-        }
-    }
-    out
-}
-
-/// Snapshot fallback when clang is unavailable: clang-22 `-dM` dumps
-/// for glcc's three Linux targets (plus the host arch when `triple`
-/// is `None`). Approximate by nature (`__VERSION__` is frozen);
-/// prefer the live bootstrap above when exactness matters.
-pub fn fallback_predefines(triple: Option<&str>) -> Vec<(String, String)> {
-    const X86_64: &str = include_str!("builtins/x86_64-linux-gnu.dM");
-    const AARCH64: &str = include_str!("builtins/aarch64-linux-gnu.dM");
-    const RISCV64: &str = include_str!("builtins/riscv64-linux-gnu.dM");
-    /// MSVC-mode snapshot (`clang --target=x86_64-pc-windows-msvc
-    /// -dM -E`, VS 2022 clang 15): `_MSC_VER`/`_WIN64` and friends, no
-    /// `__linux__`/`__LP64__` — the SDK headers take MSVC paths.
-    const WINDOWS: &str = include_str!("builtins/x86_64-windows-msvc.dM");
-    let t = triple.unwrap_or(if cfg!(target_os = "windows") {
-        "x86_64-pc-windows-msvc"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64-linux-gnu"
-    } else if cfg!(target_arch = "riscv64") {
-        "riscv64-linux-gnu"
-    } else {
-        "x86_64-linux-gnu"
-    });
-    let text = if t.contains("windows") || t.contains("msvc") || t.contains("mingw") {
-        WINDOWS
-    } else if t.contains("aarch64") {
-        AARCH64
-    } else if t.contains("riscv") {
-        RISCV64
-    } else {
-        X86_64
-    };
-    parse_d_m_defined(text)
-}
-
-/// Adjust a fallback seed's `__STDC_VERSION__` to `std_flag`, matching
-/// what clang reports for that dialect (C89 has no version macro). The
-/// clang seed needs no adjustment; this keeps the bundled snapshot
-/// honest when clang is unavailable, e.g. inside wasm.
-fn apply_std_predefines(predefined: &mut Vec<(String, String)>, std_flag: Option<&str>) {
-    let Some(flag) = std_flag else { return };
-    let text = if flag == "-ansi" { "c89" } else { flag.strip_prefix("-std=").unwrap_or(flag) };
-    let version = match Std::parse(text) {
-        Some(Std::C89 | Std::Gnu89) => None,
-        Some(Std::C99 | Std::Gnu99) => Some("199901L"),
-        Some(Std::C11 | Std::Gnu11) => Some("201112L"),
-        Some(Std::C17 | Std::Gnu17) | None => Some("201710L"),
-        Some(Std::C23 | Std::Gnu23) => Some("202311L"),
-        Some(Std::C2y | Std::Gnu2y) => Some("202400L"),
-    };
-    predefined.retain(|(name, _)| name != "__STDC_VERSION__");
-    if let Some(version) = version {
-        predefined.push(("__STDC_VERSION__".to_string(), version.to_string()));
-    }
 }
 
 /// `__has_feature` / `__has_extension` answers: a table probed from
@@ -718,9 +421,9 @@ fn has_table(which: &str, arg: &str) -> Option<bool> {
 /// Options for [`preprocess`]. Built from `-D`/`-U`/`-I` flags.
 #[derive(Debug, Clone, Default)]
 pub struct PpOptions {
-    /// Compiler builtins (`clang -dM` seed or [`fallback_predefines`]),
-    /// applied before `-D`/`-U` like GCC's own predefined macros.
-    /// Names may carry `(params)` for builtin function-likes.
+    /// Predefined macros ([`predefines`]), applied before `-D`/`-U`
+    /// like GCC's own predefined macros. Names may carry `(params)`
+    /// for builtin function-likes.
     pub predefined: Vec<(String, String)>,
     /// `-DNAME` or `-DNAME=replacement` (object- or function-like).
     pub defines: Vec<(String, Option<String>)>,
@@ -728,10 +431,11 @@ pub struct PpOptions {
     pub undefs: Vec<String>,
     /// `-I`/`-isystem`/`-iquote` paths, in order.
     pub include_paths: Vec<PathBuf>,
-    /// `-nostdinc`: callers do not append [`native_include_paths`].
+    /// `-nostdinc`: callers do not append [`include_paths`].
     pub no_std_includes: bool,
     /// Raw `-std=`/`-ansi` flag when the driver was given one (selects
-    /// `__STDC_VERSION__` in the seed and gates `__has_feature` answers).
+    /// `__STDC_VERSION__` in [`predefines`] and gates `__has_feature`
+    /// answers).
     pub std: Option<String>,
     /// `-include` files, processed before the main source.
     pub preincludes: Vec<String>,
@@ -754,11 +458,11 @@ pub struct PpOptions {
     pub trigraphs: Option<bool>,
 }
 
-/// The clang resource include directory of a seeded search list: clang
-/// searches it first, and it alone ships clang's builtin headers such as
-/// `__stddef_max_align_t.h`. `None` when the first entry is not a clang
-/// resource directory (e.g. clang was unavailable and a GCC sysroot
-/// supplied the fallback list).
+/// The clang resource include directory of an include list, when the
+/// list starts with one (see `includes::include_paths`): it alone
+/// ships clang's builtin headers such as `__stddef_max_align_t.h`.
+/// `None` when the first entry is not a clang resource directory (e.g.
+/// a GCC sysroot supplied the resource headers).
 pub fn clang_resource_dir(paths: &[PathBuf]) -> Option<PathBuf> {
     paths.first().filter(|p| p.join("__stddef_max_align_t.h").is_file()).cloned()
 }
@@ -898,14 +602,6 @@ fn push_joined(opts: &mut PpOptions, flag: &str, val: &str) {
         "-I" => opts.include_paths.push(PathBuf::from(val)),
         "-include" => opts.preincludes.push(val.to_string()),
         _ => {}
-    }
-}
-
-fn is_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c == '_' || c.is_ascii_alphabetic() => chars.all(|c| c == '_' || c.is_ascii_alphanumeric()),
-        _ => false,
     }
 }
 
@@ -1180,6 +876,7 @@ mod tests {
     #![allow(non_snake_case)]
 
     use super::*;
+    use glcc_frontend::target::Target;
 
     fn opts() -> PpOptions {
         PpOptions::default()
@@ -1468,8 +1165,8 @@ mod tests {
         let header_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../include");
         let mut o = opts();
         o.include_paths.push(header_dir);
-        o.include_paths.extend(native_include_paths(None, Some("-std=c17")));
-        o.predefined = native_predefines(None, Some("-std=c17"));
+        o.include_paths.extend(include_paths(&Target::native()));
+        o.predefined = predefines(&Target::native(), Some("-std=c17"));
         let src = "#include <tgmath.h>\ndouble f(float x, long double y) { return sqrt(x) + sqrt(y); }\n";
         let got = preprocess(src, "t.c", &o).unwrap();
         assert!(got.contains("sqrtf"), "was: {got}");
@@ -1546,41 +1243,45 @@ mod tests {
     }
 
     #[test]
-    fn fallback_predefines_cover_type_builtins() {
-        let defs = fallback_predefines(Some("x86_64-linux-gnu"));
+    fn predefines_cover_type_builtins() {
+        let defs = predefines(&Target::X86_64, None);
         assert!(defs.len() > 300, "got {}", defs.len());
         let get = |n: &str| defs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
         assert_eq!(get("__SIZE_TYPE__").as_deref(), Some("long unsigned int"));
         assert_eq!(get("__STDC_VERSION__").as_deref(), Some("201710L"));
         assert_eq!(get("__x86_64__").as_deref(), Some("1"));
+        assert_eq!(get("__LONG_MAX__").as_deref(), Some("9223372036854775807L"));
+        assert_eq!(get("__INT64_C(c)").as_deref(), Some("c##L"));
         // Function-like builtins keep their parameter lists.
         assert!(defs.iter().any(|(k, _)| k == "__INTMAX_C(c)"), "has INTMAX_C");
     }
 
     #[test]
-    fn fallback_predefines_windows_are_msvc_mode() {
-        for triple in ["x86_64-pc-windows-msvc", "x86_64-w64-mingw32", "x86_64-windows"] {
-            let defs = fallback_predefines(Some(triple));
-            let get = |n: &str| defs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
-            assert_eq!(get("_WIN64").as_deref(), Some("1"), "{triple}");
-            assert!(get("_MSC_VER").is_some(), "{triple} lacks _MSC_VER");
-            assert_eq!(get("_INTEGRAL_MAX_BITS").as_deref(), Some("64"), "{triple}");
-            // LLP64: `long` stays 4 bytes; the Linux markers are gone.
-            assert_eq!(get("__SIZEOF_LONG__").as_deref(), Some("4"), "{triple}");
-            assert!(get("__linux__").is_none(), "{triple}");
-            assert!(get("__LP64__").is_none(), "{triple}");
-        }
-        // A GNU/Linux triple still gets the Linux snapshot.
-        let linux = fallback_predefines(Some("x86_64-linux-gnu"));
+    fn predefines_windows_are_msvc_mode() {
+        let defs = predefines(&Target::WINDOWS_X86_64, None);
+        let get = |n: &str| defs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+        assert_eq!(get("_WIN64").as_deref(), Some("1"));
+        assert!(get("_MSC_VER").is_some(), "lacks _MSC_VER");
+        assert_eq!(get("_INTEGRAL_MAX_BITS").as_deref(), Some("64"));
+        // LLP64: `long` stays 4 bytes; the Linux markers are gone.
+        assert_eq!(get("__SIZEOF_LONG__").as_deref(), Some("4"));
+        assert_eq!(get("__LONG_MAX__").as_deref(), Some("2147483647L"));
+        assert_eq!(get("__SIZE_TYPE__").as_deref(), Some("long long unsigned int"));
+        assert_eq!(get("__WCHAR_TYPE__").as_deref(), Some("unsigned short"));
+        assert!(get("__linux__").is_none());
+        assert!(get("__LP64__").is_none());
+        // The GNU/Linux markers only appear for the Linux targets.
+        let linux = predefines(&Target::X86_64, None);
         assert!(linux.iter().any(|(k, _)| k == "__linux__"));
     }
 
     #[test]
-    fn fallback_predefines_follow_the_std_flag() {
+    fn predefines_follow_the_std_flag() {
         let version = |flag: &str| {
-            let mut pre = fallback_predefines(Some("x86_64-linux-gnu"));
-            apply_std_predefines(&mut pre, Some(flag));
-            pre.iter().find(|(name, _)| name == "__STDC_VERSION__").map(|(_, value)| value.clone())
+            predefines(&Target::X86_64, Some(flag))
+                .iter()
+                .find(|(name, _)| name == "__STDC_VERSION__")
+                .map(|(_, value)| value.clone())
         };
         assert_eq!(version("-std=c99").as_deref(), Some("199901L"));
         assert_eq!(version("-std=c11").as_deref(), Some("201112L"));
@@ -1591,12 +1292,16 @@ mod tests {
     }
 
     #[test]
-    fn predefines_report_the_gnu_version_glcc_targets() {
-        let pre = predefines(None, None);
-        let get = |name: &str| pre.iter().find(|(existing, _)| existing == name).map(|(_, value)| value.as_str());
-        assert_eq!(get("__GNUC__"), Some("4"));
-        assert_eq!(get("__GNUC_MINOR__"), Some("8"));
-        assert_eq!(get("__GNUC_PATCHLEVEL__"), Some("0"));
+    fn predefines_track_the_target_architecture() {
+        let aarch64 = predefines(&Target::AARCH64, None);
+        let get = |n: &str| aarch64.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+        assert_eq!(get("__aarch64__").as_deref(), Some("1"));
+        assert_eq!(get("__CHAR_UNSIGNED__").as_deref(), Some("1"));
+        assert_eq!(get("__WCHAR_TYPE__").as_deref(), Some("unsigned int"));
+        assert_eq!(get("__LDBL_MANT_DIG__").as_deref(), Some("113"));
+        let riscv = predefines(&Target::RISCV64, None);
+        assert!(riscv.iter().any(|(k, v)| k == "__riscv_xlen" && v == "64"));
+        assert!(riscv.iter().any(|(k, v)| k == "__CHAR_UNSIGNED__"));
     }
 
     #[test]
@@ -1940,33 +1645,11 @@ mod tests {
     }
 
     #[test]
-    fn clang_search_list_parsing() {
-        let stderr = "#include \"...\" search starts here:\n#include <...> search starts here:\n /usr/lib/clang/22/include\n /usr/local/include\n /Library/Frameworks (framework directory)\n /usr/include\nEnd of search list.\n";
-        assert_eq!(
-            parse_search_dirs(stderr),
-            vec![
-                PathBuf::from("/usr/lib/clang/22/include"),
-                PathBuf::from("/usr/local/include"),
-                PathBuf::from("/usr/include")
-            ]
-        );
-    }
-
-    #[test]
-    fn fallback_includes_existing_dirs() {
-        let dirs = fallback_include_paths(Some("x86_64-linux-gnu"));
+    fn include_paths_exist() {
+        let dirs = include_paths(&Target::X86_64);
         assert!(dirs.iter().all(|d| d.is_dir()), "got {dirs:?}");
-        // The POSIX layout is the only one this fallback knows about.
-        #[cfg(not(windows))]
-        assert!(dirs.contains(&PathBuf::from("/usr/include")), "got {dirs:?}");
-    }
-
-    #[test]
-    fn native_include_paths_exist() {
-        let dirs = native_include_paths(Some("x86_64-linux-gnu"), None);
-        assert!(dirs.iter().all(|d| d.is_dir()), "got {dirs:?}");
-        // A POSIX toolchain (or clang) always yields something; a bare
-        // Windows host without either may legitimately have none.
+        // A POSIX toolchain always yields something; a bare Windows
+        // host without either may legitimately have none.
         #[cfg(not(windows))]
         assert!(!dirs.is_empty(), "no include paths");
     }

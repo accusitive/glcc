@@ -295,9 +295,9 @@ fn run_preprocessor(source: &str, target: FrontendTarget, extra: &[String], nati
         popts.linemarkers = true;
         popts.target = Some(target);
         popts.std = std.map(str::to_string);
-        popts.predefined = glcc_pp::predefines(Some(target.triple()), std);
+        popts.predefined = glcc_pp::predefines(&target, std);
         if !popts.no_std_includes {
-            popts.include_paths.extend(glcc_pp::native_include_paths(Some(target.triple()), std));
+            popts.include_paths.extend(glcc_pp::include_paths(&target));
         }
         return glcc_pp::preprocess(source, "input.c", &popts).map_err(|e| e.to_string());
     }

@@ -74,6 +74,10 @@ enum VaBuiltin {
     Start,
     End,
     Copy,
+    /// MSVC's `vadefs.h` spells `va_start` as `__va_start(&ap, x)` —
+    /// the same operation as [`VaBuiltin::Start`], with the list
+    /// passed by pointer.
+    MsvcStart,
 }
 
 /// A single-instruction compiler builtin call target: bit counts,
@@ -4927,6 +4931,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             Some("__builtin_va_start" | "__builtin_c23_va_start") => Some(VaBuiltin::Start),
             Some("__builtin_va_end") => Some(VaBuiltin::End),
             Some("__builtin_va_copy") => Some(VaBuiltin::Copy),
+            Some("__va_start") => Some(VaBuiltin::MsvcStart),
             _ => None,
         }
     }
@@ -5258,6 +5263,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             VaBuiltin::Start => mir::InstKind::VaStart {
                 ap: self.place(module, func, frame, funcs, externs, globals, &args[0]).0,
             },
+            // `__va_start(&ap, x)`: peel the `&` so the list place is
+            // the operand, exactly like `__builtin_va_start(ap, x)`.
+            VaBuiltin::MsvcStart => {
+                let fe::check::CheckedExprKind::Unary(fe::parse::UnaryOp::AddrOf, ap_expr) = &args[0].kind else {
+                    let span = args[0].span;
+                    panic!("__va_start expects &va_list as its first argument at {span:?}");
+                };
+                mir::InstKind::VaStart {
+                    ap: self.place(module, func, frame, funcs, externs, globals, ap_expr).0,
+                }
+            }
             VaBuiltin::End => mir::InstKind::VaEnd {
                 ap: self.place(module, func, frame, funcs, externs, globals, &args[0]).0,
             },

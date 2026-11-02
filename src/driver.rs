@@ -1187,7 +1187,7 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         // GCC drops all builtins under `-undef`; otherwise seed the
         // native preprocessor with exactly what `clang -E` predefines.
         if !job.cpp.iter().any(|a| a == "-undef") {
-            let mut predefined = glcc_pp::predefines(Some(job.target.triple()), std.as_deref());
+            let mut predefined = glcc_pp::predefines(&job.target, std.as_deref());
             if !job.pic {
                 predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
             }
@@ -1196,7 +1196,7 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         // The default system search (resource headers, libc) comes from
         // the same clang seed; `-nostdinc` keeps only the `-I` paths.
         if !opts.no_std_includes {
-            let native = glcc_pp::native_include_paths(Some(job.target.triple()), opts.std.as_deref());
+            let native = glcc_pp::include_paths(&job.target);
             if job.target.os == Os::Windows {
                 opts.clang_resource_dir = glcc_pp::clang_resource_dir(&native);
             }
