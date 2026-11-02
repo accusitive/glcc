@@ -11,9 +11,12 @@ fn main() {
         return;
     }
     // edg-sys sets `links = "edg"`, so its `cargo:libc_dir` metadata
-    // arrives as `DEP_EDG_LIBC_DIR`.
-    match std::env::var("DEP_EDG_LIBC_DIR") {
-        Ok(dir) if !dir.is_empty() => println!("cargo:rustc-env=GLCPP_LIBC_DIR={dir}"),
-        _ => panic!("edg-sys did not publish libc_dir; cannot locate libC.a"),
+    // arrives as `DEP_EDG_LIBC_DIR`. It is absent on hosts where the
+    // EDG runtime cannot be built (non-x86; see edg-sys/build.rs) --
+    // the driver already warns and links against libstdc++ only.
+    if let Ok(dir) = std::env::var("DEP_EDG_LIBC_DIR")
+        && !dir.is_empty()
+    {
+        println!("cargo:rustc-env=GLCPP_LIBC_DIR={dir}");
     }
 }

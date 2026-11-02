@@ -436,5 +436,75 @@ anything; conformance lives in the emitter.
 2. Next: class support end-to-end (ctors/dtors appear as ordinary
    routines in lowered IL), operator new/delete, references, mangling
    verification against g++ symbols, `-g` debug info, inline asm.
-3. EH lands later in the Cranelift fork (landing pads in MIR, unwind
-   lowering); until then EH constructs must diagnose.
+3. EH: `docs/eh-plan.md` — LLVM-shaped `invoke`/landing-pad model in MIR,
+   lowered through Cranelift's `try_call` (no fork needed; the unwinder
+   metadata is ours). Until it lands, EH constructs must diagnose.
+
+## Host/arch support audit (2026-11-02)
+
+`cargo build -p glcpp --features cxx` used to be x86-64-only in three
+independent ways, all fixed in `crates/edg-sys/build.rs`:
+
+- EDG's `linux-gcc` cmakedef hardcodes `USE_QUADMATH_LIBRARY=1`
+  (libquadmath is x86-only) and `FP_LONG_DOUBLE_IS_80BIT_EXTENDED=1`.
+  Non-x86 builds override the former to the software-emulation path
+  (`APPROXIMATE_QUADMATH`) and the latter to `FP_LONG_DOUBLE_IS_BINARY128`
+  (aarch64/riscv64 `long double` is IEEE binary128); the MIR emitter
+  spells `fk_long_double` as `f128` under the same `#if`, and
+  `glcc_lower_cl` already lowers f128 arithmetic on non-x86 targets.
+  aarch64 also overrides the unsuffixed `TARG_JMP_BUF_*` defaults: the
+  cmakedef's x86-64 values (25 elements) beat `defines_linux.h`'s ARM64
+  auto-detection via `#ifndef` guards, and EDG's EH lowering would
+  allocate a 200-byte setjmp buffer for glibc's 312-byte jmp_buf —
+  stack corruption.
+- EDG's host-defaults cmake detection only knows x86_64/amd64 Linux
+  hosts, so `EDG_BASE` is now passed explicitly (the base itself is
+  arch-independent).
+- The cmake runtime target/path was hardcoded `linux_x86_64`.
+
+### The EDG runtime on non-x86
+
+cpfe's self-hosted runtime build emits generated C containing the GNU
+`__float80`/`__float128` keywords (lib_src guards on the predefined
+`__EDG_FLOAT{80,128}_ENABLING_POSSIBLE`, which must stay 1 so the ISO
+`_Float128` keyword that glibc's own headers need exists — gcc on
+aarch64/riscv64 has neither GNU spelling, and `-U`/`-D` of those
+predefines is rejected). Instead, `build_runtime_with_host_cc` compiles
+the same `edg/lib_src` sources with the host C++ compiler plus cpfe's
+`__EDG_*` predefines (captured via `cpfe --list_macros`; keep in sync
+with the EDG checkout). Skipped there: placement new/delete,
+`std::exception`/`bad_alloc`/`type_info` (libstdc++ provides them),
+`c99_complex.c` (needs the f80/128 keywords), and the
+`std::uncaught_exception` definition in `eh_util.c` (return-type clash
+with the libstdc++ header).
+
+### Known gaps found by the audit
+
+- **EH-shaped code miscompiles on aarch64.** Any construct EDG lowers
+  with an internal try block (operator new expressions — e.g.
+  `std::vector::push_back` — and throw/try) crashes at runtime on
+  aarch64; plain `setjmp`/`longjmp` through glcpp works, so the bug is
+  in the interplay of the EH bookkeeping code shape with aarch64
+  lowering. This is the aarch64 face of the known EH gap (`exceptions`
+  stays xfail for the missing unwinder on all targets).
+- **Inherited-member access through a base-typed operand emits a wrong
+  field index.** `place()`'s `eok_dot_field` case indexes the field by
+  position in the class the IL types the operand with; for `d.b` where
+  `b` is inherited, the IL types the operand with the *base* class
+  while the value is the derived storage, so the gep step lands on the
+  wrong member of the derived layout. Also, `static_cast<D*>(bp)` on an
+  erased (`ptr(void)`) base followed by member selection emits a `gep
+  field` step the MIR parser rejects ("bad gep step Field(1) on Void").
+  Correct navigation needs byte offsets relative to the operand type
+  (plus handling for aggregate-typed values in `byte_offset_addr`).
+- **Unsupported constructs** (clean `mir_gen_be` diagnostics):
+  bit-fields, virtual inheritance (expression kind 20 in the probed
+  shape), non-char string literals (`L""`, `u8""`, `u""`, `U""`), VLA,
+  designated/repeat aggregate initializers, integer constants wider
+  than 64 bits.
+- **`wchar_t` signedness diverges from native g++** on aarch64
+  (cpfe predefines `__WCHAR_TYPE__ int` from the x86-oriented
+  predefined-macro file, gcc uses `unsigned int`). Fixing it requires
+  patching `$EDG_BASE/lib/predefined_macros.txt` (the driver pins
+  `EDG_BASE` to the submodule base).
+

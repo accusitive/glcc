@@ -130,6 +130,14 @@ const char *float_kind_name(a_float_kind kind) {
     case fk_std_float64:
       return "f64";
     case fk_long_double:
+      // Long double is x87 80-bit extended on x86 and IEEE binary128
+      // elsewhere (aarch64, riscv64); the configuration macro follows
+      // the same split the cc build uses.
+#if FP_LONG_DOUBLE_IS_BINARY128
+      return "f128";
+#else
+      return "f80";
+#endif
     case fk_float80:
       return "f80";
     case fk_float128:
