@@ -26,7 +26,7 @@ use crate::{
     check::{CheckedExpr, CheckedExprKind, is_integer},
     diag::{DiagCode, did_you_mean},
     lang::Std,
-    lexer::{IntLiteral, IntSuffix, Interner, Keyword, Located, Location, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
+    lexer::{pack_directive_from_string, Constant, IntLiteral, IntSuffix, Interner, Keyword, Located, Location, PackDirective, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
     sema::{Binding, BindingKind, DeclId, EnumId, Enumerator, Linkage, Member, Sema, StructId},
     span::{CompileError, HasSpan, Span, byte_range},
 };
@@ -34,6 +34,17 @@ use crate::{
 /// Widest `_BitInt(N)` glcc accepts, matching x86-64's
 /// `__BITINT_MAXWIDTH__`.
 pub const MAX_BITINT_WIDTH: u32 = 8_388_608;
+
+/// Text of a `_Pragma` string operand: quotes dropped, each `\`
+/// removed (C17 §6.10.9.1 destringizing).
+fn destringized_pragma(spelling: &str) -> String {
+    let inner = spelling.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(spelling);
+    if inner.contains('\\') {
+        inner.replace('\\', "")
+    } else {
+        inner.to_owned()
+    }
+}
 
 /// The preprocessed TU viewed as many files sharing one buffer.
 ///
@@ -1730,18 +1741,25 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     /// Consume a `_Pragma ( string-literal )` operator, diagnosing a
-    /// malformed operand. The pragma's effect is ignored, matching the
-    /// `#pragma` treatment (including `pack`).
+    /// malformed operand. A `pack` operand is recorded as a layout
+    /// directive; every other pragma's effect is ignored, matching the
+    /// `#pragma` treatment.
     fn skip_pragma_operator(&mut self) {
         let start = self.mark();
+        let index = self.tokens.pos();
         self.tokens.advance();
         if !self.eat_punct(Punctuator::LParen) {
             return self.fail(self.span_since(start), "`_Pragma` requires a parenthesized string literal");
         }
-        if !matches!(self.tokens.peek_val(), Some(Token::StringLiteral(_))) {
-            return self.fail(self.peek_span(), "`_Pragma` requires a string literal");
-        }
+        let literal = match self.tokens.peek_val() {
+            Some(Token::StringLiteral(literal)) => *literal,
+            _ => return self.fail(self.peek_span(), "`_Pragma` requires a string literal"),
+        };
         self.tokens.advance();
+        let spelling = self.intern.resolve(literal.spelling).unwrap_or("");
+        if let Some(directive) = pack_directive_from_string(&destringized_pragma(spelling)) {
+            self.tokens.record_pack(index, directive);
+        }
         self.expect_punct(Punctuator::RParen);
     }
 
@@ -1753,12 +1771,26 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     /// Consume an MSVC annotation operator with balanced parentheses.
-    /// The contents are annotation text; the frontend ignores it (the
-    /// same treatment `#pragma` gets — including `pack`, so `#pragma
-    /// pack` layouts stay unsupported either way).
+    /// `__pragma(pack(...))` records a layout directive; other contents
+    /// (and `__declspec(...)`) are annotation text the frontend ignores.
     fn skip_msvc_operator(&mut self) {
+        let is_pragma = self.peek_msvc_operator("__pragma");
+        let index = self.tokens.pos();
         self.tokens.advance();
         self.tokens.advance();
+        if is_pragma {
+            if let Some((end, directive)) = self.peek_pack_pragma_tokens(index + 2) {
+                self.tokens.record_pack(index, directive);
+                while self.tokens.pos() < end {
+                    self.tokens.advance();
+                }
+                // The operand's closing paren: `__pragma(pack(...))`.
+                if self.token_is(end, Punctuator::RParen) {
+                    self.tokens.advance();
+                }
+                return;
+            }
+        }
         let mut depth = 1usize;
         while depth > 0 {
             match self.tokens.peek_val() {
@@ -1769,6 +1801,87 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             self.tokens.advance();
         }
+    }
+
+    /// Read a `pack ( ... )` directive from raw tokens starting at
+    /// `start` (peek only). A strict grammar match returns the
+    /// directive and the index just past `)`; anything else (unknown
+    /// pragma, unexpanded macro text) yields `None` for the caller's
+    /// balanced skip.
+    fn peek_pack_pragma_tokens(&self, start: usize) -> Option<(usize, PackDirective)> {
+        let name = match self.tokens.at(start)?.val {
+            Token::Identifier(sym) => self.intern.resolve(sym)?.to_owned(),
+            _ => return None,
+        };
+        if name != "pack" || !matches!(self.tokens.at(start + 1)?.val, Token::Punctuator(Punctuator::LParen)) {
+            return None;
+        }
+        let mut i = start + 2;
+        let directive = if self.token_is(i, Punctuator::RParen) {
+            i += 1;
+            PackDirective::Reset
+        } else if let Some(n) = self.token_int(i) {
+            i += 1;
+            if !self.token_is(i, Punctuator::RParen) {
+                return None;
+            }
+            i += 1;
+            PackDirective::Set(n)
+        } else {
+            let word = self.token_ident(i)?;
+            i += 1;
+            let push = match word.as_str() {
+                "push" => true,
+                "pop" => false,
+                // `show` and other no-effect forms.
+                _ => return None,
+            };
+            let mut id = None;
+            let mut n = None;
+            while self.token_is(i, Punctuator::Comma) {
+                i += 1;
+                if let Some(v) = self.token_int(i) {
+                    n = Some(v);
+                } else {
+                    id = Some(self.token_ident(i)?);
+                }
+                i += 1;
+            }
+            if !self.token_is(i, Punctuator::RParen) {
+                return None;
+            }
+            i += 1;
+            if push { PackDirective::Push { id, n } } else { PackDirective::Pop { id, n } }
+        };
+        Some((i, directive))
+    }
+
+    fn token_is(&self, index: usize, punct: Punctuator) -> bool {
+        matches!(self.tokens.at(index).map(|t| &t.val), Some(Token::Punctuator(p)) if *p == punct)
+    }
+
+    fn token_ident(&self, index: usize) -> Option<String> {
+        match self.tokens.at(index)?.val {
+            Token::Identifier(sym) => self.intern.resolve(sym).map(ToOwned::to_owned),
+            _ => None,
+        }
+    }
+
+    /// Value of a plain integer token (a pack argument): decimal or
+    /// `0x` hex, no suffix.
+    fn token_int(&self, index: usize) -> Option<u64> {
+        let spelling = match self.tokens.at(index)?.val {
+            Token::Constant(Constant::Int(literal)) => self.intern.resolve(literal.spelling)?,
+            _ => return None,
+        };
+        let (radix, digits) = match spelling.strip_prefix("0x").or_else(|| spelling.strip_prefix("0X")) {
+            Some(hex) => (16u32, hex),
+            None => (10u32, spelling),
+        };
+        if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        digits.chars().try_fold(0u64, |acc, c| acc.checked_mul(u64::from(radix))?.checked_add(u64::from(c.to_digit(radix).unwrap())))
     }
 
     /// One block item: a declaration if one can start here (including a
@@ -5380,6 +5493,11 @@ impl<'a, 'b> Parser<'a, 'b> {
         };
         attrs.merge(self.parse_gnu_annotations());
         self.expect_punct(Punctuator::LBrace);
+        // The `#pragma pack` in effect at the opening brace applies to
+        // the whole definition. Pragmas *inside* the body never reach
+        // this sample point (clang reads the closing-brace value, where
+        // a balanced push/pop nets out the same way).
+        let pack = self.tokens.pack_in_effect(self.tokens.pos());
         let members = self.parse_struct_declaration_list();
         if !self.cancelled() {
             self.expect_punct(Punctuator::RBrace);
@@ -5403,6 +5521,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             if let Some(n) = attrs.aligned {
                 def.align_override = Some(def.align_override.map_or(n, |m| m.max(n)));
             }
+            def.pack = pack;
         }
         self.sema.invalidate_layout(id);
         TypeSpecifier::Struct(id)
@@ -6254,6 +6373,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             // it declares nothing.
             if matches!(tok, Token::Punctuator(Punctuator::Semi)) {
                 self.tokens.advance();
+                continue;
+            }
+            // UCRT headers write `__pragma(pack(push, 8))` between
+            // members; the operator carries no tokens after skipping.
+            if self.peek_msvc_operator("__pragma") {
+                self.skip_msvc_operator();
                 continue;
             }
             // Prefix annotations on members; `packed`/`aligned` here

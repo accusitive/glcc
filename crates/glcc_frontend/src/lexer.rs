@@ -113,6 +113,10 @@ pub struct Lexer<'a> {
     /// stream, but clang's spelling offsets live in the raw buffer.
     raw: u64,
     char_off: u64,
+    /// Tokens handed out so far (the index a directive line would
+    /// occupy) and the `pack` directives lexed from `#pragma` lines.
+    emitted: usize,
+    packs: Vec<(usize, PackDirective)>,
 }
 
 /// One preprocessing token for `glcc_pp` (over glcc's interner): raw
@@ -173,6 +177,8 @@ impl<'a> Lexer<'a> {
             diagnostics: Vec::new(),
             raw: 0,
             char_off: 0,
+            emitted: 0,
+            packs: Vec::new(),
         }
     }
 
@@ -187,8 +193,11 @@ impl<'a> Lexer<'a> {
         let mut tokens = Vec::new();
         while let Some(tok) = self.next_token() {
             tokens.push(tok);
+            self.emitted += 1;
         }
-        TokenStream::with_diagnostics(tokens, self.diagnostics)
+        let mut stream = TokenStream::with_diagnostics(tokens, self.diagnostics);
+        stream.packs = self.packs;
+        stream
     }
 
     /// Next spliced char for PP lexing, folding vanished (spliced-away)
@@ -598,6 +607,148 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// One `#pragma pack(...)` action lexed out of the source. The parser
+/// lexer records these (tagged with the token index the pragma would
+/// occupy — directive lines emit no tokens) because the parser never
+/// sees them; layout folds them into the packing limit in effect at
+/// each struct definition. `pack(n)` caps every member's alignment at
+/// `n` bytes; `push`/`pop` save and restore the limit (under an
+/// optional label).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackDirective {
+    Set(u64),
+    Reset,
+    Push { id: Option<String>, n: Option<u64> },
+    Pop { id: Option<String>, n: Option<u64> },
+}
+
+/// Parse a `pack(...)` directive out of pragma text (a `_Pragma` string
+/// operand or the tail of a `#pragma` line); `None` for any other or
+/// malformed pragma. Blanks and comments may separate tokens; anything
+/// after the closing paren is ignored.
+pub(crate) fn pack_directive_from_string(text: &str) -> Option<PackDirective> {
+    let mut c = PragmaChars { it: text.chars().peekable() };
+    c.blanks();
+    if c.ident()? != "pack" {
+        return None;
+    }
+    c.blanks();
+    if c.peek() != Some('(') {
+        return None;
+    }
+    c.next();
+    c.blanks();
+    if c.peek() == Some(')') {
+        c.next();
+        return Some(PackDirective::Reset);
+    }
+    if let Some(n) = c.number() {
+        c.blanks();
+        return if c.peek() == Some(')') {
+            c.next();
+            Some(PackDirective::Set(n))
+        } else {
+            None
+        };
+    }
+    let push = match c.ident()?.as_str() {
+        "push" => true,
+        "pop" => false,
+        // `show` and other no-effect forms: well-formed, no directive.
+        _ => return None,
+    };
+    let mut id = None;
+    let mut n = None;
+    while c.peek() == Some(',') {
+        c.next();
+        c.blanks();
+        if let Some(v) = c.number() {
+            n = Some(v);
+        } else {
+            id = Some(c.ident()?);
+        }
+        c.blanks();
+    }
+    if c.peek() != Some(')') {
+        return None;
+    }
+    c.next();
+    Some(if push { PackDirective::Push { id, n } } else { PackDirective::Pop { id, n } })
+}
+
+/// Char cursor over pragma text.
+struct PragmaChars<'a> {
+    it: core::iter::Peekable<Chars<'a>>,
+}
+
+impl PragmaChars<'_> {
+    fn peek(&mut self) -> Option<char> {
+        self.it.peek().copied()
+    }
+
+    fn next(&mut self) {
+        self.it.next();
+    }
+
+    fn blanks(&mut self) {
+        loop {
+            match self.peek() {
+                Some(' ') | Some('\t') | Some('\r') => {
+                    self.it.next();
+                }
+                Some('/') if self.it.clone().nth(1) == Some('/') => {
+                    while self.peek().is_some_and(|c| c != '\n') {
+                        self.it.next();
+                    }
+                }
+                Some('/') if self.it.clone().nth(1) == Some('*') => {
+                    self.it.next();
+                    self.it.next();
+                    while self.peek().is_some() {
+                        if self.peek() == Some('*') && self.it.clone().nth(1) == Some('/') {
+                            self.it.next();
+                            self.it.next();
+                            break;
+                        }
+                        self.it.next();
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    fn ident(&mut self) -> Option<String> {
+        if !self.peek().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+            return None;
+        }
+        let mut s = String::new();
+        while self.peek().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            s.push(self.it.next().unwrap());
+        }
+        Some(s)
+    }
+
+    fn number(&mut self) -> Option<u64> {
+        let hex = self.peek() == Some('0') && matches!(self.it.clone().nth(1), Some('x') | Some('X'));
+        let radix = if hex {
+            self.it.next();
+            self.it.next();
+            16
+        } else {
+            10
+        };
+        let mut v = 0u64;
+        let mut seen = false;
+        while let Some(d) = self.peek().and_then(|c| c.to_digit(radix)) {
+            v = v.checked_mul(u64::from(radix))?.checked_add(u64::from(d))?;
+            self.it.next();
+            seen = true;
+        }
+        seen.then_some(v)
+    }
+}
+
 /// Owning buffer of eagerly-lexed tokens with peek/advance cursor.
 #[derive(Debug)]
 pub struct TokenStream {
@@ -607,6 +758,14 @@ pub struct TokenStream {
     /// parser adopts them so callers see them alongside parse/check
     /// diagnostics.
     diagnostics: Vec<CompileError>,
+    /// `pack` directives in token order, `(token index, action)`.
+    packs: Vec<(usize, PackDirective)>,
+    /// How many entries of `packs` are folded into `pack_current` /
+    /// `pack_stack` (queries advance monotonically through a parse;
+    /// an out-of-order record restarts the fold).
+    pack_folded: usize,
+    pack_current: Option<u64>,
+    pack_stack: Vec<(Option<String>, Option<u64>)>,
 }
 
 impl TokenStream {
@@ -615,11 +774,82 @@ impl TokenStream {
             tokens,
             pos: 0,
             diagnostics: Vec::new(),
+            packs: Vec::new(),
+            pack_folded: 0,
+            pack_current: None,
+            pack_stack: Vec::new(),
         }
     }
 
     pub fn with_diagnostics(tokens: Vec<Located<Token>>, diagnostics: Vec<CompileError>) -> Self {
-        Self { tokens, pos: 0, diagnostics }
+        Self {
+            tokens,
+            pos: 0,
+            diagnostics,
+            packs: Vec::new(),
+            pack_folded: 0,
+            pack_current: None,
+            pack_stack: Vec::new(),
+        }
+    }
+
+    /// Index of the next unread token.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Record a `pack` directive found outside a `#pragma` line (a
+    /// raw-source `_Pragma("pack(...)")` or `__pragma(pack(...))`
+    /// operator), kept in token order.
+    pub fn record_pack(&mut self, index: usize, directive: PackDirective) {
+        let at = self.packs.partition_point(|(i, _)| *i <= index);
+        if at < self.pack_folded {
+            self.pack_folded = 0;
+            self.pack_current = None;
+            self.pack_stack.clear();
+        }
+        self.packs.insert(at, (index, directive));
+    }
+
+    /// Packing limit in effect just before token `pos`: the fold of
+    /// every directive recorded before it. `None` means no `pack` is
+    /// active (natural member alignment).
+    pub fn pack_in_effect(&mut self, pos: usize) -> Option<u64> {
+        while self.pack_folded < self.packs.len() {
+            let (index, directive) = self.packs[self.pack_folded].clone();
+            if index >= pos {
+                break;
+            }
+            self.apply_pack(directive);
+            self.pack_folded += 1;
+        }
+        self.pack_current
+    }
+
+    fn apply_pack(&mut self, directive: PackDirective) {
+        match directive {
+            PackDirective::Set(n) => self.pack_current = Some(n),
+            PackDirective::Reset => self.pack_current = None,
+            PackDirective::Push { id, n } => {
+                self.pack_stack.push((id, self.pack_current));
+                if let Some(n) = n {
+                    self.pack_current = Some(n);
+                }
+            }
+            PackDirective::Pop { id, n } => {
+                let at = match id {
+                    Some(id) => self.pack_stack.iter().rposition(|(eid, _)| eid.as_deref() == Some(id.as_str())),
+                    None => self.pack_stack.len().checked_sub(1),
+                };
+                if let Some(at) = at {
+                    self.pack_current = self.pack_stack.remove(at).1;
+                    self.pack_stack.truncate(at);
+                }
+                if let Some(n) = n {
+                    self.pack_current = Some(n);
+                }
+            }
+        }
     }
 
     /// Lexical errors that lexing recovered from (unterminated literals,
@@ -638,6 +868,12 @@ impl TokenStream {
     /// Peek the nth upcoming token without consuming (`n = 0` is next).
     pub fn peek_nth(&self, n: usize) -> Option<&Located<Token>> {
         self.tokens.get(self.pos + n)
+    }
+
+    /// Peek by absolute token index (unlike [`TokenStream::peek_nth`],
+    /// which is cursor-relative).
+    pub fn at(&self, index: usize) -> Option<&Located<Token>> {
+        self.tokens.get(index)
     }
 
     /// Consume and return the next token.
@@ -1789,6 +2025,37 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Whether this `#` line is `#pragma pack...` (peek only, so the
+    /// caller can still collect the line when it is).
+    fn peek_pack_pragma_line(&mut self) -> bool {
+        let mut i = 0;
+        for want in ["pragma", "pack"] {
+            while self.peek_char(i).is_some_and(|c| c == ' ' || c == '\t') {
+                i += 1;
+            }
+            for (k, expect) in want.chars().enumerate() {
+                if self.peek_char(i + k) != Some(expect) {
+                    return false;
+                }
+            }
+            i += want.len();
+            if self.peek_char(i).is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Consume to end of line and return the text after `pragma`
+    /// (verified by [`Lexer::peek_pack_pragma_line`]).
+    fn collect_pragma_line(&mut self) -> String {
+        let mut line = String::new();
+        while self.peek_char(0).is_some_and(|c| c != '\n') {
+            line.push(self.bump().unwrap());
+        }
+        line["pragma".len()..].to_string()
+    }
+
     fn next_token(&mut self) -> Option<Located<Token>> {
         loop {
             let (ch, _, _) = *self.chars.peek()?;
@@ -1805,8 +2072,20 @@ impl<'a> Lexer<'a> {
                         i += 1;
                     }
                     if !self.peek_char(i).is_some_and(|c| c.is_ascii_digit()) {
-                        while self.peek_char(0).is_some_and(|c| c != '\n') {
-                            self.bump();
+                        // A `#pragma pack(...)` line is a layout
+                        // directive, not a token to drop: record it
+                        // (with the index it would occupy) for the
+                        // parser, then drop the line like any other
+                        // passthrough directive.
+                        if self.peek_pack_pragma_line() {
+                            let text = self.collect_pragma_line();
+                            if let Some(directive) = pack_directive_from_string(&text) {
+                                self.packs.push((self.emitted, directive));
+                            }
+                        } else {
+                            while self.peek_char(0).is_some_and(|c| c != '\n') {
+                                self.bump();
+                            }
                         }
                         continue;
                     }

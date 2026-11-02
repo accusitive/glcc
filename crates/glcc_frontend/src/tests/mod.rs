@@ -4298,6 +4298,64 @@ fn layout_nested_structs_arrays_and_unions() {
 }
 
 #[test]
+fn pragma_pack_caps_member_alignment() {
+    // Every member aligns to the lesser of its natural alignment and
+    // the pack limit (MSVC `#pragma pack`), with the struct alignment
+    // following along.
+    let src = "#pragma pack(2)\nstruct S { char a; int b; char c; };";
+    assert_eq!(struct_size_of(src, "S"), (8, 2));
+    assert_eq!(member_offset_in(src, "S", "a"), 0);
+    assert_eq!(member_offset_in(src, "S", "b"), 2);
+    assert_eq!(member_offset_in(src, "S", "c"), 6);
+    // Unions cap the same way.
+    assert_eq!(struct_size_of("#pragma pack(1)\nunion U { char c; short s; int i; };", "U"), (4, 1));
+}
+
+#[test]
+fn pragma_pack_push_pop_restores() {
+    let src = "\
+#pragma pack(push, 1)
+struct P { char a; int b; };
+#pragma pack(pop)
+struct Q { char a; int b; };";
+    assert_eq!(struct_size_of(src, "P"), (5, 1));
+    assert_eq!(struct_size_of(src, "Q"), (8, 4));
+    // A labeled push/pop pair and `pack()` restore, as in the UCRT's
+    // `#pragma pack(push, CRT_PACKING)` pattern (the macro expands
+    // before the frontend sees the line).
+    let labeled = "\
+#pragma pack(push, CRT_PACKING)
+struct A { char a; short b; };
+#pragma pack(pop)
+struct B { char a; short b; };";
+    assert_eq!(struct_size_of(labeled, "A"), (4, 2));
+    assert_eq!(struct_size_of(labeled, "B"), (4, 2));
+}
+
+#[test]
+fn pragma_pack_operator_forms_apply() {
+    // `__pragma` (corecrt.h writes `__pragma(pack(push, 8))`) and the
+    // C99 `_Pragma` operator record the same directives as `#pragma`.
+    let msvc = "__pragma(pack(push, 1))\nstruct P { char a; int b; };\n__pragma(pack(pop))\nstruct Q { char a; int b; };";
+    assert_eq!(struct_size_of(msvc, "P"), (5, 1));
+    assert_eq!(struct_size_of(msvc, "Q"), (8, 4));
+    let std = "_Pragma(\"pack(1)\")\nstruct S { char a; int b; };";
+    assert_eq!(struct_size_of(std, "S"), (5, 1));
+}
+
+#[test]
+fn pragma_pack_in_struct_body_and_explicit_align_wins() {
+    // A balanced push/pop between members nets out before the closing
+    // brace, so the definition lays out naturally — as in clang.
+    let mid = "struct S { char a; int b;\n#pragma pack(push, 1)\nchar c;\n#pragma pack(pop)\n};";
+    assert_eq!(struct_size_of(mid, "S"), (12, 4));
+    // An explicit member `aligned(n)` is a minimum and wins over the
+    // pack cap, as in MSVC: `b` lands at 8, `c` at 12, tail pad to 8.
+    let aligned = "#pragma pack(2)\nstruct A { char a; int b __attribute__((aligned(8))); char c; };";
+    assert_eq!(struct_size_of(aligned, "A"), (16, 8));
+}
+
+#[test]
 fn layout_covers_objects_near_the_address_space_limit() {
     // GCC caps objects at 2^63 bytes; the bit cursor must not overflow
     // `u64` on the way there (991014-1).

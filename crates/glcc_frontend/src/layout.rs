@@ -275,7 +275,7 @@ impl<'a> Sema<'a> {
                 Ty::Array { elem, bound, .. } if bound.is_none() => (0, self.type_align(elem, interner)?),
                 _ => (self.type_size(&member.ty, interner)?, self.type_align(&member.ty, interner)?),
             };
-            let align = Self::member_align(def.packed, member, natural);
+            let align = Self::member_align(def.packed, def.pack, member, natural);
             match &member.bitfield {
                 None => {
                     let at = align_up(u64::try_from(pos.div_ceil(8)).ok()?, align)?;
@@ -352,10 +352,15 @@ impl<'a> Sema<'a> {
     }
 
     /// Effective alignment of a member: the natural type alignment,
-    /// dropped to 1 by `packed` (on the struct or the member), then
-    /// raised by a member `aligned(n)` (a minimum, like GCC).
-    fn member_align(def_packed: bool, member: &Member, natural: u64) -> u64 {
+    /// dropped to 1 by `packed` (on the struct or the member), capped
+    /// by the `#pragma pack` limit in effect at the definition, then
+    /// raised by a member `aligned(n)` (a minimum, like GCC; explicit
+    /// alignment wins over `pack`, as in MSVC).
+    fn member_align(def_packed: bool, def_pack: Option<u64>, member: &Member, natural: u64) -> u64 {
         let mut align = if def_packed || member.packed { 1 } else { natural };
+        if let Some(n) = def_pack {
+            align = align.min(n);
+        }
         if let Some(n) = member.align_override {
             align = align.max(n);
         }
@@ -378,7 +383,7 @@ impl<'a> Sema<'a> {
                 Ty::Array { elem, bound, .. } if bound.is_none() => (0, self.type_align(elem, interner)?),
                 _ => (self.type_size(&member.ty, interner)?, self.type_align(&member.ty, interner)?),
             };
-            let malign = Self::member_align(def.packed, member, natural);
+            let malign = Self::member_align(def.packed, def.pack, member, natural);
             // Every union member starts at zero, entry or not.
             member_offsets.push(0);
             match &member.bitfield {

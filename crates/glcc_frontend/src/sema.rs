@@ -110,6 +110,10 @@ pub struct StructDef {
     /// `__attribute__((aligned(n)))` on the definition: a minimum
     /// overall alignment (GCC semantics).
     pub align_override: Option<u64>,
+    /// `#pragma pack(n)` in effect at the closing brace of the
+    /// definition (MSVC/clang semantics): every member's alignment is
+    /// capped at `n` unless raised by an `aligned` attribute.
+    pub pack: Option<u64>,
     /// Memoized `struct_layout` result. Layouts are pure functions of
     /// the definition (plus target, fixed per `Sema`), so the first
     /// successful computation sticks; `complete_tag` and the
@@ -468,6 +472,7 @@ impl<'a> Sema<'a> {
             complete: true,
             packed: false,
             align_override: None,
+            pack: None,
             layout_cache: RefCell::new(None),
             span,
         });
@@ -752,6 +757,7 @@ impl<'a> Sema<'a> {
             complete: false,
             packed: false,
             align_override: None,
+            pack: None,
             layout_cache: RefCell::new(None),
             span,
         });
@@ -770,6 +776,7 @@ impl<'a> Sema<'a> {
             complete: false,
             packed: false,
             align_override: None,
+            pack: None,
             layout_cache: RefCell::new(None),
             span,
         });
