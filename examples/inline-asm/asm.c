@@ -9,21 +9,33 @@
 #include <stdio.h>
 #include <string.h>
 
-/* One tied output ("+r") and one input: addl %1, %0. */
+/* One tied output ("+r") and one input: add %1, %0. */
 static int asm_add(int a, int b) {
+#if defined(__x86_64__)
     __asm__("addl %1, %0" : "+r"(a) : "r"(b));
+#else
+    __asm__("add %w0, %w0, %w1" : "+r"(a) : "r"(b));
+#endif
     return a;
 }
 
 /* An instruction with no C spelling. */
 static unsigned long asm_byteswap(unsigned long v) {
+#if defined(__x86_64__)
     __asm__("bswap %0" : "+r"(v));
+#else
+    __asm__("rev %0, %0" : "+r"(v));
+#endif
     return v;
 }
 
 /* An "m" output: the wrapper substitutes the operand's address. */
 static void asm_store(int *p, int v) {
+#if defined(__x86_64__)
     __asm__ volatile("movl %1, %0" : "=m"(*p) : "r"(v));
+#else
+    __asm__ volatile("str %w1, %0" : "=m"(*p) : "r"(v));
+#endif
 }
 
 /* The compiler barrier: nothing may move across this point. */
@@ -35,7 +47,11 @@ static int asm_barrier(int x) {
 /* asm goto: the template jumps to a C label. The wrapper turns the
  * branch into a selector and the caller dispatches on it. */
 static int asm_is_odd(int x) {
+#if defined(__x86_64__)
     __asm__ goto("testl $1, %0; jnz %l[odd]" : : "r"(x) : "cc" : odd);
+#else
+    __asm__ goto("tst %w0, #1; b.ne %l[odd]" : : "r"(x) : "cc" : odd);
+#endif
     return 0;
 odd:
     return 1;
