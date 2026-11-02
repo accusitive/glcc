@@ -2170,20 +2170,35 @@ impl<'a> Sema<'a> {
         }
     }
 
-    /// The visible ordinary identifier whose spelling is closest to
-    /// `name`, plus a noun for its kind (used in the suggestion).
-    fn similar_symbol(&self, name: SymbolU32, interner: &Interner) -> Option<(DeclId, &'static str)> {
+    /// The ordinary identifier whose spelling is closest to `name`,
+    /// plus a noun for its kind (used in the suggestion). Candidates
+    /// include bindings from scopes that have already closed (the
+    /// scope archive), which the suggestion marks out-of-scope.
+    fn similar_symbol(&self, name: SymbolU32, interner: &Interner) -> Option<(DeclId, String)> {
         let needle = interner.resolve(name)?;
         let best = did_you_mean(needle, self.visible_symbols().filter_map(|symbol| interner.resolve(symbol)))?;
         let symbol = self.visible_symbols().find(|symbol| interner.resolve(*symbol) == Some(best))?;
-        let id = self.lookup_symbol(symbol)?;
-        let kind = match self.decls[id.0 as usize].kind {
-            BindingKind::Typedef => "a type",
-            BindingKind::Func => "a function",
-            BindingKind::Var => "a variable",
-            BindingKind::EnumConst { .. } => "an enum constant",
+        let (id, live) = match self.lookup_symbol(symbol) {
+            Some(id) => (id, true),
+            // The closest spelling only binds in scopes that have
+            // already closed; still worth pointing at.
+            None => (self.archived_symbol(symbol)?, false),
         };
-        Some((id, kind))
+        let kind = match self.decls[id.0 as usize].kind {
+            BindingKind::Typedef => "type",
+            BindingKind::Func => "function",
+            BindingKind::Var => "variable",
+            BindingKind::EnumConst { .. } => "enum constant",
+        };
+        let noun = if live {
+            match kind {
+                "enum constant" => "an enum constant".to_string(),
+                other => format!("a {other}"),
+            }
+        } else {
+            format!("an out-of-scope {kind}")
+        };
+        Some((id, noun))
     }
 
     /// Member names reachable from `id`, descending through anonymous

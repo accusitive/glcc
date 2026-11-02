@@ -10732,6 +10732,16 @@ fn undeclared_identifier_suggests_a_similar_name() {
     assert!(err.secondary.iter().any(|label| label.message == "`count` is defined here"), "{:#?}", err.secondary);
 }
 
+/// The scope archive keeps bindings from closed scopes, so a typo can
+/// still be matched against a sibling block's spelling.
+#[test]
+fn undeclared_identifier_suggests_a_name_from_a_closed_scope() {
+    let diagnostics = tu_diagnostics("int main(void) { { int counter = 1; } return countor; }");
+    let err = diagnostics.iter().find(|d| d.message.contains("undeclared identifier")).expect("an undeclared identifier error");
+    assert!(err.helps.iter().any(|help| help == "an out-of-scope variable with a similar name exists: `counter`"), "{:#?}", err.helps);
+    assert!(err.secondary.iter().any(|label| label.message == "`counter` is defined here"), "{:#?}", err.secondary);
+}
+
 /// A misspelled member gets the same treatment, searching the struct's
 /// members (including those promoted from anonymous members).
 #[test]

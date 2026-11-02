@@ -338,43 +338,241 @@ pub struct Sema<'a> {
     /// Cranelift backend emits.
     pub toplevel_asm: Vec<(String, Span)>,
 }
+/// Bindings live in one flat map per namespace (`name` → binding
+/// stack, innermost last); the scope stack is a stack of marks, each
+/// recording the bindings its scope added and the stack length each
+/// name must return to when the scope closes. Popped bindings move to
+/// an archive instead of vanishing, so "did you mean" suggestions can
+/// look into adjacent scopes that have already closed (like rustc's
+/// resolver).
 #[derive(Debug, Default)]
 pub struct ScopeStack {
-    global: Scope,
-    scopes: Vec<Scope>,
-}
-impl ScopeStack {
-    pub fn current_mut(&mut self) -> &mut Scope {
-        match self.scopes.last_mut() {
-            Some(s) => s,
-            None => &mut self.global,
-        }
-    }
-    pub fn current(&self) -> &Scope {
-        match self.scopes.last() {
-            Some(s) => s,
-            None => &self.global,
-        }
-    }
-    pub fn iter(&self) -> impl Iterator<Item = &Scope> {
-        self.scopes.iter().rev().chain(core::iter::once(&self.global))
-    }
-    /// Depth of pushed block/prototype scopes: `0` is file scope.
-    pub fn depth(&self) -> usize {
-        self.scopes.len()
-    }
-}
-#[derive(Debug, Default)]
-pub struct Scope {
-    pub ordinary: HashMap<SymbolU32, DeclId>,
+    ordinary: HashMap<SymbolU32, Vec<OrdinaryBinding>>,
     // Struct/union tags live in their own namespace (C17 §6.2.1): a tag
     // and an ordinary identifier may share a spelling without interacting
     // (`struct test; int test;` declares two unrelated things).
-    pub tags: HashMap<SymbolU32, StructId>,
+    tags: HashMap<SymbolU32, Vec<TagBinding>>,
     // Enum tags share that namespace (a `struct S` and an `enum S` in
     // one scope conflict); they get their own map only so each kind
     // resolves to its own definition table.
-    pub enum_tags: HashMap<SymbolU32, EnumId>,
+    enum_tags: HashMap<SymbolU32, Vec<EnumTagBinding>>,
+    /// One mark per open scope; the file scope is the bottom mark.
+    marks: Vec<ScopeMark>,
+    /// Bindings from closed scopes, in pop order. Append-only.
+    archived: Vec<Archived>,
+}
+
+impl ScopeStack {
+    /// A stack with the file scope open.
+    pub fn new() -> Self {
+        Self {
+            marks: vec![ScopeMark::default()],
+            ..ScopeStack::default()
+        }
+    }
+
+    /// Depth of pushed block/prototype scopes: `0` is file scope.
+    pub fn depth(&self) -> usize {
+        self.marks.len() - 1
+    }
+
+    /// The scope id of the innermost open scope.
+    fn current_id(&self) -> u32 {
+        (self.marks.len() - 1) as u32
+    }
+
+    pub fn push_scope(&mut self) {
+        self.marks.push(ScopeMark::default());
+    }
+
+    /// Close the innermost scope: its bindings return to the lengths
+    /// recorded at insert time and are archived. The file scope never
+    /// closes.
+    pub fn pop_scope(&mut self) {
+        assert!(self.marks.len() > 1, "popping the file scope");
+        for (ns, name, len) in self.marks.pop().unwrap().entries.into_iter().rev() {
+            match ns {
+                Ns::Ordinary => {
+                    if let Some(stack) = self.ordinary.get_mut(&name) {
+                        for binding in stack.drain(len..) {
+                            self.archived.push(Archived::Ordinary(name, binding.id));
+                        }
+                    }
+                }
+                Ns::Tag => {
+                    if let Some(stack) = self.tags.get_mut(&name) {
+                        for binding in stack.drain(len..) {
+                            self.archived.push(Archived::Tag(name, binding.id));
+                        }
+                    }
+                }
+                Ns::EnumTag => {
+                    if let Some(stack) = self.enum_tags.get_mut(&name) {
+                        for binding in stack.drain(len..) {
+                            self.archived.push(Archived::EnumTag(name, binding.id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Record a binding in the innermost open scope.
+    fn insert<T: Insert>(&mut self, ns: Ns, name: SymbolU32, value: T) {
+        let scope = self.current_id();
+        let stack = T::stack_mut(self).entry(name).or_default();
+        let len = stack.len();
+        stack.push(T::binding(scope, value));
+        let mark = self.marks.last_mut().unwrap();
+        mark.entries.push((ns, name, len));
+    }
+
+    /// Record a binding in the file scope, no matter what is open:
+    /// used for lazily declared builtins, which are translation-unit
+    /// entities. Only ever called for spellings no other scope binds.
+    fn insert_file_scope<T: Insert>(&mut self, ns: Ns, name: SymbolU32, value: T) {
+        let stack = T::stack_mut(self).entry(name).or_default();
+        let len = stack.len();
+        stack.push(T::binding(0, value));
+        self.marks[0].entries.push((ns, name, len));
+    }
+
+    fn visible<T: Insert>(&self, name: SymbolU32) -> Option<&T::Binding> {
+        T::stack(self).get(&name).and_then(|stack| stack.last())
+    }
+
+    fn visible_in_current<T: Insert>(&self, name: SymbolU32) -> Option<&T::Binding> {
+        let current = self.current_id();
+        T::stack(self).get(&name).and_then(|stack| stack.iter().rev().find(|b| b.scope() == current))
+    }
+
+    /// The whole live binding stack of `name`, innermost last.
+    fn visible_stack<T: Insert>(&self, name: SymbolU32) -> Option<&Vec<T::Binding>> {
+        T::stack(self).get(&name).filter(|stack| !stack.is_empty())
+    }
+
+    /// The file-scope binding of `name`, if one was recorded.
+    fn file_scope_ordinary(&self, name: SymbolU32) -> Option<DeclId> {
+        self.ordinary.get(&name).and_then(|stack| stack.iter().find(|b| b.scope == 0)).map(|b| b.id)
+    }
+
+    /// The most recent archived ordinary binding of `name`, for
+    /// suggestions pointing into closed scopes.
+    fn archived_ordinary(&self, name: SymbolU32) -> Option<DeclId> {
+        self.archived.iter().rev().find_map(|a| match a {
+            Archived::Ordinary(n, id) if *n == name => Some(*id),
+            _ => None,
+        })
+    }
+}
+
+/// The three binding namespaces a scope separates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ns {
+    Ordinary,
+    Tag,
+    EnumTag,
+}
+
+#[derive(Debug, Default)]
+struct ScopeMark {
+    /// `(namespace, name, stack length to restore)`, in insert order.
+    entries: Vec<(Ns, SymbolU32, usize)>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OrdinaryBinding {
+    scope: u32,
+    id: DeclId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TagBinding {
+    scope: u32,
+    id: StructId,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EnumTagBinding {
+    scope: u32,
+    id: EnumId,
+}
+
+/// A binding that has left every open scope, kept for "did you mean"
+/// suggestions in adjacent scopes.
+#[derive(Debug, Clone, Copy)]
+enum Archived {
+    Ordinary(SymbolU32, DeclId),
+    Tag(SymbolU32, StructId),
+    EnumTag(SymbolU32, EnumId),
+}
+
+/// Uniform access to one namespace's flat map, so [`ScopeStack`] needs
+/// no per-namespace copies of insert/lookup/pop.
+trait Insert: Copy {
+    type Binding: Copy + ScopeScoped;
+    fn stack(stack: &ScopeStack) -> &HashMap<SymbolU32, Vec<Self::Binding>>;
+    fn stack_mut(stack: &mut ScopeStack) -> &mut HashMap<SymbolU32, Vec<Self::Binding>>;
+    fn binding(scope: u32, value: Self) -> Self::Binding;
+}
+
+trait ScopeScoped: Copy {
+    fn scope(&self) -> u32;
+}
+
+impl Insert for DeclId {
+    type Binding = OrdinaryBinding;
+    fn stack(stack: &ScopeStack) -> &HashMap<SymbolU32, Vec<OrdinaryBinding>> {
+        &stack.ordinary
+    }
+    fn stack_mut(stack: &mut ScopeStack) -> &mut HashMap<SymbolU32, Vec<OrdinaryBinding>> {
+        &mut stack.ordinary
+    }
+    fn binding(scope: u32, id: DeclId) -> OrdinaryBinding {
+        OrdinaryBinding { scope, id }
+    }
+}
+
+impl Insert for StructId {
+    type Binding = TagBinding;
+    fn stack(stack: &ScopeStack) -> &HashMap<SymbolU32, Vec<TagBinding>> {
+        &stack.tags
+    }
+    fn stack_mut(stack: &mut ScopeStack) -> &mut HashMap<SymbolU32, Vec<TagBinding>> {
+        &mut stack.tags
+    }
+    fn binding(scope: u32, id: StructId) -> TagBinding {
+        TagBinding { scope, id }
+    }
+}
+
+impl Insert for EnumId {
+    type Binding = EnumTagBinding;
+    fn stack(stack: &ScopeStack) -> &HashMap<SymbolU32, Vec<EnumTagBinding>> {
+        &stack.enum_tags
+    }
+    fn stack_mut(stack: &mut ScopeStack) -> &mut HashMap<SymbolU32, Vec<EnumTagBinding>> {
+        &mut stack.enum_tags
+    }
+    fn binding(scope: u32, id: EnumId) -> EnumTagBinding {
+        EnumTagBinding { scope, id }
+    }
+}
+
+impl ScopeScoped for OrdinaryBinding {
+    fn scope(&self) -> u32 {
+        self.scope
+    }
+}
+impl ScopeScoped for TagBinding {
+    fn scope(&self) -> u32 {
+        self.scope
+    }
+}
+impl ScopeScoped for EnumTagBinding {
+    fn scope(&self) -> u32 {
+        self.scope
+    }
 }
 impl Sema<'static> {
     /// A test-only `Sema` whose arena lives for the rest of the process.
@@ -414,7 +612,7 @@ impl<'a> Sema<'a> {
             decls: vec![],
             structs: vec![],
             enums: vec![],
-            scopes: ScopeStack::default(),
+            scopes: ScopeStack::new(),
             target,
             lang: LangOpts::default(),
             weak_extern_inline: false,
@@ -498,11 +696,10 @@ impl<'a> Sema<'a> {
         self.scopes.depth() == 0
     }
     pub fn push_scope(&mut self) {
-        self.scopes.scopes.push(Scope::default());
+        self.scopes.push_scope();
     }
     pub fn pop_scope(&mut self) {
-        assert!(!self.scopes.scopes.is_empty());
-        self.scopes.scopes.pop();
+        self.scopes.pop_scope();
     }
     // Record `name` in the current scope, merging with a prior
     // declaration of the same entity when C says they are one:
@@ -539,7 +736,7 @@ impl<'a> Sema<'a> {
             }
             let id = DeclId(self.decls.len() as u32);
             self.decls.push(binding);
-            self.scopes.current_mut().ordinary.insert(name, id);
+            self.scopes.insert(Ns::Ordinary, name, id);
             return Ok(id);
         }
         // Has linkage: a same-scope `NoLinkage` entry (a local or a
@@ -608,12 +805,12 @@ impl<'a> Sema<'a> {
             // scope: a block-scope `extern int v;` names the file-scope
             // object for the rest of the block, past a shadowing local
             // (C17 §6.2.2p4).
-            self.scopes.current_mut().ordinary.insert(name, existing);
+            self.scopes.insert(Ns::Ordinary, name, existing);
             return Ok(existing);
         }
         let id = DeclId(self.decls.len() as u32);
         self.decls.push(binding);
-        self.scopes.current_mut().ordinary.insert(name, id);
+        self.scopes.insert(Ns::Ordinary, name, id);
         Ok(id)
     }
     // Mark an existing binding as defined, clearing tentative: a
@@ -665,38 +862,47 @@ impl<'a> Sema<'a> {
     /// must not leave a block-scoped binding behind. Redeclaring
     /// reuses the existing entity.
     pub fn declare_global(&mut self, name: SymbolU32, binding: Binding) -> Result<DeclId, CompileError> {
-        if let Some(existing) = self.scopes.global.ordinary.get(&name).copied() {
+        if let Some(existing) = self.scopes.file_scope_ordinary(name) {
             return Ok(existing);
         }
         let id = DeclId(self.decls.len() as u32);
         self.decls.push(binding);
-        self.scopes.global.ordinary.insert(name, id);
+        self.scopes.insert_file_scope(Ns::Ordinary, name, id);
         Ok(id)
     }
     pub fn lookup_symbol_in_current_scope(&self, sym: SymbolU32) -> Option<DeclId> {
-        self.scopes.current().ordinary.get(&sym).copied()
+        self.scopes.visible_in_current::<DeclId>(sym).map(|b| b.id)
     }
     pub fn lookup_symbol(&self, sym: SymbolU32) -> Option<DeclId> {
-        self.scopes.iter().find_map(|scope| scope.ordinary.get(&sym).copied())
+        self.scopes.visible::<DeclId>(sym).map(|b| b.id)
     }
     /// Ordinary identifiers visible from the current scope, innermost
     /// first. May repeat a spelling when an inner scope shadows an
     /// outer one; used only for "did you mean" suggestions.
     pub fn visible_symbols(&self) -> impl Iterator<Item = SymbolU32> + '_ {
-        self.scopes.iter().flat_map(|scope| scope.ordinary.keys().copied())
+        self.scopes.ordinary.keys().copied().chain(self.scopes.archived.iter().map(
+            |a| match a {
+                Archived::Ordinary(name, _)
+                | Archived::Tag(name, _)
+                | Archived::EnumTag(name, _) => *name,
+            },
+        ))
+    }
+    /// An ordinary binding of `sym` that only exists in scopes which
+    /// have already closed (the archive), for suggestions pointing
+    /// into adjacent scopes.
+    pub fn archived_symbol(&self, sym: SymbolU32) -> Option<DeclId> {
+        self.scopes.archived_ordinary(sym)
     }
     /// Innermost visible binding *with* linkage (C17 §6.2.2p4's "prior
     /// declaration ... visible"): skipped `NoLinkage` locals do not
     /// count, so a block-scope `extern` finds the file-scope entity
     /// past a shadowing local.
     pub fn lookup_visible_with_linkage(&self, sym: SymbolU32) -> Option<DeclId> {
-        for scope in self.scopes.iter() {
-            if let Some(&id) = scope.ordinary.get(&sym)
-                && self.decls[id.0 as usize].linkage != Linkage::NoLinkage {
-                    return Some(id);
-                }
-        }
-        None
+        self.scopes
+            .visible_stack::<DeclId>(sym)
+            .and_then(|stack| stack.iter().rev().find(|b| self.decls[b.id.0 as usize].linkage != Linkage::NoLinkage))
+            .map(|b| b.id)
     }
     /// Prior linkage visible for an `extern` (or linkage-adopting)
     /// declaration: the linkage it inherits (C17 §6.2.2p4), or `None`
@@ -709,7 +915,7 @@ impl<'a> Sema<'a> {
 
     // Look a tag up in the current scope only.
     pub fn lookup_tag(&self, tag: SymbolU32) -> Option<StructId> {
-        self.scopes.current().tags.get(&tag).copied()
+        self.scopes.visible_in_current::<StructId>(tag).map(|b| b.id)
     }
 
     // A specifier *without* a body mentions `tag` (C17 §6.7.2.3): reuse the
@@ -718,7 +924,7 @@ impl<'a> Sema<'a> {
     // is visible, implicitly declare an incomplete type in the current
     // scope.
     pub fn reference_tag(&mut self, tag: SymbolU32, is_union: bool, span: Span) -> Result<StructId, CompileError> {
-        if let Some(id) = self.scopes.iter().find_map(|scope| scope.tags.get(&tag).copied()) {
+        if let Some(id) = self.scopes.visible::<StructId>(tag).map(|b| b.id) {
             self.check_tag_kind(id, is_union, span)?;
             return Ok(id);
         }
@@ -761,7 +967,7 @@ impl<'a> Sema<'a> {
             layout_cache: RefCell::new(None),
             span,
         });
-        self.scopes.current_mut().tags.insert(tag, id);
+        self.scopes.insert(Ns::Tag, tag, id);
         id
     }
 
@@ -814,14 +1020,14 @@ impl<'a> Sema<'a> {
 
     // Look an enum tag up in the current scope only.
     pub fn lookup_enum_tag(&self, tag: SymbolU32) -> Option<EnumId> {
-        self.scopes.current().enum_tags.get(&tag).copied()
+        self.scopes.visible_in_current::<EnumId>(tag).map(|b| b.id)
     }
 
     // A use of `enum tag` without a body: reuse a visible enum tag, else
     // implicitly declare an incomplete one here (erroring when a
     // struct/union tag owns the spelling in this scope).
     pub fn reference_enum_tag(&mut self, tag: SymbolU32, span: Span) -> Result<EnumId, CompileError> {
-        if let Some(id) = self.scopes.iter().find_map(|scope| scope.enum_tags.get(&tag).copied()) {
+        if let Some(id) = self.scopes.visible::<EnumId>(tag).map(|b| b.id) {
             return Ok(id);
         }
         self.check_no_struct_tag(tag, span)?;
@@ -856,7 +1062,7 @@ impl<'a> Sema<'a> {
             fixed: None,
             span,
         });
-        self.scopes.current_mut().enum_tags.insert(tag, id);
+        self.scopes.insert(Ns::EnumTag, tag, id);
         id
     }
 
@@ -913,14 +1119,14 @@ impl<'a> Sema<'a> {
     // A struct/union tag in this scope blocks an enum of the same
     // spelling (and vice versa): one tag namespace (C17 §6.2.3).
     fn check_no_struct_tag(&self, tag: SymbolU32, span: Span) -> Result<(), CompileError> {
-        if let Some(id) = self.scopes.current().tags.get(&tag) {
+        if let Some(id) = self.scopes.visible_in_current::<StructId>(tag).map(|b| b.id) {
             return Err(CompileError::new("conflicting redeclaration", span).with_secondary(self.structs[id.0 as usize].span, "previously declared here"));
         }
         Ok(())
     }
 
     fn check_no_enum_tag(&self, tag: SymbolU32, span: Span) -> Result<(), CompileError> {
-        if let Some(id) = self.scopes.current().enum_tags.get(&tag) {
+        if let Some(id) = self.scopes.visible_in_current::<EnumId>(tag).map(|b| b.id) {
             return Err(CompileError::new("conflicting redeclaration", span).with_secondary(self.enums[id.0 as usize].span, "previously declared here"));
         }
         Ok(())
