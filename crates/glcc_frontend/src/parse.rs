@@ -3555,7 +3555,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// the implicit-declaration path declares it with the real
     /// prototype (`libc_prototype`). The frame-address builtins need
     /// no rewrite — checking folds them inline.
-    const RUNTIME_BUILTIN_NAMES: &[(&str, &str)] = &[("__builtin_setjmp", "__glccrt_setjmp"), ("__builtin_longjmp", "__glccrt_longjmp")];
+    const RUNTIME_BUILTIN_NAMES: &'static [(&'static str, &'static str)] = &[("__builtin_setjmp", "__glccrt_setjmp"), ("__builtin_longjmp", "__glccrt_longjmp")];
     /// C89 implicit function declaration (§3.3.2.2): a call `f(...)`
     /// with no visible declaration of `f` implicitly declares
     /// `extern int f()` (unprototyped, so arguments undergo the
