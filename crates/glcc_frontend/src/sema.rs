@@ -401,15 +401,15 @@ impl ScopeStack {
                 }
                 Ns::Tag => {
                     if let Some(stack) = self.tags.get_mut(&name) {
-                        for binding in stack.drain(len..) {
-                            self.archived.push(Archived::Tag(name, binding.id));
+                        for _binding in stack.drain(len..) {
+                            self.archived.push(Archived::Tag(name));
                         }
                     }
                 }
                 Ns::EnumTag => {
                     if let Some(stack) = self.enum_tags.get_mut(&name) {
-                        for binding in stack.drain(len..) {
-                            self.archived.push(Archived::EnumTag(name, binding.id));
+                        for _binding in stack.drain(len..) {
+                            self.archived.push(Archived::EnumTag(name));
                         }
                     }
                 }
@@ -499,12 +499,13 @@ struct EnumTagBinding {
 }
 
 /// A binding that has left every open scope, kept for "did you mean"
-/// suggestions in adjacent scopes.
+/// suggestions in adjacent scopes. Only ordinary identifiers get
+/// suggested with a resolved entity; tags need the spelling alone.
 #[derive(Debug, Clone, Copy)]
 enum Archived {
     Ordinary(SymbolU32, DeclId),
-    Tag(SymbolU32, StructId),
-    EnumTag(SymbolU32, EnumId),
+    Tag(SymbolU32),
+    EnumTag(SymbolU32),
 }
 
 /// Uniform access to one namespace's flat map, so [`ScopeStack`] needs
@@ -882,9 +883,7 @@ impl<'a> Sema<'a> {
     pub fn visible_symbols(&self) -> impl Iterator<Item = SymbolU32> + '_ {
         self.scopes.ordinary.keys().copied().chain(self.scopes.archived.iter().map(
             |a| match a {
-                Archived::Ordinary(name, _)
-                | Archived::Tag(name, _)
-                | Archived::EnumTag(name, _) => *name,
+                Archived::Ordinary(name, _) | Archived::Tag(name) | Archived::EnumTag(name) => *name,
             },
         ))
     }
