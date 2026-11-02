@@ -7,7 +7,12 @@
 // These execute generated code in-process. The JIT harness binds POSIX
 // symbols and drives tests through Unix shell utilities, so it stays off
 // Windows even though the backend now lowers Win64.
-#![cfg(not(windows))]
+//
+// aarch64 hosts are excluded too: cranelift-jit only implements
+// `is_pic=true` on x86_64, so on aarch64 an extern whose libc mapping
+// lands outside ADRP's ±2GB range panics at relocation time — under
+// ASLR that is per-run luck, and the suite fails nondeterministically.
+#![cfg(not(any(windows, target_arch = "aarch64")))]
 
 use std::collections::HashMap;
 

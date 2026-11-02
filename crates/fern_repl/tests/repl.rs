@@ -1,7 +1,11 @@
 //! REPL core tests: definitions persist, redefinitions win, and failed
 //! input rolls back to the last good program.
 
-#![cfg(not(windows))]
+// aarch64 hosts are excluded alongside Windows: the REPL JIT-executes
+// every expression, and cranelift-jit only implements `is_pic=true` on
+// x86_64 — on aarch64 an extern beyond ADRP's ±2GB range panics at
+// relocation time, which under ASLR fails nondeterministically.
+#![cfg(not(any(windows, target_arch = "aarch64")))]
 
 use fern_repl::{Repl, input_incomplete, is_definition};
 

@@ -14,7 +14,9 @@ fn assemble(src: &str, obj: &std::path::Path) -> Result<(), String> {
     std::fs::write(obj, bytes).map_err(|e| e.to_string())
 }
 
-/// Runs `_start`-style source; returns the process exit code.
+/// Runs `_start`-style source; returns the process exit code. Only
+/// meaningful on an x86_64 host: the GAS frontend emits x86-64
+/// objects, which another host's `ld` cannot link.
 fn run_exit(src: &str, name: &str) -> Option<i32> {
     if Command::new("ld").arg("--version").output().is_err() {
         return None;
@@ -31,6 +33,8 @@ fn run_exit(src: &str, name: &str) -> Option<i32> {
     code
 }
 
+// Links and runs an x86-64 object; other hosts cannot.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn naked_function_asm() {
     // Exactly what glcc's driver writes for a naked function.
@@ -48,6 +52,8 @@ _start:
     assert_eq!(code, Some(7));
 }
 
+// Links and runs an x86-64 object; other hosts cannot.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn rip_relative_data_and_comms() {
     // Buffer in .comm, byte store + load, arithmetic in .data.
@@ -73,6 +79,8 @@ sum:    .quad 100
     assert_eq!(code, Some(165));
 }
 
+// Links and runs an x86-64 object; other hosts cannot.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn numeric_labels() {
     let code = run_exit(
@@ -92,6 +100,8 @@ _start:
     assert_eq!(code, Some(8));
 }
 
+// Links and runs an x86-64 object; other hosts cannot.
+#[cfg(target_arch = "x86_64")]
 #[test]
 fn suffixes_and_special_mnemonics() {
     let code = run_exit(
