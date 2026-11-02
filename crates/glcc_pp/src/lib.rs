@@ -362,14 +362,22 @@ pub fn fallback_predefines(triple: Option<&str>) -> Vec<(String, String)> {
     const X86_64: &str = include_str!("builtins/x86_64-linux-gnu.dM");
     const AARCH64: &str = include_str!("builtins/aarch64-linux-gnu.dM");
     const RISCV64: &str = include_str!("builtins/riscv64-linux-gnu.dM");
-    let t = triple.unwrap_or(if cfg!(target_arch = "aarch64") {
+    /// MSVC-mode snapshot (`clang --target=x86_64-pc-windows-msvc
+    /// -dM -E`, VS 2022 clang 15): `_MSC_VER`/`_WIN64` and friends, no
+    /// `__linux__`/`__LP64__` — the SDK headers take MSVC paths.
+    const WINDOWS: &str = include_str!("builtins/x86_64-windows-msvc.dM");
+    let t = triple.unwrap_or(if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(target_arch = "aarch64") {
         "aarch64-linux-gnu"
     } else if cfg!(target_arch = "riscv64") {
         "riscv64-linux-gnu"
     } else {
         "x86_64-linux-gnu"
     });
-    let text = if t.contains("aarch64") {
+    let text = if t.contains("windows") || t.contains("msvc") || t.contains("mingw") {
+        WINDOWS
+    } else if t.contains("aarch64") {
         AARCH64
     } else if t.contains("riscv") {
         RISCV64
@@ -1547,6 +1555,24 @@ mod tests {
         assert_eq!(get("__x86_64__").as_deref(), Some("1"));
         // Function-like builtins keep their parameter lists.
         assert!(defs.iter().any(|(k, _)| k == "__INTMAX_C(c)"), "has INTMAX_C");
+    }
+
+    #[test]
+    fn fallback_predefines_windows_are_msvc_mode() {
+        for triple in ["x86_64-pc-windows-msvc", "x86_64-w64-mingw32", "x86_64-windows"] {
+            let defs = fallback_predefines(Some(triple));
+            let get = |n: &str| defs.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+            assert_eq!(get("_WIN64").as_deref(), Some("1"), "{triple}");
+            assert!(get("_MSC_VER").is_some(), "{triple} lacks _MSC_VER");
+            assert_eq!(get("_INTEGRAL_MAX_BITS").as_deref(), Some("64"), "{triple}");
+            // LLP64: `long` stays 4 bytes; the Linux markers are gone.
+            assert_eq!(get("__SIZEOF_LONG__").as_deref(), Some("4"), "{triple}");
+            assert!(get("__linux__").is_none(), "{triple}");
+            assert!(get("__LP64__").is_none(), "{triple}");
+        }
+        // A GNU/Linux triple still gets the Linux snapshot.
+        let linux = fallback_predefines(Some("x86_64-linux-gnu"));
+        assert!(linux.iter().any(|(k, _)| k == "__linux__"));
     }
 
     #[test]
