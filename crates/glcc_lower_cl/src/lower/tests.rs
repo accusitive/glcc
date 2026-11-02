@@ -3,7 +3,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 
 use glcc_mir as mir;
 
-use super::{dense_switch_span, lower_module};
+use super::inst::dense_switch_span;
+use super::lower_module;
 
 #[test]
 fn dense_switch_span_fills_small_gaps() {

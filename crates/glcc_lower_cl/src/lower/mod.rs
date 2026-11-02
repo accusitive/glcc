@@ -18,7 +18,6 @@ mod mem;
 mod rt;
 
 pub(crate) use body::*;
-pub(crate) use inst::*;
 pub(crate) use call::*;
 pub(crate) use data::*;
 pub(crate) use mem::*;
