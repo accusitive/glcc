@@ -338,6 +338,6 @@ pub(crate) fn lower_block<M: Module>(
     let Some(term) = block.term.clone() else {
         panic!("unterminated MIR block");
     };
-    self.emit_term(builder, term);
+    self.emit_term(builder, clif, func_ids, extern_ids, rt, layouts, extern_layouts, term);
 }
 }

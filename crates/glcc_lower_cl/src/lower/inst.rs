@@ -7,11 +7,11 @@ use cranelift_codegen::ir::{
     AtomicRmwOp, BlockArg, InstBuilder, MemFlagsData, SourceLoc, StackSlotData,
     StackSlotKind, TrapCode,
 };
-use cranelift_codegen::ir::{Block as ClifBlock, Value as ClifValue};
+use cranelift_codegen::ir::{Block as ClifBlock, FuncRef, Value as ClifValue};
 use cranelift_frontend::{FunctionBuilder, Switch};
 use cranelift_module::{FuncId, Linkage, Module};
 
-use glcc_mir as mir;
+use glcc_mir::{self as mir};
 
 use crate::abi::{self, Arch, SigLayout};
 use crate::memflags;
@@ -431,6 +431,22 @@ pub(crate) fn emit_inst<M: Module>(
         mir::InstKind::Popcnt(a) => {
             let x = self.operand(builder, a);
             Some(builder.ins().popcnt(x))
+        }
+        mir::InstKind::EhTypeId { typeinfo } => {
+            let mut found = None;
+            let mut index = 0u64;
+            for block in self.func.blocks.iter() {
+                let Some(clauses) = &block.lpad else { continue };
+                for clause in clauses {
+                    index += 1;
+                    if let mir::LpadClause::Catch(g) = clause
+                        && *g == typeinfo {
+                            found = Some(index);
+                        }
+                }
+            }
+            let selector = found.unwrap_or_else(|| panic!("eh.typeid for a typeinfo this function never catches"));
+            Some(builder.ins().iconst(types::I32, selector as i64))
         }
         mir::InstKind::Bswap(a) => {
             let x = self.operand(builder, a);
@@ -1077,6 +1093,7 @@ pub(crate) fn emit_inst<M: Module>(
                 &args,
                 &result_ty,
                 data.result,
+                None,
             )
         }
         mir::InstKind::CallExtern { target, args } => {
@@ -1096,6 +1113,7 @@ pub(crate) fn emit_inst<M: Module>(
                 &args,
                 &result_ty,
                 data.result,
+                None,
             )
         }
         // The coroutine pass rewrites every `await` to a poll loop
@@ -1119,6 +1137,7 @@ pub(crate) fn emit_inst<M: Module>(
                 &args,
                 &result_ty,
                 data.result,
+                None,
             )
         }
         mir::InstKind::VaStart { ap } => {
@@ -1302,7 +1321,19 @@ pub(crate) fn gep_addr(&mut self, builder: &mut FunctionBuilder, base: ClifValue
     }
     addr
 }
-pub(crate) fn emit_term(&mut self, builder: &mut FunctionBuilder, term: mir::Terminator) {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_term<M: Module>(
+    &mut self,
+    builder: &mut FunctionBuilder,
+    clif: &mut M,
+    func_ids: &HashMap<mir::Func, FuncId>,
+    extern_ids: &HashMap<mir::Extern, FuncId>,
+    rt: &Rt,
+    layouts: &HashMap<mir::Func, SigLayout>,
+    extern_layouts: &HashMap<mir::Extern, SigLayout>,
+    term: mir::Terminator,
+) {
+    use cranelift_codegen::ir::{BlockArg, BlockCall};
     match term {
         mir::Terminator::Br { dest, args } => {
             let target = self.blocks[&dest];
@@ -1409,6 +1440,74 @@ pub(crate) fn emit_term(&mut self, builder: &mut FunctionBuilder, term: mir::Ter
                 let otherwise = if i + 1 < tests.len() { tests[i + 1] } else { default_target };
                 builder.ins().brif(same, target, &[], otherwise, &[]);
             }
+        }
+        mir::Terminator::Resume { exn, .. } => {
+            // `_Unwind_Resume` never returns; keep the selector unreferenced.
+            let exn_clif = self.operand(builder, exn);
+            let mut sig = cranelift_codegen::ir::Signature::new(self.target.call_conv());
+            sig.params.push(cranelift_codegen::ir::AbiParam::new(types::I64));
+            let func_id = clif
+                .declare_function("_Unwind_Resume", Linkage::Import, &sig)
+                .unwrap_or_else(|e| panic!("cannot declare _Unwind_Resume: {e:?}"));
+            let funcref: FuncRef = clif.declare_func_in_func(func_id, builder.func);
+            builder.ins().call(funcref, &[exn_clif]);
+            builder.ins().trap(TrapCode::user(1).expect("nonzero trap code"));
+            self.current = None;
+            return;
+        }
+        mir::Terminator::Invoke { callee, args, sig, normal, normal_args, unwind } => {
+            let normal_target = self.blocks[&normal];
+            let unwind_target = self.blocks[&unwind];
+            // The normal edge passes the call's results first, then the
+            // extra branch arguments.
+            let returns = usize::from(!sig.ret.is_void());
+            assert_eq!(
+                self.func.blocks[normal].params.len(),
+                returns + normal_args.len(),
+                "invoke normal edge arity mismatch"
+            );
+            let mut edge_args: Vec<BlockArg> = (0..returns as u32).map(|i| BlockArg::TryCallRet(i)).collect();
+            edge_args.extend(normal_args.iter().map(|a| BlockArg::Value(self.operand(builder, *a))));
+            let payload = self
+                .target
+                .call_conv()
+                .exception_payload_types(types::I64)
+                .len();
+            let exn_args: Vec<BlockArg> = (0..payload as u32).map(|i| BlockArg::TryCallExn(i)).collect();
+            let normal_call = BlockCall::new(normal_target, edge_args, &mut builder.func.dfg.value_lists);
+            let unwind_call = BlockCall::new(unwind_target, exn_args, &mut builder.func.dfg.value_lists);
+            let (target, callee_layout) = match callee {
+                mir::InvokeCallee::Func(f) => (CallTarget::Internal(f), layouts[&f].clone()),
+                mir::InvokeCallee::Extern(e) => (CallTarget::External(e), extern_layouts[&e].clone()),
+                mir::InvokeCallee::Indirect(v) => {
+                    let addr = self.addr_operand(builder, v);
+                    let layout = abi::layout_sig(self.target, &sig.params, &sig.ret, sig.variadic);
+                    (CallTarget::Indirect { addr, variadic: sig.variadic }, layout)
+                }
+            };
+            let try_targets = Some(super::call::TryTargets { normal: normal_call, unwind: unwind_call });
+            let ret_ty = sig.ret.clone();
+            emit_call(
+                self,
+                builder,
+                clif,
+                func_ids,
+                extern_ids,
+                &HashMap::new(),
+                rt,
+                layouts,
+                extern_layouts,
+                target,
+                &callee_layout,
+                &args,
+                &Some(ret_ty),
+                None,
+                try_targets,
+            );
+            // try_call is a terminator: the next source block must force
+            // a block switch.
+            self.current = None;
+            return;
         }
         mir::Terminator::Return { val } => {
             // Clone the piece list first: loading the value below

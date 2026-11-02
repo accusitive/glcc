@@ -12,7 +12,7 @@ use std::fmt;
 use smallvec::SmallVec;
 
 use crate::builder::ModuleBuilder;
-use crate::ir::{Block, Const, DataReloc, Def, Extern, FcmpPred, Func, Global, Inst, InstData, InstKind, IcmpPred, MemFlags, Module, Terminator, Value, ValueData};
+use crate::ir::{Block, Const, DataReloc, Def, Extern, FcmpPred, Func, Global, Inst, InstData, InstKind, IcmpPred, InvokeCallee, LpadClause, MemFlags, Module, Terminator, Value, ValueData};
 use crate::ty::{FloatKind, GepIndex, Signature, Ty};
 
 /// Parse failure: the 1-based source line it was detected on plus a
@@ -99,7 +99,7 @@ pub fn parse_module(text: &str) -> Result<Module, MirParseError> {
                     && matches!(toks.get(1), Some(Tok::Punct(':')) | Some(Tok::Punct('(')));
                 if is_label_line {
                     let mut c = Cursor { toks: &toks[1..], pos: 0, line: *line_no, depth: 0 };
-                    parse_label_line(&mut builder.module, ctx, first, &mut c)?;
+                    parse_label_line(&mut builder.module, ctx, first, &names, &mut c)?;
                 } else {
                     let mut c = Cursor { toks, pos: 0, line: *line_no, depth: 0 };
                     parse_inst(&mut builder.module, ctx, &names, &mut c)?;
@@ -492,6 +492,7 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
     let mut local = false;
     let mut weak = false;
     let mut inline = false;
+    let mut personality: Option<Extern> = None;
     loop {
         let flag = c.peek_word().map(str::to_string);
         match flag.as_deref() {
@@ -513,6 +514,18 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
         }
     }
     let sig = parse_sig(c)?;
+    if c.eat_word("personality") {
+        c.expect_punct('=')?;
+        let word = c.word()?;
+        let pname = symbol(&word)
+            .ok_or_else(|| c.err(format!("expected @name after personality=, found `{word}`")))?;
+        personality = Some(
+            *names
+                .externs
+                .get(pname)
+                .ok_or_else(|| c.err(format!("unknown personality @{pname} (missing .extern)")))?,
+        );
+    }
     expect_done(c)?;
     if names.funcs.contains_key(name) {
         return Err(c.err(format!("duplicate function @{name}")));
@@ -522,6 +535,7 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
     func.local = local;
     func.weak = weak;
     func.inline = inline;
+    func.personality = personality;
     names.funcs.insert(name.to_string(), id);
     Ok(id)
 }
@@ -992,7 +1006,7 @@ fn block_ref(module: &mut Module, ctx: &mut FnCtx, label: u32, args: &[Value], l
     Ok(b)
 }
 
-fn parse_label_line(module: &mut Module, ctx: &mut FnCtx, word: &str, c: &mut Cursor) -> Result<(), MirParseError> {
+fn parse_label_line(module: &mut Module, ctx: &mut FnCtx, word: &str, names: &Names, c: &mut Cursor) -> Result<(), MirParseError> {
     let line = c.line;
     let label = parse_label(word).expect("label checked by caller");
     let mut decls: Vec<(u32, Ty)> = Vec::new();
@@ -1012,6 +1026,37 @@ fn parse_label_line(module: &mut Module, ctx: &mut FnCtx, word: &str, c: &mut Cu
                 }
             }
         }
+    }
+    let mut lpad: Option<SmallVec<[LpadClause; 4]>> = None;
+    if c.eat_word(".lpad") {
+        c.expect_punct('[')?;
+        let mut clauses = SmallVec::new();
+        loop {
+            if c.eat_punct(']') {
+                break;
+            }
+            let word = c.word()?;
+            match word.as_str() {
+                "catchall" => clauses.push(LpadClause::CatchAll),
+                "cleanup" => clauses.push(LpadClause::Cleanup),
+                "catch" => {
+                    let word = c.word()?;
+                    let gname = symbol(&word)
+                        .ok_or_else(|| c.err(format!("expected @name after catch, found `{word}`")))?;
+                    let global = *names
+                        .globals
+                        .get(gname)
+                        .ok_or_else(|| c.err(format!("catch of unknown typeinfo @{gname} (missing .dataextern)")))?;
+                    clauses.push(LpadClause::Catch(global));
+                }
+                other => return Err(c.err(format!("unknown .lpad clause `{other}`"))),
+            }
+            if !c.eat_punct(',') {
+                c.expect_punct(']')?;
+                break;
+            }
+        }
+        lpad = Some(clauses);
     }
     c.expect_punct(':')?;
     expect_done(c)?;
@@ -1035,6 +1080,9 @@ fn parse_label_line(module: &mut Module, ctx: &mut FnCtx, word: &str, c: &mut Cu
             b
         }
     };
+    if let Some(clauses) = lpad {
+        module.funcs[ctx.func].blocks[b].lpad = Some(clauses);
+    }
     let nparams = module.funcs[ctx.func].blocks[b].params.len();
     if declares_params && nparams != decls.len() {
         return Err(c.err(format!("block b{label} takes {nparams} branch arguments but its label declares {}", decls.len())));
@@ -1345,7 +1393,30 @@ fn parse_branch_target(module: &mut Module, ctx: &mut FnCtx, c: &mut Cursor) -> 
     Ok((block, args))
 }
 
-fn parse_term(module: &mut Module, ctx: &mut FnCtx, c: &mut Cursor, op: &str) -> Result<Terminator, MirParseError> {
+/// Pre-create a referenced block's params for an edge whose arguments
+/// are not plain value references (invoke results, lpad payload). A
+/// fresh block gets placeholder params; one that already has params
+/// (from its label or another edge) must match the count.
+fn reserve_edge_params(module: &mut Module, ctx: &FnCtx, block: Block, tys: &[Ty], line: u32) -> Result<(), MirParseError> {
+    let func = &mut module.funcs[ctx.func];
+    let have = func.blocks[block].params.len();
+    if have == 0 {
+        for (i, ty) in tys.iter().enumerate() {
+            let v = func.values.push(ValueData { ty: ty.clone(), def: Def::Param(block, i as u32) });
+            func.blocks[block].params.push(v);
+        }
+        return Ok(());
+    }
+    if have != tys.len() {
+        return Err(MirParseError {
+            line,
+            message: format!("block b{} takes {have} params but this edge supplies {}", block.index(), tys.len()),
+        });
+    }
+    Ok(())
+}
+
+fn parse_term(module: &mut Module, ctx: &mut FnCtx, names: &Names, c: &mut Cursor, op: &str) -> Result<Terminator, MirParseError> {
     match op {
         "br" => {
             let (dest, args) = parse_branch_target(module, ctx, c)?;
@@ -1399,6 +1470,52 @@ fn parse_term(module: &mut Module, ctx: &mut FnCtx, c: &mut Cursor, op: &str) ->
                 Ok(Terminator::Return { val: Some(val) })
             }
         }
+        "resume" => {
+            let exn = need_val_operand(module, ctx, c, "resume exception")?;
+            c.expect_punct(',')?;
+            let sel = need_val_operand(module, ctx, c, "resume selector")?;
+            expect_done(c)?;
+            Ok(Terminator::Resume { exn, sel })
+        }
+        "invoke" | "invoke.ext" | "invoke.ind" => {
+            let callee = match op {
+                "invoke" => {
+                    let word = c.word()?;
+                    let name = symbol(&word).ok_or_else(|| c.err(format!("expected @name, found `{word}`")))?;
+                    let f = *names.funcs.get(name).ok_or_else(|| c.err(format!("invoke of unknown function @{name} (missing .func)")))?;
+                    InvokeCallee::Func(f)
+                }
+                "invoke.ext" => {
+                    let word = c.word()?;
+                    let name = symbol(&word).ok_or_else(|| c.err(format!("expected @name, found `{word}`")))?;
+                    let e = *names.externs.get(name).ok_or_else(|| c.err(format!("invoke of unknown extern @{name} (missing .extern)")))?;
+                    InvokeCallee::Extern(e)
+                }
+                _ => InvokeCallee::Indirect(need_val_operand(module, ctx, c, "invoke.ind callee")?),
+            };
+            let sig = parse_sig(c)?;
+            if !c.done() {
+                c.expect_punct(',')?;
+            }
+            let args = parse_call_args(module, ctx, c)?;
+            c.expect_word("to")?;
+            let (normal, _normal_args) = parse_branch_target(module, ctx, c)?;
+            // The normal edge carries the call's results as the first
+            // block params; reserve them now so the label line (or a
+            // later branch) sees the arity.
+            let result_tys: Vec<Ty> = if sig.ret.is_void() { Vec::new() } else { vec![sig.ret.clone()] };
+            reserve_edge_params(module, ctx, normal, &result_tys, c.line)?;
+            c.expect_word("unwind")?;
+            let word = c.word()?;
+            let label = parse_label(&word).ok_or_else(|| c.err(format!("expected a block label after unwind, found `{word}`")))?;
+            let unwind = block_ref(module, ctx, label, &[], c.line)?;
+            // Landing-pad payload params are declared on the label line
+            // (their types are target-dependent); reserve two pending
+            // slots (`Ty::Void` is the established placeholder).
+            reserve_edge_params(module, ctx, unwind, &[Ty::Void, Ty::Void], c.line)?;
+            expect_done(c)?;
+            Ok(Terminator::Invoke { callee, args, sig, normal, normal_args: Default::default(), unwind })
+        }
         "unreachable" => Ok(Terminator::Unreachable),
         _ => unreachable!("terminator op checked by caller"),
     }
@@ -1414,7 +1531,6 @@ fn parse_call_args(module: &mut Module, ctx: &mut FnCtx, c: &mut Cursor) -> Resu
             break;
         }
     }
-    expect_done(c)?;
     Ok(args)
 }
 
@@ -1426,9 +1542,9 @@ fn parse_inst(module: &mut Module, ctx: &mut FnCtx, names: &Names, c: &mut Curso
 
     ctx.last_inst_line = Some(line);
 
-    if matches!(op.as_str(), "br" | "brif" | "switch" | "ret" | "unreachable") {
+    if matches!(op.as_str(), "br" | "brif" | "switch" | "ret" | "unreachable" | "resume" | "invoke" | "invoke.ext" | "invoke.ind") {
         no_result(&result, &op, line)?;
-        let term = parse_term(module, ctx, c, &op)?;
+        let term = parse_term(module, ctx, names, c, &op)?;
         let func = &mut module.funcs[ctx.func];
         if func.blocks[cur].term.is_some() {
             return Err(c.err("block already has a terminator"));
@@ -1687,6 +1803,16 @@ fn parse_inst(module: &mut Module, ctx: &mut FnCtx, names: &Names, c: &mut Curso
             } else {
                 push_inst(module, ctx, cur, kind, None);
             }
+        }
+        "eh.typeid" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let word = c.word()?;
+            let gname = symbol(&word).ok_or_else(|| c.err(format!("expected @name after eh.typeid, found `{word}`")))?;
+            let typeinfo = *names
+                .globals
+                .get(gname)
+                .ok_or_else(|| c.err(format!("eh.typeid of unknown typeinfo @{gname} (missing .dataextern)")))?;
+            emit_value(module, ctx, cur, InstKind::EhTypeId { typeinfo }, n, ty, line)?;
         }
         _ => return Err(c.err(format!("unknown instruction `{op}`"))),
     }

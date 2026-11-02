@@ -151,3 +151,37 @@ fn branches_print_targets_and_arguments() {
     assert!(text.contains(&format!("switch {} [0: b1, 1: b2] default b3", val_name(&f, scrut))), "{text}");
     assert!(text.contains(&format!("brif {} b5 b3({})", val_name(&f, cond), val_name(&f, p))), "{text}");
 }
+
+#[test]
+fn eh_constructs_dump() {
+    use crate::ir::{InvokeCallee, LpadClause};
+    let sig = Signature::new(vec![Ty::int(32)], Ty::Void);
+    let (mut f, entry) = Function::new("catcher", sig);
+    f.personality = Some(crate::ir::Extern::from_usize(7));
+    let x = param(&mut f, entry, Ty::int(32));
+    let normal = f.push_block(vec![Ty::int(32)]);
+    let lpad = f.push_block(vec![Ty::ptr(Ty::Void), Ty::int(64)]);
+    let cleanup = f.push_block(vec![]);
+    f.blocks[lpad].lpad = Some(smallvec::smallvec![LpadClause::Catch(crate::ir::Global::from_usize(3)), LpadClause::CatchAll]);
+    f.blocks[entry].term = Some(Terminator::Invoke {
+        callee: InvokeCallee::Extern(crate::ir::Extern::from_usize(2)),
+        args: smallvec::smallvec![x],
+        sig: Signature::new(vec![Ty::int(32)], Ty::int(32)),
+        normal,
+        normal_args: Default::default(),
+        unwind: lpad,
+    });
+    let exn = f.blocks[lpad].params[0];
+    let sel = f.blocks[lpad].params[1];
+    f.blocks[normal].term = Some(Terminator::Return { val: None });
+    f.blocks[lpad].term = Some(Terminator::Resume { exn, sel });
+    f.blocks[cleanup].term = Some(Terminator::Unreachable);
+
+    let mut module = Module::default();
+    module.push_func(f);
+    let dump = dump_module(&module);
+    assert!(dump.contains("func @catcher personality=e7:"), "{dump}");
+    assert!(dump.contains(".lpad [catch g3, catchall]"), "{dump}");
+    assert!(dump.contains("invoke.ext e2 sig=(i32) -> i32 (%0) to b1 unwind b2"), "{dump}");
+    assert!(dump.contains("resume %2 %3"), "{dump}");
+}

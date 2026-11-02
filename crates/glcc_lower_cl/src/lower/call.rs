@@ -45,6 +45,7 @@ pub(crate) fn emit_call<M: Module>(
     args: &[mir::Value],
     result_ty: &Option<mir::Ty>,
     result_val: Option<mir::Value>,
+    try_targets: Option<TryTargets>,
 ) -> Option<ClifValue> {
     let (variadic, foreign) = match target {
         CallTarget::Internal(f) => (layouts[&f].variadic, false),
@@ -191,6 +192,9 @@ pub(crate) fn emit_call<M: Module>(
     // externs (whose declarations use the same layout). Variadic calls
     // and foreign `long double` returns build a per-call signature and
     // go indirect.
+    if foreign_f80_ret && try_targets.is_some() {
+        panic!("invoke of a foreign long-double-returning function is unsupported");
+    }
     let indirect = variadic || foreign_f80_ret || matches!(target, CallTarget::Indirect { .. });
     if !indirect {
         let clif_id = match target {
@@ -199,6 +203,12 @@ pub(crate) fn emit_call<M: Module>(
             CallTarget::Indirect { .. } => panic!("indirect call marked direct"),
         };
         let funcref: FuncRef = clif.declare_func_in_func(clif_id, builder.func);
+        if let Some(targets) = try_targets {
+            let sigref = builder.import_signature(sig);
+            let table = body.exception_table(builder, sigref, targets);
+            builder.ins().try_call(funcref, &clif_args, table);
+            return None;
+        }
         let inst = builder.ins().call(funcref, &clif_args);
         return body.map_call_results(builder, inst, &callee_layout.ret, sret_temp, result_val);
     }
@@ -228,6 +238,11 @@ pub(crate) fn emit_call<M: Module>(
         let jump = clif.declare_func_in_func(jmp_va, builder.func);
         let jump_addr = builder.ins().func_addr(types::I64, jump);
         let sigref = builder.import_signature(sig);
+        if let Some(targets) = try_targets {
+            let table = body.exception_table(builder, sigref, targets);
+            builder.ins().try_call_indirect(jump_addr, &clif_args, table);
+            return None;
+        }
         let inst = builder.ins().call_indirect(sigref, jump_addr, &clif_args);
         if foreign_f80_ret {
             return Some(foreign_f80_result(builder, clif, rt));
@@ -235,11 +250,40 @@ pub(crate) fn emit_call<M: Module>(
         return body.map_call_results(builder, inst, &callee_layout.ret, sret_temp, result_val);
     }
     let sigref = builder.import_signature(sig);
+    if let Some(targets) = try_targets {
+        let table = body.exception_table(builder, sigref, targets);
+        builder.ins().try_call_indirect(addr, &clif_args, table);
+        return None;
+    }
     let inst = builder.ins().call_indirect(sigref, addr, &clif_args);
     if foreign_f80_ret {
         return Some(foreign_f80_result(builder, clif, rt));
     }
     body.map_call_results(builder, inst, &callee_layout.ret, sret_temp, result_val)
+}
+
+/// Pre-built branch targets for a `try_call`: the normal edge carries the
+/// call's results (`TryCallRet`), the unwind edge the unwinder's payload
+/// registers (`TryCallExn`).
+pub(crate) struct TryTargets {
+    pub normal: cranelift_codegen::ir::BlockCall,
+    pub unwind: cranelift_codegen::ir::BlockCall,
+}
+
+impl<'m> Body<'m> {
+    fn exception_table(
+        &self,
+        builder: &mut FunctionBuilder,
+        sigref: cranelift_codegen::ir::SigRef,
+        targets: TryTargets,
+    ) -> cranelift_codegen::ir::ExceptionTable {
+        use cranelift_codegen::ir::{ExceptionTableData, ExceptionTableItem};
+        builder
+            .func
+            .dfg
+            .exception_tables
+            .push(ExceptionTableData::new(sigref, targets.normal, [ExceptionTableItem::Default(targets.unwind)]))
+    }
 }
 
 /// Fetch a foreign `long double` result from the live `st(0)` into a

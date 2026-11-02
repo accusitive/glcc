@@ -114,7 +114,10 @@ fn analyze(func: &Function, dom: &DomInfo, header: Block, set: &HashSet<Block>) 
                     return None;
                 }
             }
-            Terminator::Return { .. } | Terminator::Unreachable => return None,
+            // A call that can unwind runs arbitrary code per trip and
+            // carries a second CFG edge; unrolling it is out of scope.
+            Terminator::Invoke { .. } => return None,
+            Terminator::Resume { .. } | Terminator::Return { .. } | Terminator::Unreachable => return None,
         }
     }
     if backedges.len() != 1 {
@@ -447,7 +450,19 @@ fn clone_term(term: &Terminator, blocks: &HashMap<Block, Block>, values: &HashMa
             cases: cases.iter().map(|(case, dest)| (*case, block(*dest))).collect(),
             default: block(*default),
         },
-        Terminator::Return { .. } | Terminator::Unreachable => {
+        Terminator::Invoke { callee, args, sig, normal, normal_args, unwind } => Terminator::Invoke {
+            callee: match callee {
+                crate::ir::InvokeCallee::Func(f) => crate::ir::InvokeCallee::Func(*f),
+                crate::ir::InvokeCallee::Extern(e) => crate::ir::InvokeCallee::Extern(*e),
+                crate::ir::InvokeCallee::Indirect(v) => crate::ir::InvokeCallee::Indirect(value(*v)),
+            },
+            args: map_values(args, values),
+            sig: sig.clone(),
+            normal: block(*normal),
+            normal_args: map_values(normal_args, values),
+            unwind: block(*unwind),
+        },
+        Terminator::Resume { .. } | Terminator::Return { .. } | Terminator::Unreachable => {
             unreachable!("counted loops have no early exits")
         }
     }

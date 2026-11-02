@@ -280,7 +280,12 @@ impl State {
                     }
                 }
             },
-            Terminator::Return { .. } | Terminator::Unreachable => {}
+            // A call that can unwind is opaque to SCCP: keep both edges.
+            Terminator::Invoke { normal, unwind, .. } => {
+                self.mark_edge(block, *normal);
+                self.mark_edge(block, *unwind);
+            }
+            Terminator::Resume { .. } | Terminator::Return { .. } | Terminator::Unreachable => {}
         }
     }
 

@@ -417,6 +417,13 @@ pub enum InstKind {
     Popcnt(Value),
     /// Reverse bytes (`__builtin_bswap*`).
     Bswap(Value),
+    /// `llvm.eh.typeid.for`: the selector constant for a typeinfo global —
+    /// its 1-based position in this function's type table (the union of the
+    /// landing pads' clause lists, in source order; 0 is the cleanup
+    /// selector). Folds to a constant.
+    EhTypeId {
+        typeinfo: Global,
+    },
 }
 
 /// Atomic read-modify-write operation.
@@ -514,7 +521,7 @@ impl InstKind {
                 f(*src);
             }
             InstKind::Memset { dst, .. } => f(*dst),
-            InstKind::FuncAddr { .. } | InstKind::ExternAddr { .. } => {}
+            InstKind::FuncAddr { .. } | InstKind::ExternAddr { .. } | InstKind::EhTypeId { .. } => {}
             InstKind::VaStart { ap } | InstKind::VaArg { ap } | InstKind::VaEnd { ap } => f(*ap),
             InstKind::VaCopy { dst, src } => {
                 f(*dst);
@@ -614,6 +621,7 @@ impl InstKind {
                 | InstKind::GetElementPtr { .. }
                 | InstKind::ExtractValue { .. }
                 | InstKind::InsertValue { .. }
+                | InstKind::EhTypeId { .. }
         )
     }
 }
@@ -638,10 +646,40 @@ pub enum Terminator {
         cases: Vec<(i128, Block)>,
         default: Block,
     },
+    /// A call that can unwind (inside a live EH scope): normal return goes
+    /// to `normal` with the call's results as its block params, an
+    /// exceptional return lands in `unwind` (a `.lpad` block) with the
+    /// unwinder's two payload values as its params. Plain `Call` means the
+    /// callee does not throw.
+    Invoke {
+        callee: InvokeCallee,
+        args: SmallVec<[Value; 4]>,
+        /// Callee signature, carried for lowering like `CallIndirect`.
+        sig: Signature,
+        normal: Block,
+        normal_args: SmallVec<[Value; 4]>,
+        unwind: Block,
+    },
     Return {
         val: Option<Value>,
     },
+    /// Leave the function with an in-flight exception (`landingpad` +
+    /// LLVM `resume`): lowered to `_Unwind_Resume(exn)` (noreturn).
+    Resume {
+        exn: Value,
+        /// The selector; unused by lowering today but carried so rethrow
+        /// paths can distinguish cleanup pads later.
+        sel: Value,
+    },
     Unreachable,
+}
+
+/// Target of an [`Terminator::Invoke`], mirroring the three call spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvokeCallee {
+    Func(Func),
+    Extern(Extern),
+    Indirect(Value),
 }
 
 impl Terminator {
@@ -650,7 +688,8 @@ impl Terminator {
             Terminator::Br { dest, .. } => [*dest].into_iter().collect(),
             Terminator::CondBr { then_block, else_block, .. } => [*then_block, *else_block].into_iter().collect(),
             Terminator::Switch { cases, default, .. } => cases.iter().map(|(_, b)| *b).chain([*default]).collect(),
-            Terminator::Return { .. } | Terminator::Unreachable => SmallVec::new(),
+            Terminator::Invoke { normal, unwind, .. } => [*normal, *unwind].into_iter().collect(),
+            Terminator::Return { .. } | Terminator::Resume { .. } | Terminator::Unreachable => SmallVec::new(),
         }
     }
 
@@ -678,6 +717,21 @@ impl Terminator {
                 }
             }
             Terminator::Switch { scrutinee, .. } => f(*scrutinee),
+            Terminator::Invoke { callee, args, normal_args, .. } => {
+                if let InvokeCallee::Indirect(v) = callee {
+                    f(*v);
+                }
+                for &a in args.iter() {
+                    f(a);
+                }
+                for &a in normal_args.iter() {
+                    f(a);
+                }
+            }
+            Terminator::Resume { exn, sel } => {
+                f(*exn);
+                f(*sel);
+            }
             Terminator::Return { val } => {
                 if let Some(v) = val {
                     f(*v);
@@ -699,11 +753,29 @@ pub struct InstData {
     pub loc: Option<Location>,
 }
 
+/// One `catch`/`cleanup` clause of a landing pad, in source order. The
+/// clause list defines the function's type table order (LLVM: the
+/// `landingpad` clause list is the type table; `eh.typeid` indexes it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LpadClause {
+    /// `catch @_ZTIx`: the typeinfo global (a `.dataextern` supplied by
+    /// libstdc++/the runtime at link time).
+    Catch(Global),
+    /// `catchall`: `catch(...)`, matches any C++ exception.
+    CatchAll,
+    /// `cleanup`: destructor chain, rethrows after running.
+    Cleanup,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BlockData {
     pub params: Vec<Value>,
     pub insts: Vec<Inst>,
     pub term: Option<Terminator>,
+    /// Landing-pad clauses: `Some` exactly on `.lpad` blocks, which carry
+    /// the unwinder's two payload params and may only be targeted by an
+    /// `unwind` edge.
+    pub lpad: Option<SmallVec<[LpadClause; 4]>>,
 }
 
 /// One function with its own value/inst/block arenas.
@@ -738,6 +810,11 @@ pub struct Function {
     /// flag (and every `Await`) and clears it — the emitted functions
     /// are plain.
     pub coroutine: Option<Ty>,
+    /// The EH personality (`@__gxx_personality_v0`), referenced from the
+    /// CIE augmentation when the function has landing pads. `None` for C
+    /// functions and `-fno-exceptions` code; the C frontend never emits
+    /// EH ops.
+    pub personality: Option<Extern>,
     /// Debug record: declaration, parameters, variables, and lexical
     /// blocks. `Some` whenever the function was lowered from source
     /// with debug collection enabled.
@@ -766,6 +843,7 @@ impl Function {
             noinline: false,
             returns_twice: false,
             coroutine: None,
+            personality: None,
             debug: None,
             values: IndexVec::new(),
             insts: IndexVec::new(),
@@ -1099,6 +1177,7 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         },
         InstKind::AtomicFence => InstKind::AtomicFence,
         InstKind::GetFramePointer => InstKind::GetFramePointer,
+        InstKind::EhTypeId { typeinfo } => InstKind::EhTypeId { typeinfo: *typeinfo },
     }
 }
 
@@ -1127,6 +1206,19 @@ pub(crate) fn remap_term(term: &Terminator, swap: impl Fn(Value) -> Value) -> Te
             default: *default,
         },
         Terminator::Return { val } => Terminator::Return { val: val.map(swap) },
+        Terminator::Invoke { callee, args, sig, normal, normal_args, unwind } => Terminator::Invoke {
+            callee: match callee {
+                InvokeCallee::Func(f) => InvokeCallee::Func(*f),
+                InvokeCallee::Extern(e) => InvokeCallee::Extern(*e),
+                InvokeCallee::Indirect(v) => InvokeCallee::Indirect(swap(*v)),
+            },
+            args: args.iter().map(|&a| swap(a)).collect(),
+            sig: sig.clone(),
+            normal: *normal,
+            normal_args: normal_args.iter().map(|&a| swap(a)).collect(),
+            unwind: *unwind,
+        },
+        Terminator::Resume { exn, sel } => Terminator::Resume { exn: swap(*exn), sel: swap(*sel) },
         Terminator::Unreachable => Terminator::Unreachable,
     }
 }

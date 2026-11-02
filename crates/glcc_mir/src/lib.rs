@@ -31,7 +31,7 @@ pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use debug::{BaseEncoding, DebugType, DebugTypeId, Enumerator, File, FunctionDebug, GlobalDebug, Location, Member, MemberLocation, Qualifier, ScopeDebug, VarDebug, VarHome};
 pub use ir::{
     AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, ExternEffect, FcmpPred, Func, Function, Global, GlobalData, IcmpPred, Inst,
-    InstData, InstKind, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
+    InstData, InstKind, InvokeCallee, LpadClause, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
 pub use optimize::{OptLevel, optimize};
 pub use parse::{MirParseError, parse_module};

@@ -1686,7 +1686,18 @@ fn non_escaping_stack_slots(func: &Function) -> std::collections::HashSet<Value>
                     escape_root(func, arg, &mut escaped);
                 }
             }
-            Terminator::Return { val: None } | Terminator::Switch { .. } | Terminator::Unreachable => {}
+            Terminator::Invoke { args, normal_args, .. } => {
+                for &arg in args.iter() {
+                    escape_root(func, arg, &mut escaped);
+                }
+                for &arg in normal_args.iter() {
+                    escape_root(func, arg, &mut escaped);
+                }
+            }
+            Terminator::Resume { .. }
+            | Terminator::Return { val: None }
+            | Terminator::Switch { .. }
+            | Terminator::Unreachable => {}
         }
     }
 
@@ -2335,7 +2346,13 @@ fn set_successor_args(func: &mut Function, block: Block, phi_index: &std::collec
                     *arg = value;
                 }
         }
-        Terminator::Switch { .. } | Terminator::Return { .. } | Terminator::Unreachable => {}
+        Terminator::Invoke { normal, normal_args, .. } => {
+            if let Some(&index) = phi_index.get(normal)
+                && let Some(arg) = normal_args.get_mut(index) {
+                    *arg = value;
+                }
+        }
+        Terminator::Resume { .. } | Terminator::Switch { .. } | Terminator::Return { .. } | Terminator::Unreachable => {}
     }
 }
 
@@ -2354,6 +2371,12 @@ fn extend_incoming_edges(func: &mut Function, target: Block, placeholder: Value)
                     args.push(placeholder);
                 }
             }
+            Terminator::Invoke { normal, normal_args, .. } => {
+                if *normal == target {
+                    normal_args.push(placeholder);
+                }
+            }
+            Terminator::Resume { .. } => {}
             Terminator::CondBr {
                 then_block,
                 then_args,
@@ -2902,6 +2925,15 @@ fn remap_successors(term: &Terminator, remap: impl Fn(Block) -> Block) -> Termin
             cases: cases.iter().map(|(value, dest)| (*value, remap(*dest))).collect(),
             default: remap(*default),
         },
+        Terminator::Invoke { callee, args, sig, normal, normal_args, unwind } => Terminator::Invoke {
+            callee: *callee,
+            args: args.clone(),
+            sig: sig.clone(),
+            normal: remap(*normal),
+            normal_args: normal_args.clone(),
+            unwind: remap(*unwind),
+        },
+        Terminator::Resume { exn, sel } => Terminator::Resume { exn: *exn, sel: *sel },
         Terminator::Return { val } => Terminator::Return { val: *val },
         Terminator::Unreachable => Terminator::Unreachable,
     }
@@ -3431,6 +3463,9 @@ fn callee_eligible(module: &Module, caller: crate::ir::Func, callee: crate::ir::
                     return false;
                 }
             }
+            // EH constructs are never inlined in v1 (the callee's landing
+            // pads and unwind edges would need EH-aware reshaping).
+            Some(Terminator::Invoke { .. }) | Some(Terminator::Resume { .. }) => return false,
             Some(Terminator::Br { .. }) | Some(Terminator::CondBr { .. }) | Some(Terminator::Switch { .. }) | Some(Terminator::Unreachable) => {}
             None => return false,
         }
@@ -3693,6 +3728,9 @@ fn inline_multi_block(module: &mut Module, caller_id: crate::ir::Func, site: cra
                 })
             }
             Some(Terminator::Unreachable) => Some(Terminator::Unreachable),
+            Some(Terminator::Invoke { .. }) | Some(Terminator::Resume { .. }) => {
+                unreachable!("inlining rejects functions with EH constructs")
+            }
         };
         caller.blocks[new_b].term = next;
     }

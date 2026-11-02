@@ -150,6 +150,7 @@ pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::VaCopy { dst, src } => format!("vacopy {} {}", val_name(func, *dst), val_name(func, *src)),
         InstKind::Memset { dst, byte, len } => format!("memset {} {byte} len{len}", val_name(func, *dst)),
         InstKind::Memcpy { dst, src, len } => format!("memcpy {} {} len{len}", val_name(func, *dst), val_name(func, *src)),
+        InstKind::EhTypeId { typeinfo } => format!("eh.typeid g{}", typeinfo.index()),
     }
 }
 
@@ -185,8 +186,35 @@ fn term_str(func: &Function, term: &Terminator) -> String {
             Some(v) => format!("ret {}", val_name(func, *v)),
             None => "ret void".to_string(),
         },
+        Terminator::Invoke { callee, args, sig, normal, unwind, .. } => {
+            let list: Vec<_> = args.iter().map(|a| val_name(func, *a)).collect();
+            let callee_str = match callee {
+                crate::ir::InvokeCallee::Func(f) => format!("f{}", f.index()),
+                crate::ir::InvokeCallee::Extern(e) => format!("e{}", e.index()),
+                crate::ir::InvokeCallee::Indirect(v) => val_name(func, *v),
+            };
+            let kind = match callee {
+                crate::ir::InvokeCallee::Func(_) => "invoke",
+                crate::ir::InvokeCallee::Extern(_) => "invoke.ext",
+                crate::ir::InvokeCallee::Indirect(_) => "invoke.ind",
+            };
+            format!(
+                "{kind} {callee_str} sig={} ({}) to b{} unwind b{}",
+                sig_str(sig),
+                list.join(", "),
+                normal.index(),
+                unwind.index()
+            )
+        }
+        Terminator::Resume { exn, sel } => format!("resume {} {}", val_name(func, *exn), val_name(func, *sel)),
         Terminator::Unreachable => "unreachable".to_string(),
     }
+}
+
+/// Signature in the parser's spelling: `sig=(i32, ptr(void)) -> i32`.
+fn sig_str(sig: &crate::ty::Signature) -> String {
+    let params: Vec<_> = sig.params.iter().map(ty_str).collect();
+    format!("({}) -> {}", params.join(", "), ty_str(&sig.ret))
 }
 
 /// One source location as `path:line:column`, resolved through the
@@ -220,14 +248,29 @@ fn provenance_suffix(func: &Function, module: &Module, values: &[crate::ir::Valu
 /// `  ; path:line:column` suffix, and any line mentioning a
 /// pass-materialized value carries its provenance after that.
 fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module>) -> fmt::Result {
+    let personality = func.personality.map(|e| format!(" personality=e{}", e.index())).unwrap_or_default();
     if func.inline {
-        writeln!(out, "func @{} inline:", func.name)?;
+        writeln!(out, "func @{} inline{personality}:", func.name)?;
     } else {
-        writeln!(out, "func @{}:", func.name)?;
+        writeln!(out, "func @{func_name}{personality}:", func_name = func.name)?;
     }
     for (id, block) in func.blocks.iter_enumerated() {
         let params: Vec<_> = block.params.iter().map(|p| format!("{}:{}", val_name(func, *p), ty_str(&func.values[*p].ty))).collect();
-        writeln!(out, "  b{}({}):", id.index(), params.join(", "))?;
+        let lpad = match &block.lpad {
+            None => String::new(),
+            Some(clauses) => {
+                let list: Vec<_> = clauses
+                    .iter()
+                    .map(|c| match c {
+                        crate::ir::LpadClause::Catch(g) => format!("catch g{}", g.index()),
+                        crate::ir::LpadClause::CatchAll => "catchall".to_string(),
+                        crate::ir::LpadClause::Cleanup => "cleanup".to_string(),
+                    })
+                    .collect();
+                format!(" .lpad [{}]", list.join(", "))
+            }
+        };
+        writeln!(out, "  b{}({}){lpad}:", id.index(), params.join(", "))?;
         for inst in &block.insts {
             let data = &func.insts[*inst];
             let suffix = match module {
