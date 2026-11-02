@@ -4356,6 +4356,25 @@ fn pragma_pack_in_struct_body_and_explicit_align_wins() {
 }
 
 #[test]
+fn declspec_align_raises_member_alignment() {
+    // `__declspec(align(n))` on a member behaves like GNU
+    // `aligned(n)`: a minimum alignment, mirrored in the struct's
+    // (`b` at 32, `c` at 36, tail pad to 32).
+    let src = "struct S { char a; __declspec(align(32)) int b; char c; };";
+    assert_eq!(struct_size_of(src, "S"), (64, 32));
+    assert_eq!(member_offset_in(src, "S", "b"), 32);
+    // Multiple keywords in one group parse (`align(8), noeffect`):
+    // `b` lands at 8, size rounds the tail to 16.
+    let mixed = "struct M { char a; __declspec(align(8), noeffect) short b; };";
+    assert_eq!(struct_size_of(mixed, "M"), (16, 8));
+    assert_eq!(member_offset_in(mixed, "M", "b"), 8);
+    // And explicit alignment still beats the pack cap (`b` at 8).
+    let packed = "#pragma pack(2)\nstruct P { char a; __declspec(align(8)) short b; };";
+    assert_eq!(struct_size_of(packed, "P"), (16, 8));
+    assert_eq!(member_offset_in(packed, "P", "b"), 8);
+}
+
+#[test]
 fn layout_covers_objects_near_the_address_space_limit() {
     // GCC caps objects at 2^63 bytes; the bit cursor must not overflow
     // `u64` on the way there (991014-1).

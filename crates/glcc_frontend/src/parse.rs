@@ -5225,14 +5225,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.tokens.advance();
                 continue;
             }
-            // MSVC `__declspec(...)` annotations (`vcruntime.h`:
-            // `__declspec(noreturn) void __cdecl __report_gsfailure(...)`).
-            // Ignored like other attributes: `dllimport` resolves from
-            // the static CRT libraries at link time.
-            if self.peek_msvc_operator("__declspec") || self.peek_msvc_operator("_declspec") {
-                self.skip_msvc_operator();
-                continue;
-            }
+            // MSVC `__declspec(...)` annotations fold through
+            // `parse_gnu_annotations` at the top of this loop (`align(n)`
+            // applies; `dllimport` resolves from the static CRT
+            // libraries at link time).
             if self.peek_is_gnu("__int128") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Int128);
@@ -5721,8 +5717,10 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // MSVC calling conventions sit between the specifiers
                 // and the declared name (`unsigned __int64* __cdecl f(void)`).
                 self.tokens.advance();
-            } else if self.peek_msvc_operator("__declspec") || self.peek_msvc_operator("_declspec") || self.peek_msvc_operator("__pragma") {
+            } else if self.peek_msvc_operator("__pragma") {
                 self.skip_msvc_operator();
+            } else if self.peek_msvc_operator("__declspec") || self.peek_msvc_operator("_declspec") {
+                self.parse_declspec(&mut out);
             } else {
                 break;
             }
@@ -5868,6 +5866,37 @@ impl<'a, 'b> Parser<'a, 'b> {
             return self.fail_code(kw_span, DiagCode::InvalidAlignment, format!("requested alignment '{n}' is not a power of 2"));
         }
         attrs.aligned = Some(attrs.aligned.map_or(n, |m: u64| m.max(n)));
+    }
+
+    /// Consume a `__declspec(...)`/`_declspec(...)` group. Most contents
+    /// (`noreturn`, `dllimport`, ...) have no modeled effect here, but
+    /// `align(n)` is MSVC's minimum-alignment specifier and folds into
+    /// `attrs.aligned` exactly like `_Alignas`.
+    fn parse_declspec(&mut self, attrs: &mut GnuAttributes) {
+        let start = self.mark();
+        self.tokens.advance();
+        if !self.eat_punct(Punctuator::LParen) {
+            return self.fail(self.span_since(start), "`__declspec` requires a parenthesized list");
+        }
+        loop {
+            match self.tokens.peek_val() {
+                Some(Token::Punctuator(Punctuator::RParen)) => {
+                    self.tokens.advance();
+                    return;
+                }
+                Some(Token::Identifier(sym)) if self.intern.resolve(*sym) == Some("align") => {
+                    self.parse_alignas(attrs);
+                }
+                Some(Token::Punctuator(Punctuator::LParen)) => self.skip_balanced_parens(),
+                Some(_) => {
+                    self.tokens.advance();
+                }
+                None => {
+                    let span = self.peek_span();
+                    return self.fail(span, "unterminated `__declspec`");
+                }
+            }
+        }
     }
 
     /// Record `async` on `out` when the extension is enabled; without
