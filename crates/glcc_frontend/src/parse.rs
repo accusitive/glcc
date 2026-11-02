@@ -25,6 +25,7 @@ use string_interner::symbol::SymbolU32;
 use crate::{
     check::{CheckedExpr, CheckedExprKind, is_integer},
     diag::{DiagCode, did_you_mean},
+    ext,
     lang::Std,
     lexer::{pack_directive_from_string, Constant, IntLiteral, IntSuffix, Interner, Keyword, Located, Location, PackDirective, Punctuator, Radix, StringLiteral, StringPrefix, Token, TokenStream},
     sema::{Binding, BindingKind, DeclId, EnumId, Enumerator, Linkage, Member, Sema, StructId},
@@ -1767,7 +1768,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// `__pragma(...)` (the inline `#pragma` spelling, `corecrt.h`
     /// writes `__pragma(pack(push, 8))`) or `__declspec(...)`.
     fn peek_msvc_operator(&self, word: &str) -> bool {
-        self.peek_is_gnu(word) && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
+        self.peek_ext(word) && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
     }
 
     /// Consume an MSVC annotation operator with balanced parentheses.
@@ -1982,7 +1983,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// so far; a non-empty one is rejected until the backend can emit
     /// it.
     fn try_parse_asm_statement(&mut self, start: Location) -> Option<Stmt<'a>> {
-        while self.peek_is_gnu("__extension__") {
+        while self.peek_ext("__extension__") {
             self.tokens.advance();
         }
         if !self.asm_statement_ahead() {
@@ -3120,7 +3121,7 @@ impl<'a, 'b> Parser<'a, 'b> {
     pub fn can_start_declaration(&mut self) -> bool {
         // `__extension__` opens GNU-annotated declarations from system
         // headers (`__extension__ typedef ...`).
-        if self.peek_is_gnu("__extension__") {
+        if self.peek_ext("__extension__") {
             return true;
         }
         // `_Alignas`/`alignas` may open a declaration (`_Alignas(16) int x`).
@@ -3129,7 +3130,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
         // Thread-local specifiers open declarations too
         // (`__thread int x;`, `_Thread_local int x;`).
-        if self.peek_is_gnu("_Thread_local") || self.peek_is_gnu("__thread") || self.peek_is_gnu("thread_local") {
+        if self.peek_ext("_Thread_local") || self.peek_ext("__thread") || self.peek_ext("thread_local") {
             return true;
         }
         match self.tokens.peek().map(|located| &located.val) {
@@ -3170,7 +3171,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     || self.peek_msvc_operator("_declspec")
                     || ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"]
                         .into_iter()
-                        .any(|kw| self.peek_is_gnu(kw))
+                        .any(|kw| self.peek_ext(kw))
                     // `_Future(T)` opens a declaration like a typedef name does.
                     || self.is_future_specifier(*sym)
             }
@@ -3303,9 +3304,9 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// keyword whose family the LangOpts gate chooses (`__extension__`,
     /// `__attribute__`, `__int64`, `typeof`, ...). Resolving never
     /// interns, so probing leaves the interner alone.
-    fn peek_is_gnu(&self, word: &str) -> bool {
+    fn peek_ext(&self, word: &str) -> bool {
         match self.tokens.peek_val() {
-            Some(Token::Identifier(sym)) => self.intern.resolve(*sym) == Some(word) && crate::lang::spelling_family(word).allowed(self.sema.lang),
+            Some(Token::Identifier(sym)) => self.intern.resolve(*sym) == Some(word) && crate::ext::spelling_family(word).allowed(self.sema.lang),
             _ => false,
         }
     }
@@ -3332,12 +3333,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             return None;
         }
         match self.tokens.peek_val() {
-            Some(Token::Identifier(sym)) => match self.intern.resolve(*sym) {
-                Some("__const__") | Some("__const") => Some(TypeQualifier::Const),
-                Some("__restrict__") | Some("__restrict") => Some(TypeQualifier::Restrict),
-                Some("__volatile__") | Some("__volatile") => Some(TypeQualifier::Volatile),
-                _ => None,
-            },
+            Some(Token::Identifier(sym)) => self.intern.resolve(*sym).and_then(ext::qualifier_of),
             _ => None,
         }
     }
@@ -3345,24 +3341,23 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// `__inline`, used for `static __inline` definitions in system
     /// headers) and MSVC's `__forceinline`.
     fn peek_alternate_inline(&self) -> bool {
-        self.peek_is_gnu("__inline__") || self.peek_is_gnu("__inline") || self.peek_is_gnu("__forceinline")
+        self.peek_ext("__inline__") || self.peek_ext("__inline") || self.peek_ext("__forceinline")
     }
     /// MSVC's pointer-size attributes, which follow the `*` they modify.
     fn peek_ms_ptr_size(&self) -> Option<PtrSize> {
-        if self.peek_is_gnu("__ptr32") {
-            Some(PtrSize::Ptr32)
-        } else if self.peek_is_gnu("__ptr64") {
-            Some(PtrSize::Ptr64)
-        } else {
-            None
+        for (spelling, size) in ext::PTR_SIZE_SPELLINGS {
+            if self.peek_ext(spelling) {
+                return Some(*size);
+            }
         }
+        None
     }
     /// MSVC's `__unaligned` type qualifier (`UNALIGNED` in the Windows
     /// headers). It only promises the object need not be naturally
     /// aligned; our codegen already emits every access unaligned-safe,
     /// so it is accepted in MS mode and erased like `_Atomic`.
     fn peek_ms_unaligned(&self) -> bool {
-        self.peek_is_gnu("__unaligned")
+        self.peek_ext("__unaligned")
     }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
@@ -3399,7 +3394,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             _ => return false,
         };
-        crate::lang::spelling_family(word).allowed(self.sema.lang)
+        crate::ext::spelling_family(word).allowed(self.sema.lang)
     }
     /// GNU `typeof ( expression )` / `typeof ( type-name )`: the type of
     /// the operand exactly as written (arrays and functions do not
@@ -5135,7 +5130,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // Thread-local storage (`_Thread_local`, `__thread`,
             // `thread_local`): like a storage class, combinable with
             // `static`/`extern`.
-            if self.peek_is_gnu("_Thread_local") || self.peek_is_gnu("__thread") || self.peek_is_gnu("thread_local") {
+            if self.peek_ext("_Thread_local") || self.peek_ext("__thread") || self.peek_ext("thread_local") {
                 ds.thread_local = true;
                 self.tokens.advance();
                 continue;
@@ -5180,12 +5175,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 ds.type_specifier.push(TypeSpecifier::Builtin(ty));
                 continue;
             }
-            if self.peek_is_gnu("typeof") || self.peek_is_gnu("__typeof__") || self.peek_is_gnu("__typeof") {
+            if self.peek_ext("typeof") || self.peek_ext("__typeof__") || self.peek_ext("__typeof") {
                 let ty = self.parse_typeof_specifier(false);
                 ds.type_specifier.push(TypeSpecifier::Builtin(ty));
                 continue;
             }
-            if self.peek_is_gnu("__builtin_va_list") {
+            if self.peek_ext("__builtin_va_list") {
                 self.tokens.advance();
                 // On Windows the builtin `va_list` *is* `char *` (the
                 // MSVC ABI, and how clang models it there), so the
@@ -5205,12 +5200,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 ds.type_specifier.push(TypeSpecifier::Builtin(ty));
                 continue;
             }
-            if self.peek_is_gnu("__float128") {
+            if self.peek_ext("__float128") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Float128));
                 continue;
             }
-            if self.peek_is_gnu("__signed__") {
+            if self.peek_ext("__signed__") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Signed);
                 continue;
@@ -5220,7 +5215,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // single convention, so they are accepted and ignored.
             if ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"]
                 .into_iter()
-                .any(|kw| self.peek_is_gnu(kw))
+                .any(|kw| self.peek_ext(kw))
             {
                 self.tokens.advance();
                 continue;
@@ -5229,7 +5224,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // `parse_gnu_annotations` at the top of this loop (`align(n)`
             // applies; `dllimport` resolves from the static CRT
             // libraries at link time).
-            if self.peek_is_gnu("__int128") {
+            if self.peek_ext("__int128") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Int128);
                 continue;
@@ -5262,34 +5257,34 @@ impl<'a, 'b> Parser<'a, 'b> {
             // MSVC's fixed-width spellings (`vcruntime.h`:
             // `typedef unsigned __int64 uintptr_t;`), composable with
             // `signed`/`unsigned` like the ISO keywords they alias.
-            if self.peek_is_gnu("__int8") {
+            if self.peek_ext("__int8") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Char);
                 continue;
             }
-            if self.peek_is_gnu("__int16") {
+            if self.peek_ext("__int16") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Short);
                 continue;
             }
-            if self.peek_is_gnu("__int32") {
+            if self.peek_ext("__int32") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Int);
                 continue;
             }
-            if self.peek_is_gnu("__int64") {
+            if self.peek_ext("__int64") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Long);
                 ds.type_specifier.push(TypeSpecifier::Long);
                 continue;
             }
             // GCC's predefined 128-bit typedefs need no declaration.
-            if self.peek_is_gnu("__uint128_t") {
+            if self.peek_ext("__uint128_t") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::UnsignedInt128));
                 continue;
             }
-            if self.peek_is_gnu("__int128_t") {
+            if self.peek_ext("__int128_t") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Int128));
                 continue;
@@ -5297,7 +5292,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             // GNU complex spellings (`__complex__`, `__complex`):
             // synonyms of `_Complex`, combinable with any real type
             // (`__complex__ double`, `__complex__ int`).
-            if self.peek_is_gnu("__complex__") || self.peek_is_gnu("__complex") {
+            if self.peek_ext("__complex__") || self.peek_ext("__complex") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::_Complex);
                 continue;
@@ -5310,12 +5305,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             // (for pre-C23 compilers), where the name is the
             // declarator — like `int T;` below, a trailing ident
             // declares instead of specifying.
-            if ds.type_specifier.is_empty() && self.peek_is_gnu("_Float32") {
+            if ds.type_specifier.is_empty() && self.peek_ext("_Float32") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Float));
                 continue;
             }
-            if ds.type_specifier.is_empty() && self.peek_is_gnu("_Float64") {
+            if ds.type_specifier.is_empty() && self.peek_ext("_Float64") {
                 self.tokens.advance();
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Double));
                 continue;
@@ -5334,7 +5329,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             // GNU `__auto_type` (also accepted in C2y): the same
             // inference from a single initialized declarator.
-            if ds.type_specifier.is_empty() && self.peek_is_gnu("__auto_type") {
+            if ds.type_specifier.is_empty() && self.peek_ext("__auto_type") {
                 ds.auto_infer = true;
                 self.tokens.advance();
                 continue;
@@ -5698,7 +5693,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 out.std.merge(self.parse_std_attributes());
             // Both spellings are accepted: `__attribute` appears in the
             // wild next to `__attribute__` (GCC and clang take both).
-            } else if (self.peek_is_gnu("__attribute__") || self.peek_is_gnu("__attribute"))
+            } else if (self.peek_ext("__attribute__") || self.peek_ext("__attribute"))
                 && matches!(self.tokens.peek_nth(1).map(|t| &t.val), Some(Token::Punctuator(Punctuator::LParen)))
             {
                 out.merge(self.parse_gnu_attribute_list());
@@ -5708,11 +5703,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let label = self.parse_asm_string("label");
                 self.expect_punct(Punctuator::RParen);
                 out.asm_label = out.asm_label.or(Some(self.intern.get_or_intern(&label)));
-            } else if self.peek_is_gnu("__extension__") {
+            } else if self.peek_ext("__extension__") {
                 self.tokens.advance();
             } else if ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"]
                 .into_iter()
-                .any(|kw| self.peek_is_gnu(kw))
+                .any(|kw| self.peek_ext(kw))
             {
                 // MSVC calling conventions sit between the specifiers
                 // and the declared name (`unsigned __int64* __cdecl f(void)`).
@@ -7436,7 +7431,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         let start = self.mark();
         // `__extension__` prefixes any expression in GNU C (a no-op
         // here, like everywhere else it is skipped).
-        if self.peek_is_gnu("__extension__") {
+        if self.peek_ext("__extension__") {
             self.tokens.advance();
         }
         // `_Generic` lexes as an identifier, so match its spelling

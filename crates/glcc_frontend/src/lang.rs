@@ -151,55 +151,6 @@ impl LangOpts {
     }
 }
 
-/// Which gate a keyword spelling reaches the parser through.
-/// Classification table in [`spelling_family`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fam {
-    Gnu,
-    Ms,
-    Clang,
-    /// Standard level required (no matter which extension family).
-    C11,
-    C23,
-    /// GNU (or C23 for the standardized spelling).
-    GnuOrC23,
-    /// GNU (or C2y for reserved spellings accepted there).
-    GnuOrC2y,
-}
-
-impl Fam {
-    pub fn allowed(self, lang: LangOpts) -> bool {
-        match self {
-            Fam::Gnu => lang.gnu,
-            Fam::Ms => lang.ms,
-            Fam::Clang => lang.clang,
-            Fam::C11 => lang.standard_includes(Std::C11),
-            Fam::C23 => lang.standard_includes(Std::C23),
-            Fam::GnuOrC23 => lang.gnu || lang.std.level() >= Std::C23.level(),
-            Fam::GnuOrC2y => lang.gnu || lang.std.level() >= Std::C2y.level(),
-        }
-    }
-}
-
-/// Family of a keyword spelling. Everything unlisted is GNU-family
-/// (`peek_is_gnu` only sees spellings the frontend treats as keywords).
-pub fn spelling_family(word: &str) -> Fam {
-    match word {
-        "_Thread_local" => Fam::C11,
-        // Bare `thread_local` and `typeof` are C23 spellings; glcc kept
-        // accepting them liberally, and unchanged defaults (GNU on)
-        // keep doing so.
-        "thread_local" | "typeof" => Fam::GnuOrC23,
-        // GNU's `__auto_type` predates C23 `auto`; glcc accepts the
-        // reserved spelling in C2y too.
-        "__auto_type" => Fam::GnuOrC2y,
-        "__int8" | "__int16" | "__int32" | "__int64" | "__declspec" | "_declspec" | "__pragma" | "__cdecl" | "__stdcall" | "__fastcall" | "__thiscall" | "__vectorcall"
-        | "__clrcall" | "__forceinline" | "__ptr32" | "__ptr64" | "__unaligned" => Fam::Ms,
-        "_Float32" | "_Float64" => Fam::Clang,
-        _ => Fam::Gnu,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

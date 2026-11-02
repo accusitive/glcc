@@ -20,6 +20,7 @@ pub mod check;
 pub mod diag;
 pub mod dump;
 pub mod eval;
+pub mod ext;
 pub mod lang;
 pub mod layout;
 pub mod lexer;
