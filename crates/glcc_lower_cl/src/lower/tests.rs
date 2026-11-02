@@ -2585,3 +2585,51 @@ fn volatile_mir_accesses_lower_to_atomic_clif() {
     assert!(!plain_ops.contains(&Opcode::AtomicLoad), "{plain_ops:?}");
     assert!(!plain_ops.contains(&Opcode::AtomicStore), "{plain_ops:?}");
 }
+
+fn eh_test_module() -> mir::Module {
+    glcc_mir::parse_module(
+        r#"
+.extern @thrower sig=(i32) -> i32
+.extern @__gxx_personality_v0 sig=() -> i32
+.dataextern @_ZTIi ty=ptr(void)
+
+.func @catcher sig=(i32) -> i32 personality=@__gxx_personality_v0
+.params %0:i32
+b0:
+  invoke.ext @thrower sig=(i32) -> i32, i32 %0 to b1 unwind b2
+b1(%1:i32):
+  ret %1
+b2(%2:ptr(void), %3:i64) .lpad [catch @_ZTIi]:
+  %4:i32 = eh.typeid @_ZTIi
+  ret %4
+
+.func @selector sig=() -> i32 personality=@__gxx_personality_v0
+b0:
+  %0:i32 = eh.typeid @_ZTIi
+  ret %0
+b1(%1:ptr(void), %2:i64) .lpad [catch @_ZTIi]:
+  unreachable
+"#,
+    )
+    .expect("EH test module parses")
+}
+
+extern "C" fn jit_thrower(x: i32) -> i32 {
+    x + 1
+}
+
+#[test]
+fn invoke_normal_edge_returns_callee_result() {
+    let module = eh_test_module();
+    let (jit, ids) = jit_module_with(&module, &[("thrower", jit_thrower as *const u8)]);
+    assert_eq!(run_i32(&jit, &ids, 0, 5), 6, "invoke normal edge carries the result");
+    assert_eq!(run_i32(&jit, &ids, 0, 0), 1);
+}
+
+#[test]
+fn eh_typeid_lowers_to_type_table_selector() {
+    let module = eh_test_module();
+    let (jit, ids) = jit_module_with(&module, &[("thrower", jit_thrower as *const u8)]);
+    // One catch clause: `int` is type table slot 1 (0 is the cleanup selector).
+    assert_eq!(run_i32_0(&jit, &ids, 1), 1);
+}

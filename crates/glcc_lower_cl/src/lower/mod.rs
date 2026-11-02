@@ -168,8 +168,29 @@ pub(crate) fn lower_module_impl<M: Module>(
                 mir::InstKind::GlobalAddr { global } => {
                     used_globals.insert(*global);
                 }
+                mir::InstKind::EhTypeId { typeinfo } => {
+                    used_globals.insert(*typeinfo);
+                }
                 _ => {}
             }
+        }
+        // Invokes reference externs/functions; landing-pad catch clauses
+        // name the typeinfo globals the LSDA's type table will point at.
+        for block in func.blocks.iter() {
+            if let Some(clauses) = &block.lpad {
+                for clause in clauses {
+                    if let mir::LpadClause::Catch(global) = clause {
+                        used_globals.insert(*global);
+                    }
+                }
+            }
+            if let Some(mir::Terminator::Invoke { callee, .. }) = &block.term
+                && let mir::InvokeCallee::Extern(target) = callee {
+                    used_externs.insert(*target);
+                }
+        }
+        if let Some(personality) = func.personality {
+            used_externs.insert(personality);
         }
     }
     for global in mir_module.globals.iter() {
