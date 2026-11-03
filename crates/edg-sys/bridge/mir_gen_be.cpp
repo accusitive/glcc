@@ -336,6 +336,8 @@ std::string float_bits_text(a_float_kind kind, unsigned __int128 bits) {
     std::size_t end = start;
     while (end + 1 < s.size() && s[end] == '0' && s[end + 1] == '0') end += 2;
     if (s[end] == '0' && (s.size() - end) % 2 == 0) end++;
+    // An all-zero constant must still spell at least one digit.
+    if (end >= s.size()) end = s.size() - 1;
     s = s.substr(0, start - 2) + "0x" + s.substr(end);
   }
   return s;
@@ -1007,6 +1009,19 @@ struct FuncEmitter {
     std::string name = global_name_for_variable(var);
     if (!declared_globals.count(name)) {
       declared_globals.emplace(name, true);
+      // A declaration-only extern referenced from a body must become a
+      // .dataextern, never a zero definition that would shadow the
+      // real object at link time (glibc's stderr was the failure).
+      if (sc == (a_storage_class)sc_extern) {
+        pending_module_lines.push_back(".dataextern @" + name + " ty=" +
+                                       ty_name(var->type));
+        ensure_open();
+        int n = new_value();
+        emit("%%%d:ptr(%s) = globaladdr @%s", n, ty_name(var->type).c_str(),
+             name.c_str());
+        Val slot = val(n, synth_ptr_il_type(var->type));
+        return slot;
+      }
       // Unnamed static temporaries (guard objects, troublesome
       // aggregate constants). Most carry initk_function_local --
       // their initializer lives in a local-static-variable-init
