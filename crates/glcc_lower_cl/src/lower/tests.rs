@@ -2618,7 +2618,10 @@ extern "C" fn jit_thrower(x: i32) -> i32 {
     x + 1
 }
 
+// Cranelift has no exception-lowering support on Windows fastcall; both
+// EH JIT tests below are disabled there until that is addressed.
 #[test]
+#[cfg_attr(windows, ignore = "cranelift does not support EH on Windows fastcall")]
 fn invoke_normal_edge_returns_callee_result() {
     let module = eh_test_module();
     let (jit, ids) = jit_module_with(&module, &[("thrower", jit_thrower as *const u8)]);
@@ -2627,6 +2630,7 @@ fn invoke_normal_edge_returns_callee_result() {
 }
 
 #[test]
+#[cfg_attr(windows, ignore = "cranelift does not support EH on Windows fastcall")]
 fn eh_typeid_lowers_to_type_table_selector() {
     let module = eh_test_module();
     let (jit, ids) = jit_module_with(&module, &[("thrower", jit_thrower as *const u8)]);
