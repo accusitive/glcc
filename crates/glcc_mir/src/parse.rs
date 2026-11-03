@@ -110,6 +110,7 @@ pub fn parse_module(text: &str) -> Result<Module, MirParseError> {
     if let Some(ctx) = fctx.take() {
         close_function(&mut builder.module, ctx)?;
     }
+    resolve_data_relocs(&mut builder.module, &names)?;
 
     for (id, line) in &func_order {
         let errors = crate::verify::verify_func(&builder.module.funcs[*id]);
@@ -118,6 +119,37 @@ pub fn parse_module(text: &str) -> Result<Module, MirParseError> {
         }
     }
     Ok(builder.finish())
+}
+
+/// Deferred relocations (forward references in global initializers)
+/// become ordinary Func/FuncExtern/Global relocations once every
+/// declaration in the file is known.
+fn resolve_data_relocs(module: &mut Module, names: &Names) -> Result<(), MirParseError> {
+    let mut resolve = |reloc: &mut DataReloc| -> Result<(), (u32, String)> {
+        let DataReloc::Deferred { name, addend, line } = reloc else {
+            return Ok(());
+        };
+        let (name, addend, line) = (std::mem::take(name), *addend, *line);
+        if let Some(&target) = names.funcs.get(name.as_str()) {
+            *reloc = DataReloc::Func { target };
+        } else if let Some(&target) = names.externs.get(name.as_str()) {
+            *reloc = DataReloc::FuncExtern { target };
+        } else if let Some(&target) = names.globals.get(name.as_str()) {
+            *reloc = DataReloc::Global { target, addend };
+        } else {
+            return Err((line, format!("unknown relocation symbol @{name}")));
+        }
+        Ok(())
+    };
+    for global in module.globals.iter_mut() {
+        for (_, reloc) in global.relocs.iter_mut() {
+            resolve(reloc).map_err(|(line, message)| MirParseError { line, message })?;
+        }
+        for (_, reloc) in global.relocs32.iter_mut() {
+            resolve(reloc).map_err(|(line, message)| MirParseError { line, message })?;
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +752,10 @@ fn parse_reloc(names: &Names, c: &mut Cursor) -> Result<DataReloc, MirParseError
     if let Some(&target) = names.globals.get(name) {
         return Ok(DataReloc::Global { target, addend });
     }
-    Err(c.err(format!("unknown relocation symbol @{name}")))
+    // Not declared yet: a forward reference (the emitter may order a
+    // global's users before its definition). Deferred until the whole
+    // file has been parsed.
+    Ok(DataReloc::Deferred { name: name.to_string(), addend, line: c.line })
 }
 
 /// Relocations may only patch pointer-width slots (`long` covers C's

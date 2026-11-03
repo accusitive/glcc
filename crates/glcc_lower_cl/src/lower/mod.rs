@@ -210,6 +210,8 @@ pub(crate) fn lower_module_impl<M: Module>(
                     used_externs.insert(*target);
                 }
                 mir::DataReloc::Func { .. } => {}
+                // Deferred relocations are resolved during parsing.
+                mir::DataReloc::Deferred { .. } => {}
             }
         }
     }

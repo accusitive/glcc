@@ -73,6 +73,8 @@ pub(crate) fn define_global<M: Module>(
                 let fr = clif.declare_func_in_data(extern_ids[target], &mut desc);
                 desc.write_function_addr(*off as u32, fr);
             }
+            // Deferred relocations are resolved during parsing.
+            mir::DataReloc::Deferred { .. } => {}
         }
     }
     // 32-bit patches stay out of the descriptor: Cranelift would emit a
@@ -83,6 +85,8 @@ pub(crate) fn define_global<M: Module>(
             mir::DataReloc::Global { target, addend } => (NarrowTarget::Data(data_ids[target]), *addend),
             mir::DataReloc::Func { target } => (NarrowTarget::Func(func_ids[target]), 0),
             mir::DataReloc::FuncExtern { target } => (NarrowTarget::Func(extern_ids[target]), 0),
+            // Deferred relocations are resolved during parsing.
+            mir::DataReloc::Deferred { .. } => continue,
         };
         narrow.push(NarrowReloc {
             container: id,

@@ -436,6 +436,8 @@ impl ModulePass for DeadModuleItems {
                     DataReloc::Func { target } => global_funcs[id].push(*target),
                     DataReloc::Global { target, .. } => global_globals[id].push(*target),
                     DataReloc::FuncExtern { .. } => {}
+                    // Deferred relocations are resolved during parsing.
+                    DataReloc::Deferred { .. } => {}
                 }
             }
         }
@@ -674,6 +676,8 @@ fn remap_global(global: &mut crate::ir::GlobalData, funcs: &[Option<Func>], glob
                 *target = globals[target.index()].expect("live object references a live object");
             }
             DataReloc::FuncExtern { .. } => {}
+            // Deferred relocations are resolved during parsing.
+            DataReloc::Deferred { .. } => {}
         }
     }
 }

@@ -1234,6 +1234,11 @@ pub enum DataReloc {
     Func { target: Func },
     /// Address of an imported function.
     FuncExtern { target: Extern },
+    /// Symbol not (yet) known at parse time — a forward reference to
+    /// a global defined later in the file. parse_module resolves
+    /// these once every line has been parsed; the variant never
+    /// survives into a returned module.
+    Deferred { name: String, addend: i64, line: u32 },
 }
 
 /// Module-level global with an optional constant initializer.
