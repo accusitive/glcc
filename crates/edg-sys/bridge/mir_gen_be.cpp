@@ -195,6 +195,90 @@ bool pointee_index_step_illegal(a_type_ptr pointee) {
          kind == (a_type_kind)tk_void || kind == (a_type_kind)tk_routine;
 }
 
+// Bit-fields never appear as MIR struct members. A maximal run of
+// consecutive bit-field members whose bits fit in an 8-byte window
+// starting at the run's first byte emits ONE integer unit entry (same
+// convention as glcc_lower_mir's lower_bitfield_struct for the native
+// front end); every other member emits its own entry. All bit-field
+// access goes through byte offsets and explicit masking, never gep
+// field steps.
+struct BitFieldUnit {
+  unsigned long long off; // byte offset of the unit within the struct
+  unsigned bytes;         // 1, 2, 4 or 8
+  a_field_ptr run_begin;  // first member of the run
+  a_field_ptr run_end;    // first member AFTER the run
+};
+
+unsigned unit_bytes_for_bits(unsigned long long bits) {
+  if (bits <= 8) return 1;
+  if (bits <= 16) return 2;
+  if (bits <= 32) return 4;
+  return 8;
+}
+
+// Consume the storage unit covering the bit-field run beginning at *f.
+void bit_field_unit(a_field_ptr *f, BitFieldUnit *out) {
+  a_field_ptr first = *f;
+  unsigned long long start = first->offset;
+  unsigned long long end_bit = 0;
+  a_field_ptr p = first;
+  while (p != NULL && p->is_bit_field) {
+    unsigned long long field_end =
+        (p->offset - start) * 8 + p->offset_bit_remainder + p->bit_size;
+    if (field_end > 64) break;
+    if (field_end > end_bit) end_bit = field_end;
+    p = p->next;
+  }
+  out->off = start;
+  out->bytes = unit_bytes_for_bits(end_bit);
+  out->run_begin = first;
+  out->run_end = p;
+  *f = p;
+}
+
+// Bit-position of `field` (in a bit-field run) within its unit: the
+// caller walks from the list head, so this also locates the run.
+unsigned bit_field_pos(a_type_ptr cls, a_field_ptr field, BitFieldUnit *unit) {
+  a_field_ptr f = cls->variant.class_struct_union.field_list;
+  for (; f != NULL;) {
+    if (f->is_bit_field) {
+      bit_field_unit(&f, unit);
+      if (unit->run_end == NULL || field < unit->run_end) {
+        return (unsigned)((field->offset - unit->off) * 8 +
+                          field->offset_bit_remainder);
+      }
+    } else {
+      if (f == field) {
+        unsupported("bit_field_pos on a non-bit-field member");
+      }
+      f = f->next;
+    }
+  }
+  unsupported("bit-field member not found in class layout");
+}
+
+// Index of `field` in the MIR field list spelled by ty_name: one entry
+// per non-bit-field member, one per bit-field storage unit.
+int mir_field_index(a_type_ptr cls, a_field_ptr field) {
+  int index = 0;
+  a_field_ptr f = cls->variant.class_struct_union.field_list;
+  for (; f != NULL;) {
+    if (f->is_bit_field) {
+      BitFieldUnit unit;
+      bit_field_unit(&f, &unit);
+      if (field >= unit.run_begin &&
+          (unit.run_end == NULL || field < unit.run_end)) {
+        return index;
+      }
+    } else {
+      if (f == field) return index;
+      f = f->next;
+    }
+    index++;
+  }
+  unsupported_f("field not found in struct layout");
+}
+
 // MIR type text for an IL type. Typerefs are transparent and types are
 // inline, so nothing needs declaring ahead of use.
 std::string ty_name(a_type_ptr type) {
@@ -235,12 +319,19 @@ std::string ty_name(a_type_ptr type) {
       std::string s = "struct<" +
                       std::to_string((unsigned long long)type->size) + ">{";
       for (a_field_ptr field = type->variant.class_struct_union.field_list;
-           field != NULL; field = field->next) {
-        if (field->is_bit_field) unsupported("bit-fields");
+           field != NULL;) {
+        if (field->is_bit_field) {
+          BitFieldUnit unit;
+          bit_field_unit(&field, &unit);
+          s += std::to_string(unit.off) + ":i" +
+               std::to_string(unit.bytes * 8) + ",";
+          continue;
+        }
         s += std::to_string((unsigned long long)field->offset);
         s += ":";
         s += ty_name(field->type);
         s += ",";
+        field = field->next;
       }
       s += "}";
       return s;
@@ -308,7 +399,7 @@ a_type synth_float_type(const char *mir_name) {
 
 std::string const_init_text(a_constant_ptr con);
 
-std::string int_const_text(a_constant_ptr con) {
+unsigned long long int_const_text_value(a_constant_ptr con) {
   unsigned bits = int_bits(con->type);
   if (bits > 64) unsupported("integer constant wider than 64 bits");
   a_host_large_integer value;
@@ -317,8 +408,13 @@ std::string int_const_text(a_constant_ptr con) {
                                            il_int_signed(con->type),
                                            &value, &err);
   if (err) unsupported("integer constant conversion failed");
+  return (unsigned long long)value;
+}
+
+std::string int_const_text(a_constant_ptr con) {
   char buf[32];
-  std::snprintf(buf, sizeof(buf), "%lld", (long long)value);
+  std::snprintf(buf, sizeof(buf), "%lld",
+                (long long)int_const_text_value(con));
   return buf;
 }
 
@@ -367,7 +463,8 @@ std::string string_const_text(a_constant_ptr con) {
   return s;
 }
 
-// Dense aggregate init: one element per array element / struct field,
+// Dense aggregate init: one element per array element / struct field
+// (bit-field runs collapse into their storage unit, matching ty_name),
 // `zeroinit` for elements the constant does not cover.
 std::string aggregate_const_text(a_constant_ptr con) {
   a_type_ptr type = skip_typerefs(con->type);
@@ -380,19 +477,46 @@ std::string aggregate_const_text(a_constant_ptr con) {
     }
     elems.push_back(elem);
   }
-  unsigned long long count = 0;
-  if (type->kind == (a_type_kind)tk_array) {
-    count = (unsigned long long)type->variant.array.variant.number_of_elements;
-  } else {
-    for (a_field_ptr f = type->variant.class_struct_union.field_list; f != NULL;
-         f = f->next) {
-      count++;
-    }
-  }
   std::string s = "[";
-  for (unsigned long long i = 0; i < count; i++) {
-    if (i > 0) s += ", ";
-    s += i < elems.size() ? const_init_text(elems[i]) : "zeroinit";
+  if (type->kind == (a_type_kind)tk_array) {
+    unsigned long long count =
+        (unsigned long long)type->variant.array.variant.number_of_elements;
+    for (unsigned long long i = 0; i < count; i++) {
+      if (i > 0) s += ", ";
+      s += i < elems.size() ? const_init_text(elems[i]) : "zeroinit";
+    }
+  } else {
+    unsigned long long elem_idx = 0;
+    bool first = true;
+    for (a_field_ptr f = type->variant.class_struct_union.field_list;
+         f != NULL;) {
+      if (!first) s += ", ";
+      first = false;
+      if (f->is_bit_field) {
+        BitFieldUnit unit;
+        bit_field_unit(&f, &unit);
+        unsigned __int128 merged = 0;
+        for (a_field_ptr m = unit.run_begin; m != unit.run_end;
+             m = m->next, elem_idx++) {
+          if (elem_idx >= elems.size() || elems[elem_idx] == NULL) continue;
+          unsigned __int128 mask =
+              m->bit_size >= 64
+                  ? ~(unsigned __int128)0
+                  : (((unsigned __int128)1 << m->bit_size) - 1);
+          unsigned __int128 value =
+              (unsigned __int128)(unsigned long long)int_const_text_value(
+                  elems[elem_idx]);
+          merged |= (value & mask)
+                    << ((m->offset - unit.off) * 8 + m->offset_bit_remainder);
+        }
+        s += std::to_string((unsigned long long)merged);
+        continue;
+      }
+      s += elem_idx < elems.size() ? const_init_text(elems[elem_idx])
+                                   : "zeroinit";
+      elem_idx++;
+      f = f->next;
+    }
   }
   s += "]";
   return s;
@@ -468,6 +592,11 @@ std::vector<std::string> pending_module_lines;
 // Global names already declared (.global/.dataextern), so lazily
 // registered temporaries do not collide with the module walk.
 std::map<std::string, bool> declared_globals;
+// Routine symbols already given a .extern interface: libstdc++ headers
+// declare the same function through several IL routine entries
+// (re-declarations, overloads across headers), and the MIR parser
+// rejects a duplicate .extern.
+std::map<std::string, bool> emitted_extern_syms;
 // Names for unnamed static-storage variables, per IL entry: every
 // reference to the same variable must name the same object.
 std::map<a_variable_ptr, std::string> var_global_names;
@@ -512,10 +641,17 @@ std::string var_data_attrs(a_variable_ptr var, const std::string &name) {
   return attrs;
 }
 
-// Compiler builtins the back end models itself (never a symbol).
+// Compiler builtins the back end models itself (never a symbol). The
+// clz/ctz family is prefix-matched: suffixes g/l/ll pick the generic
+// or long variants, all modeled the same way.
 bool builtin_intercepted(const std::string &name) {
-  return name == "__builtin_is_constant_evaluated" ||
-         name == "__builtin_expect" || name == "__builtin_unreachable";
+  if (name == "__builtin_is_constant_evaluated" ||
+      name == "__builtin_expect" || name == "__builtin_unreachable" ||
+      name == "__builtin_constant_p") {
+    return true;
+  }
+  return name.rfind("__builtin_clz", 0) == 0 ||
+         name.rfind("__builtin_ctz", 0) == 0;
 }
 
 // The external symbol for a routine: known __builtin_X libc wrappers
@@ -525,7 +661,20 @@ std::string routine_symbol_name(a_routine_ptr rout) {
   static const char *const libc_builtins[] = {
       "strlen", "memcpy", "memmove", "memset", "memcmp", "memchr",
       "strchr", "strrchr", "strcmp", "strncmp", "strcpy", "strncpy",
-      "strcat", "strncat", "strstr", "abort",  "exit",   NULL};
+      "strcat", "strncat", "strstr", "abort",  "exit",
+      // stdio (GCC maps the __builtin_ forms straight to the libc
+      // functions); libm math, all f/l suffix families.
+      "printf", "fprintf", "sprintf", "snprintf", "vprintf", "puts",
+      "putchar", "putc", "fputs", "fwrite", "fabs", "fabsf", "fabsl",
+      "sqrt", "sqrtf", "sqrtl", "sin", "sinf", "cos", "cosf", "tan",
+      "tanf", "asin", "asinf", "acos", "acosf", "atan", "atanf",
+      "atan2", "atan2f", "exp", "expf", "log", "logf", "log2",
+      "log2f", "log10", "log10f", "pow", "powf", "fmod", "fmodf",
+      "floor", "floorf", "ceil", "ceilf", "round", "roundf", "trunc",
+      "truncf", "copysign", "copysignf", "copysignl", "fmin", "fminf",
+      "fmax", "fmaxf", "hypot", "hypotf", "sinh", "sinhf", "cosh",
+      "coshf", "tanh", "tanhf",
+      "abs", "labs", "llabs", NULL};
   if (name.rfind("__builtin_", 0) == 0) {
     std::string rest = name.substr(10);
     for (unsigned i = 0; libc_builtins[i] != NULL; i++) {
@@ -647,6 +796,14 @@ struct FuncEmitter {
   std::map<a_variable_ptr, a_local_static_variable_init_ptr> local_static_inits;
   // Local static variables whose constant initializer has been applied.
   std::map<a_variable_ptr, bool> flocal_inits_done;
+  // In-progress GNU statement expressions: the slot receiving the
+  // result and whether that slot holds an address (statement
+  // expressions used as glvalues) or the value itself.
+  struct StmtExprCtx {
+    Val slot;
+    bool want_place;
+  };
+  std::vector<StmtExprCtx> stmt_expr_ctx;
   a_scope_ptr func_scope = NULL;
   a_routine_ptr func_rout = NULL;
 
@@ -812,6 +969,119 @@ struct FuncEmitter {
                                              &value, &err);
     if (err) unsupported("integer constant conversion failed");
     return (long long)value;
+  }
+
+  // ---- bit-fields --------------------------------------------------------
+
+  // A bit-field member access resolved to its storage unit: RMW
+  // through `unit` with the field's bits at [bit, bit+width).
+  struct BitRef {
+    Val unit;
+    unsigned bit;
+    unsigned width;
+    bool is_signed;
+    a_type unit_ty_obj;
+    a_type_ptr unit_ty;
+  };
+
+  // True when `expr` selects a bit-field member (directly or through
+  // an lvalue-preserving cast); *out then describes the access.
+  bool bitfield_ref(an_expr_node_ptr expr, BitRef *out) {
+    while (expr->kind == (an_expr_node_kind)enk_operation) {
+      an_expr_operator_kind op = expr->variant.operation.kind;
+      if (op != (an_expr_operator_kind)eok_lvalue_adjust &&
+          op != (an_expr_operator_kind)eok_lvalue_cast) {
+        break;
+      }
+      expr = expr->variant.operation.operands;
+    }
+    if (expr->kind != (an_expr_node_kind)enk_operation) return false;
+    an_expr_operator_kind op = expr->variant.operation.kind;
+    if (op != (an_expr_operator_kind)eok_dot_field &&
+        op != (an_expr_operator_kind)eok_points_to_field) {
+      return false;
+    }
+    an_expr_node_ptr obj = expr->variant.operation.operands;
+    a_field_ptr field = obj->next->variant.field.ptr;
+    if (!field->is_bit_field) return false;
+    a_type_ptr cls =
+        op == (an_expr_operator_kind)eok_dot_field
+            ? skip_typerefs(obj->type)
+            : skip_typerefs(skip_typerefs(obj->type)->variant.pointer.type);
+    BitFieldUnit unit;
+    out->bit = bit_field_pos(cls, field, &unit);
+    out->width = field->bit_size;
+    out->is_signed = il_int_signed(field->type);
+    out->unit_ty_obj = synth_int_type(unit.bytes * 8, /*is_signed=*/false);
+    out->unit_ty = &out->unit_ty_obj;
+    Val base = op == (an_expr_operator_kind)eok_dot_field ? field_base(obj)
+                                                          : eval(obj);
+    out->unit = byte_offset_addr(base, unit.off, out->unit_ty);
+    return true;
+  }
+
+  // Reads the field's bits, sign/zero-extended to its declared type.
+  Val bitfield_load(const BitRef &bf, a_type_ptr result_ty) {
+    a_type i64t = synth_int_type(64, TRUE);
+    Val unit = load(bf.unit, bf.unit_ty);
+    Val v = convert(unit, bf.unit_ty, &i64t);
+    if (bf.bit > 0) {
+      ensure_open();
+      int n = new_value();
+      emit("%%%d:i64 = lshr %s, %u", n, opnd(v).c_str(), bf.bit);
+      v = val(n, &i64t);
+    }
+    if (bf.width < 64) {
+      if (bf.is_signed) {
+        unsigned sh = 64 - bf.width;
+        ensure_open();
+        int n = new_value();
+        emit("%%%d:i64 = shl %s, %u", n, opnd(v).c_str(), sh);
+        ensure_open();
+        int m = new_value();
+        emit("%%%d:i64 = ashr %%%d, %u", m, n, sh);
+        v = val(m, &i64t);
+      } else {
+        unsigned __int128 mask = (((unsigned __int128)1 << bf.width) - 1);
+        ensure_open();
+        int n = new_value();
+        emit("%%%d:i64 = and %s, %lld", n, opnd(v).c_str(),
+             (long long)mask);
+        v = val(n, &i64t);
+      }
+    }
+    return convert(v, &i64t, result_ty);
+  }
+
+  // Replaces the field's bits with `value` (read-modify-write).
+  void bitfield_store(const BitRef &bf, Val value, a_type_ptr value_ty) {
+    a_type i64t = synth_int_type(64, TRUE);
+    unsigned __int128 mask =
+        bf.width >= 64 ? ~(unsigned __int128)0
+                       : (((unsigned __int128)1 << bf.width) - 1);
+    Val old = convert(load(bf.unit, bf.unit_ty), bf.unit_ty, &i64t);
+    Val v = convert(value, value_ty, &i64t);
+    if (bf.width < 64) {
+      ensure_open();
+      int n = new_value();
+      emit("%%%d:i64 = and %s, %lld", n, opnd(v).c_str(), (long long)mask);
+      v = val(n, &i64t);
+    }
+    unsigned __int128 field_mask = mask << bf.bit;
+    ensure_open();
+    int c = new_value();
+    emit("%%%d:i64 = and %s, %lld", c, opnd(old).c_str(),
+         (long long)~field_mask);
+    if (bf.bit > 0) {
+      ensure_open();
+      int n = new_value();
+      emit("%%%d:i64 = shl %s, %u", n, opnd(v).c_str(), bf.bit);
+      v = val(n, &i64t);
+    }
+    ensure_open();
+    int n = new_value();
+    emit("%%%d:i64 = or %%%d, %s", n, c, opnd(v).c_str());
+    store(bf.unit, convert(val(n, &i64t), &i64t, bf.unit_ty));
   }
 
   // ---- memory ----------------------------------------------------------
@@ -991,7 +1261,9 @@ struct FuncEmitter {
 
   Val var_storage(a_variable_ptr var) {
     auto it = slots.find(var);
-    if (it != slots.end()) return val(it->second, var->type);
+    if (it != slots.end()) {
+      return val(it->second, synth_ptr_il_type(var->type));
+    }
     if (var->is_parameter) {
       unsupported_f("parameter '%s' referenced without a slot",
                     var->source_corresp.name ? var->source_corresp.name : "?");
@@ -1089,6 +1361,11 @@ struct FuncEmitter {
   // Address of the storage backing an lvalue expression.
   Val place(an_expr_node_ptr expr);
 
+  // GNU statement expression ({...}): emits the enclosed block inline
+  // and captures the value (or address, for want_place) written by its
+  // trailing stmk_stmt_expr_result into a temporary slot.
+  Val statement_expr(an_expr_node_ptr expr, bool want_place);
+
   // The two-node operand of a field selection, as a base address. An
   // aggregate rvalue operand is copied to a temporary first so its
   // members have stable storage.
@@ -1099,6 +1376,9 @@ struct FuncEmitter {
 
   Val call_emit(an_expr_node_ptr selector, an_expr_node_ptr args,
                 a_type_ptr result_ty);
+
+  Val emit_count_zeros(const std::string &name, an_expr_node_ptr args,
+                       a_type_ptr result_ty);
 
   Val call_addr(a_routine_ptr rout);
   Val increment(Val v, bool up);
@@ -1436,6 +1716,8 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
         }
         case eok_dot_field:
         case eok_points_to_field: {
+          BitRef bf;
+          if (bitfield_ref(expr, &bf)) return bf.unit;
           Val base;
           bool erased_base = false;
           if (expr->variant.operation.kind == (an_expr_operator_kind)eok_dot_field) {
@@ -1449,15 +1731,11 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
             return byte_offset_addr(base, (unsigned long long)field->offset,
                                     field->type);
           }
-          int index = 0;
           a_type_ptr cls = skip_typerefs(
               expr->variant.operation.kind == (an_expr_operator_kind)eok_dot_field
                   ? op1->type
                   : (skip_typerefs(op1->type)->variant.pointer.type));
-          for (a_field_ptr f = cls->variant.class_struct_union.field_list;
-               f != NULL && f != field; f = f->next) {
-            index++;
-          }
+          int index = mir_field_index(cls, field);
           return gep(base, field->type, "field " + std::to_string(index));
         }
         case eok_subscript: {
@@ -1586,9 +1864,29 @@ Val FuncEmitter::place(an_expr_node_ptr expr) {
       }
       return var_storage(params[num - 1]);
     }
+    case enk_statement:
+      return statement_expr(expr, /*want_place=*/true);
     default:
       unsupported_f("expression kind %d used as an lvalue", (int)expr->kind);
   }
+}
+
+Val FuncEmitter::statement_expr(an_expr_node_ptr expr, bool want_place) {
+  a_statement_ptr block = expr->variant.statement;
+  bool glvalue = want_place || expr->is_lvalue || expr->is_xvalue;
+  bool has_value =
+      glvalue || skip_typerefs(expr->type)->kind != (a_type_kind)tk_void;
+  // A glvalue result stores the result's address; a scalar prvalue
+  // stores the value; an aggregate prvalue is memcpy'd (its value is
+  // the address of the storage to copy from).
+  a_type_ptr slot_ty = glvalue ? synth_ptr_il_type(expr->type) : expr->type;
+  Val slot = alloca(slot_ty);
+  stmt_expr_ctx.push_back({slot, want_place});
+  declare_block_locals(block);
+  walk_statements(block->variant.block.statements);
+  stmt_expr_ctx.pop_back();
+  Val res = load(slot, slot_ty);
+  return glvalue ? val(res.n, expr->type) : res;
 }
 
 Val FuncEmitter::eval(an_expr_node_ptr expr) {
@@ -1686,6 +1984,8 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
       return eval(expr->variant.object_lifetime.expr);
     case enk_operation:
       break; // handled below
+    case enk_statement:
+      return statement_expr(expr, /*want_place=*/false);
     case enk_temp_init:
       unsupported("enk_temp_init survived lowering");
     default:
@@ -1763,6 +2063,8 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
     }
     case eok_dot_field:
     case eok_points_to_field: {
+      BitRef bf;
+      if (bitfield_ref(expr, &bf)) return bitfield_load(bf, result_ty);
       Val addr = place(expr);
       if (expr->is_lvalue || expr->is_xvalue) return addr;
       return load(addr, result_ty);
@@ -1775,6 +2077,12 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
     case eok_array_to_pointer:
       return place(expr);
     case eok_assign: {
+      BitRef bf;
+      if (bitfield_ref(op1, &bf)) {
+        Val src = eval(op2);
+        bitfield_store(bf, src, op2->type);
+        return src;
+      }
       Val dst = place(op1);
       Val src = eval(op2);
       a_type_ptr ty = skip_typerefs(result_ty);
@@ -1795,8 +2103,10 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
     case eok_xor_assign:
     case eok_shiftl_assign:
     case eok_shiftr_assign: {
-      Val dst = place(op1);
-      Val old = load(dst, op1->type);
+      BitRef bf;
+      bool bitfield = bitfield_ref(op1, &bf);
+      Val dst = bitfield ? bf.unit : place(op1);
+      Val old = bitfield ? bitfield_load(bf, op1->type) : load(dst, op1->type);
       Val rhs = eval(op2);
       static const an_expr_operator_kind plain[] = {
           eok_add,    eok_subtract, eok_multiply, eok_divide,
@@ -1804,30 +2114,46 @@ Val FuncEmitter::eval(an_expr_node_ptr expr) {
           eok_shiftl, eok_shiftr};
       int idx = (int)op - (int)eok_add_assign;
       Val newv = binop(plain[idx], old, rhs, op1->type, op1->type);
-      store(dst, newv);
+      if (bitfield) {
+        bitfield_store(bf, newv, op1->type);
+      } else {
+        store(dst, newv);
+      }
       return newv;
     }
     case eok_padd_assign:
     case eok_psubtract_assign: {
-      Val dst = place(op1);
-      Val old = load(dst, op1->type);
+      BitRef bf;
+      bool bitfield = bitfield_ref(op1, &bf);
+      Val dst = bitfield ? bf.unit : place(op1);
+      Val old = bitfield ? bitfield_load(bf, op1->type) : load(dst, op1->type);
       Val idx = eval(op2);
       Val newv = pointer_arith(
           op == (an_expr_operator_kind)eok_padd_assign ? eok_padd : eok_psubtract,
           old, idx, op1->type);
-      store(dst, newv);
+      if (bitfield) {
+        bitfield_store(bf, newv, op1->type);
+      } else {
+        store(dst, newv);
+      }
       return newv;
     }
     case eok_pre_incr:
     case eok_pre_decr:
     case eok_post_incr:
     case eok_post_decr: {
-      Val dst = place(op1);
-      Val old = load(dst, op1->type);
+      BitRef bf;
+      bool bitfield = bitfield_ref(op1, &bf);
+      Val dst = bitfield ? bf.unit : place(op1);
+      Val old = bitfield ? bitfield_load(bf, op1->type) : load(dst, op1->type);
       bool incr = op == (an_expr_operator_kind)eok_pre_incr ||
                   op == (an_expr_operator_kind)eok_post_incr;
       Val newv = incr ? increment(old, TRUE) : increment(old, FALSE);
-      store(dst, newv);
+      if (bitfield) {
+        bitfield_store(bf, newv, op1->type);
+      } else {
+        store(dst, newv);
+      }
       return op == (an_expr_operator_kind)eok_pre_incr ||
                      op == (an_expr_operator_kind)eok_pre_decr
                  ? newv
@@ -2066,6 +2392,59 @@ Val FuncEmitter::pointer_arith(an_expr_operator_kind op, Val base, Val idx,
   return convert(sum, &i64, result_ty);
 }
 
+// __builtin_clzg(x[, fb]) / __builtin_ctzg(x[, fb]) and their l/ll
+// variants: leading/trailing zero count within the argument's own
+// width. A zero argument yields the fallback argument (the argument's
+// width when omitted).
+Val FuncEmitter::emit_count_zeros(const std::string &name,
+                                  an_expr_node_ptr args,
+                                  a_type_ptr result_ty) {
+  bool lead = name.rfind("__builtin_clz", 0) == 0;
+  a_type_ptr arg_ty = skip_typerefs(args->type);
+  if (arg_ty->kind != (a_type_kind)tk_integer) {
+    unsupported_f("%s on a non-integer argument", name.c_str());
+  }
+  unsigned width = int_bits(arg_ty);
+  Val x = eval(args);
+  // Widen bit-pattern-preserving: retype to the same-width unsigned
+  // type (no value change) so the widening conversion zero-extends.
+  a_type same_u_obj = synth_int_type(width, FALSE);
+  a_type u64_obj = synth_int_type(64, FALSE);
+  a_type i32_obj = synth_int_type(32, TRUE);
+  a_type_ptr same_u = &same_u_obj;
+  a_type_ptr u64t = &u64_obj;
+  x = convert(x, x.ty, same_u);
+  Val wide = convert(x, same_u, u64t);
+  ensure_open();
+  int c = new_value();
+  emit("%%%d:i64 = %s %s", c, lead ? "clz" : "ctz", opnd(wide).c_str());
+  Val v = val(c, u64t);
+  if (width < 64) {
+    // The widening added (64 - width) leading zeros; drop them.
+    Val pad = int_const((long long)(64 - width), u64t);
+    ensure_open();
+    int n = new_value();
+    emit("%%%d:i64 = sub %s, %s", n, opnd(v).c_str(), opnd(pad).c_str());
+    v = val(n, u64t);
+  }
+  Val slot = alloca(u64t);
+  int b_zero = new_block();
+  int b_nz = new_block();
+  int b_end = new_block();
+  Val is0 = icmp("eq", wide, zero_const(u64t), &i32_obj);
+  emit_brif(is0, b_zero, -1, b_nz, -1);
+  start_block(b_zero);
+  Val fb = args->next != NULL ? eval(args->next)
+                              : int_const((long long)width, u64t);
+  store(slot, convert(fb, fb.ty, u64t));
+  emit_br(b_end);
+  start_block(b_nz);
+  store(slot, v);
+  emit_br(b_end);
+  start_block(b_end);
+  return convert(load(slot, u64t), u64t, result_ty);
+}
+
 Val FuncEmitter::call_emit(an_expr_node_ptr selector, an_expr_node_ptr args,
                            a_type_ptr result_ty) {
   std::vector<Val> argv;
@@ -2094,6 +2473,16 @@ Val FuncEmitter::call_emit(an_expr_node_ptr selector, an_expr_node_ptr args,
       if (name == "__builtin_expect") {
         // Pure hint: the value is the first argument.
         return eval(args);
+      }
+      if (name == "__builtin_constant_p") {
+        // Predicate folded by GCC; at runtime codegen "not a
+        // constant" (0) is always a sound answer -- callers use it
+        // only to choose between equivalent fast/slow paths.
+        return const_int_val(0, result_ty);
+      }
+      if (name.rfind("__builtin_clz", 0) == 0 ||
+          name.rfind("__builtin_ctz", 0) == 0) {
+        return emit_count_zeros(name, args, result_ty);
       }
       // __builtin_unreachable
       emit("unreachable");
@@ -2206,11 +2595,42 @@ void FuncEmitter::store_const_into(Val addr, a_constant_ptr con,
           ty->kind == (a_type_kind)tk_union) {
         size_t i = 0;
         for (a_field_ptr f = ty->variant.class_struct_union.field_list;
-             f != NULL; f = f->next, i++) {
+             f != NULL;) {
+          if (f->is_bit_field) {
+            BitFieldUnit unit;
+            bit_field_unit(&f, &unit);
+            a_type unit_ty_obj = synth_int_type(unit.bytes * 8, FALSE);
+            a_type_ptr unit_ty = &unit_ty_obj;
+            Val unit_addr = byte_offset_addr(addr, unit.off, unit_ty);
+            ensure_open();
+            emit("memset %%%d, byte=0, len=%llu", unit_addr.n, unit.bytes);
+            for (a_field_ptr m = unit.run_begin; m != unit.run_end;
+                 m = m->next, i++) {
+              if (i >= elems.size() || elems[i] == NULL) continue;
+              if (elems[i]->kind != (a_constant_repr_kind)ck_integer) {
+                unsupported("non-integer bit-field constant initializer");
+              }
+              BitRef bf;
+              bf.unit = unit_addr;
+              bf.bit = (unsigned)((m->offset - unit.off) * 8 +
+                                  m->offset_bit_remainder);
+              bf.width = m->bit_size;
+              bf.is_signed = il_int_signed(m->type);
+              bf.unit_ty = unit_ty;
+              bitfield_store(bf,
+                             const_int_val(
+                                 (long long)int_const_text_value(elems[i]),
+                                 m->type),
+                             m->type);
+            }
+            continue;
+          }
           Val field_addr = gep(addr, f->type,
-                               "field " + std::to_string((unsigned long long)i));
+                               "field " + std::to_string(mir_field_index(ty, f)));
           store_const_into(field_addr, i < elems.size() ? elems[i] : NULL,
                            f->type);
+          i++;
+          f = f->next;
         }
         return;
       }
@@ -2266,8 +2686,9 @@ void FuncEmitter::do_dynamic_init(a_dynamic_init_ptr dip) {
     case dik_expression: {
       Val value = eval(dip->variant.expression);
       Val slot = var_storage(var);
-      if (type_is_aggregate(skip_typerefs(var->type))) {
-        memcpy_bytes(slot, value, (unsigned long long)var->type->size);
+      a_type_ptr vty = skip_typerefs(var->type);
+      if (type_is_aggregate(vty)) {
+        memcpy_bytes(slot, value, (unsigned long long)vty->size);
       } else {
         store(slot, value);
       }
@@ -2354,6 +2775,22 @@ void FuncEmitter::walk_statement(a_statement_ptr stmt) {
     case stmk_expr:
       eval(stmt->expr);
       break;
+    case stmk_stmt_expr_result: {
+      // Trailing statement of a GNU statement expression: capture the
+      // result into the enclosing statement_expr context.
+      if (stmt_expr_ctx.empty()) {
+        unsupported("stmk_stmt_expr_result outside a statement expression");
+      }
+      StmtExprCtx &ctx = stmt_expr_ctx.back();
+      if (ctx.want_place) {
+        Val addr = place(stmt->expr);
+        store(ctx.slot, addr);
+      } else {
+        Val v = eval(stmt->expr);
+        store_or_copy(ctx.slot, v, stmt->expr->type);
+      }
+      break;
+    }
     case stmk_init:
       do_dynamic_init(stmt->variant.dynamic_init);
       break;
@@ -2594,6 +3031,7 @@ void FuncEmitter::walk_statement(a_statement_ptr stmt) {
 // ---------------------------------------------------------------------------
 
 void scan_const_strings(a_constant_ptr con);
+void scan_stmt_strings(a_statement_ptr stmt);
 
 void scan_expr_strings(an_expr_node_ptr expr) {
   for (; expr != NULL; expr = expr->next) {
@@ -2601,6 +3039,8 @@ void scan_expr_strings(an_expr_node_ptr expr) {
       scan_const_strings(expr->variant.constant.ptr);
     } else if (expr->kind == (an_expr_node_kind)enk_operation) {
       scan_expr_strings(expr->variant.operation.operands);
+    } else if (expr->kind == (an_expr_node_kind)enk_statement) {
+      scan_stmt_strings(expr->variant.statement->variant.block.statements);
     }
   }
 }
@@ -2767,10 +3207,12 @@ void emit_routine_sig(a_routine_ptr rout, std::string *out) {
 }
 
 void emit_extern_routine(a_routine_ptr rout) {
+  std::string sym = routine_symbol_name(rout);
+  if (emitted_extern_syms.count(sym)) return;
+  emitted_extern_syms.emplace(sym, true);
   std::string sig;
   emit_routine_sig(rout, &sig);
-  std::fprintf(f_out, ".extern @%s %s\n",
-               routine_symbol_name(rout).c_str(), sig.c_str());
+  std::fprintf(f_out, ".extern @%s %s\n", sym.c_str(), sig.c_str());
 }
 
 void emit_func_def(a_routine_ptr rout, a_scope_ptr scope) {
@@ -2823,11 +3265,12 @@ void emit_func_def(a_routine_ptr rout, a_scope_ptr scope) {
   // caller's copy) are memcpy'd so the callee owns its storage.
   for (size_t i = 0; i < em.params.size(); i++) {
     a_variable_ptr param = em.params[i];
+    a_type_ptr pty = skip_typerefs(param->type);
     Val pv = em.val((int)i, param->type);
-    Val slot = em.alloca(param->type);
+    Val slot = em.alloca(pty);
     em.slots.emplace(param, slot.n);
-    if (type_is_aggregate(skip_typerefs(param->type))) {
-      em.memcpy_bytes(slot, pv, (unsigned long long)param->type->size);
+    if (type_is_aggregate(pty)) {
+      em.memcpy_bytes(slot, pv, (unsigned long long)pty->size);
     } else {
       em.store(slot, pv);
     }
