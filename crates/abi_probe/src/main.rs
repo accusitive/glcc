@@ -543,9 +543,11 @@ fn build_module_object(src: &str, target: Target, fe_target: glcc_frontend::targ
     }
     // MIR -> Clif object.
     let mut flag_builder = settings::builder();
+    for (name, value) in glcc_lower_cl::codegen_flags() {
+        flag_builder.set(name, value).map_err(|e| e.to_string())?;
+    }
     flag_builder.set("opt_level", "none").map_err(|e| e.to_string())?;
     flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;
-    flag_builder.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     flag_builder.set("tls_model", "elf_gd").map_err(|e| e.to_string())?;
     let flags = settings::Flags::new(flag_builder);
     let isa: cranelift_codegen::isa::OwnedTargetIsa = match target.arch {

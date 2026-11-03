@@ -38,3 +38,22 @@ pub use ehframe::{emit_unwind, FuncEh};
 pub use initarray::emit_init_array;
 pub use lower::{NarrowReloc, NarrowTarget, WinUnwindEntry, lower_module, lower_module_collecting, lower_module_collecting_with_ids, lower_module_selected, lower_module_with_debug};
 pub use ty::{LoweredSig, clif_ty, lower_sig};
+
+/// Cranelift settings every embedder of this backend should start
+/// from, merged into the JIT builder or flag builder before any
+/// embedder-specific flags.
+///
+/// Stack probing is always on: aggregate SSA values lower to one
+/// stack slot per `InsertValue`, so wide-`_BitInt` code can frame
+/// well past Cranelift's 4KB probe threshold, and without a probe the
+/// prologue jumps straight past the single Windows guard page into
+/// uncommitted stack (an undeliverable access violation). Linux
+/// survives the same code only because the kernel grows the stack
+/// VMA for in-frame faults.
+pub fn codegen_flags() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("preserve_frame_pointers", "true"),
+        ("enable_probestack", "true"),
+        ("probestack_strategy", "inline"),
+    ]
+}

@@ -210,7 +210,7 @@ impl ExecSession {
 }
 
 fn build_jit() -> JITModule {
-    let mut builder = JITBuilder::with_flags(&[("preserve_frame_pointers", "true")], cranelift_module::default_libcall_names()).expect("jit builder");
+    let mut builder = JITBuilder::with_flags(&glcc_lower_cl::codegen_flags(), cranelift_module::default_libcall_names()).expect("jit builder");
     builder.symbol("memcpy", memcpy as *const u8);
     builder.symbol("memset", memset as *const u8);
     builder.symbol("malloc", malloc as *const u8);

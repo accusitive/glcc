@@ -982,7 +982,7 @@ fn jit_run_main(mut mir_module: mir::Module) -> i32 {
         // The variadic prelude reads the frame pointer, like the
         // driver (which sets preserve_frame_pointers), and Win64
         // F128/I128 follow LLVM's ABI there.
-        let mut flags = vec![("preserve_frame_pointers", "true")];
+        let mut flags = glcc_lower_cl::codegen_flags();
         if cfg!(windows) {
             flags.push(("enable_llvm_abi_extensions", "true"));
         }

@@ -175,9 +175,11 @@ fn emit_object(module: &glcc_mir::ir::Module, opt: OptLevel) -> Result<Vec<u8>, 
     use cranelift_codegen::settings::Configurable;
 
     let mut flag_builder = cranelift_codegen::settings::builder();
+    for (name, value) in glcc_lower_cl::codegen_flags() {
+        flag_builder.set(name, value).map_err(|e| e.to_string())?;
+    }
     flag_builder.set("opt_level", opt.flag()).map_err(|e| e.to_string())?;
     flag_builder.set("is_pic", "true").map_err(|e| e.to_string())?;
-    flag_builder.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let flags = cranelift_codegen::settings::Flags::new(flag_builder);
     let isa = cranelift_native::builder().map_err(|e| e.to_string())?.finish(flags).map_err(|e| e.to_string())?;
     // EH modules take over `.eh_frame` (see glcc_lower_cl::ehframe).
