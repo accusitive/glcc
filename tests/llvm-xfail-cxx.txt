@@ -1,49 +1,33 @@
-# Current expected failures for run-cxx.sh. Tests verified passing (dynamic
-# global ctors/dtors, iostreams, pointer-to-data-member, non-PODs by value,
-# virtual dispatch, short-circuit dtor sequencing, ...) were un-xfail'd once
-# the runner learned to strip the historical `exit 0` line from upstream
-# .reference_output files.
-
-# Emitter: duplicate .extern @strlen emitted (interface loop in
-# crates/edg-sys/bridge/mir_gen_be.cpp emits one .extern per undefined routine
-# entry without dedup; libstdc++ headers produce multiple strlen entries), and
-# the MIR parser rejects the duplicate. Fix: dedup emitted extern names (or
-# tolerate identical duplicate externs in the MIR parser).
-loop_unroll
-simple_types_constant_folding
-simple_types_loop_invariant
-stepanov_abstraction
-stepanov_vector
-# functionobjects hits the same duplicate-@strlen failure most runs, but
-# nondeterministically (ASLR-dependent IL reads) instead hits an emitter bug:
-# int_bits() reads a garbage an_integer_kind (observed 32 and 224) from the
-# type of an integer constant (int_const_text -> const_init_text ->
-# var_storage), i.e. the IL memory region holding that type was never read
-# (or an enum-type constant's int_kind is not populated). Failure mode varies
-# run to run between the two.
-functionobjects
+# Current expected failures for run-cxx.sh. The runner compiles at -O0:
+# the -O2 pipeline has a known inst-combine miscompile (the GEP
+# zero-index fold in crates/glcc_mir/src/passes/instcombine/mod.rs
+# rewrites `gep base [0]` into a bitcast/value of the base; stepanov_vector
+# then reports wrong sums) that is parked until a dedicated root-cause
+# pass. Tests verified passing (dynamic global ctors/dtors, iostreams,
+# pointer-to-data-member, non-PODs by value, virtual dispatch,
+# short-circuit dtor sequencing, the Adobe-C++ block after the extern
+# dedup + libc-builtin mapping + __builtin_clzg modeling, ...) were
+# un-xfail'd as fixed.
 
 # Emitter construct gaps (mir_gen_be unsupported-construct exits):
-# 2003-05-14-expr_stmt: GNU statement expression ({ ... }) - enk_statement
-#   (expr kind 18) not handled in FuncEmitter::eval.
-# 2011-03-28-Bitfield: bit-fields unsupported in mir_gen_be.
 # pointer_method2: pointer-to-member-function: member-pointer constant
 #   (Itanium ABI {fnptr, adjustment} aggregate) needs an aggregate->i64 cast,
 #   unsupported in the emitter's convert().
 # fftbench: "routine without a name" - entity_name() refuses a routine with
 #   NULL IL name (compiler-generated routine from <complex>/<iostream> that
 #   only carries a mangled name); needs a mangled-name fallback.
-2003-05-14-expr_stmt
-2011-03-28-Bitfield
 pointer_method2
 fftbench
 
-# Codegen run bugs:
+# Codegen run bugs (-O0-independent, not optimizer miscompiles):
+# stepanov_abstraction: segfault. benchmark::quicksort recurses without
+#   terminating (stack overflow) even at -O0.
 # pointer_method: segfault. Member-pointer constant copy is stored to one
 #   stack slot but read back 16 bytes off (vmovdqu (%rsp) store vs
 #   0x10(%rsp) load), so (b.*Fn)() calls through a garbage function pointer.
 # stdthreadbug: segfault in the new thread. std::thread's heap _State_impl
 #   (vptr + lambda closure copy) is miscompiled: libstdc++'s
 #   execute_native_thread_routine calls _M_run() through a null vptr slot.
+stepanov_abstraction
 pointer_method
 stdthreadbug

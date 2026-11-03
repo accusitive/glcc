@@ -37,7 +37,7 @@ for dir in $CXX_DIRS; do
     else
       want=pass
     fi
-    if ! timeout 120 "$GLCPP" -O2 "$src" -o "$tmp/a.out" 2>"$tmp/cc.err"; then
+    if ! timeout 120 "$GLCPP" -O0 "$src" -o "$tmp/a.out" 2>"$tmp/cc.err"; then
       if [ "$want" = xfail ]; then echo "xfail (compile)"; xf=$((xf+1));
       else echo "FAIL (compile)"; fail=$((fail+1)); fails_list="$fails_list $base"; fi
       continue
