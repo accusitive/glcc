@@ -183,12 +183,14 @@ fn undefined_symbol(obj: &mut Object<'static>, name: &str) -> object::write::Sym
 }
 
 /// (code alignment, DWARF return-address register, DWARF stack-pointer
-/// register, CFA offset relative to SP) per ISA, mirroring each backend's
-/// `create_cie`.
-fn cie_params(isa: &dyn TargetIsa) -> (u8, Register, Register, i32) {
+/// register, CFA offset relative to SP, return-address offset from CFA) per
+/// ISA, mirroring each backend's `create_cie`. x86-64 saves the return
+/// address at `CFA-8` on every call; aarch64 keeps it in `x30` (the FDE's
+/// prologue rule covers saving it).
+fn cie_params(isa: &dyn TargetIsa) -> (u8, Register, Register, i32, Option<i32>) {
     match isa.triple().architecture {
-        target_lexicon::Architecture::Aarch64(_) => (4, Register(30), Register(31), 0),
-        target_lexicon::Architecture::X86_64 => (1, Register(16), Register(7), 8),
+        target_lexicon::Architecture::Aarch64(_) => (4, Register(30), Register(31), 0, None),
+        target_lexicon::Architecture::X86_64 => (1, Register(16), Register(7), 8, Some(-8)),
         arch => panic!("no SystemV CIE parameters for {arch}"),
     }
 }
@@ -305,17 +307,23 @@ pub fn emit_unwind(
     let personality_idx = symbols.len();
     symbols.push(undefined_symbol(obj, "__gxx_personality_v0"));
 
-    let (code_align, ra_reg, sp_reg, cfa_sp_off) = cie_params(isa);
+    let (code_align, ra_reg, sp_reg, cfa_sp_off, ra_offset) = cie_params(isa);
     let encoding = Encoding { address_size: 8, format: Format::Dwarf32, version: 1 };
 
     let plain_cie = {
         let mut cie = CommonInformationEntry::new(encoding, code_align, -8, ra_reg);
         cie.add_instruction(CallFrameInstruction::Cfa(sp_reg, cfa_sp_off));
+        if let Some(offset) = ra_offset {
+            cie.add_instruction(CallFrameInstruction::Offset(ra_reg, offset));
+        }
         cie
     };
     let eh_cie = {
         let mut cie = CommonInformationEntry::new(encoding, code_align, -8, ra_reg);
         cie.add_instruction(CallFrameInstruction::Cfa(sp_reg, cfa_sp_off));
+        if let Some(offset) = ra_offset {
+            cie.add_instruction(CallFrameInstruction::Offset(ra_reg, offset));
+        }
         cie.personality = Some((
             constants::DW_EH_PE_absptr,
             Address::Symbol { symbol: personality_idx, addend: 0 },

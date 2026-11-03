@@ -68,13 +68,13 @@ impl RelocateWriter for FrameSection {
 }
 
 /// (code alignment, DWARF return-address register, DWARF stack-pointer
-/// register, CFA offset relative to SP) for the host ISA, mirroring each
-/// backend's `create_cie`.
-fn cie_params(triple: &target_lexicon::Triple) -> (u8, Register, Register, i32) {
+/// register, CFA offset relative to SP, return-address offset from CFA) for
+/// the host ISA, mirroring each backend's `create_cie`.
+fn cie_params(triple: &target_lexicon::Triple) -> (u8, Register, Register, i32, Option<i32>) {
     use target_lexicon::Architecture;
     match triple.architecture {
-        Architecture::Aarch64(_) => (4, Register(30), Register(31), 0),
-        Architecture::X86_64 => (1, Register(16), Register(7), 8),
+        Architecture::Aarch64(_) => (4, Register(30), Register(31), 0, None),
+        Architecture::X86_64 => (1, Register(16), Register(7), 8, Some(-8)),
         arch => panic!("unsupported spike architecture {arch}"),
     }
 }
@@ -393,17 +393,23 @@ fn main() {
     let personality_idx = symbols.len() as u32;
     symbols.push(undefined_symbol(&mut obj, "__gxx_personality_v0"));
 
-    let (code_align, ra_reg, sp_reg, cfa_sp_off) = cie_params(&isa.triple());
+    let (code_align, ra_reg, sp_reg, cfa_sp_off, ra_offset) = cie_params(&isa.triple());
     let encoding = Encoding { address_size: 8, format: Format::Dwarf32, version: 1 };
 
     let plain_cie = {
         let mut cie = CommonInformationEntry::new(encoding, code_align, -8, ra_reg);
         cie.add_instruction(CallFrameInstruction::Cfa(sp_reg, cfa_sp_off));
+        if let Some(offset) = ra_offset {
+            cie.add_instruction(CallFrameInstruction::Offset(ra_reg, offset));
+        }
         cie
     };
     let eh_cie = {
         let mut cie = CommonInformationEntry::new(encoding, code_align, -8, ra_reg);
         cie.add_instruction(CallFrameInstruction::Cfa(sp_reg, cfa_sp_off));
+        if let Some(offset) = ra_offset {
+            cie.add_instruction(CallFrameInstruction::Offset(ra_reg, offset));
+        }
         cie.personality = Some((
             constants::DW_EH_PE_absptr,
             Address::Symbol { symbol: personality_idx as usize, addend: 0 },
