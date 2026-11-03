@@ -49,7 +49,10 @@ int main() {
 }
 "#;
 
+// Cranelift has no exception-lowering support on Windows fastcall; skipped
+// there until that is addressed (same as the EH JIT tests in src/lower).
 #[test]
+#[cfg_attr(windows, ignore = "cranelift does not support EH on Windows fastcall")]
 fn eh_object_pipeline_unwinds_end_to_end() {
     let module = glcc_mir::parse_module(MIR).expect("EH module parses");
     assert!(glcc_mir::parse_module(MIR).is_ok()); // parse already ran verification
