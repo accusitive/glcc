@@ -305,6 +305,36 @@ Provided by libstdc++/libgcc_s, nothing to write: `__cxa_throw`,
 `libC.a` keeps `operator new`/arrays/RTTI helpers; its setjmp EH machinery
 (`throw.o` etc.) simply stops being referenced.
 
+## How to resume P3 (exact state, 2026-11-03)
+
+Nothing on the EDG side has changed yet; P0-P2 are landed and green. P3
+starts with three moves in `crates/edg-sys/build.rs`:
+
+1. Insert `defs.insert("DO_FULL_PORTABLE_EH_LOWERING", Some("FALSE"))`
+   right before the *frontend* `cc::Build` consumes `defs` (so
+   `cmake_defines.h`, written after, carries it to mir_gen_be).
+2. cgen must stay portable: before the `cgen_build` define loop, add
+   `cgen_build.define("DO_FULL_PORTABLE_EH_LOWERING", Some("TRUE"))`
+   (the `-D` beats cmake_defines.h's `#ifndef` guard).
+3. The flip must land in the same commit as the `mir_gen_be` emitter
+   below: with the portable lowering off, every C++ construct EDG
+   lowers with an internal try block (operator new expressions!)
+   surfaces as `stmk_try_block` in the IL, and today's
+   `unsupported("try block")` would reject files that compile fine now
+   (e.g. `std_vector` on x86).
+
+`mir_gen_be.cpp` then needs (see the "EDG side" section above for the IL
+shapes): `stmk_try_block` walking (guarded scope push, per-call invoke
+conversion, one merged landing pad per try block),
+`a_handler.typeinfo_var` dispatch through `eh.typeid`,
+`__cxa_begin_catch`/`__cxa_end_catch` around the handler body, the
+cleanup path reusing the existing object-lifetime walk, and `throw` via
+`__cxa_allocate_exception` + copy + `__cxa_throw`. Acceptance:
+`sh tests/cpp/run.sh` with `exceptions` still xfail and `std_vector`
+green without `__internal_rethrow`. The e2e shape to imitate is
+`crates/glcc_lower_cl/tests/eh_e2e.rs` (its MIR text is exactly what the
+emitter must produce, minus cleanup pads).
+
 ## Phases
 
 - **S0 — spike (do first).** Hand-written CLIF (not through MIR): a
