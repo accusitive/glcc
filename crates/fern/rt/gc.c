@@ -725,7 +725,10 @@ static char **fern_win_argv_array(char *name, fargv *args) {
 	u64 n = fern_argv_count(args);
 	char **out = (char **)fern_alloc((n + 2) * sizeof(char *));
 	u64 i = 0;
-	out[0] = name;
+	/* The program name lands on the same unquoted command line as the
+	   arguments, so a path with spaces (Git Bash's SHELL) would split
+	   into "C:\Program" + a bogus file name. */
+	out[0] = fern_win_quote(name);
 	while (args != 0) {
 		i++;
 		out[i] = fern_win_quote(args->s);
