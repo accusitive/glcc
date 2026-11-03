@@ -428,6 +428,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "glcc_cxx"
+version = "0.1.0"
+dependencies = [
+ "edg-sys",
+ "glcc",
+]
+
+[[package]]
 name = "glcc_dwarf"
 version = "0.1.0"
 dependencies = [
@@ -518,14 +526,6 @@ dependencies = [
 [[package]]
 name = "glcc_toolchain"
 version = "0.1.0"
-
-[[package]]
-name = "glcpp"
-version = "0.1.0"
-dependencies = [
- "edg-sys",
- "glcc",
-]
 
 [[package]]
 name = "hashbrown"

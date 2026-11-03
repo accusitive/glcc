@@ -20,8 +20,8 @@ bootstrapped, it can drive every example Makefile without GNU make.
 
 On Linux and macOS, run `make && make run` in any example directory.
 On Windows, build the tools with `cargo build -p glcc -p fernc`, build
-`tools/fernmake/build/fernmake.exe` once (see
-`tools/fernmake/README.md`), then use the PowerShell recipes:
+`tools/fernmake/build/fernmake.exe` once (run `tools/fernmake/build.ps1`,
+see `tools/fernmake/README.md`), then use the PowerShell recipes:
 
 ```powershell
 ..\..\..\tools\fernmake\build\fernmake.exe Makefile.win

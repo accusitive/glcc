@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Stage the link-time runtimes under ~/.local/lib/glcc. The compilers
-# themselves install with cargo:
+# Build the compilers, then stage the link-time runtimes under
+# ~/.local/lib/glcc. The compilers themselves install with cargo:
 #
 #   cargo install --path . --locked                            # glcc
-#   cargo install --path crates/glcpp --features cxx --locked  # optional C++
+#   cargo install --path crates/glcc_cxx --features cxx --locked  # optional C++
 #
 # glcc's build script already stages glccrt.o during those installs; this
 # script rebuilds it with the freshest local glcc and copies EDG's libC.a
@@ -15,18 +15,11 @@ LIB="$HOME/.local/lib/glcc"
 mkdir -p "$LIB"
 
 if [ -z "${GLCC:-}" ]; then
-  for cand in "$ROOT/target/release/glcc" "$ROOT/target/debug/glcc"; do
-    if [ -x "$cand" ]; then
-      GLCC="$cand"
-      break
-    fi
-  done
+  cargo build --release -p glcc --locked
+  GLCC="$ROOT/target/release/glcc"
 fi
-if [ -z "${GLCC:-}" ]; then
-  GLCC="$(command -v glcc || true)"
-fi
-if [ -z "${GLCC:-}" ]; then
-  echo "install.sh: glcc not found; run 'cargo install --path .' first, or set GLCC" >&2
+if [ ! -x "$GLCC" ]; then
+  echo "install.sh: built glcc not found at $GLCC" >&2
   exit 1
 fi
 
@@ -68,15 +61,22 @@ fi
 # EDG's C++ runtime, built into the checkout's target dir by edg-sys.
 # (Cargo build dirs are `build/edg-sys-<hash>/out/` or `build/edg-sys/<hash>/out/`
 # depending on the cargo version.)
-LIBC_A=""
-for profile in release debug; do
-  [ -d "$ROOT/target/$profile" ] || continue
-  LIBC_A="$(find "$ROOT/target/$profile" -path '*/build/edg-sys*' -name libC.a -print -quit 2>/dev/null)"
-  [ -n "$LIBC_A" ] && break
-done
+find_libc() {
+  for profile in release debug; do
+    [ -d "$ROOT/target/$profile" ] || continue
+    find "$ROOT/target/$profile" -path '*/build/edg-sys*' -name libC.a -print -quit 2>/dev/null
+  done | head -n1
+}
+LIBC_A="$(find_libc || true)"
+if [ -z "$LIBC_A" ] && [ -f "$ROOT/edg/src/ccfe.c" ]; then
+  cargo build --release -p glcc_cxx --features cxx --locked
+  LIBC_A="$(find_libc || true)"
+fi
 if [ -n "$LIBC_A" ]; then
   cp "$LIBC_A" "$LIB/libC.a"
+elif [ ! -f "$ROOT/edg/src/ccfe.c" ]; then
+  echo "install.sh: EDG submodule missing; skipping libC.a (C++ will not link)" >&2
 else
-  echo "install.sh: libC.a not found under target/; build glcpp first:" >&2
-  echo "  cargo install --path crates/glcpp --features cxx --locked" >&2
+  echo "install.sh: libC.a not found after building glcc_cxx" >&2
+  exit 1
 fi

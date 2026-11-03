@@ -12,8 +12,9 @@
   compiles.) CI runs the full workspace suite, so there is no need to
   run it locally.
 
-  Building `glcpp` (and with it EDG) is opt-in via `--features cxx`:
-  `cargo build -p glcpp --features cxx` (or `cargo build --workspace
+  Building the C++ front end (crate `glcc_cxx`, binary `glcpp`) and
+  with it EDG is opt-in via `--features cxx`:
+  `cargo build -p glcc_cxx --features cxx` (or `cargo build --workspace
   --features cxx`). Plain workspace builds skip it.
 
 ## Error handling

@@ -60,11 +60,11 @@ Goals
 Non-goals
 
 - **C++ / EDG.** No `--features cxx`, no `--all-features` (which would
-  enable `cxx` via `crates/glcpp/Cargo.toml`), no `edg` submodule, no
+  enable `cxx` via `crates/glcc_cxx/Cargo.toml`), no `edg` submodule, no
   `glcpp` binary. The workspace already skips EDG by design:
   `edg-sys/build.rs:73-81` returns immediately unless `CARGO_FEATURE_CXX`
   is set, and `glcpp`'s binary is `required-features = ["cxx"]`
-  (`crates/glcpp/Cargo.toml:6-14`).
+  (`crates/glcc_cxx/Cargo.toml:6-14`).
 - **Submodule suites.** `tools/torture.bash` needs the 2+ GB
   `tests/llvm-test-suite` checkout; `tools/ctestsuite.bash` needs
   `tests/c-testsuite`. Both are bash-driven and out of scope for now.
@@ -94,7 +94,7 @@ tests exactly; doc-tests add nothing material). CI runs these minus
 | `glcc` (root `src/driver.rs`) | 43 | driver arg parsing, link-command assembly, in-process object emission; two asserts are `#[cfg(not(windows))]` (`.eh_frame`) |
 | `glcc_explorer` | 16 | in-process compile; disassembly assertions are skipped when no `objdump`/`llvm-objdump` is on PATH (`crates/glcc_explorer/src/lib.rs:561-569`) |
 | `glcc_toolchain` | 1 | pure version-ordering test |
-| `glcc_dwarf`, `abi_probe`, `glcpp` | 0 | — |
+| `glcc_dwarf`, `abi_probe`, `glcc_cxx` | 0 | — |
 | `fern` | 94 | experiment; JIT suite excluded on Linux/aarch64, compiled out on Windows |
 | `fernc` | 14 | end-to-end driver tests; Windows gate, excluded on Linux/aarch64 |
 
@@ -292,7 +292,7 @@ suite is excluded (it fails here; see audit). Nothing extra to install.
 # 4. add C:\Program Files\Git\bin and ...\usr\bin to PATH
 # 5. cargo build -p glcc -p fernc --locked
 # 6. cargo test --workspace --locked
-# 7. build fernmake with fernc + glcc, run tools/fernmake/Makefile.win,
+# 7. build fernmake with fernc + glcc (tools/fernmake/build.ps1),
 #    then run Makefile.win in examples/fern/{brainfuck,modules,showcase}
 ```
 
@@ -302,8 +302,9 @@ What Windows needs and does not need, verified against the code:
   driver tests use `glcc` (the sibling binary built in step 5) for the
   C harness and link step.
 - Git Bash supplies `sh`, `test`, `cp`, `printf`, `rm`, `mkdir`, and
-  `realpath` for `fernmake`'s POSIX feature tests. The Windows example and tool
-  makefiles use PowerShell recipes instead and avoid those utilities.
+  `realpath` for `fernmake`'s POSIX feature tests. The Windows example
+  makefiles and fernmake's `demo.win.mk` use PowerShell recipes instead
+  and avoid those utilities.
 - `link.exe`/`lib.exe` come from `ilammy/msvc-dev-cmd`; `glcc` uses
   them to link the fern objects and C harnesses.
 - `clang` is not needed by tests. It *is* on the image (LLVM 20.1.8)
@@ -445,9 +446,10 @@ What **not** to cache:
    (`GLCC_CC` unset), but a future Windows test with `GLCC_CC` set
    would need GNU `ar`.
 7. **Windows links and runs real `.exe`s.** The fern driver tests link
-   each object with `glcc`, and the example step builds and runs all
-   four `Makefile.win` targets. The optional C driver smoke remains
-   commented out, but it is no longer the first real link.
+   each object with `glcc`, and the example step builds fernmake with
+   `build.ps1` and runs the three example `Makefile.win`s. The optional
+   C driver smoke remains commented out, but it is no longer the first
+   real link.
 
 Nothing found in the suite that hard-fails Windows on inspection:
 no `#[ignore]`, no `symlink`, no `Command::new("sh")`, no `/home`, no

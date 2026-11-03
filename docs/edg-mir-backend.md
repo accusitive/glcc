@@ -19,7 +19,7 @@ foo.cpp ──EDG cpfe (DO_IL_LOWERING=1)──> lowered C-like IL
 | MIR text parser | `crates/glcc_mir/src/parse.rs` |
 | Driver splice | `src/driver.rs` `compile_edg_input` / `compile_source` |
 
-Build: `cargo build -p glcpp --features cxx`. Run:
+Build: `cargo build -p glcc_cxx --features cxx`. Run:
 `GLCPP_EDG_BACKEND=cgen glcpp ...` selects the legacy generated-C path for
 A/B debugging; default is the MIR path.
 
@@ -442,7 +442,7 @@ anything; conformance lives in the emitter.
 
 ## Host/arch support audit (2026-11-02)
 
-`cargo build -p glcpp --features cxx` used to be x86-64-only in three
+`cargo build -p glcc_cxx --features cxx` used to be x86-64-only in three
 independent ways, all fixed in `crates/edg-sys/build.rs`:
 
 - EDG's `linux-gcc` cmakedef hardcodes `USE_QUADMATH_LIBRARY=1`

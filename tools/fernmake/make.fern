@@ -8,8 +8,8 @@
 -- file. Recipes run through `$(SHELL)` with `.SHELLFLAGS` (default
 -- `sh -c`); `Makefile.win` selects PowerShell instead.
 --
--- Build with `make`, or run `./bootstrap.sh` when GNU make is absent.
--- Then try `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
+-- Build with `./build.sh` (or `.\build.ps1` on Windows). Then try
+-- `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
 
 import std::io
 import std::list

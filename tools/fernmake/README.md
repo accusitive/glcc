@@ -4,51 +4,45 @@ A small Makefile runner written in fern. It is the drop-in build entry
 point for the examples when GNU make is not available. The tool lives
 under `tools/` so it is not an example.
 
-With GNU make in the repo:
+Build it with the `build.sh` / `build.ps1` scripts; there is no
+Makefile here, so the Makefile runner does not need GNU make to build
+itself. The scripts rebuild everything on every invocation.
 
 ```bash
 cd tools/fernmake
-make
-make run                              # runs the demo
-make install                          # installs to /usr/local/bin
-make install PREFIX=$HOME/.local      # or under another prefix
+./build.sh                            # builds build/fernmake
+./build.sh run                        # builds, then runs the demo
+./build.sh install                    # installs to /usr/local/bin
+./build.sh install PREFIX=$HOME/.local  # or under another prefix
+./build.sh clean                      # removes build/
 ```
 
-`DESTDIR` stages the install into a packaging root, as usual.
+`DESTDIR` stages the install into a packaging root, as usual. The
+scripts look for `fernc` and `glcc` in the repo's `target/debug` and
+`target/release` trees first (`cargo build -p glcc -p fernc`), then on
+`PATH`; `FERNC`/`GLCC` environment variables override both.
 
-Without GNU make, bootstrap it once with `fernc` and `glcc`, then use
-the resulting binary for every example Makefile:
+Once built, use the binary for every example Makefile:
 
 ```bash
-cd tools/fernmake
-FERNC=../../target/debug/fernc \
-GLCC=../../target/debug/glcc \
-./bootstrap.sh
-
-./build/fernmake demo.mk              # default target
+./build/fernmake demo.mk              # named makefile, default target
 ./build/fernmake demo.mk clean        # named target
-PREFIX=$HOME/.local ./build/fernmake Makefile install
-(cd ../../examples/fern/showcase && ../../../tools/fernmake/build/fernmake Makefile)
+(cd ../../examples/fern/showcase && ../../../tools/fernmake/build/fernmake)
 ```
 
-On Windows, build the runner with `fernc` and `glcc` directly, then use
-`Makefile.win`:
+With no arguments, fernmake builds `Makefile` in the current directory;
+the example directories all have one.
+
+On Windows, use `build.ps1`:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path build
-..\..\target\debug\fernc.exe -O1 make.fern -o build\fernmake.obj
-..\..\target\debug\glcc.exe driver.c build\fernmake.obj -o build\fernmake.exe
-.\build\fernmake.exe Makefile.win
-.\build\fernmake.exe Makefile.win run
+.\build.ps1            # builds build\fernmake.exe
+.\build.ps1 run        # builds, then runs the demo
+.\build.ps1 clean      # removes build\
 ```
 
-`Makefile.win` and `demo.win.mk` use PowerShell as their recipe shell;
-the POSIX `Makefile` and `demo.mk` use `sh`.
-
-`./build/fernmake Makefile` rebuilds fernmake from its own Makefile, so
-the tool is self-hosting after the initial bootstrap. The POSIX and
-Windows Makefiles repeat their small build rules so the tool does not
-depend on the examples.
+`demo.win.mk` uses PowerShell as its recipe shell; the POSIX `demo.mk`
+uses `sh`.
 
 Supported subset:
 

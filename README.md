@@ -13,12 +13,13 @@ The C++ front end (`glcpp`) is opt-in and needs the EDG submodule:
 
     git submodule update --init edg
     cargo install --path . --locked
-    cargo install --path crates/glcpp --features cxx --locked
+    cargo install --path crates/glcc_cxx --features cxx --locked
     ./install.sh             # stage the runtimes in ~/.local/lib/glcc
 
-`cargo install` builds and installs both compilers. `./install.sh` only
-builds/copies the runtime files they link against: `glccrt.o` for C, and
-EDG's `libC.a` for C++.
+`cargo install` builds and installs both compilers. `./install.sh`
+builds them too (into `target/release`) and copies the runtime files
+they link against into `~/.local/lib/glcc`: `glccrt.o` for C, and EDG's
+`libC.a` for C++.
 
 ## License
 
