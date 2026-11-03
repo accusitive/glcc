@@ -15,6 +15,7 @@ use crate::abi::{self, SigLayout, Target, VaCtx};
 use crate::memflags;
 use crate::ty::clif_ty;
 use super::*;
+use crate::ehframe::FuncEh;
 
 pub(crate) struct Body<'m> {
     pub(crate) func: &'m mir::Function,
@@ -49,6 +50,7 @@ pub(crate) struct Body<'m> {
 pub(crate) fn lower_function<M: Module>(
     id: mir::Func,
     mir_func: &mir::Function,
+    globals: &index_vec::IndexVec<mir::Global, mir::GlobalData>,
     target: Target,
     layouts: &HashMap<mir::Func, SigLayout>,
     extern_layouts: &HashMap<mir::Extern, SigLayout>,
@@ -62,6 +64,7 @@ pub(crate) fn lower_function<M: Module>(
     wrappers: &mut Wrappers,
     debug: Option<&mut glcc_dwarf::LoweredDebug>,
     unwind: Option<&mut Vec<WinUnwindEntry>>,
+    eh: &mut Vec<FuncEh>,
 ) {
     let layout = layouts[&id].clone();
     let mut ctx = clif.make_context();
@@ -157,6 +160,7 @@ pub(crate) fn lower_function<M: Module>(
                 });
             }
         }
+    eh.push(crate::ehframe::collect_func_eh(mir_func, globals, clif_id, &ctx, clif.isa()));
 }
 
 /// Order for filling blocks: reverse postorder over the reachable CFG,

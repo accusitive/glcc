@@ -479,6 +479,7 @@ dependencies = [
  "gimli",
  "glcc_dwarf",
  "glcc_mir",
+ "index_vec",
  "object",
  "smallvec",
  "target-lexicon",

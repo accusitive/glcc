@@ -1379,32 +1379,52 @@ fn emit_object(
             .finish(flags)
             .expect("isa flags")
     };
-    let mut builder = cranelift_object::ObjectBuilder::new(isa, "glcc", cranelift_module::default_libcall_names()).expect("object builder");
-    // Always emit `.eh_frame` so backtraces work with or without
-    // `-g`: the DWARF variable locations are CFA-relative, so gdb
-    // needs the CFI to resolve them too.
-    builder.unwind_info(true);
+    let mut builder = cranelift_object::ObjectBuilder::new(isa.clone(), "glcc", cranelift_module::default_libcall_names()).expect("object builder");
+    // EH modules take over `.eh_frame` entirely (personality CIE +
+    // LSDAs; see glcc_lower_cl::ehframe), so cranelift's own emission
+    // must stay off there. Otherwise always emit `.eh_frame` so
+    // backtraces work with or without `-g`: the DWARF variable
+    // locations are CFA-relative, so gdb needs the CFI to resolve
+    // them too.
+    let has_eh = mir_module.funcs.iter().any(|f| f.personality.is_some());
+    builder.unwind_info(!has_eh);
     let mut obj = cranelift_object::ObjectModule::new(builder);
     let mut unwind = Vec::new();
-    Ok(if debug {
-        let (ids, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+    let mut eh = Vec::new();
+    let bytes = if debug {
+        let (ids, lowered, narrow) = glcc_lower_cl::lower_module_with_debug(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind, &mut eh);
         let mut product = obj.finish();
         emit_init_array(&mut product, &mir_module, &ids);
         if let Err(e) = winunwind::emit(&mut product, &unwind) {
             eprintln!("glcc: warning: {e}");
         }
+        emit_eh_frame(&mut product, &eh, isa.clone());
         apply_narrow_relocs(&mut product, &narrow);
-        (glcc_dwarf::emit_with_debug(product, &lowered, &mir_module), asm_text)
+        glcc_dwarf::emit_with_debug(product, &lowered, &mir_module)
     } else {
-        let (ids, narrow) = glcc_lower_cl::lower_module_collecting_with_ids(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind);
+        let (ids, narrow) = glcc_lower_cl::lower_module_collecting_with_ids(&mir_module, &mut obj, cl_target, &mut asm_text, &mut unwind, &mut eh);
         let mut product = obj.finish();
         emit_init_array(&mut product, &mir_module, &ids);
         if let Err(e) = winunwind::emit(&mut product, &unwind) {
             eprintln!("glcc: warning: {e}");
         }
+        emit_eh_frame(&mut product, &eh, isa.clone());
         apply_narrow_relocs(&mut product, &narrow);
-        (product.emit().expect("object emit"), asm_text)
-    })
+        product.emit().expect("object emit")
+    };
+    Ok((bytes, asm_text))
+}
+
+/// Append our own `.eh_frame` + `.gcc_except_table` for EH modules (the
+/// plain-CFI case keeps cranelift's section). Degrades to a warning like
+/// the other object patchups.
+fn emit_eh_frame(product: &mut cranelift_object::ObjectProduct, eh: &[glcc_lower_cl::FuncEh], isa: cranelift_codegen::isa::OwnedTargetIsa) {
+    if !eh.iter().any(|f| f.eh) {
+        return;
+    }
+    if let Err(e) = glcc_lower_cl::emit_unwind(product, eh, &[], &*isa) {
+        eprintln!("glcc: warning: cannot emit EH unwind metadata: {e}");
+    }
 }
 
 /// Append `.init_array` entries for the module's declared constructors.

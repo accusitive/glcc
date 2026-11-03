@@ -27,6 +27,8 @@ pub(crate) use rt::*;
 /// `UNWIND_INFO` (`.xdata` content) plus the function size its
 /// `.pdata` `RUNTIME_FUNCTION` entry needs. The driver's `winunwind`
 /// module lays these out as sections; other targets collect none.
+use crate::ehframe::FuncEh;
+
 pub struct WinUnwindEntry {
     pub func: FuncId,
     /// Function size in bytes: begin address + size is the RUNTIME_FUNCTION
@@ -64,7 +66,8 @@ pub enum NarrowTarget {
 /// stable symbol names either way.
 pub fn lower_module<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target) -> HashMap<mir::Func, FuncId> {
     let mut asm_text = String::new();
-    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, &|_| true, &|_| true).0
+    let mut eh = Vec::new();
+    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, &mut eh, &|_| true, &|_| true).0
 }
 
 /// [`lower_module`] for a module that shares a [`Module`] with code
@@ -82,15 +85,16 @@ pub fn lower_module_selected<M: Module>(
     define_data: &dyn Fn(&str) -> bool,
 ) -> HashMap<mir::Func, FuncId> {
     let mut asm_text = String::new();
-    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, define_func, define_data).0
+    let mut eh = Vec::new();
+    lower_module_impl(mir_module, clif, target, &mut asm_text, None, None, &mut eh, define_func, define_data).0
 }
 
 /// [`lower_module`], also appending the generated inline-asm wrapper
 /// text to `asm_text`. The driver assembles it into the TU's `.s`.
 /// Returns the 32-bit (`__ptr32`) address patches the object driver
 /// must apply itself.
-pub fn lower_module_collecting<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target, asm_text: &mut String, unwind: &mut Vec<WinUnwindEntry>) -> Vec<NarrowReloc> {
-    lower_module_collecting_with_ids(mir_module, clif, target, asm_text, unwind).1
+pub fn lower_module_collecting<M: Module>(mir_module: &mir::Module, clif: &mut M, target: Target, asm_text: &mut String, unwind: &mut Vec<WinUnwindEntry>, eh: &mut Vec<FuncEh>) -> Vec<NarrowReloc> {
+    lower_module_collecting_with_ids(mir_module, clif, target, asm_text, unwind, eh).1
 }
 
 /// [`lower_module_collecting`], also returning the Clif id of every MIR
@@ -103,8 +107,9 @@ pub fn lower_module_collecting_with_ids<M: Module>(
     target: Target,
     asm_text: &mut String,
     unwind: &mut Vec<WinUnwindEntry>,
+    eh: &mut Vec<FuncEh>,
 ) -> (HashMap<mir::Func, FuncId>, Vec<NarrowReloc>) {
-    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), &|_| true, &|_| true)
+    lower_module_impl(mir_module, clif, target, asm_text, None, Some(unwind), eh, &|_| true, &|_| true)
 }
 
 /// [`lower_module_collecting`], also collecting the debug records the
@@ -116,9 +121,10 @@ pub fn lower_module_with_debug<M: Module>(
     target: Target,
     asm_text: &mut String,
     unwind: &mut Vec<WinUnwindEntry>,
+    eh: &mut Vec<FuncEh>,
 ) -> (HashMap<mir::Func, FuncId>, glcc_dwarf::LoweredDebug, Vec<NarrowReloc>) {
     let mut debug = glcc_dwarf::LoweredDebug::new();
-    let (ids, narrow) = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind), &|_| true, &|_| true);
+    let (ids, narrow) = lower_module_impl(mir_module, clif, target, asm_text, Some(&mut debug), Some(unwind), eh, &|_| true, &|_| true);
     (ids, debug, narrow)
 }
 
@@ -129,6 +135,7 @@ pub(crate) fn lower_module_impl<M: Module>(
     asm_text: &mut String,
     mut debug: Option<&mut glcc_dwarf::LoweredDebug>,
     mut unwind: Option<&mut Vec<WinUnwindEntry>>,
+    eh: &mut Vec<FuncEh>,
     define_func: &dyn Fn(&str) -> bool,
     define_data: &dyn Fn(&str) -> bool,
 ) -> (HashMap<mir::Func, FuncId>, Vec<NarrowReloc>) {
@@ -271,6 +278,7 @@ pub(crate) fn lower_module_impl<M: Module>(
         lower_function(
             id,
             func,
+            &mir_module.globals,
             target,
             &layouts,
             &extern_layouts,
@@ -284,6 +292,7 @@ pub(crate) fn lower_module_impl<M: Module>(
             &mut wrappers,
             debug.as_deref_mut(),
             unwind.as_deref_mut(),
+            eh,
         );
     }
     asm_text.push_str(&wrappers.text);

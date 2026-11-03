@@ -7,8 +7,13 @@ cannot mirror LLVM freely is codegen, because we lower to Cranelift — but
 Cranelift 0.136 turns out to cover the hard part (see "Verified Cranelift
 capabilities").
 
-**Status:** S0 spike done (2026-11-02, aarch64 host); P0 is next. See
-"S0 outcome" below.
+**Status:** S0, P0, P1, P2 done (2026-11-03, aarch64 host); P3 (EDG
+zero-cost mode) is next. See "S0 outcome" below. P0/P1/P2 landed as:
+MIR `Terminator::Invoke`/`Resume`/`EhTypeId`/`personality`/`.lpad`
+(glcc_mir, with parse/display/verify), `try_call` lowering
+(glcc_lower_cl), and `.eh_frame`+LSDA emission (`glcc_lower_cl::ehframe`,
+wired into the driver and the `eh_e2e` integration test, which unwinds a
+libstdc++-thrown exception into a Cranelift landing pad end to end).
 
 ## How to resume
 

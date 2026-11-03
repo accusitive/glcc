@@ -180,16 +180,26 @@ fn emit_object(module: &glcc_mir::ir::Module, opt: OptLevel) -> Result<Vec<u8>, 
     flag_builder.set("preserve_frame_pointers", "true").map_err(|e| e.to_string())?;
     let flags = cranelift_codegen::settings::Flags::new(flag_builder);
     let isa = cranelift_native::builder().map_err(|e| e.to_string())?.finish(flags).map_err(|e| e.to_string())?;
-    let builder = cranelift_object::ObjectBuilder::new(isa, "fern", cranelift_module::default_libcall_names()).map_err(|e| e.to_string())?;
+    // EH modules take over `.eh_frame` (see glcc_lower_cl::ehframe).
+    let has_eh = module.funcs.iter().any(|f| f.personality.is_some());
+    let mut builder = cranelift_object::ObjectBuilder::new(isa.clone(), "fern", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    builder.unwind_info(!has_eh);
     let mut object = cranelift_object::ObjectModule::new(builder);
     // The runtime comes first: the program's externs for `fern_enter`,
     // `fern_pin`, `fern_leave`, and `fern_alloc` then bind to the
     // runtime's definitions (cranelift-module merges same-name
     // declarations).
     let runtime = fern::runtime::module();
-    glcc_lower_cl::lower_module(&runtime, &mut object, glcc_lower_cl::Target::native());
-    glcc_lower_cl::lower_module(module, &mut object, glcc_lower_cl::Target::native());
-    object.finish().emit().map_err(|e| format!("object emission failed: {e}"))
+    let mut eh = Vec::new();
+    glcc_lower_cl::lower_module_collecting(&runtime, &mut object, glcc_lower_cl::Target::native(), &mut String::new(), &mut Vec::new(), &mut eh);
+    glcc_lower_cl::lower_module_collecting(module, &mut object, glcc_lower_cl::Target::native(), &mut String::new(), &mut Vec::new(), &mut eh);
+    let mut product = object.finish();
+    if has_eh {
+        glcc_lower_cl::emit_unwind(&mut product, &eh, &[], &*isa)
+            .map_err(|e| format!("EH unwind metadata: {e}"))?;
+    }
+    product.emit().map_err(|e| format!("object emission failed: {e}"))
 }
 
 #[cfg(test)]
