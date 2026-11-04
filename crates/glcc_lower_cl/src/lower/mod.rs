@@ -148,7 +148,7 @@ pub(crate) fn lower_module_impl<M: Module>(
     for (id, func) in mir_module.funcs.iter_enumerated() {
         let sig = abi::clif_signature(&layouts[&id], target.call_conv());
         let linkage = definition_linkage(func.local, func.weak);
-        let clif_id = clif.declare_function(&func.name, linkage, &sig).unwrap_or_else(|_| panic!("cannot declare {}", func.name));
+        let clif_id = clif.declare_function(&func.name, linkage, &sig).unwrap_or_else(|e| panic!("cannot declare {}: {e}", func.name));
         ids.insert(id, clif_id);
     }
     // Imports for declared externs use plain named-only signatures;

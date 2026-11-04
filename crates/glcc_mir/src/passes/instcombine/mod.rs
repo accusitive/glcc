@@ -19,6 +19,9 @@ use crate::ty::{GepIndex, Ty};
 
 use super::{eval_icmp, mask, wrap};
 
+mod magic;
+use magic::{signed_magic, unsigned_magic};
+
 /// Algebraic simplification of pure instructions.
 #[derive(Default)]
 pub struct InstCombine;
@@ -108,6 +111,25 @@ enum Plan {
     /// Signed division (or remainder when `remainder`) by a positive
     /// power of two, rounded toward zero.
     SignedPow2 { value: Value, shift: u32, remainder: bool },
+    /// Unsigned division (or remainder when `remainder`) by a constant
+    /// via a multiply-by-reciprocal in double-width arithmetic.
+    MagicUdiv {
+        value: Value,
+        divisor: u128,
+        magic: u128,
+        shift: u32,
+        remainder: bool,
+    },
+    /// Signed division (or remainder when `remainder`) by a positive
+    /// constant via the same construction. `magic` may be negative and
+    /// the wide product is interpreted signed.
+    MagicSdiv {
+        value: Value,
+        divisor: i128,
+        magic: i128,
+        shift: u32,
+        remainder: bool,
+    },
     /// Compare a widened value with a constant after narrowing both to
     /// the original width.
     NarrowCompare { value: Value, pred: IcmpPred, ty: Ty, constant: i128 },
@@ -165,30 +187,36 @@ fn plan(func: &Function, inst: Inst, kind: &InstKind, use_counts: &[u32]) -> Opt
                 Some(plan)
             } else if let Some(shift) = int_pow2(func, *b) {
                 Some(Plan::ShlBy(*a, shift))
-            } else { int_pow2(func, *a).map(|shift| Plan::ShlBy(*b, shift)) }
+            } else {
+                int_pow2(func, *a).map(|shift| Plan::ShlBy(*b, shift))
+            }
         }
         // A divisor of one cannot trap, so the quotient is the dividend
         // and the remainder is zero for every input (including the
         // minimum signed value, whose `-1` cases are the dangerous
         // ones).
-        InstKind::Udiv(a, b) => {
-            if is_int_one(func, *b) {
-                Some(Plan::Value(*a))
+        InstKind::Udiv(x, d) => {
+            if is_int_one(func, *d) {
+                Some(Plan::Value(*x))
+            } else if let Some(shift) = unsigned_pow2(func, *d) {
+                Some(Plan::LshrBy(*x, shift))
             } else {
-                int_pow2(func, *b).map(|shift| Plan::LshrBy(*a, shift))
+                magic_plan(func, result_ty, *x, *d, false, false)
             }
         }
         InstKind::Sdiv(a, b) if is_int_one(func, *b) => Some(Plan::Value(*a)),
-        InstKind::Sdiv(a, b) => signed_pow2(func, result_ty, *a, *b, false),
+        InstKind::Sdiv(a, b) => signed_pow2(func, result_ty, *a, *b, false).or_else(|| magic_plan(func, result_ty, *a, *b, true, false)),
         InstKind::Urem(a, b) => {
             if is_int_one(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
+            } else if let Some(shift) = unsigned_pow2(func, *b) {
+                Some(Plan::AndConst(*a, mask(shift) as i128))
             } else {
-                int_pow2(func, *b).map(|shift| Plan::AndConst(*a, mask(shift) as i128))
+                magic_plan(func, result_ty, *a, *b, false, true)
             }
         }
         InstKind::Srem(_, b) if is_int_one(func, *b) => Some(Plan::Const(zero_const(result_ty)?)),
-        InstKind::Srem(a, b) => signed_pow2(func, result_ty, *a, *b, true),
+        InstKind::Srem(a, b) => signed_pow2(func, result_ty, *a, *b, true).or_else(|| magic_plan(func, result_ty, *a, *b, true, true)),
         InstKind::And(a, b) => {
             if is_int_zero(func, *a) || is_int_zero(func, *b) {
                 Some(Plan::Const(zero_const(result_ty)?))
@@ -406,6 +434,50 @@ fn signed_pow2(func: &Function, result_ty: &Ty, value: Value, divisor: Value, re
     Some(Plan::SignedPow2 { value, shift, remainder })
 }
 
+/// The shift for a power-of-two bit pattern. Unlike [`int_pow2`] this
+/// reads the divisor's bit pattern, so a wrapped literal like
+/// `0x8000_0000` counts for unsigned division.
+fn unsigned_pow2(func: &Function, v: Value) -> Option<u32> {
+    let (bits, value) = int_const(func, v)?;
+    if bits == 0 || bits > 128 {
+        return None;
+    }
+    let value = (value as u128) & mask(bits);
+    value.is_power_of_two().then(|| value.trailing_zeros())
+}
+
+/// Plan a division or remainder by a constant that is neither one nor a
+/// power of two through the magic-multiplier sequences. Those compute in
+/// a double width, so only widths the backend lowers exactly apply.
+fn magic_plan(func: &Function, result_ty: &Ty, value: Value, divisor: Value, signed: bool, remainder: bool) -> Option<Plan> {
+    let n = arith_bits(result_ty)?;
+    if !matches!(2 * n, 16 | 32 | 64 | 128) {
+        return None;
+    }
+    let (bits, constant) = int_const(func, divisor)?;
+    if signed {
+        let divisor = wrap(bits, constant);
+        let (magic, shift) = signed_magic(divisor, n)?;
+        Some(Plan::MagicSdiv {
+            value,
+            divisor,
+            magic,
+            shift,
+            remainder,
+        })
+    } else {
+        let divisor = (constant as u128) & mask(bits);
+        let (magic, shift) = unsigned_magic(divisor, n)?;
+        Some(Plan::MagicUdiv {
+            value,
+            divisor,
+            magic,
+            shift,
+            remainder,
+        })
+    }
+}
+
 fn push_temp(func: &mut Function, block: Block, kind: InstKind, ty: Ty, loc: Option<crate::debug::Location>, out: &mut Vec<Inst>) -> Value {
     let next = Inst::from_usize(func.insts.len());
     let value = func.values.push(ValueData { ty, def: Def::Inst(next) });
@@ -578,6 +650,65 @@ fn apply(func: &mut Function, block: Block, inst: Inst, result: Value, plan: Pla
             let quotient = push_temp(func, block, InstKind::AShr(adjusted, shift_amount), ty.clone(), loc, out);
             if remainder {
                 let scaled = push_temp(func, block, InstKind::Shl(quotient, shift_amount), ty.clone(), loc, out);
+                push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
+            } else {
+                quotient
+            }
+        }
+        Plan::MagicUdiv {
+            value,
+            divisor,
+            magic,
+            shift,
+            remainder,
+        } => {
+            let ty = func.values[result].ty.clone();
+            let n = int_ty_bits(&ty).expect("magic division has an integer width");
+            let loc = func.insts[inst].loc;
+            let wide = Ty::int(2 * n);
+            let magic_v = push_int_const(func, &wide, magic as i128);
+            let width_v = push_int_const(func, &wide, i128::from(n));
+            let shift_v = push_int_const(func, &wide, i128::from(shift));
+            let divisor_v = push_int_const(func, &ty, divisor as i128);
+            let wide_value = push_temp(func, block, InstKind::Zext(value), wide.clone(), loc, out);
+            let product = push_temp(func, block, InstKind::Mul(wide_value, magic_v), wide.clone(), loc, out);
+            let high = push_temp(func, block, InstKind::LShr(product, width_v), wide.clone(), loc, out);
+            let sum = push_temp(func, block, InstKind::Add(wide_value, high), wide.clone(), loc, out);
+            let shifted = push_temp(func, block, InstKind::LShr(sum, shift_v), wide.clone(), loc, out);
+            let quotient = push_temp(func, block, InstKind::Trunc(shifted), ty.clone(), loc, out);
+            if remainder {
+                let scaled = push_temp(func, block, InstKind::Mul(quotient, divisor_v), ty.clone(), loc, out);
+                push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
+            } else {
+                quotient
+            }
+        }
+        Plan::MagicSdiv {
+            value,
+            divisor,
+            magic,
+            shift,
+            remainder,
+        } => {
+            let ty = func.values[result].ty.clone();
+            let n = int_ty_bits(&ty).expect("magic division has an integer width");
+            let loc = func.insts[inst].loc;
+            let wide = Ty::int(2 * n);
+            let magic_v = push_int_const(func, &wide, magic);
+            let width_v = push_int_const(func, &wide, i128::from(n));
+            let shift_v = push_int_const(func, &wide, i128::from(shift));
+            let sign_v = push_int_const(func, &wide, i128::from(2 * n - 1));
+            let divisor_v = push_int_const(func, &ty, divisor);
+            let wide_value = push_temp(func, block, InstKind::Sext(value), wide.clone(), loc, out);
+            let product = push_temp(func, block, InstKind::Mul(wide_value, magic_v), wide.clone(), loc, out);
+            let high = push_temp(func, block, InstKind::AShr(product, width_v), wide.clone(), loc, out);
+            let sum = push_temp(func, block, InstKind::Add(wide_value, high), wide.clone(), loc, out);
+            let biased = push_temp(func, block, InstKind::AShr(sum, shift_v), wide.clone(), loc, out);
+            let sign = push_temp(func, block, InstKind::AShr(wide_value, sign_v), wide.clone(), loc, out);
+            let adjusted = push_temp(func, block, InstKind::Sub(biased, sign), wide.clone(), loc, out);
+            let quotient = push_temp(func, block, InstKind::Trunc(adjusted), ty.clone(), loc, out);
+            if remainder {
+                let scaled = push_temp(func, block, InstKind::Mul(quotient, divisor_v), ty.clone(), loc, out);
                 push_temp(func, block, InstKind::Sub(value, scaled), ty, loc, out)
             } else {
                 quotient
@@ -1448,4 +1579,3 @@ fn trunc_mask_covers(func: &Function, value: Value, result_ty: &Ty) -> bool {
 
 #[cfg(test)]
 mod tests;
-

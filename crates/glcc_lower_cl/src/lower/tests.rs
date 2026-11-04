@@ -2637,3 +2637,118 @@ fn eh_typeid_lowers_to_type_table_selector() {
     // One catch clause: `int` is type table slot 1 (0 is the cleanup selector).
     assert_eq!(run_i32_0(&jit, &ids, 1), 1);
 }
+#[test]
+fn division_by_constants_uses_magic_multipliers() {
+    use glcc_mir::FunctionPass;
+
+    // Each entry: name, width, signed, remainder, divisor.
+    let specs = [
+        ("u3", 8u32, false, false, 3i128),
+        ("s3", 8, true, false, 3),
+        ("u7r", 8, false, true, 7),
+        ("s7r", 8, true, true, 7),
+        ("u10", 32, false, false, 10),
+        ("s7", 32, true, false, 7),
+        ("s7r32", 32, true, true, 7),
+        ("umax", 64, false, false, -1),
+        ("s3x", 64, true, false, 3),
+        ("s100r", 64, true, true, 100),
+    ];
+    let mut module = mir::Module::new();
+    for (name, bits, signed, remainder, divisor) in specs {
+        let sig = mir::Signature::new(vec![mir::Ty::int(bits)], mir::Ty::int(bits));
+        let (mut f, entry) = mir::Function::new(name, sig);
+        let x = param(&mut f, entry, mir::Ty::int(bits), 0);
+        let d = iconst(&mut f, bits, divisor);
+        let kind = match (signed, remainder) {
+            (false, false) => mir::InstKind::Udiv(x, d),
+            (false, true) => mir::InstKind::Urem(x, d),
+            (true, false) => mir::InstKind::Sdiv(x, d),
+            (true, true) => mir::InstKind::Srem(x, d),
+        };
+        let out = emit(&mut f, entry, kind, mir::Ty::int(bits));
+        ret(&mut f, entry, Some(out));
+        assert!(mir::passes::InstCombine.run(&mut f), "{name} should rewrite");
+        assert!(!f.blocks[entry].insts.iter().any(|inst| {
+            matches!(
+                f.insts[*inst].kind,
+                mir::InstKind::Udiv(..) | mir::InstKind::Sdiv(..) | mir::InstKind::Urem(..) | mir::InstKind::Srem(..)
+            )
+        }));
+        module.push_func(f);
+    }
+    let (jit, ids) = jit_module(&module);
+
+    // Exhaustive over the 8-bit domains.
+    for (index, (name, bits, signed, remainder, divisor)) in specs.iter().enumerate().filter(|(_, (_, bits, ..))| *bits == 8) {
+        let _ = name;
+        let func: extern "C" fn(i8) -> i8 = unsafe { std::mem::transmute(func_addr(&jit, &ids, index)) };
+        for raw in -128i8..=127 {
+            let (x, dv) = (raw as i128, *divisor as i128);
+            let expected = match (signed, remainder) {
+                (false, false) => ((raw as u8) / (*divisor as u8)) as i8,
+                (false, true) => ((raw as u8) % (*divisor as u8)) as i8,
+                (true, false) => x.wrapping_div(dv) as i8,
+                (true, true) => x.wrapping_rem(dv) as i8,
+            };
+            assert_eq!(func(raw), expected, "{name}({raw})");
+        }
+    }
+
+    let u32_cases = [0u32, 1, 9, 10, 11, 20, u32::MAX, u32::MAX - 1, 1 << 31, (1 << 31) + 1, 4000000000, 123456789];
+    let div10: extern "C" fn(u32) -> u32 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 4)) };
+    for x in u32_cases {
+        assert_eq!(div10(x), x / 10, "u32 {x} / 10");
+    }
+
+    let i32_cases = [0, 1, -1, 6, 7, 8, -7, -8, i32::MAX, i32::MIN, i32::MIN + 1, 2147483646, -2147483647, 987654321, -987654321];
+    let sdiv7: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 5)) };
+    for x in i32_cases {
+        assert_eq!(sdiv7(x), x.wrapping_div(7), "i32 {x} / 7");
+    }
+    let srem7: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 6)) };
+    for x in i32_cases {
+        assert_eq!(srem7(x), x.wrapping_rem(7), "i32 {x} % 7");
+    }
+
+    let u64_cases = [
+        0u64,
+        1,
+        0xFFFFFFFF,
+        0x1_0000_0000,
+        0xFFFFFFFF * 2,
+        u64::MAX,
+        u64::MAX - 1,
+        1 << 63,
+        (1 << 63) + 1,
+        0x8000_0000_0000_0001,
+    ];
+    let div_umax: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 7)) };
+    for x in u64_cases {
+        assert_eq!(div_umax(x), x / u64::MAX, "u64 {x:#x} / u64::max");
+    }
+
+    let i64_cases = [
+        0i64,
+        1,
+        -1,
+        2,
+        3,
+        -3,
+        i64::MIN,
+        i64::MIN + 1,
+        i64::MAX,
+        i64::MAX - 1,
+        1 << 40,
+        -(1 << 40) - 1,
+        987654321987654321,
+    ];
+    let sdiv3: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 8)) };
+    for x in i64_cases {
+        assert_eq!(sdiv3(x), x.wrapping_div(3), "i64 {x} / 3");
+    }
+    let srem100: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(func_addr(&jit, &ids, 9)) };
+    for x in i64_cases {
+        assert_eq!(srem100(x), x.wrapping_rem(100), "i64 {x} % 100");
+    }
+}

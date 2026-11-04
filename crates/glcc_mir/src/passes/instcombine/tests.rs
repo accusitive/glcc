@@ -1614,3 +1614,154 @@ fn leaves_unknown_operands_alone() {
     func.blocks[entry].term = Some(Terminator::Return { val: Some(sum) });
     assert!(!run(&mut func));
 }
+
+/// Evaluate a straight-line rewritten division sequence for one input
+/// pattern, with wrapping arithmetic at each value's own width.
+fn evaluate(func: &Function, value: Value, input: u128) -> u128 {
+    let mask = |bits: u32| -> u128 { if bits >= 128 { u128::MAX } else { (1u128 << bits) - 1 } };
+    let sign_extend = |pattern: u128, bits: u32| -> i128 {
+        let t = pattern & mask(bits);
+        if bits > 0 && t >> (bits - 1) & 1 == 1 { (t | !mask(bits)) as i128 } else { t as i128 }
+    };
+    match &func.values[value].def {
+        Def::Const(Const::Int { bits, value: constant }) => (*constant as u128) & mask(*bits),
+        Def::Param(..) => input,
+        Def::Inst(inst) => {
+            let bits = match &func.values[value].ty {
+                Ty::Int { bits } => *bits,
+                other => panic!("scalar integer expected, got {other:?}"),
+            };
+            let operand = |v| evaluate(func, v, input);
+            match &func.insts[*inst].kind {
+                InstKind::Zext(x) | InstKind::Trunc(x) => operand(*x) & mask(bits),
+                InstKind::Sext(x) => {
+                    sign_extend(
+                        operand(*x),
+                        match &func.values[*x].ty {
+                            Ty::Int { bits } => *bits,
+                            _ => panic!("integer source expected"),
+                        },
+                    ) as u128
+                        & mask(bits)
+                }
+                InstKind::Mul(a, b) => operand(*a).wrapping_mul(operand(*b)) & mask(bits),
+                InstKind::Add(a, b) => operand(*a).wrapping_add(operand(*b)) & mask(bits),
+                InstKind::Sub(a, b) => operand(*a).wrapping_sub(operand(*b)) & mask(bits),
+                InstKind::Shl(a, b) => operand(*a).wrapping_shl(operand(*b) as u32) & mask(bits),
+                InstKind::LShr(a, b) => operand(*a).wrapping_shr(operand(*b) as u32) & mask(bits),
+                InstKind::AShr(a, b) => ((sign_extend(operand(*a), bits) >> operand(*b)) as u128) & mask(bits),
+                other => panic!("unexpected op in a rewritten sequence: {other:?}"),
+            }
+        }
+        other => panic!("unexpected value def: {other:?}"),
+    }
+}
+
+fn division_func(bits: u32, signed: bool, divisor: i128, remainder: bool) -> (Function, Block, Value, Value) {
+    let sig = Signature::new(vec![Ty::int(bits)], Ty::int(bits));
+    let (mut func, entry) = Function::new("f", sig);
+    let x = param(&mut func, entry, Ty::int(bits), 0);
+    let d = iconst(&mut func, bits, divisor);
+    let kind = match (signed, remainder) {
+        (false, false) => InstKind::Udiv(x, d),
+        (false, true) => InstKind::Urem(x, d),
+        (true, false) => InstKind::Sdiv(x, d),
+        (true, true) => InstKind::Srem(x, d),
+    };
+    let out = emit(&mut func, entry, kind, Ty::int(bits));
+    func.blocks[entry].term = Some(Terminator::Return { val: Some(out) });
+    (func, entry, x, out)
+}
+
+#[test]
+fn magic_division_sequences_compute_exactly() {
+    let divisors = [3i128, 5, 7, 10, 17, 100, 127];
+    for &d in &divisors {
+        for signed in [false, true] {
+            for remainder in [false, true] {
+                let (mut func, entry, ..) = division_func(8, signed, d, remainder);
+                assert!(run(&mut func), "udiv/urem/sdiv/srem by {d} should rewrite");
+                let out = returned(&func);
+                assert!(
+                    !func.blocks[entry]
+                        .insts
+                        .iter()
+                        .any(|inst| { matches!(func.insts[*inst].kind, InstKind::Udiv(..) | InstKind::Sdiv(..) | InstKind::Urem(..) | InstKind::Srem(..)) })
+                );
+                for raw in 0u128..1 << 8 {
+                    let got = evaluate(&func, out, raw);
+                    if signed {
+                        let sign_extend = |pattern: u128| -> i128 {
+                            let t = pattern & ((1u128 << 8) - 1);
+                            if t >> 7 & 1 == 1 { (t | !((1u128 << 8) - 1)) as i128 } else { t as i128 }
+                        };
+                        let value = sign_extend(raw);
+                        let expected = if remainder { value.wrapping_rem(d) } else { value.wrapping_div(d) };
+                        assert_eq!(got, (expected as u128) & ((1u128 << 8) - 1), "{value} op {d}");
+                    } else {
+                        let expected = if remainder { raw % d as u128 } else { raw / d as u128 };
+                        assert_eq!(got, expected, "{raw} op {d}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn magic_division_covers_the_wider_widths_at_the_boundaries() {
+    for (bits, signed, divisor) in [(32u32, false, 10i128), (32, true, 7), (32, false, -1), (64, false, -1), (64, true, 3), (64, true, 1 << 40)] {
+        let (mut func, _, _, out) = division_func(bits, signed, divisor, false);
+        assert!(run(&mut func), "{bits}-bit division by {divisor} should rewrite");
+        let out = returned(&func);
+        let span = 1u128 << bits;
+        let half = 1i128 << (bits - 1);
+        let d = divisor as u128 & (span - 1);
+        let unsigned_edges = [0u128, 1, d, d + 1, 2 * d, span / 2, span / 2 + 1, span - 1, span - 2];
+        let signed_edges = [0i128, 1, -1, half - 1, -half, half / (divisor as i128) * (divisor as i128), -half + 1];
+        let mut inputs = unsigned_edges.to_vec();
+        inputs.extend(signed_edges.iter().map(|v| (*v as i128) as u128 & (span - 1)));
+        for raw in inputs {
+            let got = evaluate(&func, out, raw);
+            let expected = if signed {
+                let sign_extend = |pattern: u128| -> i128 {
+                    let t = pattern & (span - 1);
+                    if t >> (bits - 1) & 1 == 1 { (t | !(span - 1)) as i128 } else { t as i128 }
+                };
+                (sign_extend(raw).wrapping_div(divisor) as u128) & (span - 1)
+            } else {
+                raw / d
+            };
+            assert_eq!(got, expected, "{bits}-bit signed={signed} {raw} / {divisor}");
+        }
+    }
+}
+
+#[test]
+fn wrapped_power_of_two_divisor_shifts() {
+    let (mut func, entry, x) = int_func();
+    // `0x8000_0000`, spelled as a wrapped negative literal.
+    let d = iconst(&mut func, 32, -0x8000_0000i128);
+    let quotient = emit(&mut func, entry, InstKind::Udiv(x, d), Ty::int(32));
+    func.blocks[entry].term = Some(Terminator::Return { val: Some(quotient) });
+    assert!(run(&mut func));
+    let inst = def_inst(&func, returned(&func)).expect("rebuilt shift");
+    match &func.insts[inst].kind {
+        InstKind::LShr(lhs, amount) => {
+            assert_eq!(*lhs, x);
+            assert_eq!(func.const_value(*amount), Some(&Const::Int { bits: 32, value: 31 }));
+        }
+        other => panic!("expected logical shift, got {other:?}"),
+    }
+}
+
+#[test]
+fn widths_without_a_double_width_carrier_keep_the_division() {
+    let sig = Signature::new(vec![Ty::int(24)], Ty::int(24));
+    let (mut func, entry) = Function::new("f", sig);
+    let x = param(&mut func, entry, Ty::int(24), 0);
+    let ten = iconst(&mut func, 24, 10);
+    let quotient = emit(&mut func, entry, InstKind::Udiv(x, ten), Ty::int(24));
+    func.blocks[entry].term = Some(Terminator::Return { val: Some(quotient) });
+    assert!(!run(&mut func));
+}
