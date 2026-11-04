@@ -53,7 +53,6 @@ pub use ty::{LoweredSig, clif_ty, lower_sig};
 /// VMA for in-frame faults.
 pub fn codegen_flags() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("preserve_frame_pointers", "true"),
         ("enable_probestack", "true"),
         ("probestack_strategy", "inline"),
     ]

@@ -1372,7 +1372,6 @@ fn emit_object(
     let mut flag_builder = cranelift_codegen::settings::builder();
     flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
     flag_builder.set("is_pic", if pic { "true" } else { "false" }).expect("pic");
-    flag_builder.set("preserve_frame_pointers", "true").expect("frame pointers");
     // Cranelift's MachInst verifier is a dev-time safety net; our own
     // MIR verifier still runs in every build.
     flag_builder

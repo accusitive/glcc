@@ -131,6 +131,20 @@ pub(crate) fn lower_function<M: Module>(
     builder.seal_all_blocks();
     let config = clif.target_config();
     builder.finalize(config);
+    // The fork elides the frame setup unless a function asks for the
+    // frame-pointer chain, so force it exactly where the lowered code
+    // reads the frame: variadic preludes and `__builtin_frame_address`
+    // (`get_return_address` would apply the same way if ever lowered).
+    if ctx.func.layout.blocks().any(|block| {
+        ctx.func.layout.block_insts(block).any(|inst| {
+            matches!(
+                ctx.func.dfg.insts[inst].opcode(),
+                cranelift_codegen::ir::Opcode::GetFramePointer | cranelift_codegen::ir::Opcode::GetReturnAddress
+            )
+        })
+    }) {
+        ctx.func.preserve_frame_pointer = true;
+    }
     let clif_id = func_ids[&id];
     if let Err(e) = clif.define_function(clif_id, &mut ctx) {
         eprintln!(

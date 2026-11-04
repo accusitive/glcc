@@ -979,8 +979,8 @@ fn jit_run_main(mut mir_module: mir::Module) -> i32 {
         // The driver runs the shared pipeline before lowering; the
         // JIT helper bypasses it, so legalize wide integers here.
         mir::optimize(&mut mir_module, mir::OptLevel::None);
-        // The variadic prelude reads the frame pointer, like the
-        // driver (which sets preserve_frame_pointers), and Win64
+        // The variadic prelude reads the frame pointer; the lowering
+        // re-requests the frame chain per function for it. Win64
         // F128/I128 follow LLVM's ABI there.
         let mut flags = glcc_lower_cl::codegen_flags();
         if cfg!(windows) {

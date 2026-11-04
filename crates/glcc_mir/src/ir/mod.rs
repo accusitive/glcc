@@ -401,7 +401,8 @@ pub enum InstKind {
         block: Box<AsmBlock>,
     },
     /// Address held in the frame pointer register (`__builtin_frame_address`
-    /// level 0). Requires the `preserve_frame_pointers` setting.
+    /// level 0). The backend keeps the frame-pointer chain for functions
+    /// containing it.
     GetFramePointer,
     /// Round a float up (`__builtin_ceil`).
     Ceil(Value),
