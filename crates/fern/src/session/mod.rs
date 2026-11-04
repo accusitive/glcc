@@ -52,11 +52,11 @@ struct UnitCache {
 /// incremental check can append without invalidating earlier items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKindKey {
-    Data,
+    Type,
     Class,
     Instance,
     Extern,
-    Fun,
+    Fn,
     Let,
     Import,
     Use,
@@ -505,9 +505,9 @@ impl Session {
         let modular =
             program.modules.iter().any(|module| !module.path.is_empty()) || program.items.iter().any(|item| matches!(item.kind, ast::ItemKind::Import(_) | ast::ItemKind::Use(_)));
         let graph = self.module_graph(files);
-        if modular {
-            resolve::qualify(&mut program).map_err(|diag| vec![diag])?;
-        }
+        // Resolution also decides constructor-vs-value for bare names
+        // (case is not grammatical), so it always runs.
+        resolve::qualify(&mut program).map_err(|diag| vec![diag])?;
         let items = self.item_keys(&program);
         self.unit_compiles.set(self.unit_compiles.get() + 1);
 
@@ -792,13 +792,11 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
     hash_str(&mut hash, &module_path.join("::"));
     for item in items {
         match &item.kind {
-            ast::ItemKind::Fun(fun) => {
-                hash_str(&mut hash, if fun.is_async { "async fun" } else { "fun" });
+            ast::ItemKind::Fn(fun) => {
+                hash_str(&mut hash, if fun.is_async { "async fn" } else { "fn" });
                 hash_str(&mut hash, &fun.name);
-                for param in &fun.params {
-                    hash_str(&mut hash, &param.ty.display());
-                }
-                hash_str(&mut hash, &fun.ret.display());
+                hash_str(&mut hash, &fun.param.binds().join(","));
+                hash_str(&mut hash, &fun.ann.display());
             }
             ast::ItemKind::Let(value) => {
                 hash_str(&mut hash, "let");
@@ -812,8 +810,8 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
                     }
                 }
             }
-            ast::ItemKind::Data(data) => {
-                hash_str(&mut hash, "data");
+            ast::ItemKind::Type(data) => {
+                hash_str(&mut hash, "type");
                 hash_str(&mut hash, &data.name);
                 for param in &data.params {
                     hash_str(&mut hash, param);
@@ -842,7 +840,9 @@ fn interface_hash(source: &str, items: &[ast::Item], module_path: &[String]) -> 
                 for bound in &instance.ctx {
                     hash_str(&mut hash, &bound.display());
                 }
-                hash_str(&mut hash, &instance.self_ty.display());
+                for arg in &instance.args {
+                    hash_str(&mut hash, &arg.display());
+                }
                 for method in &instance.methods {
                     hash_str(&mut hash, &method.name);
                 }
@@ -975,11 +975,11 @@ fn tarjan(adjacency: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 fn item_kind(kind: &ast::ItemKind) -> ItemKindKey {
     match kind {
-        ast::ItemKind::Data(_) => ItemKindKey::Data,
+        ast::ItemKind::Type(_) => ItemKindKey::Type,
         ast::ItemKind::Class(_) => ItemKindKey::Class,
         ast::ItemKind::Instance(_) => ItemKindKey::Instance,
         ast::ItemKind::Extern(_) => ItemKindKey::Extern,
-        ast::ItemKind::Fun(_) => ItemKindKey::Fun,
+        ast::ItemKind::Fn(_) => ItemKindKey::Fn,
         ast::ItemKind::Let(_) => ItemKindKey::Let,
         ast::ItemKind::Import(_) => ItemKindKey::Import,
         ast::ItemKind::Use(_) => ItemKindKey::Use,
@@ -990,7 +990,7 @@ fn item_kind(kind: &ast::ItemKind) -> ItemKindKey {
 /// introduces no instance that the class solver could pick up for code
 /// already checked.
 fn plain_items(items: &[ItemKey]) -> bool {
-    items.iter().all(|item| matches!(item.kind, ItemKindKey::Fun | ItemKindKey::Let | ItemKindKey::Extern))
+    items.iter().all(|item| matches!(item.kind, ItemKindKey::Fn | ItemKindKey::Let | ItemKindKey::Extern))
 }
 
 fn common_prefix(left: &[ItemKey], right: &[ItemKey]) -> usize {
@@ -1001,10 +1001,10 @@ fn item_counts(items: &[ast::Item]) -> (usize, usize, usize) {
     let (mut fns, mut values, mut instances) = (0, 0, 0);
     for item in items {
         match &item.kind {
-            ast::ItemKind::Fun(_) => fns += 1,
+            ast::ItemKind::Fn(_) => fns += 1,
             ast::ItemKind::Let(_) => values += 1,
             ast::ItemKind::Instance(_) => instances += 1,
-            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+            ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     (fns, values, instances)
@@ -1023,7 +1023,7 @@ fn roots_of(program: &Program, from: usize) -> (Vec<BodyKey>, Vec<String>) {
     let mut names = Vec::new();
     for item in &program.items[from..] {
         match &item.kind {
-            ast::ItemKind::Fun(f) => {
+            ast::ItemKind::Fn(f) => {
                 roots.push(BodyKey::Fn(FnId(fn_index as u32)));
                 names.push(f.name.clone());
                 fn_index += 1;
@@ -1033,7 +1033,7 @@ fn roots_of(program: &Program, from: usize) -> (Vec<BodyKey>, Vec<String>) {
                 names.push(v.name.clone());
                 value_index += 1;
             }
-            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Instance(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+            ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Instance(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     (roots, names)

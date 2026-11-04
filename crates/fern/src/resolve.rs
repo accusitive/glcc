@@ -77,12 +77,12 @@ pub fn qualify(program: &mut Program) -> KResult<()> {
         let module = item.module;
         let drop = match &mut item.kind {
             ItemKind::Import(_) | ItemKind::Use(_) => true,
-            ItemKind::Data(data) => {
+            ItemKind::Type(data) => {
                 data.name = qualifier.local(module, &data.name);
                 for ctor in &mut data.ctors {
                     ctor.name = qualifier.local(module, &ctor.name);
                     for field in &mut ctor.fields {
-                        qualifier.ty(module, field)?;
+                        qualifier.ty(module, field, &mut data.params.clone())?;
                     }
                 }
                 false
@@ -90,50 +90,47 @@ pub fn qualify(program: &mut Program) -> KResult<()> {
             ItemKind::Class(class) => {
                 class.name = qualifier.local(module, &class.name);
                 for method in &mut class.methods {
-                    qualifier.ty(module, &mut method.ty)?;
+                    qualifier.ty(module, &mut method.ty, &mut class.params.clone())?;
                 }
                 false
             }
             ItemKind::Instance(instance) => {
                 instance.class = qualifier.class_name(module, &instance.class, instance.span)?;
                 for bound in &mut instance.ctx {
-                    qualifier.ty(module, bound)?;
+                    qualifier.ty(module, bound, &mut instance.params.clone())?;
                 }
-                qualifier.ty(module, &mut instance.self_ty)?;
-                qualifier.check_orphan(module, &instance.class, &instance.self_ty, instance.span)?;
+                for arg in &mut instance.args {
+                    qualifier.ty(module, arg, &mut instance.params.clone())?;
+                }
+                qualifier.check_orphan(module, &instance.class, &instance.args, instance.span)?;
                 for method in &mut instance.methods {
                     let mut scopes = Scopes::default();
                     scopes.push();
-                    for param in &mut method.params {
-                        qualifier.pat(module, param)?;
-                        scopes.bind(param.binds());
-                    }
+                    qualifier.pat(module, &mut method.param, &mut scopes, &mut Vec::new())?;
+                    scopes.bind(method.param.binds());
                     qualifier.expr(module, &mut method.body, &mut scopes)?;
                 }
                 false
             }
             ItemKind::Extern(extern_decl) => {
                 extern_decl.name = qualifier.local(module, &extern_decl.name);
-                qualifier.ty(module, &mut extern_decl.ty)?;
+                qualifier.ty(module, &mut extern_decl.ty, &mut Vec::new())?;
                 false
             }
-            ItemKind::Fun(fun) => {
+            ItemKind::Fn(fun) => {
                 fun.name = qualifier.local(module, &fun.name);
                 let mut scopes = Scopes::default();
                 scopes.push();
-                for param in &mut fun.params {
-                    qualifier.ty(module, &mut param.ty)?;
-                    qualifier.pat(module, &mut param.pat)?;
-                    scopes.bind(param.pat.binds());
-                }
-                qualifier.ty(module, &mut fun.ret)?;
+                qualifier.pat(module, &mut fun.param, &mut scopes, &mut Vec::new())?;
+                scopes.bind(fun.param.binds());
+                qualifier.ty(module, &mut fun.ann, &mut Vec::new())?;
                 qualifier.expr(module, &mut fun.body, &mut scopes)?;
                 false
             }
             ItemKind::Let(value) => {
                 value.name = qualifier.local(module, &value.name);
                 if let Some(ty) = &mut value.ty {
-                    qualifier.ty(module, ty)?;
+                    qualifier.ty(module, ty, &mut Vec::new())?;
                 }
                 let mut scopes = Scopes::default();
                 qualifier.expr(module, &mut value.body, &mut scopes)?;
@@ -176,7 +173,7 @@ impl Qualifier {
                 return Err(Diag::new("item belongs to an unknown module", item.span));
             }
             match &item.kind {
-                ItemKind::Data(data) => {
+                ItemKind::Type(data) => {
                     qualifier.register(module, &data.name, Sort::Type);
                     for ctor in &data.ctors {
                         qualifier.register(module, &ctor.name, Sort::Ctor);
@@ -189,7 +186,7 @@ impl Qualifier {
                     }
                 }
                 ItemKind::Extern(extern_decl) => qualifier.register(module, &extern_decl.name, Sort::Value),
-                ItemKind::Fun(fun) => qualifier.register(module, &fun.name, Sort::Value),
+                ItemKind::Fn(fun) => qualifier.register(module, &fun.name, Sort::Value),
                 ItemKind::Let(value) => qualifier.register(module, &value.name, Sort::Value),
                 ItemKind::Instance(_) | ItemKind::Import(_) | ItemKind::Use(_) => {}
             }
@@ -339,9 +336,6 @@ impl Qualifier {
         if expect == Expect::Type && Ty::intros().contains(&name) {
             return Ok(name.to_string());
         }
-        if expect == Expect::Type && name.chars().next().is_some_and(char::is_lowercase) {
-            return Ok(name.to_string());
-        }
         let what = match expect {
             Expect::Type | Expect::Class => "type",
             Expect::Value => "value",
@@ -377,25 +371,40 @@ impl Qualifier {
         Some(canonical)
     }
 
-    fn ty(&self, module: ModuleId, ty: &mut TyExpr) -> KResult<()> {
+    /// Resolve every type name. `binders` holds the type parameters in
+    /// scope: declaration headers and nested `for<...>` binders. Any
+    /// other unresolved name is an error — type variables must be bound
+    /// explicitly.
+    fn ty(&self, module: ModuleId, ty: &mut TyExpr, binders: &mut Vec<String>) -> KResult<()> {
         match &mut ty.kind {
             TyExprKind::Name(name) => {
+                if binders.contains(name) {
+                    return Ok(());
+                }
                 let span = ty.span;
                 *name = self.resolve_name(module, name, Expect::Type, span)?;
             }
-            TyExprKind::Paren(inner) => self.ty(module, inner)?,
+            TyExprKind::Paren(inner) => self.ty(module, inner, binders)?,
             TyExprKind::Tuple(items) => {
                 for item in items {
-                    self.ty(module, item)?;
+                    self.ty(module, item, binders)?;
                 }
             }
-            TyExprKind::App(head, arg) => {
-                self.ty(module, head)?;
-                self.ty(module, arg)?;
+            TyExprKind::For { params, ty } => {
+                let base = binders.len();
+                binders.extend(params.iter().cloned());
+                self.ty(module, ty, binders)?;
+                binders.truncate(base);
+            }
+            TyExprKind::App(head, args) => {
+                self.ty(module, head, binders)?;
+                for arg in args {
+                    self.ty(module, arg, binders)?;
+                }
             }
             TyExprKind::Arrow(left, right) => {
-                self.ty(module, left)?;
-                self.ty(module, right)?;
+                self.ty(module, left, binders)?;
+                self.ty(module, right, binders)?;
             }
         }
         Ok(())
@@ -418,16 +427,21 @@ impl Qualifier {
         self.resolve_name(module, name, Expect::Ctor, span)
     }
 
-    fn check_orphan(&self, module: ModuleId, class: &str, self_ty: &TyExpr, span: Span) -> KResult<()> {
+    fn check_orphan(&self, module: ModuleId, class: &str, args: &[TyExpr], span: Span) -> KResult<()> {
         let class_owner = self.owners.get(class).copied();
         let mut names = Vec::new();
-        collect_type_names(self_ty, &mut names);
+        for arg in args {
+            collect_type_names(arg, &mut names);
+        }
         let local = names.iter().any(|name| self.owners.get(*name) == Some(&module));
         if class_owner == Some(module) || local {
             Ok(())
         } else {
             Err(Diag::new(
-                format!("orphan instance: neither `{class}` nor `{}` belongs to this module", self_ty.display()),
+                format!(
+                    "orphan instance: neither `{class}` nor any of ({}) belongs to this module",
+                    args.iter().map(|a| a.display()).collect::<Vec<_>>().join(", ")
+                ),
                 span,
             ))
         }
@@ -435,7 +449,7 @@ impl Qualifier {
 
     fn expr(&self, module: ModuleId, expr: &mut Expr, scopes: &mut Scopes) -> KResult<()> {
         match &mut expr.kind {
-            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::BoolConst(_) | ExprKind::Str(_) | ExprKind::Unit => {}
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Char(_) | ExprKind::BoolConst(_) | ExprKind::Str(_) | ExprKind::Unit => {}
             ExprKind::CtorCall { name, args } => {
                 let span = expr.span;
                 *name = self.ctor_name(module, name, span)?;
@@ -448,15 +462,36 @@ impl Qualifier {
                 *name = self.ctor_name(module, name, span)?;
             }
             ExprKind::Var(name) => {
-                if !scopes.contains(name) {
-                    let span = expr.span;
+                if scopes.contains(name) {
+                    return Ok(());
+                }
+                // Case is not grammatical: a name that resolves to a
+                // constructor is one, everything else is a value.
+                let span = expr.span;
+                if let Some(ctor) = self
+                    .lookup_local(module, name, Expect::Ctor)
+                    .or_else(|| self.lookup_use(module, name, Expect::Ctor))
+                {
+                    *expr = Expr {
+                        kind: ExprKind::Ctor { name: ctor },
+                        span,
+                    };
+                } else {
                     *name = self.value_name(module, name, span)?;
                 }
             }
             ExprKind::Call(callee, args) => {
                 self.expr(module, callee, scopes)?;
-                for arg in args {
+                for arg in args.iter_mut() {
                     self.expr(module, arg, scopes)?;
+                }
+                // `Just(x)`: a saturated constructor call.
+                if let ExprKind::Ctor { name } = callee.kind.clone() {
+                    let span = expr.span;
+                    *expr = Expr {
+                        kind: ExprKind::CtorCall { name, args: std::mem::take(args) },
+                        span,
+                    };
                 }
             }
             ExprKind::Record { ctor, fields } => {
@@ -479,7 +514,7 @@ impl Qualifier {
             ExprKind::Lambda { params, body } => {
                 scopes.push();
                 for param in params {
-                    self.pat(module, param)?;
+                    self.pat(module, param, scopes, &mut Vec::new())?;
                     scopes.bind(param.binds());
                 }
                 self.expr(module, body, scopes)?;
@@ -489,7 +524,7 @@ impl Qualifier {
                 scopes.push();
                 for (pat, value) in binds {
                     self.expr(module, value, scopes)?;
-                    self.pat(module, pat)?;
+                    self.pat(module, pat, scopes, &mut Vec::new())?;
                     scopes.bind(pat.binds());
                 }
                 self.expr(module, body, scopes)?;
@@ -499,7 +534,7 @@ impl Qualifier {
                 self.expr(module, scrutinee, scopes)?;
                 for arm in arms {
                     scopes.push();
-                    self.pat(module, &mut arm.pat)?;
+                    self.pat(module, &mut arm.pat, scopes, &mut Vec::new())?;
                     scopes.bind(arm.pat.binds());
                     if let Some(guard) = &mut arm.guard {
                         self.expr(module, guard, scopes)?;
@@ -537,16 +572,28 @@ impl Qualifier {
             let module_path = !scopes.contains(first) && (1..path.len()).any(|n| imports.contains_key(&path[..n].join(".")));
             if module_path {
                 let member = path.last().expect("field paths are non-empty");
-                let expect = if member.as_bytes()[0].is_ascii_uppercase() { Expect::Ctor } else { Expect::Value };
-                let name = self.resolve_member(module, &path.join("."), expect, span)?;
-                *expr = match expect {
-                    Expect::Ctor => Expr {
+                let prefix_len = path.len() - 1;
+                let target = imports
+                    .get(&path[..prefix_len].join("."))
+                    .copied()
+                    .ok_or_else(|| Diag::new(format!("unknown module in `{}`; add an `import` first", path.join(".")), span))?;
+                // Case is not grammatical: the member's registered sort
+                // decides between a constructor and a value.
+                if let Some(name) = self.lookup_member(target, member, Expect::Ctor, span) {
+                    *expr = Expr {
                         kind: ExprKind::Ctor { name },
                         span,
-                    },
-                    _ => Expr { kind: ExprKind::Var(name), span },
-                };
-                return Ok(());
+                    };
+                    return Ok(());
+                }
+                if let Some(name) = self.lookup_member(target, member, Expect::Value, span) {
+                    *expr = Expr {
+                        kind: ExprKind::Var(name),
+                        span,
+                    };
+                    return Ok(());
+                }
+                return Err(Diag::new(format!("module `{}` has no matching `{member}`", path[..prefix_len].join(".")), span));
             }
         }
         if let ExprKind::Field { base, .. } = &mut expr.kind {
@@ -555,25 +602,42 @@ impl Qualifier {
         Ok(())
     }
 
-    fn pat(&self, module: ModuleId, pat: &mut Pat) -> KResult<()> {
+    fn pat(&self, module: ModuleId, pat: &mut Pat, scopes: &mut Scopes, binders: &mut Vec<String>) -> KResult<()> {
         match pat {
-            Pat::Wild | Pat::Bind(_) | Pat::Int(_) | Pat::Bool(_) => {}
-            Pat::Paren(inner) => self.pat(module, inner)?,
+            Pat::Wild | Pat::Int(_) | Pat::Char(_) | Pat::Bool(_) => {}
+            Pat::Bind(name) => {
+                // A bare name is a binding, unless it names a constructor
+                // that no local binding shadows.
+                if scopes.contains(name) {
+                    return Ok(());
+                }
+                if let Some(ctor) = self
+                    .lookup_local(module, name, Expect::Ctor)
+                    .or_else(|| self.lookup_use(module, name, Expect::Ctor))
+                {
+                    *pat = Pat::Ctor { name: ctor, fields: Vec::new() };
+                }
+            }
+            Pat::Paren(inner) => self.pat(module, inner, scopes, binders)?,
+            Pat::Typed(inner, ty) => {
+                self.pat(module, inner, scopes, binders)?;
+                self.ty(module, ty, binders)?;
+            }
             Pat::Ctor { name, fields } => {
                 let span = Span::new(0, 0);
                 *name = self.ctor_name(module, name, span)?;
                 for field in fields {
-                    self.pat(module, field)?;
+                    self.pat(module, field, scopes, binders)?;
                 }
             }
             Pat::Tuple(items) | Pat::List(items) => {
                 for item in items {
-                    self.pat(module, item)?;
+                    self.pat(module, item, scopes, binders)?;
                 }
             }
             Pat::Comp(left, right) => {
-                self.pat(module, left)?;
-                self.pat(module, right)?;
+                self.pat(module, left, scopes, binders)?;
+                self.pat(module, right, scopes, binders)?;
             }
         }
         Ok(())
@@ -611,14 +675,17 @@ fn collect_type_names<'a>(ty: &'a TyExpr, out: &mut Vec<&'a str>) {
     match &ty.kind {
         TyExprKind::Name(name) => out.push(name),
         TyExprKind::Paren(inner) => collect_type_names(inner, out),
+        TyExprKind::For { ty, .. } => collect_type_names(ty, out),
         TyExprKind::Tuple(items) => {
             for item in items {
                 collect_type_names(item, out);
             }
         }
-        TyExprKind::App(head, arg) => {
+        TyExprKind::App(head, args) => {
             collect_type_names(head, out);
-            collect_type_names(arg, out);
+            for arg in args {
+                collect_type_names(arg, out);
+            }
         }
         TyExprKind::Arrow(left, right) => {
             collect_type_names(left, out);

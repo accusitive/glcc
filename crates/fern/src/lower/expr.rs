@@ -51,6 +51,7 @@ impl<'l, 'd> FnCtx<'l, 'd> {
     fn const_value(&mut self, c: &ConstValue) -> KResult<mir::Value> {
         Ok(match c {
             ConstValue::Int(v) => self.iconst(64, *v as i128),
+            ConstValue::Char(c) => self.iconst(32, *c as i128),
             ConstValue::Float(v) => self.fconst(*v),
             ConstValue::Bool(b) => self.bool_const(*b),
             ConstValue::Str(s) => self.string_const(s)?,

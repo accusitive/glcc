@@ -80,6 +80,8 @@ impl<'d> Types<'d> {
             "Int" => return Ok(mir::Ty::int(64)),
             "Float" => return Ok(mir::Ty::Float(mir::FloatKind::F64)),
             "Bool" => return Ok(mir::Ty::Bool),
+            // A Unicode code point, 32 bits.
+            "Char" => return Ok(mir::Ty::int(32)),
             "Unit" => return Ok(mir::Ty::int(8)),
             // A NUL-terminated `char *`. Literals live in private
             // globals; constructed strings are GC cells.

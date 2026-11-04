@@ -10,7 +10,8 @@ use fern::{lexer, parser};
 
 fn collect(src: &str) -> Defs {
     let tokens = lexer::lex(src).expect("lex");
-    let program = parser::parse(tokens).expect("parse");
+    let mut program = parser::parse(tokens).expect("parse");
+    fern::resolve::qualify(&mut program).expect("resolve");
     defs::collect(&program).expect("collect")
 }
 
@@ -37,8 +38,8 @@ fn instance(solution: Solution) -> (usize, Vec<Ty>) {
 }
 
 const SUMS: &str = "\
-class Sum a { add : a -> a -> a }
-instance Sum Int {}
+class Sum<A> { add: (A, A) -> A }
+instance Sum<Int> {}
 ";
 
 #[test]
@@ -64,14 +65,14 @@ fn environment_bounds_discharge_goals() {
     let cid = defs.class_by_name("Sum").expect("Sum");
     let env = [Bound {
         class_id: cid,
-        args: vec![Ty::Param("a".into())],
+        args: vec![Ty::Param("A".into())],
         span: span(),
     }];
     let solver = Solver::new(&defs);
 
     let rigid = Obligation {
         class_id: cid,
-        args: vec![Ty::Param("a".into())],
+        args: vec![Ty::Param("A".into())],
     };
     let solution = solver.prove(&mut InferCtx::new(), &env, &rigid, span()).expect("prove");
     assert!(matches!(solution, Solution::Bound));
@@ -85,17 +86,17 @@ fn environment_bounds_discharge_goals() {
     };
     let solution = solver.prove(&mut infer, &env, &unknown, span()).expect("prove");
     assert!(matches!(solution, Solution::Bound));
-    assert_eq!(infer.resolve(&t), Ty::Param("a".into()));
+    assert_eq!(infer.resolve(&t), Ty::Param("A".into()));
 }
 
 #[test]
 fn bounds_recurse_through_instances() {
     let defs = collect(
         "\
-class Sum a { add : a -> a -> a }
-data List a = Nil | Cons(a, List a)
-instance Sum Int {}
-instance Sum (List a) when Sum a {}
+class Sum<A> { add: (A, A) -> A }
+type List<A> = | Nil | Cons(A, List<A>)
+instance Sum<Int> {}
+instance<A> Sum<List<A>> when Sum<A> {}
 ",
     );
     let list = |inner: Ty| Ty::named("List", vec![inner]);
@@ -111,11 +112,11 @@ instance Sum (List a) when Sum a {}
 fn hkt_goals_dispatch_through_partial_applications() {
     let defs = collect(
         "\
-class Functor f { map : (a -> b) -> f a -> f b }
-data List a = Nil | Cons(a, List a)
-data Free f a = Pure(a) | Wrap(f a, Free f a)
-instance Functor List {}
-instance Functor (Free g) when Functor g {}
+class Functor<F> { map: for<A, B> (A -> B) -> F<A> -> F<B> }
+type List<A> = | Nil | Cons(A, List<A>)
+type Free<F, A> = | Pure(A) | Wrap(F<A>, Free<F, A>)
+instance Functor<List> {}
+instance<G> Functor<Free<G>> when Functor<G> {}
 ",
     );
     let cid = defs.class_by_name("Functor").expect("Functor");
@@ -147,10 +148,10 @@ instance Functor (Free g) when Functor g {}
 fn two_matching_instances_are_ambiguous() {
     let defs = collect(
         "\
-class Eq a { eq : a -> a -> Bool }
-data List a = Nil | Cons(a, List a)
-instance Eq (List a) {}
-instance Eq (List b) {}
+class Eq<A> { eq: (A, A) -> Bool }
+type List<A> = | Nil | Cons(A, List<A>)
+instance<A> Eq<List<A>> {}
+instance<B> Eq<List<B>> {}
 ",
     );
     let solution = prove(&defs, &[], &goal(&defs, "Eq", vec![Ty::named("List", vec![Ty::int_ty()])]));
@@ -164,9 +165,9 @@ instance Eq (List b) {}
 fn instance_generics_substitute_positionally() {
     let defs = collect(
         "\
-class Co a b { co : a -> b }
-data Pair a b = Pair(a, b)
-instance Co (Pair a b) Int {}
+class Co<A, B> { co: (A, B) -> B }
+type Pair<A, B> = | Pair(A, B)
+instance<A, B> Co<Pair<A, B>, Int> {}
 ",
     );
     let (_, args) = instance(prove(

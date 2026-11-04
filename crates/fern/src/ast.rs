@@ -43,11 +43,11 @@ pub struct Item {
 
 #[derive(Debug, Clone)]
 pub enum ItemKind {
-    Data(DataDecl),
+    Type(TypeDecl),
     Class(ClassDecl),
     Instance(InstanceDecl),
     Extern(ExternDecl),
-    Fun(FnDecl),
+    Fn(FnDecl),
     Let(ValueDecl),
     Import(ImportDecl),
     Use(UseDecl),
@@ -70,7 +70,9 @@ pub struct UseDecl {
 }
 
 /// `extern "symbol" name : ty`. The optional string renames the linked
-/// symbol; without it the symbol and the fern name are the same.
+/// symbol; without it the symbol and the fern name are the same. A
+/// paren tuple domain is the C calling convention: `(A, B) -> C` takes
+/// two C arguments.
 #[derive(Debug, Clone)]
 pub struct ExternDecl {
     pub span: Span,
@@ -80,7 +82,7 @@ pub struct ExternDecl {
 }
 
 #[derive(Debug, Clone)]
-pub struct DataDecl {
+pub struct TypeDecl {
     pub span: Span,
     pub name: String,
     pub params: Vec<String>,
@@ -112,35 +114,42 @@ pub struct MethodSig {
 #[derive(Debug, Clone)]
 pub struct InstanceDecl {
     pub span: Span,
+    /// `instance<A, B>`: type parameters bound for the head and context.
+    pub params: Vec<String>,
     pub class: String,
+    /// The class's type arguments, in order: `instance Functor<List>`
+    /// binds `List` as the dispatching argument.
+    pub args: Vec<TyExpr>,
     /// Haskell-style `context =>`: constraints from the instance head.
     pub ctx: Vec<TyExpr>,
-    pub self_ty: TyExpr,
     pub methods: Vec<MethodBody>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MethodBody {
     pub name: String,
-    pub params: Vec<Pat>,
+    /// The parameter list as one pattern matched against the method's
+    /// domain: `(f, xs)` is a tuple pattern, `()` matches the unit
+    /// domain of a nullary method.
+    pub param: Pat,
     pub body: Expr,
     pub span: Span,
-}
-
-#[derive(Debug, Clone)]
-pub struct FnParam {
-    pub pat: Pat,
-    pub ty: TyExpr,
 }
 
 #[derive(Debug, Clone)]
 pub struct FnDecl {
     pub span: Span,
     pub name: String,
-    pub params: Vec<FnParam>,
-    pub ret: TyExpr,
+    /// The parameter list as one pattern matched against the domain of
+    /// the annotation: `fn name(x, ys) : (Int, List<A>) -> Ret` binds
+    /// `x : Int` and `ys : List<A>`; `fn f() : -> Int` is the unit
+    /// pattern against the unit domain.
+    pub param: Pat,
+    /// The full function type after `:`, including any `for<...>`
+    /// binders. Its domain is peeled off against `param`.
+    pub ann: TyExpr,
     pub body: Expr,
-    /// `async fun`: calls yield a `Future` instead of running the body.
+    /// `async fn`: calls yield a `Future` instead of running the body.
     pub is_async: bool,
 }
 
@@ -161,10 +170,16 @@ pub struct TyExpr {
 #[derive(Debug, Clone)]
 pub enum TyExprKind {
     Name(String),
-    /// `Pair a b`: juxtaposition, each argument is one atom. Left-assoc.
-    App(Box<TyExpr>, Box<TyExpr>),
-    /// `a -> b`: right-assoc.
+    /// `List<Int>`: bracket application; each argument is a full type.
+    App(Box<TyExpr>, Vec<TyExpr>),
+    /// `a -> b`: right-assoc. An empty domain (`-> b`) is the unit
+    /// tuple, the type of a nullary function.
     Arrow(Box<TyExpr>, Box<TyExpr>),
+    /// `for<A, B> ty`: explicit type-parameter binders.
+    For {
+        params: Vec<String>,
+        ty: Box<TyExpr>,
+    },
     /// Grouping; transparent for resolution.
     Paren(Box<TyExpr>),
     /// `(a, b)` and `()`: the unit type is the zero-tuple.
@@ -181,37 +196,58 @@ impl TyExpr {
             TyExprKind::Name(n) => n.clone(),
             TyExprKind::Paren(t) => format!("({})", t.display()),
             TyExprKind::Tuple(items) => format!("({})", items.iter().map(|t| t.display()).collect::<Vec<_>>().join(", ")),
-            TyExprKind::App(f, a) => format!("{} {}", f.display(), a.display()),
+            TyExprKind::App(f, args) => format!(
+                "{}<{}>",
+                f.display(),
+                args.iter().map(|a| a.display()).collect::<Vec<_>>().join(", ")
+            ),
             TyExprKind::Arrow(a, b) => format!("{} -> {}", a.display(), b.display()),
+            TyExprKind::For { params, ty } => format!("for<{}> {}", params.join(", "), ty.display()),
+        }
+    }
+
+    /// Peel `for<...>` binders, returning them plus the bare type.
+    pub fn strip_for(&self) -> (Vec<String>, &TyExpr) {
+        match &self.kind {
+            TyExprKind::For { params, ty } => (params.clone(), ty),
+            _ => (Vec::new(), self),
         }
     }
 
     pub fn free_tyvars(&self) -> Vec<String> {
         let mut out = Vec::new();
-        self.collect_free(&mut out);
+        let mut bound = Vec::new();
+        self.collect_free(&mut bound, &mut out);
         out
     }
 
-    fn collect_free(&self, out: &mut Vec<String>) {
+    fn collect_free(&self, bound: &mut Vec<String>, out: &mut Vec<String>) {
         match &self.kind {
             TyExprKind::Name(n) => {
-                if !out.contains(n) {
+                if !bound.contains(n) && !out.contains(n) {
                     out.push(n.clone())
                 }
             }
-            TyExprKind::Paren(t) => t.collect_free(out),
+            TyExprKind::Paren(t) => t.collect_free(bound, out),
             TyExprKind::Tuple(items) => {
                 for t in items {
-                    t.collect_free(out);
+                    t.collect_free(bound, out);
                 }
             }
-            TyExprKind::App(f, a) => {
-                f.collect_free(out);
-                a.collect_free(out);
+            TyExprKind::App(f, args) => {
+                f.collect_free(bound, out);
+                for a in args {
+                    a.collect_free(bound, out);
+                }
             }
             TyExprKind::Arrow(a, b) => {
-                a.collect_free(out);
-                b.collect_free(out);
+                a.collect_free(bound, out);
+                b.collect_free(bound, out);
+            }
+            TyExprKind::For { params, ty } => {
+                let mut inner = bound.clone();
+                inner.extend(params.iter().cloned());
+                ty.collect_free(&mut inner, out);
             }
         }
     }
@@ -240,13 +276,16 @@ pub enum BinOp {
     Cons,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Pat {
     Wild,
-    /// Pattern binding a name: lowercase (or lambda parameter).
+    /// A bare name: a binding, or a nullary constructor once resolution
+    /// has decided (case is not grammatical).
     Bind(String),
     /// Grouping; transparent.
     Paren(Box<Pat>),
+    /// `pat : T` on a closure parameter; checked against both sides.
+    Typed(Box<Pat>, TyExpr),
     Ctor {
         name: String,
         fields: Vec<Pat>,
@@ -258,6 +297,7 @@ pub enum Pat {
     /// checker.
     Comp(Box<Pat>, Box<Pat>),
     Int(i64),
+    Char(char),
     Bool(bool),
 }
 
@@ -270,16 +310,17 @@ impl Pat {
 
     pub fn is_irrefutable(&self) -> bool {
         match self {
-            Pat::Wild | Pat::Bind(_) | Pat::Paren(_) => true,
+            Pat::Wild | Pat::Bind(_) | Pat::Paren(_) | Pat::Typed(..) => true,
             Pat::Tuple(fs) => fs.iter().all(|f| f.is_irrefutable()),
-            Pat::Ctor { .. } | Pat::List(_) | Pat::Comp(..) | Pat::Int(_) | Pat::Bool(_) => false,
+            Pat::Ctor { .. } | Pat::List(_) | Pat::Comp(..) | Pat::Int(_) | Pat::Char(_) | Pat::Bool(_) => false,
         }
     }
 
     pub fn collect_binds(&self, out: &mut Vec<String>) {
         match self {
             Pat::Bind(n) => out.push(n.clone()),
-            Pat::Wild | Pat::Int(_) | Pat::Bool(_) => {}
+            Pat::Wild | Pat::Int(_) | Pat::Char(_) | Pat::Bool(_) => {}
+            Pat::Typed(inner, _) => inner.collect_binds(out),
             Pat::Paren(inner) => inner.collect_binds(out),
             Pat::Ctor { fields, .. } => {
                 for f in fields {
@@ -314,6 +355,7 @@ pub struct Expr {
 pub enum ExprKind {
     Int(i64),
     Float(f64),
+    Char(char),
     BoolConst(bool),
     Str(String),
     Unit,
@@ -342,7 +384,7 @@ pub enum ExprKind {
     },
     /// `expr?`: unwrap a `Result`/`Maybe`, early-returning the residual.
     Try(Box<Expr>),
-    /// `await expr`: suspend until a `Future` completes.
+    /// `expr.await`: suspend until a `Future` completes.
     Await(Box<Expr>),
     /// `Eq::eq(x, y)` — a class-method call.
     ClassSel {

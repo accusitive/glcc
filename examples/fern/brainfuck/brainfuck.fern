@@ -1,63 +1,63 @@
--- brainfuck.fern — a Brainfuck machine built from immutable values.
---
--- The tape is a zipper of two lists around the head cell, so it is
--- unbounded and zero-filled at both ends. A program is a list of `Op`s,
--- loops are a stack of pending bodies, input is a list of bytes, and
--- control flow is ordinary recursion. There is no mutable state, so no
--- array or program counter even exists.
---
--- Programs are ordinary strings parsed into `Op`s, comments and
--- whitespace included. `demo()` prints each program's output, and
--- `run_file(path)` runs one loaded from disk.
---
--- Build and run: make && make run (driver.c calls `demo()` and prints
--- the checksum from `answer()`).
+// brainfuck.fern — a Brainfuck machine built from immutable values.
+//
+// The tape is a zipper of two lists around the head cell, so it is
+// unbounded and zero-filled at both ends. A program is a list of `Op`s,
+// loops are a stack of pending bodies, input is a list of bytes, and
+// control flow is ordinary recursion. There is no mutable state, so no
+// array or program counter even exists.
+//
+// Programs are ordinary strings parsed into `Op`s, comments and
+// whitespace included. `demo()` prints each program's output, and
+// `run_file(path)` runs one loaded from disk.
+//
+// Build and run: make && make run (driver.c calls `demo()` and prints
+// the checksum from `answer()`).
 
 import std::foldable
 import std::list
 use std::list::append
 use std::list::reverse
 
-data Op = Right | Left | Inc | Dec | Emit | Read | Open | Close
+type Op = | Right | Left | Inc | Dec | Emit | Read | Open | Close
 
--- ------------------------------------------------------------- the tape --
--- `(left, head, right)` holds the nearest cells first. Touching an
--- unwritten cell materializes a zero.
+// ------------------------------------------------------------- the tape --
+// `(left, head, right)` holds the nearest cells first. Touching an
+// unwritten cell materializes a zero.
 
-fun head(t : (List Int, Int, List Int)) : Int = match t { case (_, c, _) => c }
-fun poke(t : (List Int, Int, List Int), n : Int) : (List Int, Int, List Int) = match t { case (l, _, r) => (l, n, r) }
+fn head(t) : (List<Int>, Int, List<Int>) -> Int = match t { case (_, c, _) => c }
+fn poke(t, n) : ((List<Int>, Int, List<Int>), Int) -> (List<Int>, Int, List<Int>) = match t { case (l, _, r) => (l, n, r) }
 
-fun right(t : (List Int, Int, List Int)) : (List Int, Int, List Int) = match t {
+fn right(t) : (List<Int>, Int, List<Int>) -> (List<Int>, Int, List<Int>) = match t {
     case (l, c, Nil) => (Cons(c, l), 0, Nil)
     case (l, c, Cons(h, r)) => (Cons(c, l), h, r)
 }
 
-fun left(t : (List Int, Int, List Int)) : (List Int, Int, List Int) = match t {
+fn left(t) : (List<Int>, Int, List<Int>) -> (List<Int>, Int, List<Int>) = match t {
     case (Nil, c, r) => (Nil, 0, Cons(c, r))
     case (Cons(h, l), c, r) => (l, h, Cons(c, r))
 }
 
--- Cells are bytes; `+` and `-` wrap like a real Brainfuck.
-fun bump(n : Int) : Int = if n == 255 then 0 else n + 1
-fun drop(n : Int) : Int = if n == 0 then 255 else n - 1
+// Cells are bytes; `+` and `-` wrap like a real Brainfuck.
+fn bump(n) : Int -> Int = if n == 255 then 0 else n + 1
+fn drop(n) : Int -> Int = if n == 0 then 255 else n - 1
 
--- ------------------------------------------------------------ the input --
--- `,` consumes the front of the input stream; at EOF the byte reads as
--- 0 and the stream stays empty.
+// ------------------------------------------------------------ the input --
+// `,` consumes the front of the input stream; at EOF the byte reads as
+// 0 and the stream stays empty.
 
-fun peek(stream : List Int) : Maybe Int = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
-fun tail(stream : List Int) : List Int = match stream { case Nil => Nil case Cons(_, more) => more }
+fn peek(stream) : List<Int> -> Maybe<Int> = match stream { case Nil => Nothing case Cons(b, _) => Just(b) }
+fn tail(stream) : List<Int> -> List<Int> = match stream { case Nil => Nil case Cons(_, more) => more }
 
--- "Maybe a byte" from the input stream becomes a byte: `Just(b)` keeps
--- `b`, and `Nothing` at EOF reads as 0.
-fun or_zero(m : Maybe Int) : Int = fold((_, b) -> b, 0, m)
+// "Maybe a byte" from the input stream becomes a byte: `Just(b)` keeps
+// `b`, and `Nothing` at EOF reads as 0.
+fn or_zero(m) : Maybe<Int> -> Int = fold(|_, b| b, 0, m)
 
--- ---------------------------------------------------------- the program --
--- `split(ops, depth)` runs with the `Open` already consumed: it cuts
--- out the loop body up to the matching close and returns
--- (body, program-after-that-close). `depth` counts loops still open.
+// ---------------------------------------------------------- the program --
+// `split(ops, depth)` runs with the `Open` already consumed: it cuts
+// out the loop body up to the matching close and returns
+// (body, program-after-that-close). `depth` counts loops still open.
 
-fun split(ops : List Op, depth : Int) : (List Op, List Op) = match ops {
+fn split(ops, depth) : (List<Op>, Int) -> (List<Op>, List<Op>) = match ops {
     case Nil => (Nil, Nil)
     case Cons(op, rest) => match op {
         case Open => { let (body, after) = split(rest, depth + 1); (Cons(op, body), after) }
@@ -66,11 +66,11 @@ fun split(ops : List Op, depth : Int) : (List Op, List Op) = match ops {
     }
 }
 
--- `loops` is a stack of loop bodies, one entry per `[` we are inside.
--- A `[` with a nonzero head pushes the body and falls into it; the
--- matching `]` jumps back to the body while the head is nonzero and
--- pops it otherwise. A zero head at `[` skips with `split`.
-fun exec(ops : List Op, loops : List (List Op), tape : (List Int, Int, List Int), input : List Int, out : List Int) : ((List Int, Int, List Int), List Int, List Int) = match ops {
+// `loops` is a stack of loop bodies, one entry per `[` we are inside.
+// A `[` with a nonzero head pushes the body and falls into it; the
+// matching `]` jumps back to the body while the head is nonzero and
+// pops it otherwise. A zero head at `[` skips with `split`.
+fn exec(ops, loops, tape, input, out) : (List<Op>, List<(List<Op>)>, (List<Int>, Int, List<Int>), List<Int>, List<Int>) -> ((List<Int>, Int, List<Int>), List<Int>, List<Int>) = match ops {
     case Nil => (tape, input, out)
     case Cons(op, rest) => match op {
         case Right => exec(rest, loops, right(tape), input, out)
@@ -93,17 +93,17 @@ fun exec(ops : List Op, loops : List (List Op), tape : (List Int, Int, List Int)
     }
 }
 
--- One whole run, returning the emitted bytes oldest first. (`out`
--- accumulates newest first, hence the `reverse`.)
-fun output(program : List Op, input : List Int) : List Int = {
+// One whole run, returning the emitted bytes oldest first. (`out`
+// accumulates newest first, hence the `reverse`.)
+fn output(program, input) : (List<Op>, List<Int>) -> List<Int> = {
     let (_, _, out) = exec(program, Nil, (Nil, 0, Nil), input, Nil);
     reverse(out)
 }
 
--- ------------------------------------------------------------- programs --
--- Parse Brainfuck text: keep the eight commands and ignore everything
--- else, so comments and layout are free.
-fun parse_op(c : String) : Maybe Op =
+// ------------------------------------------------------------- programs --
+// Parse Brainfuck text: keep the eight commands and ignore everything
+// else, so comments and layout are free.
+fn parse_op(c) : String -> Maybe<Op> = 
     if c == ">" then Just(Right)
     else if c == "<" then Just(Left)
     else if c == "+" then Just(Inc)
@@ -114,14 +114,14 @@ fun parse_op(c : String) : Maybe Op =
     else if c == "]" then Just(Close)
     else Nothing
 
-fun parse_from(source : String, i : Int, n : Int) : List Op =
+fn parse_from(source, i, n) : (String, Int, Int) -> List<Op> = 
     if i >= n then Nil
     else match parse_op(str_slice(source, i, 1)) {
         case Nothing => parse_from(source, i + 1, n)
         case Just(op) => Cons(op, parse_from(source, i + 1, n))
     }
 
-fun parse(source : String) : List Op = parse_from(source, 0, str_len(source))
+fn parse(source) : String -> List<Op> = parse_from(source, 0, str_len(source))
 
 let hello_source = "
     ++++++++++[>+++++++>++++++++++>+++>+<<<<-]
@@ -139,34 +139,34 @@ let cubes = parse(cubes_source)
 let wander = parse(wander_source)
 let cat = parse(cat_source)
 
--- --------------------------------------------------------------- output --
--- Bytes become a printable string for the demo; control bytes use the
--- same escapes the lexer accepts.
-fun render_byte(b : Int) : String =
+// --------------------------------------------------------------- output --
+// Bytes become a printable string for the demo; control bytes use the
+// same escapes the lexer accepts.
+fn render_byte(b) : Int -> String = 
     if b == 0 then "\\0"
     else if b == 10 then "\\n"
     else if b == 9 then "\\t"
     else if b == 13 then "\\r"
     else str_of_byte(b)
 
-fun render(bytes : List Int) : String =
-    fold((text, b) -> concat(text, render_byte(b)), "", bytes)
+fn render(bytes) : List<Int> -> String = 
+    fold(|text, b| concat(text, render_byte(b)), "", bytes)
 
--- File output is raw text, so a trailing newline from the program stays
--- a newline. A zero byte has no C-string representation and is dropped.
-fun decode(bytes : List Int) : String =
-    fold((text, b) -> if b == 0 then text else concat(text, str_of_byte(b)), "", bytes)
+// File output is raw text, so a trailing newline from the program stays
+// a newline. A zero byte has no C-string representation and is dropped.
+fn decode(bytes) : List<Int> -> String = 
+    fold(|text, b| if b == 0 then text else concat(text, str_of_byte(b)), "", bytes)
 
-fun run_source(source : String, input : List Int) : List Int =
+fn run_source(source, input) : (String, List<Int>) -> List<Int> = 
     output(parse(source), input)
 
-fun show(name : String, source : String, input : List Int) : Unit = {
+fn show(name, source, input) : (String, String, List<Int>) -> Unit = {
     let bytes = run_source(source, input);
     println(concat(name, concat(" => ", render(bytes))));
     ()
 }
 
-fun demo() : Unit = {
+fn demo() :  -> Unit = {
     show("hello", hello_source, Nil);
     show("forty", forty_source, Nil);
     show("cubes", cubes_source, Nil);
@@ -175,8 +175,8 @@ fun demo() : Unit = {
     ()
 }
 
--- Run one program from a file with no input, writing its bytes as text.
-fun run_file(path : String) : Int = {
+// Run one program from a file with no input, writing its bytes as text.
+fn run_file(path) : String -> Int = {
     let source = read_file(path);
     if str_len(source) == 0 then {
         println(concat("cannot read ", path));
@@ -187,12 +187,12 @@ fun run_file(path : String) : Int = {
     }
 }
 
--- A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
--- no `%`, so `reduce` spells the modulo by subtraction.
-fun reduce(h : Int) : Int = if h >= 1000000007 then reduce(h - 1000000007) else h
-fun checksum(bs : List Int) : Int = fold((h, b) -> reduce(h * 31 + b), 7, bs)
+// A rolling checksum: h := (h * 31 + byte) mod 1_000_000_007. fern has
+// no `%`, so `reduce` spells the modulo by subtraction.
+fn reduce(h) : Int -> Int = if h >= 1000000007 then reduce(h - 1000000007) else h
+fn checksum(bs) : List<Int> -> Int = fold(|h, b| reduce(h * 31 + b), 7, bs)
 
-fun answer() : Int = {
+fn answer() :  -> Int = {
     let spoken = append(output(hello, Nil), append(output(forty, Nil),
         append(output(cubes, Nil), append(output(wander, Nil), output(cat, [72, 101])))));
     checksum(spoken)

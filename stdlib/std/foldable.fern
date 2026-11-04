@@ -1,15 +1,15 @@
-class Foldable t {
-    fold : (b -> a -> b) -> b -> t a -> b
+class Foldable<T> {
+    fold: for<A, B> ((B, A) -> B) -> B -> T<A> -> B
 }
 
-instance Foldable List {
+instance Foldable<List> {
     fold(f, z, xs) = match xs {
         case Nil => z
         case Cons(x, xs) => fold(f, f(z, x), xs)
     }
 }
 
-instance Foldable Maybe {
+instance Foldable<Maybe> {
     fold(f, z, m) = match m {
         case Nothing => z
         case Just(x) => f(z, x)

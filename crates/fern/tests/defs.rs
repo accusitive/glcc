@@ -6,7 +6,8 @@ use fern::{lexer, parser};
 
 fn collect(src: &str) -> Result<Defs, fern::Diag> {
     let tokens = lexer::lex(src)?;
-    let program = parser::parse(tokens)?;
+    let mut program = parser::parse(tokens)?;
+    fern::resolve::qualify(&mut program)?;
     defs::collect(&program)
 }
 
@@ -34,7 +35,7 @@ fn arrow(a: Kind, b: Kind) -> Kind {
 
 #[test]
 fn infers_higher_kinded_parameters() {
-    let defs = collect_ok("data Free f a = Pure(a) | Wrap(f a, Free f a)");
+    let defs = collect_ok("type Free<F, A> = | Pure(A) | Wrap(F<A>, Free<F, A>)");
     assert_eq!(defs.data.len(), 1);
     let free = defs.kind_of_head("Free").expect("Free's kind");
     assert_eq!(*free, arrow(arrow(star(), star()), arrow(star(), star())));
@@ -43,11 +44,11 @@ fn infers_higher_kinded_parameters() {
 #[test]
 fn resolves_class_and_instance_heads() {
     let src = "\
-class Functor f { map : (a -> b) -> f a -> f b }
-data List a = Nil | Cons(a, List a)
-instance Functor List {}
-instance Functor (Free g) when Functor g {}
-data Free f a = Pure(a) | Wrap(f a, Free f a)
+class Functor<F> { map: for<A, B> (A -> B) -> F<A> -> F<B> }
+type List<A> = | Nil | Cons(A, List<A>)
+instance Functor<List> {}
+instance<G> Functor<Free<G>> when Functor<G> {}
+type Free<F, A> = | Pure(A) | Wrap(F<A>, Free<F, A>)
 ";
     let defs = collect_ok(src);
     assert_eq!(defs.instances.len(), 2);
@@ -57,10 +58,10 @@ data Free f a = Pure(a) | Wrap(f a, Free f a)
 
     let second = &defs.instances[1];
     assert_eq!(second.generics.len(), 1);
-    assert_eq!(second.generics[0].0, "g");
+    assert_eq!(second.generics[0].0, "G");
     assert_eq!(second.generics[0].1, arrow(star(), star()));
     assert_eq!(second.args.len(), 1);
-    assert_eq!(second.args[0].to_string(), "Free g");
+    assert_eq!(second.args[0].to_string(), "Free<G>");
     assert_eq!(second.bounds.len(), 1);
 
     assert_eq!(defs.ctor_by_name("Cons"), Some((defs.data_ids["List"], 1)));
@@ -69,9 +70,9 @@ data Free f a = Pure(a) | Wrap(f a, Free f a)
 #[test]
 fn rejects_nullary_instance_of_kinded_class() {
     let src = "\
-data Wrapped = Wrapped(Int)
-class Functor f { map : (a -> b) -> f a -> f b }
-instance Functor Wrapped {}
+type Wrapped = | Wrapped(Int)
+class Functor<F> { map: for<A, B> (A -> B) -> F<A> -> F<B> }
+instance Functor<Wrapped> {}
 ";
     let err = collect_err(src);
     assert!(err.msg.contains("kinds do not match"), "{}", err.msg);
@@ -79,38 +80,38 @@ instance Functor Wrapped {}
 
 #[test]
 fn rejects_wrong_arity_class_application() {
-    let err = collect_err("class Clash a b { clash : a -> b -> a }\ninstance Clash Int {}");
+    let err = collect_err("class Clash<A, B> { clash: (A, B) -> A }\ninstance Clash<Int> {}");
     assert!(err.msg.contains("takes 2 type arguments"), "{}", err.msg);
 
-    let err = collect_err("class Clash a b { clash : a -> b -> a }\ninstance Clash a b c {}");
+    let err = collect_err("class Clash<A, B> { clash: (A, B) -> A }\ninstance<A, B, C> Clash<A, B, C> {}");
     assert!(err.msg.contains("takes 2 type arguments"), "{}", err.msg);
 }
 
 #[test]
 fn multi_parameter_class_takes_positional_arguments() {
     let src = "\
-class Clash a b { clash : a -> b -> a }
-instance Clash Int Bool {}
-instance Clash (List a) Float {}
-data List a = Nil | Cons(a, List a)
+class Clash<A, B> { clash: (A, B) -> A }
+instance Clash<Int, Bool> {}
+instance<A> Clash<List<A>, Float> {}
+type List<A> = | Nil | Cons(A, List<A>)
 ";
     let defs = collect_ok(src);
     assert_eq!(defs.instances[0].args[0].to_string(), "Int");
     assert_eq!(defs.instances[0].self_ty().to_string(), "Int");
-    assert_eq!(defs.instances[1].args[0].to_string(), "List a");
+    assert_eq!(defs.instances[1].args[0].to_string(), "List<A>");
     assert_eq!(defs.instances[1].args[1].to_string(), "Float");
 }
 
 #[test]
 fn rejects_ambiguous_and_duplicate_instances() {
-    let src = "class Sum a { add : a -> a -> a }\ninstance Sum a {}";
+    let src = "class Sum<A> { add: (A, A) -> A }\ninstance<A> Sum<A> {}";
     let err = collect_err(src);
     assert!(err.msg.contains("bare type parameter"), "{}", err.msg);
 
     let src = "\
-class Sum a { add : a -> a -> a }
-instance Sum Int {}
-instance Sum Int {}
+class Sum<A> { add: (A, A) -> A }
+instance Sum<Int> {}
+instance Sum<Int> {}
 ";
     let err = collect_err(src);
     assert!(err.msg.contains("duplicate instance"), "{}", err.msg);
@@ -118,7 +119,7 @@ instance Sum Int {}
 
 #[test]
 fn collects_extern_signatures() {
-    let defs = collect_ok("extern \"puts\" put : String -> Int\nextern twice : Int -> Int -> Int");
+    let defs = collect_ok("extern \"puts\" put : String -> Int\nextern twice : (Int, Int) -> Int");
     let put = defs.extern_by_name("put").expect("put");
     assert_eq!(defs.externs[put.index()].symbol, "puts");
     assert_eq!(defs.externs[put.index()].params.len(), 1);
@@ -133,41 +134,41 @@ fn collects_extern_signatures() {
 
 #[test]
 fn externs_share_the_value_namespace() {
-    let err = collect_err("fun f(x : Int) : Int = x\nextern f : Int -> Int");
+    let err = collect_err("fn f(x) : Int -> Int = x\nextern f : Int -> Int");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
-    let err = collect_err("extern f : Int -> Int\nfun f(x : Int) : Int = x");
+    let err = collect_err("extern f : Int -> Int\nfn f(x) : Int -> Int = x");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
 }
 
 #[test]
 fn reports_duplicate_definitions() {
-    let err = collect_err("data Foo = A\ndata Foo = B");
+    let err = collect_err("type Foo = | A\ntype Foo = | B");
     assert!(err.msg.contains("duplicate type name"), "{}", err.msg);
 
-    let err = collect_err("fun f(x : Int) : Int = x\nlet f = 1");
+    let err = collect_err("fn f(x) : Int -> Int = x\nlet f = 1");
     assert!(err.msg.contains("already defined"), "{}", err.msg);
 
-    let err = collect_err("data A = Same\ndata B = Same");
+    let err = collect_err("type A = | Same\ntype B = | Same");
     assert!(err.msg.contains("duplicate constructor"), "{}", err.msg);
 }
 
 #[test]
 fn reports_unknown_types() {
-    let err = collect_err("data Foo a = Foo(Missing a)");
-    assert!(err.msg.contains("cannot find type `Missing`"), "{}", err.msg);
+    let err = collect_err("type Foo<A> = | Foo(Missing<A>)");
+    assert!(err.msg.contains("unknown type `Missing`"), "{}", err.msg);
 }
 
 #[test]
 fn future_has_kind_star_to_star() {
-    let defs = collect_ok("fun f(x : Future Int) : Future Int = x");
+    let defs = collect_ok("fn f(x) : Future<Int> -> Future<Int> = x");
     assert_eq!(defs.kind_of_head("Future"), Some(&arrow(star(), star())));
-    let err = collect_err("fun f(x : Future) : Int = 1");
+    let err = collect_err("fn f(x) : Future -> Int = 1");
     assert!(err.msg.contains("kinds do not match"), "{}", err.msg);
 }
 
 #[test]
 fn fern_prefix_is_reserved_for_the_runtime() {
-    for src in ["fun fern_alloc(x : Int) : Int = x", "let fern_two = 2"] {
+    for src in ["fn fern_alloc(x) : Int -> Int = x", "let fern_two = 2"] {
         let diag = collect_err(src);
         assert!(diag.msg.contains("reserved"), "{src}: {}", diag.msg);
     }

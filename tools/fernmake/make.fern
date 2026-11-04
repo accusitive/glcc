@@ -1,15 +1,15 @@
--- fernmake — a small Makefile runner written in fern.
---
--- It supports the subset that drives the examples: comments, variables
--- (`=`, `:=`, `?=`), ordinary rules, tab-indented recipes, `.PHONY`,
--- prerequisite ordering, line continuations, nested `$(...)`, the
--- common path/shell functions, and the `$@`, `$<`, and `$^` automatic
--- variables. `include` splices another makefile relative to the including
--- file. Recipes run through `$(SHELL)` with `.SHELLFLAGS` (default
--- `sh -c`); `Makefile.win` selects PowerShell instead.
---
--- Build with `./build.sh` (or `.\build.ps1` on Windows). Then try
--- `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
+// fernmake — a small Makefile runner written in fern.
+//
+// It supports the subset that drives the examples: comments, variables
+// (`=`, `:=`, `?=`), ordinary rules, tab-indented recipes, `.PHONY`,
+// prerequisite ordering, line continuations, nested `$(...)`, the
+// common path/shell functions, and the `$@`, `$<`, and `$^` automatic
+// variables. `include` splices another makefile relative to the including
+// file. Recipes run through `$(SHELL)` with `.SHELLFLAGS` (default
+// `sh -c`); `Makefile.win` selects PowerShell instead.
+//
+// Build with `./build.sh` (or `.\build.ps1` on Windows). Then try
+// `./build/fernmake demo.mk` or `./build/fernmake demo.mk run`.
 
 import std::io
 import std::list
@@ -32,31 +32,31 @@ use std::string::trim_left
 use std::string::trim_right
 use std::string::words
 
-data Rule = Rule {
-    targets : List String,
-    prereqs : List String,
-    recipe : List String
+type Rule = {
+    targets : List<String>,
+    prereqs : List<String>,
+    recipe : List<String>
 }
 
-data Parsed = Parsed {
-    vars : List (String, String),
-    rules : List Rule,
-    phony : List String
+type Parsed = {
+    vars : List<(String, String)>,
+    rules : List<Rule>,
+    phony : List<String>
 }
 
-data BuildError = BuildError(String)
+type BuildError = | BuildError(String)
 
-data BuildState = BuildState {
-    rules : List Rule,
-    vars : List (String, String),
-    phony : List String,
-    done : List String,
-    visiting : List String
+type BuildState = {
+    rules : List<Rule>,
+    vars : List<(String, String)>,
+    phony : List<String>,
+    done : List<String>,
+    visiting : List<String>
 }
 
--- Join backslash-newline continuations before classifying lines. The
--- continuation's leading whitespace (including a recipe tab) is dropped.
-fun logical_lines(lines : List String, acc : List String) : List String = match lines {
+// Join backslash-newline continuations before classifying lines. The
+// continuation's leading whitespace (including a recipe tab) is dropped.
+fn logical_lines(lines, acc) : (List<String>, List<String>) -> List<String> = match lines {
     case Nil => reverse(acc)
     case Cons(line, rest) => {
         let line = if ends_with("\r", line) then take(line, str_len(line) - 1) else line;
@@ -69,18 +69,18 @@ fun logical_lines(lines : List String, acc : List String) : List String = match 
     }
 }
 
-fun dir_name(s : String) : String = {
+fn dir_name(s) : String -> String = {
     let dir = dirname(s);
     if ends_with("/", dir) then dir else concat(dir, "/")
 }
 
-fun normalize_path(s : String) : String =
+fn normalize_path(s) : String -> String = 
     if getenv("OS") == "Windows_NT" then replace("\\", "/", s) else s
 
-fun absolute_path(s : String) : Bool =
+fn absolute_path(s) : String -> Bool = 
     starts_with("/", s) || (str_len(s) > 1 && str_slice(s, 1, 1) == ":")
 
-async fun include_files(names : List String, base : String) : List String = match names {
+async fn include_files(names, base) : (List<String>, String) -> List<String> = match names {
     case Nil => Nil
     case Cons(name, rest) => {
         let name = normalize_path(name);
@@ -90,66 +90,66 @@ async fun include_files(names : List String, base : String) : List String = matc
             let _ = exit(1);
             Nil
         } else {
-            let source = await io.read_file(path);
+            let source = io.read_file(path).await;
             let lines = if str_len(source) == 0 then Nil else str_lines(source);
-            append(await expand_includes(lines, dir_name(path)), await include_files(rest, base))
+            append(expand_includes(lines, dir_name(path)).await, include_files(rest, base).await)
         }
     }
 }
 
-async fun expand_includes(lines : List String, base : String) : List String = match lines {
+async fn expand_includes(lines, base) : (List<String>, String) -> List<String> = match lines {
     case Nil => Nil
     case Cons(line, rest) => {
         let code = trim(line);
         if not(starts_with("\t", line)) && starts_with("include ", code) then
-            append(await include_files(words(str_slice(code, 8, str_len(code) - 8)), base), await expand_includes(rest, base))
-        else Cons(line, await expand_includes(rest, base))
+            append(include_files(words(str_slice(code, 8, str_len(code) - 8)), base).await, expand_includes(rest, base).await)
+        else Cons(line, expand_includes(rest, base).await)
     }
 }
 
-fun first_word(s : String) : String = match head(words(s)) {
+fn first_word(s) : String -> String = match head(words(s)) {
     case Nothing => ""
     case Just(word) => word
 }
 
-fun compact(xs : List String) : List String = filter(x -> str_len(x) > 0, xs)
+fn compact(xs) : List<String> -> List<String> = filter(|x| str_len(x) > 0, xs)
 
-fun strip_comment(s : String) : String = {
+fn strip_comment(s) : String -> String = {
     let at = str_find("#", s);
     if at < 0 then s else str_slice(s, 0, at)
 }
 
--- ----------------------------------------------------------- variables --
+// ----------------------------------------------------------- variables --
 
-fun lookup_var(name : String, vars : List (String, String)) : Maybe String = match vars {
+fn lookup_var(name, vars) : (String, List<(String, String)>) -> Maybe<String> = match vars {
     case Nil => Nothing
     case Cons((key, value), rest) => if key == name then Just(value) else lookup_var(name, rest)
 }
 
-fun has_var(name : String, vars : List (String, String)) : Bool =
+fn has_var(name, vars) : (String, List<(String, String)>) -> Bool = 
     match lookup_var(name, vars) {
         case Nothing => false
         case Just(_) => true
     }
 
-fun drop_var(name : String, vars : List (String, String)) : List (String, String) = match vars {
+fn drop_var(name, vars) : (String, List<(String, String)>) -> List<(String, String)> = match vars {
     case Nil => Nil
     case Cons((key, value), rest) =>
         if key == name then drop_var(name, rest) else Cons((key, value), drop_var(name, rest))
 }
 
-fun set_var(name : String, value : String, vars : List (String, String)) : List (String, String) =
+fn set_var(name, value, vars) : (String, String, List<(String, String)>) -> List<(String, String)> = 
     Cons((name, value), drop_var(name, vars))
 
-fun var_value(name : String, vars : List (String, String)) : String =
+fn var_value(name, vars) : (String, List<(String, String)>) -> String = 
     match lookup_var(name, vars) {
         case Nothing => getenv(name)
         case Just(value) => value
     }
 
--- Index of the `)` matching an already-consumed `(`. Function calls
--- nest, so a plain `str_find(")")` is not enough.
-fun matching_close(s : String, i : Int, depth : Int) : Int =
+// Index of the `)` matching an already-consumed `(`. Function calls
+// nest, so a plain `str_find(")")` is not enough.
+fn matching_close(s, i, depth) : (String, Int, Int) -> Int = 
     if i >= str_len(s) then -1
     else {
         let c = str_slice(s, i, 1);
@@ -159,23 +159,23 @@ fun matching_close(s : String, i : Int, depth : Int) : Int =
         else matching_close(s, i + 1, depth)
     }
 
-fun shell_value(command : String) : String = trim(spawn_capture("sh", ["-c", command]))
+fn shell_value(command) : String -> String = trim(spawn_capture("sh", ["-c", command]))
 
-fun wildcard(pattern : String) : String = {
+fn wildcard(pattern) : String -> String = {
     let script = concat("for f in ", concat(pattern, "; do [ -e \"$f\" ] && printf '%s\\n' \"$f\"; done"));
     str_join(" ", compact(str_split("\n", shell_value(script))))
 }
 
--- `realpath` and `abspath` are enough for the examples and avoid
--- depending on a POSIX path library. Both expect the path to exist.
-fun real_path(path : String) : String = {
+// `realpath` and `abspath` are enough for the examples and avoid
+// depending on a POSIX path library. Both expect the path to exist.
+fn real_path(path) : String -> String = {
     let resolved = shell_value(concat("realpath ", path));
     if str_len(resolved) == 0 then path else resolved
 }
 
-fun abs_path(path : String) : String = real_path(path)
+fn abs_path(path) : String -> String = real_path(path)
 
-fun eval_expr(expr : String, vars : List (String, String), depth : Int) : String =
+fn eval_expr(expr, vars, depth) : (String, List<(String, String)>, Int) -> String = 
     if starts_with("firstword ", expr) then
         first_word(trim(str_slice(expr, 10, str_len(expr) - 10)))
     else if starts_with("wildcard ", expr) then
@@ -190,9 +190,9 @@ fun eval_expr(expr : String, vars : List (String, String), depth : Int) : String
         abs_path(trim(str_slice(expr, 8, str_len(expr) - 8)))
     else expand_depth(var_value(trim(expr), vars), vars, depth - 1)
 
--- Expand `$(NAME)` and the function subset recursively. `depth` guards
--- self-reference and mutual recursion.
-fun expand_depth(s : String, vars : List (String, String), depth : Int) : String =
+// Expand `$(NAME)` and the function subset recursively. `depth` guards
+// self-reference and mutual recursion.
+fn expand_depth(s, vars, depth) : (String, List<(String, String)>, Int) -> String = 
     if depth == 0 then s
     else {
         let at = str_find("$(", s);
@@ -211,24 +211,24 @@ fun expand_depth(s : String, vars : List (String, String), depth : Int) : String
         }
     }
 
-fun expand(s : String, vars : List (String, String)) : String = expand_depth(s, vars, 32)
+fn expand(s, vars) : (String, List<(String, String)>) -> String = expand_depth(s, vars, 32)
 
-fun expand_names(xs : List String, vars : List (String, String)) : List String = match xs {
+fn expand_names(xs, vars) : (List<String>, List<(String, String)>) -> List<String> = match xs {
     case Nil => Nil
     case Cons(x, rest) => Cons(expand(x, vars), expand_names(rest, vars))
 }
 
--- ------------------------------------------------------------- parsing --
+// ------------------------------------------------------------- parsing --
 
-fun is_recipe(line : String) : Bool = starts_with("\t", line)
+fn is_recipe(line) : String -> Bool = starts_with("\t", line)
 
-fun recipe_command(line : String) : String =
+fn recipe_command(line) : String -> String = 
     str_slice(line, 1, str_len(line) - 1)
 
-fun is_name(s : String) : Bool =
+fn is_name(s) : String -> Bool = 
     str_len(s) > 0 && not(str_contains(" ", s)) && not(str_contains("\t", s)) && not(str_contains(":", s))
 
-fun parse_assignment(line : String) : Maybe (String, String, Bool) = {
+fn parse_assignment(line) : String -> Maybe<(String, String, Bool)> = {
     let eq = str_find("=", line);
     if eq < 0 then Nothing
     else {
@@ -242,7 +242,7 @@ fun parse_assignment(line : String) : Maybe (String, String, Bool) = {
     }
 }
 
-fun parse_phony(line : String) : Maybe (List String) = {
+fn parse_phony(line) : String -> Maybe<(List<String>)> = {
     let at = str_find(":", line);
     if at < 0 then Nothing
     else if trim(str_slice(line, 0, at)) == ".PHONY" then
@@ -250,7 +250,7 @@ fun parse_phony(line : String) : Maybe (List String) = {
     else Nothing
 }
 
-fun parse_rule(line : String) : Maybe (List String, List String) = {
+fn parse_rule(line) : String -> Maybe<(List<String>, List<String>)> = {
     let at = str_find(":", line);
     if at < 0 then Nothing
     else {
@@ -260,7 +260,7 @@ fun parse_rule(line : String) : Maybe (List String, List String) = {
     }
 }
 
-fun add_recipe(state : Parsed, command : String) : Parsed = match state.rules {
+fn add_recipe(state, command) : (Parsed, String) -> Parsed = match state.rules {
     case Nil => state
     case Cons(rule, rest) =>
         if str_len(trim(command)) == 0 then state
@@ -275,19 +275,19 @@ fun add_recipe(state : Parsed, command : String) : Parsed = match state.rules {
         }
 }
 
-fun add_rule(state : Parsed, targets : List String, prereqs : List String) : Parsed =
+fn add_rule(state, targets, prereqs) : (Parsed, List<String>, List<String>) -> Parsed = 
     Parsed {
         vars = state.vars,
         rules = Cons(Rule { targets = targets, prereqs = prereqs, recipe = Nil }, state.rules),
         phony = state.phony
     }
 
-fun add_phony(names : List String, phony : List String) : List String = match names {
+fn add_phony(names, phony) : (List<String>, List<String>) -> List<String> = match names {
     case Nil => phony
     case Cons(name, rest) => add_phony(rest, Cons(name, phony))
 }
 
-fun set_assignment(state : Parsed, name : String, value : String, conditional : Bool) : Parsed =
+fn set_assignment(state, name, value, conditional) : (Parsed, String, String, Bool) -> Parsed = 
     if conditional && (has_var(name, state.vars) || str_len(getenv(name)) > 0) then state
     else Parsed {
         vars = set_var(name, value, state.vars),
@@ -295,7 +295,7 @@ fun set_assignment(state : Parsed, name : String, value : String, conditional : 
         phony = state.phony
     }
 
-fun reverse_recipes(rules : List Rule) : List Rule = match rules {
+fn reverse_recipes(rules) : List<Rule> -> List<Rule> = match rules {
     case Nil => Nil
     case Cons(rule, rest) =>
         Cons(Rule {
@@ -305,14 +305,14 @@ fun reverse_recipes(rules : List Rule) : List Rule = match rules {
         }, reverse_recipes(rest))
 }
 
-fun finish_parsing(state : Parsed) : Parsed =
+fn finish_parsing(state) : Parsed -> Parsed = 
     Parsed {
         vars = state.vars,
         rules = reverse(reverse_recipes(state.rules)),
         phony = reverse(state.phony)
     }
 
-fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
+fn parse_lines(lines, state) : (List<String>, Parsed) -> Parsed = match lines {
     case Nil => finish_parsing(state)
     case Cons(line, rest) =>
         if is_recipe(line) then parse_lines(rest, add_recipe(state, recipe_command(line)))
@@ -337,52 +337,52 @@ fun parse_lines(lines : List String, state : Parsed) : Parsed = match lines {
         }
 }
 
-fun resolve_rule(rule : Rule, vars : List (String, String)) : Rule =
+fn resolve_rule(rule, vars) : (Rule, List<(String, String)>) -> Rule = 
     Rule {
         targets = compact(expand_names(rule.targets, vars)),
         prereqs = compact(expand_names(rule.prereqs, vars)),
         recipe = rule.recipe
     }
 
-fun resolve_rules(rules : List Rule, vars : List (String, String)) : List Rule = match rules {
+fn resolve_rules(rules, vars) : (List<Rule>, List<(String, String)>) -> List<Rule> = match rules {
     case Nil => Nil
     case Cons(rule, rest) => Cons(resolve_rule(rule, vars), resolve_rules(rest, vars))
 }
 
-fun resolve_parsed(parsed : Parsed) : Parsed =
+fn resolve_parsed(parsed) : Parsed -> Parsed = 
     Parsed {
         vars = parsed.vars,
         rules = resolve_rules(parsed.rules, parsed.vars),
         phony = compact(expand_names(parsed.phony, parsed.vars))
     }
 
-fun default_var(name : String, fallback : String) : String = {
+fn default_var(name, fallback) : (String, String) -> String = {
     let value = getenv(name);
     if str_len(value) == 0 then fallback else value
 }
 
-async fun parse_makefile(source : String, path : String) : Parsed = {
+async fn parse_makefile(source, path) : (String, String) -> Parsed = {
     let path = normalize_path(path);
     let builtins = Cons(
         ("CC", default_var("CC", "cc")),
         Cons(("MAKEFILE_LIST", path), Nil)
     );
     let initial = Parsed { vars = builtins, rules = Nil, phony = Nil };
-    let lines = await expand_includes(str_lines(source), dir_name(path));
+    let lines = expand_includes(str_lines(source), dir_name(path)).await;
     resolve_parsed(parse_lines(logical_lines(lines, Nil), initial))
 }
 
--- ------------------------------------------------------------- building --
+// ------------------------------------------------------------- building --
 
-fun rule_targets(rule : Rule) : List String = rule.targets
+fn rule_targets(rule) : Rule -> List<String> = rule.targets
 
-fun lookup_rule(target : String, rules : List Rule) : Maybe Rule = match rules {
+fn lookup_rule(target, rules) : (String, List<Rule>) -> Maybe<Rule> = match rules {
     case Nil => Nothing
     case Cons(rule, rest) =>
         if contains(target, rule_targets(rule)) then Just(rule) else lookup_rule(target, rest)
 }
 
-fun default_target(rules : List Rule) : Maybe String = match rules {
+fn default_target(rules) : List<Rule> -> Maybe<String> = match rules {
     case Nil => Nothing
     case Cons(rule, rest) => match head(rule_targets(rule)) {
         case Nothing => default_target(rest)
@@ -390,28 +390,28 @@ fun default_target(rules : List Rule) : Maybe String = match rules {
     }
 }
 
-fun file_exists(path : String) : Bool = path_exists(path)
+fn file_exists(path) : String -> Bool = path_exists(path)
 
-fun file_newer(target : String, prereq : String) : Bool =
+fn file_newer(target, prereq) : (String, String) -> Bool = 
     if getenv("OS") == "Windows_NT" then path_newer(target, prereq)
     else spawn_status("test", [prereq, "-nt", target]) == 0
 
-fun any_newer(target : String, prereqs : List String) : Bool = match prereqs {
+fn any_newer(target, prereqs) : (String, List<String>) -> Bool = match prereqs {
     case Nil => false
     case Cons(prereq, rest) =>
         if file_newer(target, prereq) then true else any_newer(target, rest)
 }
 
-fun any_phony(prereqs : List String, phony : List String) : Bool = match prereqs {
+fn any_phony(prereqs, phony) : (List<String>, List<String>) -> Bool = match prereqs {
     case Nil => false
     case Cons(prereq, rest) =>
         if contains(prereq, phony) then true else any_phony(rest, phony)
 }
 
-fun needs_build(target : String, prereqs : List String, phony : List String) : Bool =
+fn needs_build(target, prereqs, phony) : (String, List<String>, List<String>) -> Bool = 
     contains(target, phony) || not(file_exists(target)) || any_phony(prereqs, phony) || any_newer(target, prereqs)
 
-fun automatic_variables(s : String, target : String, prereqs : List String) : String = {
+fn automatic_variables(s, target, prereqs) : (String, String, List<String>) -> String = {
     let first_prereq = match head(prereqs) {
         case Nothing => ""
         case Just(prereq) => prereq
@@ -421,35 +421,35 @@ fun automatic_variables(s : String, target : String, prereqs : List String) : St
     replace("$^", str_join(" ", prereqs), expanded)
 }
 
-fun recipe_line(raw : String, target : String, prereqs : List String, vars : List (String, String)) : String = {
+fn recipe_line(raw, target, prereqs, vars) : (String, String, List<String>, List<(String, String)>) -> String = {
     let with_auto = automatic_variables(raw, target, prereqs);
     automatic_variables(expand(with_auto, vars), target, prereqs)
 }
 
-fun shell_program(vars : List (String, String)) : String = {
+fn shell_program(vars) : List<(String, String)> -> String = {
     let value = var_value("SHELL", vars);
     if str_len(value) == 0 then "sh" else value
 }
 
-fun shell_arguments(command : String, vars : List (String, String)) : List String = {
+fn shell_arguments(command, vars) : (String, List<(String, String)>) -> List<String> = {
     let flags = var_value(".SHELLFLAGS", vars);
     let flags = if str_len(flags) == 0 then "-c" else flags;
     append(words(flags), [command])
 }
 
-fun powershell_shell(vars : List (String, String)) : Bool = {
+fn powershell_shell(vars) : List<(String, String)> -> Bool = {
     let shell = shell_program(vars);
     str_contains("powershell", shell) || str_contains("pwsh", shell)
 }
 
--- PowerShell does not turn a failed native command into a failed process
--- on its own, so make the recipe's status explicit.
-fun shell_command(command : String, vars : List (String, String)) : String =
+// PowerShell does not turn a failed native command into a failed process
+// on its own, so make the recipe's status explicit.
+fn shell_command(command, vars) : (String, List<(String, String)>) -> String = 
     if powershell_shell(vars) then
         concat(command, "; if ($LASTEXITCODE) { exit $LASTEXITCODE } elseif (-not $?) { exit 1 }")
     else command
 
-fun run_shell(silent : Bool, command : String, vars : List (String, String)) : Int = {
+fn run_shell(silent, command, vars) : (Bool, String, List<(String, String)>) -> Int = {
     let command = shell_command(command, vars);
     if silent then spawn_status(shell_program(vars), shell_arguments(command, vars))
     else {
@@ -458,7 +458,7 @@ fun run_shell(silent : Bool, command : String, vars : List (String, String)) : I
     }
 }
 
-fun run_recipe(recipe : List String, target : String, prereqs : List String, vars : List (String, String)) : result.Result Unit BuildError =
+fn run_recipe(recipe, target, prereqs, vars) : (List<String>, String, List<String>, List<(String, String)>) -> result.Result<Unit, BuildError> = 
     match recipe {
         case Nil => result.Ok(())
         case Cons(raw, rest) => {
@@ -474,7 +474,7 @@ fun run_recipe(recipe : List String, target : String, prereqs : List String, var
         }
     }
 
-fun build_all(prereqs : List String, state : BuildState) : result.Result (List String) BuildError =
+fn build_all(prereqs, state) : (List<String>, BuildState) -> result.Result<(List<String>), BuildError> = 
     match prereqs {
         case Nil => result.Ok(state.done)
         case Cons(prereq, rest) => {
@@ -489,7 +489,7 @@ fun build_all(prereqs : List String, state : BuildState) : result.Result (List S
         }
     }
 
-fun build(target : String, state : BuildState) : result.Result (List String) BuildError =
+fn build(target, state) : (String, BuildState) -> result.Result<(List<String>), BuildError> = 
     if contains(target, state.done) then result.Ok(state.done)
     else if contains(target, state.visiting) then
         result.Err(BuildError(concat("fernmake: circular dependency: ", target)))
@@ -513,18 +513,18 @@ fun build(target : String, state : BuildState) : result.Result (List String) Bui
         }
     }
 
--- --------------------------------------------------------------- entry --
+// --------------------------------------------------------------- entry --
 
-fun run_makefile(path : String, requested : String) : Int =
+fn run_makefile(path, requested) : (String, String) -> Int = 
     block_on_int(run_makefile_async(path, requested))
 
-async fun run_makefile_async(path : String, requested : String) : Int = {
-    let source = await io.read_file(path);
+async fn run_makefile_async(path, requested) : (String, String) -> Int = {
+    let source = io.read_file(path).await;
     if str_len(source) == 0 then {
         println(concat("fernmake: cannot read ", path));
         1
     } else {
-        let parsed = await parse_makefile(source, path);
+        let parsed = parse_makefile(source, path).await;
         let requested = trim(requested);
         let goal = if str_len(requested) > 0 then requested
                    else match default_target(parsed.rules) {

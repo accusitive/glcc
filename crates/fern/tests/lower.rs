@@ -49,27 +49,27 @@ fn runtime_externs_carry_memory_effects() {
 
 #[test]
 fn identity_and_call() {
-    let m = lower("fun id(x : a) : a = x\nfun main() : Int = id(1)");
+    let m = lower("fn id(x) : for<A> A -> A = x\nfn main() : -> Int = id(1)");
     assert!(has(&m, "id$$Int"));
     assert!(has(&m, "main"));
 }
 
 #[test]
 fn arithmetic_and_branches() {
-    lower("fun abs(x : Int) : Int = if x < 0 then -x else x\nfun max(x : Int, y : Int) : Int = if x > y then x else y");
-    lower("fun f(x : Int) : Int = x * 2 - 3 / 1\nfun g(x : Float) : Bool = x < 1.5");
+    lower("fn abs(x) : Int -> Int = if x < 0 then -x else x\nfn max(x, y) : (Int, Int) -> Int = if x > y then x else y");
+    lower("fn f(x) : Int -> Int = x * 2 - 3 / 1\nfn g(x) : Float -> Bool = x < 1.5");
 }
 
 #[test]
 fn short_circuit_keeps_narrowing() {
-    lower("fun both(a : Bool, b : Bool) : Bool = a && b\nfun either(a : Bool, b : Bool) : Bool = a || b");
+    lower("fn both(a, b) : (Bool, Bool) -> Bool = a && b\nfn either(a, b) : (Bool, Bool) -> Bool = a || b");
 }
 
 #[test]
 fn recursion_over_lists() {
     let m = lower(
-        "fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
-         fun main() : Int = sum([1, 2, 3])",
+        "fn sum(xs) : List<Int> -> Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }\n\
+         fn main() : -> Int = sum([1, 2, 3])",
     );
     assert!(has(&m, "sum"));
 }
@@ -77,42 +77,42 @@ fn recursion_over_lists() {
 #[test]
 fn patterns_and_tuples() {
     lower(
-        "fun swap(p : (a, b)) : (b, a) = match p { case (a, b) => (b, a) }\n\
-         fun first(p : (a, b)) : a = match p { case (a, _) => a }\n\
-         fun zip_len(xs : List (Int, Int)) : Int = match xs { case Nil => 0 case Cons((a, b), _) => a + b }\n\
-         fun main() : Int = first(swap((1, 2))) + zip_len([(1, 2)])",
+        "fn swap(p) : for<A, B> (A, B) -> (B, A) = match p { case (a, b) => (b, a) }\n\
+         fn first(p) : for<A, B> (A, B) -> A = match p { case (a, _) => a }\n\
+         fn zip_len(xs) : List<(Int, Int)> -> Int = match xs { case Nil => 0 case Cons((a, b), _) => a + b }\n\
+         fn main() : -> Int = first(swap((1, 2))) + zip_len([(1, 2)])",
     );
-    lower("fun unit() : Unit = {}\nfun k(x : Int) : Int = { let (a, b) = (1, 2); a + b + x }");
+    lower("fn unit() : -> Unit = {}\nfn k(x) : Int -> Int = { let (a, b) = (1, 2); a + b + x }");
 }
 
 #[test]
 fn int_literal_patterns_and_guards() {
     lower(
-        "fun sign(x : Int) : Int = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n\
-         fun main() : Int = sign(0) + sign(1)",
+        "fn sign(x) : Int -> Int = match x { case 0 => 0 case n when n < 0 => -1 case _ => 1 }\n\
+         fn main() : -> Int = sign(0) + sign(1)",
     );
-    lower("fun b(x : Bool) : Int = match x { case true => 1 case false => 0 }");
+    lower("fn b(x) : Bool -> Int = match x { case true => 1 case false => 0 }");
 }
 
 #[test]
 fn closures_and_higher_order() {
     let m = lower(
-        "fun apply(f : a -> b, x : a) : b = f(x)\n\
-         fun adder(n : Int) : Int -> Int = x -> x + n\n\
-         fun compose(f : b -> c, g : a -> b) : a -> c = x -> f(g(x))\n\
-         fun main() : Int = apply(adder(3), 4) + apply(compose(y -> y * 2, y -> y + 1), 1)",
+        "fn apply(f, x) : for<A, B> (A -> B, A) -> B = f(x)\n\
+         fn adder(n) : Int -> Int -> Int = |x| x + n\n\
+         fn compose(f, g) : for<A, B, C> (B -> C, A -> B) -> A -> C = |x| f(g(x))\n\
+         fn main() : -> Int = apply(adder(3), 4) + apply(compose(|y| y * 2, |y| y + 1), 1)",
     );
     assert!(has(&m, "apply$$Int$Int"));
 }
 
 #[test]
 fn escaping_closure() {
-    lower("fun adder(n : Int) : Int -> Int = x -> x + n\nfun main() : Int = { let f = adder(2); f(3) }");
+    lower("fn adder(n) : Int -> Int -> Int = |x| x + n\nfn main() : -> Int = { let f = adder(2); f(3) }");
 }
 
 #[test]
 fn class_dispatch_over_lists() {
-    let m = lower("fun main() : Bool = eq([1, 2], [1, 3])");
+    let m = lower("fn main() : -> Bool = eq([1, 2], [1, 3])");
     assert!(names(&m).iter().any(|n| n.starts_with("List$Int::Eq::eq")));
     assert!(names(&m).iter().any(|n| n.starts_with("Int::Eq::eq")));
 }
@@ -120,11 +120,11 @@ fn class_dispatch_over_lists() {
 #[test]
 fn custom_hkt_class() {
     let m = lower(
-        "class Functor f { map : (a -> b) -> f a -> f b }\n\
-         instance Functor List {\n\
+        "class Functor<F> { map: for<A, B> (A -> B) -> F<A> -> F<B> }\n\
+         instance Functor<List> {\n\
              map(f, xs) = match xs { case Nil => Nil case Cons(x, xs) => Cons(f(x), map(f, xs)) }\n\
          }\n\
-         fun main() : List Int = map(x -> x + 1, [1, 2])",
+         fn main() : -> List<Int> = map(|x| x + 1, [1, 2])",
     );
     assert!(names(&m).iter().any(|n| n.starts_with("List::Functor::map$$Int$Int")));
 }
@@ -132,9 +132,9 @@ fn custom_hkt_class() {
 #[test]
 fn named_function_as_value() {
     let m = lower(
-        "fun twice(f : a -> a, x : a) : a = f(f(x))\n\
-         fun inc(x : Int) : Int = x + 1\n\
-         fun main() : Int = twice(inc, 1)",
+        "fn twice(f, x) : for<A> (A -> A, A) -> A = f(f(x))\n\
+         fn inc(x) : Int -> Int = x + 1\n\
+         fn main() : -> Int = twice(inc, 1)",
     );
     assert!(names(&m).iter().any(|n| n.contains("$thunk")));
 }
@@ -142,16 +142,16 @@ fn named_function_as_value() {
 #[test]
 fn method_value_and_partial_use() {
     lower(
-        "fun apply(f : a -> b, x : a) : b = f(x)\n\
-         fun main() : Int = apply(y -> y + 1, 1) + apply(z -> z + 1, 2)",
+        "fn apply(f, x) : for<A, B> (A -> B, A) -> B = f(x)\n\
+         fn main() : -> Int = apply(|y| y + 1, 1) + apply(|z| z + 1, 2)",
     );
 }
 
 #[test]
 fn maybe_with_bounds() {
     let m = lower(
-        "fun eq_maybe(mx : Maybe Int, my : Maybe Int) : Bool = eq(mx, my)\n\
-         fun main() : Bool = eq_maybe(Just(1), Nothing)",
+        "fn eq_maybe(mx, my) : (Maybe<Int>, Maybe<Int>) -> Bool = eq(mx, my)\n\
+         fn main() : -> Bool = eq_maybe(Just(1), Nothing)",
     );
     assert!(names(&m).iter().any(|n| n.contains("Maybe")));
 }
@@ -159,16 +159,16 @@ fn maybe_with_bounds() {
 #[test]
 fn tail_self_calls_lower_to_a_loop() {
     let m = lower(
-        "fun count(n : Int, acc : Int) : Int =\n\
+        "fn count(n, acc) : (Int, Int) -> Int =\n\
          if n == 0 then acc else if n / 2 * 2 == n then count(n - 1, acc + 1) else count(n - 1, acc + 2)\n\
-         fun main() : Int = count(1000000, 0)",
+         fn main() : -> Int = count(1000000, 0)",
     );
     assert!(has(&m, "count"));
 }
 
 #[test]
 fn async_lowers_to_start_and_resume() {
-    let m = lower("async fun f(x : Int) : Int = x + 1\nfun main() : Int = block_on_int(f(1))");
+    let m = lower("async fn f(x) : Int -> Int = x + 1\nfn main() : -> Int = block_on_int(f(1))");
     assert!(has(&m, "f"));
     assert!(has(&m, "f$resume"));
     assert!(has(&m, "main"));
@@ -177,9 +177,9 @@ fn async_lowers_to_start_and_resume() {
 #[test]
 fn await_lowers_to_getelementptr_and_result() {
     let m = lower(
-        "async fun f(x : Int) : Int = x\n\
-         async fun g(x : Int) : Int = await f(x) + 1\n\
-         fun main() : Int = block_on_int(g(1))",
+        "async fn f(x) : Int -> Int = x\n\
+         async fn g(x) : Int -> Int = f(x).await + 1\n\
+         fn main() : -> Int = block_on_int(g(1))",
     );
     assert!(has(&m, "g$resume"));
     assert!(m.externs.iter().any(|e| e.name == "__glcc_frame_alloc"));
@@ -187,7 +187,7 @@ fn await_lowers_to_getelementptr_and_result() {
 
 #[test]
 fn polymorphic_instances_monomorphize_per_type() {
-    let m = lower("fun main() : Bool = eq(1, 2) && eq([true], [false])");
+    let m = lower("fn main() : -> Bool = eq(1, 2) && eq([true], [false])");
     assert!(has(&m, "Int::Eq::eq"));
     assert!(has(&m, "Bool::Eq::eq"));
     assert!(names(&m).iter().any(|n| n.starts_with("List$Bool::Eq::eq")));

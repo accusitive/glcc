@@ -56,7 +56,7 @@ pub fn check_selected(defs: &mut Defs, program: &ast::Program, selected: &HashSe
     let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
     for (index, item) in program.items.iter().enumerate() {
         match &item.kind {
-            ast::ItemKind::Fun(_) => {
+            ast::ItemKind::Fn(_) => {
                 if selected.contains(&index) {
                     fn_ids.insert(FnId(fn_index as u32));
                 }
@@ -74,7 +74,7 @@ pub fn check_selected(defs: &mut Defs, program: &ast::Program, selected: &HashSe
                 }
                 instance_index += 1;
             }
-            ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+            ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
         }
     }
     start_hir.bodies.retain(|body| match body.key {
@@ -137,6 +137,9 @@ struct Check<'d> {
     self_ref: Option<SelfRef>,
     /// Whether the body being checked is an async function body.
     in_async: bool,
+    /// Generic names whose `Ty::Param` forms may appear in body type
+    /// annotations, innermost last.
+    generic_names: Vec<String>,
 }
 
 enum SelfRef {
@@ -209,6 +212,7 @@ impl<'d> Check<'d> {
             returns: Vec::new(),
             self_ref: None,
             in_async: false,
+            generic_names: Vec::new(),
         }
     }
 
@@ -222,14 +226,14 @@ impl<'d> Check<'d> {
         let (mut fn_index, mut value_index, mut instance_index) = (0usize, 0usize, 0usize);
         for (index, item) in program.items.iter().enumerate() {
             match &item.kind {
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     if selected.contains(&index) {
                         self.check_instance(instance_index)?;
                     }
                     instance_index += 1;
                 }
-                ast::ItemKind::Fun(f) => {
+                ast::ItemKind::Fn(f) => {
                     if selected.contains(&index) {
                         self.check_fn(FnId(fn_index as u32), f)?;
                     }
@@ -251,19 +255,19 @@ impl<'d> Check<'d> {
         for item in &program.items[..first_item] {
             match &item.kind {
                 ast::ItemKind::Instance(_) => instance_index += 1,
-                ast::ItemKind::Fun(_) => fn_index += 1,
+                ast::ItemKind::Fn(_) => fn_index += 1,
                 ast::ItemKind::Let(_) => value_index += 1,
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
             }
         }
         for item in &program.items[first_item..] {
             match &item.kind {
-                ast::ItemKind::Data(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
+                ast::ItemKind::Type(_) | ast::ItemKind::Class(_) | ast::ItemKind::Extern(_) | ast::ItemKind::Import(_) | ast::ItemKind::Use(_) => {}
                 ast::ItemKind::Instance(_) => {
                     self.check_instance(instance_index)?;
                     instance_index += 1;
                 }
-                ast::ItemKind::Fun(f) => {
+                ast::ItemKind::Fn(f) => {
                     self.check_fn(FnId(fn_index as u32), f)?;
                     fn_index += 1;
                 }
@@ -283,16 +287,15 @@ impl<'d> Check<'d> {
         let name = f.name.clone();
         let def = &self.defs.fns[id.index()];
         let declared = def.scheme.clone().expect("function signatures are resolved during collection");
-        let param_tys: Vec<Ty> = def.params.iter().map(|p| p.ty.clone()).collect();
         let ret = def.ret.clone();
         let fn_ty = declared.ty.clone();
         let outer_async = self.in_async;
         self.in_async = f.is_async;
         let checked = self.check_root(BodyKey::Fn(id), name, span, declared.vars.clone(), Vec::new(), false, Some(declared.clone()), &mut |this| {
-            check_param_names(f.params.iter().map(|p| &p.pat), span)?;
+            check_param_names(def.params.iter().map(|p| &p.pat), span)?;
             let mut params = Vec::new();
-            for (param, ty) in f.params.iter().zip(&param_tys) {
-                params.push(this.check_pat(&param.pat, ty, span)?);
+            for pd in &def.params {
+                params.push(this.check_pat(&pd.pat, &pd.ty, span)?);
             }
             this.self_ref = Some(SelfRef::Fn(id, f.name.clone(), fn_ty.clone()));
             this.returns.push(ret.clone());
@@ -409,21 +412,38 @@ impl<'d> Check<'d> {
             true,
             None,
             &mut |this| {
-                check_param_names(impl_m.params.iter(), span)?;
                 let (param_tys, ret) = split_arrows(&sig);
-                if param_tys.len() != impl_m.params.len() {
-                    return Err(Diag::new(
-                        format!(
-                            "method `{}` takes {} parameter(s), but the instance gives {}",
-                            method.name,
-                            param_tys.len(),
-                            impl_m.params.len()
-                        ),
-                        span,
-                    ));
-                }
+                let param_pats: &[ast::Pat] = match &impl_m.param {
+                    ast::Pat::Tuple(pats) => {
+                        if pats.len() != param_tys.len() {
+                            return Err(Diag::new(
+                                format!(
+                                    "method `{}` takes {} parameter(s), but the instance gives {}",
+                                    method.name,
+                                    param_tys.len(),
+                                    pats.len()
+                                ),
+                                span,
+                            ));
+                        }
+                        pats
+                    }
+                    pat => {
+                        if param_tys.len() != 1 {
+                            return Err(Diag::new(
+                                format!(
+                                    "method `{}` takes {} parameter(s), but the instance gives 1",
+                                    method.name,
+                                    param_tys.len()
+                                ),
+                                span,
+                            ));
+                        }
+                        std::slice::from_ref(pat)
+                    }
+                };
                 let mut params = Vec::new();
-                for (p, want) in impl_m.params.iter().zip(param_tys.iter()) {
+                for (p, want) in param_pats.iter().zip(param_tys.iter()) {
                     params.push(this.check_pat(p, want, span)?);
                 }
                 this.returns.push(ret.clone());
@@ -454,7 +474,10 @@ impl<'d> Check<'d> {
         let closure_start = self.hir.closures.len();
         self.bodies.push(BodyState::new());
         self.self_ref = None;
+        let generics_base = self.generic_names.len();
+        self.generic_names.extend(generics.iter().map(|(n, _)| n.clone()));
         let built = build(self);
+        self.generic_names.truncate(generics_base);
         let (params, ret, body, fn_ty) = match built {
             Ok(built) => built,
             Err(diag) => {
@@ -525,6 +548,11 @@ impl<'d> Check<'d> {
             ast::ExprKind::Float(v) => Ok(HirExpr {
                 kind: HirExprKind::Const(ConstValue::Float(*v)),
                 ty: Ty::float_ty(),
+                span,
+            }),
+            ast::ExprKind::Char(c) => Ok(HirExpr {
+                kind: HirExprKind::Const(ConstValue::Char(*c)),
+                ty: Ty::char_ty(),
                 span,
             }),
             ast::ExprKind::BoolConst(v) => Ok(HirExpr {
@@ -898,6 +926,15 @@ impl<'d> Check<'d> {
         })
     }
 
+    /// Whether `ty` is a unary function whose domain is a tuple with
+    /// exactly `arity` elements.
+    fn unary_tuple_domain(&self, ty: &Ty, arity: usize) -> bool {
+        let Ty::Arrow(domain, _) = self.infer.shallow(ty) else {
+            return false;
+        };
+        matches!(self.infer.resolve(&domain), Ty::Tuple(domains) if domains.len() == arity)
+    }
+
     fn synthesize_call(&mut self, callee: &ast::Expr, args: &[ast::Expr], span: Span) -> KResult<HirExpr> {
         let callee_hir = self.synth(callee)?;
         let callee_ty = callee_hir.ty.clone();
@@ -914,27 +951,61 @@ impl<'d> Check<'d> {
             Some(n) => (n, false),
             None => self.arity_scan(&callee_ty),
         };
-        if args.len() < known || (!open && args.len() != known) {
+        // Tuple-form call sugar. `f((a, b))` on a curried `f` spreads the
+        // explicit tuple into separate arguments; `f(a, b)` on a unary
+        // callee with a tuple domain of the same arity becomes one tuple
+        // argument.
+        let mut args: Vec<&ast::Expr> = args.iter().collect();
+        if known > 1
+            && args.len() == 1
+            && let ast::ExprKind::Tuple(items) = &args[0].kind
+            && items.len() == known
+        {
+            args = items.iter().collect();
+        }
+        let tuple_sugar = known == 1
+            && args.len() > 1
+            && !open
+            && self.unary_tuple_domain(&callee_ty, args.len());
+        if args.len() < known || (!open && args.len() != known && !tuple_sugar) {
             let count = if open { format!("at least {known}") } else { format!("{known}") };
             return Err(Diag::new(
                 format!("this function takes {count} parameter(s), but {} argument(s) were given", args.len()),
                 span,
             ));
         }
+        let peel = if tuple_sugar { 1 } else { args.len() };
         let mut cur = callee_ty;
         let mut params = Vec::new();
-        for _ in args {
+        for _ in 0..peel {
             let a = self.infer.fresh();
             let r = self.infer.fresh();
             self.infer.unify(&cur, &Ty::arrow(a.clone(), r.clone()), callee.span)?;
             params.push(a);
             cur = r;
         }
-        let mut hir_args = Vec::new();
-        for (a, want) in args.iter().zip(params.iter()) {
-            hir_args.push(self.check_expr(a, want)?);
-        }
         let ty = cur;
+        let mut hir_args = Vec::new();
+        if tuple_sugar {
+            let domains = match params.first().map(|p| self.infer.shallow(p)) {
+                Some(Ty::Tuple(domains)) => domains,
+                other => unreachable!("tuple sugar checked the domain: {other:?}"),
+            };
+            let mut items = Vec::with_capacity(args.len());
+            for (a, want) in args.iter().zip(&domains) {
+                items.push(self.check_expr(a, want)?);
+            }
+            let ty = Ty::Tuple(domains);
+            hir_args.push(HirExpr {
+                kind: HirExprKind::Tuple(items),
+                ty,
+                span,
+            });
+        } else {
+            for (a, want) in args.iter().zip(params.iter()) {
+                hir_args.push(self.check_expr(a, want)?);
+            }
+        }
         let kind = match callee_hir.kind {
             HirExprKind::Fn(FnRef::Class { class_id, method, args }) => self.dispatch_class(class_id, method, args, hir_args, span)?,
             // A top-level `let` is evaluated to a closure value, so calls
@@ -1435,6 +1506,14 @@ impl<'d> Check<'d> {
                     span,
                 })
             }
+            ast::Pat::Char(c) => {
+                self.infer.unify(expected, &Ty::char_ty(), span)?;
+                Ok(HirPat {
+                    kind: HirPatKind::Char(*c),
+                    ty: Ty::char_ty(),
+                    span,
+                })
+            }
             ast::Pat::Bool(v) => {
                 self.infer.unify(expected, &Ty::bool_ty(), span)?;
                 Ok(HirPat {
@@ -1443,6 +1522,53 @@ impl<'d> Check<'d> {
                     span,
                 })
             }
+            ast::Pat::Typed(inner, ann) => {
+                let ty = self.annotation_ty(ann, ann.span)?;
+                self.infer.unify(expected, &ty, span)?;
+                self.pat_inner(inner, &ty, span)
+            }
+        }
+    }
+
+    /// Resolve a type annotation written inside a body (closure
+    /// parameters): names resolve to the enclosing body's generics or to
+    /// known types.
+    fn annotation_ty(&self, node: &ast::TyExpr, span: Span) -> KResult<Ty> {
+        match &node.kind {
+            ast::TyExprKind::Name(n) => {
+                if self.generic_names.contains(n) {
+                    return Ok(Ty::Param(n.clone()));
+                }
+                if n == "Unit" {
+                    return Ok(Ty::unit_ty());
+                }
+                let known = Ty::intros().contains(&n.as_str())
+                    || self.defs.data_by_name(n).is_some()
+                    || self.defs.class_by_name(n).is_some();
+                if known {
+                    Ok(Ty::named0(n))
+                } else {
+                    Err(Diag::new(format!("cannot find type `{n}`"), span))
+                }
+            }
+            ast::TyExprKind::Paren(inner) => self.annotation_ty(inner, span),
+            ast::TyExprKind::Tuple(items) => {
+                let mut tys = Vec::with_capacity(items.len());
+                for item in items {
+                    tys.push(self.annotation_ty(item, span)?);
+                }
+                Ok(Ty::Tuple(tys))
+            }
+            ast::TyExprKind::Arrow(a, b) => Ok(Ty::arrow(self.annotation_ty(a, span)?, self.annotation_ty(b, span)?)),
+            ast::TyExprKind::App(head, args) => {
+                let mut cur = self.annotation_ty(head, span)?;
+                for arg in args {
+                    let arg_ty = self.annotation_ty(arg, span)?;
+                    cur = apply_annotation(&self.defs, cur, arg_ty, span)?;
+                }
+                Ok(cur)
+            }
+            ast::TyExprKind::For { .. } => Err(Diag::new("closure parameter annotations cannot bind type variables", span)),
         }
     }
 
@@ -1570,7 +1696,9 @@ impl<'d> Check<'d> {
     fn comparable(&mut self, ty: &Ty, span: Span) -> KResult<()> {
         match self.infer.shallow(ty) {
             Ty::Var(_) => self.infer.unify(ty, &Ty::int_ty(), span),
-            Ty::Named { name, args } if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool" || name == "String") => Ok(()),
+            Ty::Named { name, args }
+                if args.is_empty() && (name == "Int" || name == "Float" || name == "Bool" || name == "Char" || name == "String") =>
+            Ok(()),
             other => Err(Diag::new(format!("cannot compare values of type `{other}`"), span)),
         }
     }
@@ -1598,7 +1726,7 @@ impl<'d> Check<'d> {
         match target {
             FnRef::Fn { id, .. } => Some(self.defs.fns[id.index()].params.len()),
             FnRef::Value { .. } => None,
-            FnRef::Instance { instance, method, .. } => Some(self.defs.instances[*instance].methods[*method].params.len()),
+            FnRef::Instance { instance, method, .. } => Some(param_arity(&self.defs.instances[*instance].methods[*method].param)),
             FnRef::Extern { id } => Some(self.defs.externs[id.index()].params.len()),
             FnRef::Class { class_id, method, .. } => {
                 let sig = &self.defs.classes[class_id.index()].methods[*method].ty;
@@ -1606,6 +1734,49 @@ impl<'d> Check<'d> {
             }
         }
     }
+}
+
+/// Number of top-level parameters a parameter-list pattern binds.
+fn param_arity(pat: &ast::Pat) -> usize {
+    match pat {
+        ast::Pat::Tuple(pats) => pats.len(),
+        _ => 1,
+    }
+}
+
+/// Resolve one bracket application in a body annotation through the
+/// final kind table.
+fn apply_annotation(defs: &Defs, head: Ty, arg: Ty, span: Span) -> KResult<Ty> {
+    let head_name = match &head {
+        Ty::Named { name, args } if args.is_empty() => name.clone(),
+        other => return Err(Diag::new(format!("`{other}` cannot take type arguments here"), span)),
+    };
+    let kind = defs
+        .kind_of_head(&head_name)
+        .ok_or_else(|| Diag::new(format!("cannot find type `{head_name}`"), span))?
+        .clone();
+    let arg_kind = match &arg {
+        Ty::Named { name, args } => {
+            let head_kind = defs
+                .kind_of_head(name)
+                .ok_or_else(|| Diag::new(format!("cannot find type `{name}`"), span))?
+                .clone();
+            let mut cur = head_kind;
+            for _ in args {
+                cur = cur.apply(&Kind::star(), span)?;
+            }
+            cur
+        }
+        _ => Kind::star(),
+    };
+    kind.apply(&arg_kind, span)?;
+    Ok(match head {
+        Ty::Named { name, mut args } => {
+            args.push(arg);
+            Ty::Named { name, args }
+        }
+        other => Ty::app(other, arg),
+    })
 }
 
 fn split_arrows(ty: &Ty) -> (Vec<Ty>, Ty) {
@@ -1704,7 +1875,7 @@ fn finalize_pat(infer: &InferCtx, ids: &[u32], allowed: &HashSet<String>, p: &mu
                 finalize_pat(infer, ids, allowed, f)?;
             }
         }
-        HirPatKind::Wild | HirPatKind::Bind(_) | HirPatKind::Int(_) | HirPatKind::Bool(_) => {}
+        HirPatKind::Wild | HirPatKind::Bind(_) | HirPatKind::Int(_) | HirPatKind::Char(_) | HirPatKind::Bool(_) => {}
     }
     Ok(())
 }

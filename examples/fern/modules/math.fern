@@ -1,10 +1,10 @@
-data Tree a = Leaf(a) | Node(Tree a, Tree a)
+type Tree<A> = | Leaf(A) | Node(Tree<A>, Tree<A>)
 
-fun double(x : Int) : Int = x * 2
+fn double(x) : Int -> Int = x * 2
 
-fun size(t : Tree a) : Int = match t {
+fn size(t) : for<A> Tree<A> -> Int = match t {
     case Leaf(_) => 1
     case Node(l, r) => size(l) + size(r)
 }
 
-fun tree() : Tree Int = Node(Leaf(20), Leaf(1))
+fn tree() : -> Tree<Int> = Node(Leaf(20), Leaf(1))

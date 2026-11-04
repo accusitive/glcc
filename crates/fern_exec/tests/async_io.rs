@@ -33,11 +33,11 @@ fn round_trips_a_file() {
     let path = fern_path(&dir.join("data.txt"));
     let src = format!(
         "import std::io\n\
-         async fun roundtrip(p : String) : String = {{\n\
-         let _ = await io.write_file(p, \"hello async io\");\n\
-         await io.read_file(p)\n\
+         async fn roundtrip(p) : String -> String = {{\n\
+         let _ = io.write_file(p, \"hello async io\").await;\n\
+         io.read_file(p).await\n\
          }}\n\
-         fun main() : Int = if block_on_string(roundtrip(\"{path}\")) == \"hello async io\" then 1 else 0"
+         fn main() : -> Int = if block_on_string(roundtrip(\"{path}\")) == \"hello async io\" then 1 else 0"
     );
     assert_eq!(run(&src), Value::Int(1));
     let _ = fs::remove_dir_all(&dir);
@@ -50,7 +50,7 @@ fn reads_a_file_larger_than_one_chunk() {
     fs::write(&path, "x".repeat(200_000)).expect("write large file");
     let src = format!(
         "import std::io\n\
-         fun main() : Int = str_len(block_on_string(io.read_file(\"{}\")))",
+         fn main() : -> Int = str_len(block_on_string(io.read_file(\"{}\")))",
         fern_path(&path)
     );
     assert_eq!(run(&src), Value::Int(200_000));
@@ -60,8 +60,8 @@ fn reads_a_file_larger_than_one_chunk() {
 #[test]
 fn sleep_suspends_the_driver() {
     let src = "import std::io\n\
-               async fun nap() : Int = { let _ = await io.sleep(25); 5 }\n\
-               fun main() : Int = block_on_int(nap())";
+               async fn nap() : -> Int = { let _ = io.sleep(25).await; 5 }\n\
+               fn main() : -> Int = block_on_int(nap())";
     let start = Instant::now();
     assert_eq!(run(src), Value::Int(5));
     assert!(start.elapsed() >= Duration::from_millis(20), "sleep returned after {:?}", start.elapsed());
@@ -70,9 +70,9 @@ fn sleep_suspends_the_driver() {
 #[test]
 fn block_on_handles_scalar_results() {
     let src = "import std::io\n\
-               async fun truth() : Bool = true\n\
-               async fun half() : Float = 0.5\n\
-               async fun text() : String = \"ok\"\n\
-               fun main() : Int = if block_on_bool(truth()) && block_on_float(half()) == 0.5 && block_on_string(text()) == \"ok\" then 1 else 0";
+               async fn truth() : -> Bool = true\n\
+               async fn half() : -> Float = 0.5\n\
+               async fn text() : -> String = \"ok\"\n\
+               fn main() : -> Int = if block_on_bool(truth()) && block_on_float(half()) == 0.5 && block_on_string(text()) == \"ok\" then 1 else 0";
     assert_eq!(run(src), Value::Int(1));
 }

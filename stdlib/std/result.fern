@@ -1,61 +1,61 @@
-data Result a e = Ok(a) | Err(e)
+type Result<A, E> = | Ok(A) | Err(E)
 
-fun is_ok(r : Result a e) : Bool = match r {
+fn is_ok(r) : for<A, E> Result<A, E> -> Bool = match r {
     case Ok(_) => true
     case Err(_) => false
 }
 
-fun is_err(r : Result a e) : Bool = match r {
+fn is_err(r) : for<A, E> Result<A, E> -> Bool = match r {
     case Ok(_) => false
     case Err(_) => true
 }
 
-fun map(f : a -> b, r : Result a e) : Result b e = match r {
+fn map(f, r) : for<A, B, E> (A -> B) -> Result<A, E> -> Result<B, E> = match r {
     case Ok(x) => Ok(f(x))
     case Err(error) => Err(error)
 }
 
-fun map_err(f : e -> f, r : Result a e) : Result a f = match r {
+fn map_err(f, r) : for<A, E, F> (E -> F) -> Result<A, E> -> Result<A, F> = match r {
     case Ok(x) => Ok(x)
     case Err(error) => Err(f(error))
 }
 
-fun and_then(f : a -> Result b e, r : Result a e) : Result b e = match r {
+fn and_then(f, r) : for<A, B, E> (A -> Result<B, E>) -> Result<A, E> -> Result<B, E> = match r {
     case Ok(x) => f(x)
     case Err(error) => Err(error)
 }
 
-fun or_else(f : e -> Result a f, r : Result a e) : Result a f = match r {
+fn or_else(f, r) : for<A, E, F> (E -> Result<A, F>) -> Result<A, E> -> Result<A, F> = match r {
     case Ok(x) => Ok(x)
     case Err(error) => f(error)
 }
 
-fun unwrap_or(default : a, r : Result a e) : a = match r {
+fn unwrap_or(default, r) : for<A, E> A -> Result<A, E> -> A = match r {
     case Ok(x) => x
     case Err(_) => default
 }
 
-fun unwrap_or_else(f : e -> a, r : Result a e) : a = match r {
+fn unwrap_or_else(f, r) : for<A, E> (E -> A) -> Result<A, E> -> A = match r {
     case Ok(x) => x
     case Err(error) => f(error)
 }
 
-fun flatten(r : Result (Result a e) e) : Result a e = match r {
+fn flatten(r) : for<A, E> Result<Result<A, E>, E> -> Result<A, E> = match r {
     case Ok(inner) => inner
     case Err(error) => Err(error)
 }
 
-fun to_maybe(r : Result a e) : Maybe a = match r {
+fn to_maybe(r) : for<A, E> Result<A, E> -> Maybe<A> = match r {
     case Ok(x) => Just(x)
     case Err(_) => Nothing
 }
 
-fun to_list(r : Result a e) : List a = match r {
+fn to_list(r) : for<A, E> Result<A, E> -> List<A> = match r {
     case Ok(x) => Cons(x, Nil)
     case Err(_) => Nil
 }
 
-fun from_maybe(error : e, m : Maybe a) : Result a e = match m {
+fn from_maybe(error, m) : for<A, E> E -> Maybe<A> -> Result<A, E> = match m {
     case Nothing => Err(error)
     case Just(x) => Ok(x)
 }

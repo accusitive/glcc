@@ -190,6 +190,7 @@ pub enum HirPatKind {
     Wild,
     Bind(usize),
     Int(i64),
+    Char(char),
     Bool(bool),
     Ctor { data_id: DataId, ctor: usize, fields: Vec<HirPat> },
     Tuple(Vec<HirPat>),
@@ -217,6 +218,7 @@ pub enum FnRef {
 pub enum ConstValue {
     Int(i64),
     Float(f64),
+    Char(char),
     Bool(bool),
     Str(String),
 }

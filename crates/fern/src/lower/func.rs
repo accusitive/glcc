@@ -381,6 +381,18 @@ impl<'l, 'd> FnCtx<'l, 'd> {
                 )?;
                 self.branch_on(cond, fail)
             }
+            HirPatKind::Char(c) => {
+                let want = self.iconst(32, *c as i128);
+                let cond = self.emit(
+                    mir::InstKind::Icmp {
+                        pred: mir::IcmpPred::Eq,
+                        lhs: value,
+                        rhs: want,
+                    },
+                    mir::Ty::Bool,
+                )?;
+                self.branch_on(cond, fail)
+            }
             HirPatKind::Bool(b) => {
                 let want = self.bool_const(*b);
                 let cond = self.emit(

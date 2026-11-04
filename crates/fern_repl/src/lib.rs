@@ -220,9 +220,9 @@ fn parse_chunk(src: &str) -> (Vec<NamedSpan>, Vec<fern::Diag>) {
         .items
         .iter()
         .filter_map(|item| match &item.kind {
-            ItemKind::Fun(fun) => Some((fun.name.clone(), item.span)),
+            ItemKind::Fn(fun) => Some((fun.name.clone(), item.span)),
             ItemKind::Let(value) => Some((value.name.clone(), item.span)),
-            ItemKind::Data(data) => Some((data.name.clone(), item.span)),
+            ItemKind::Type(type_decl) => Some((type_decl.name.clone(), item.span)),
             ItemKind::Class(class) => Some((class.name.clone(), item.span)),
             ItemKind::Extern(extern_item) => Some((extern_item.name.clone(), item.span)),
             ItemKind::Instance(_) | ItemKind::Import(_) | ItemKind::Use(_) => None,
@@ -275,7 +275,7 @@ fn signature_line(analysis: &fern::Analysis, name: &str) -> Option<String> {
             .as_ref()
             .map(|scheme| format!("{name} : {}", display_scheme(scheme)))
     } else if analysis.defs.data_ids.contains_key(name) {
-        Some(format!("data {name}"))
+        Some(format!("type {name}"))
     } else if analysis.defs.class_ids.contains_key(name) {
         Some(format!("class {name}"))
     } else {
@@ -293,7 +293,7 @@ fn display_scheme(scheme: &fern::defs::Scheme) -> String {
         text
     } else {
         let vars: Vec<String> = names.iter().map(|(_, letter)| letter.clone()).collect();
-        format!("forall {}. {text}", vars.join(" "))
+        format!("for<{}> {text}", vars.join(", "))
     }
 }
 
@@ -326,7 +326,7 @@ fn rename_vars(text: &str, names: &[(&str, String)]) -> String {
 
 pub fn is_definition(chunk: &str) -> bool {
     let trimmed = chunk.trim_start();
-    ["data ", "class ", "instance ", "extern ", "fun ", "let ", "import ", "use "]
+    ["type ", "class ", "instance ", "extern ", "fn ", "async fn ", "let ", "import ", "use "]
         .iter()
         .any(|keyword| trimmed.starts_with(keyword))
 }

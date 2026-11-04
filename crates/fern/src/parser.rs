@@ -1,26 +1,37 @@
 //! Recursive-descent parser for fern.
 //!
-//! fern is a small pure ML-family surface:
+//! fern is a small pure ML-family surface. Case carries no grammatical
+//! meaning: every name is one `Ident` token and resolution decides
+//! whether it is a constructor, a type, or a value.
 //!
 //! ```text
-//! item     := data | class | instance | extern | fun | let
-//! data     := 'data' Upper lower* '=' ctor ('|' ctor)*
-//! extern   := 'extern' string? lower ':' ty
-//! ctor     := Upper ( '(' ty (',' ty)* ')' )?
-//! class    := 'class' Upper lower* '{' (lower ':' ty ';')* '}'
-//! instance := 'instance' Upper ty ('when' ty (',' ty)*)? '{' method* '}'
-//! method   := lower '(' pat-list? ')' '=' expr ';'?       (params may be empty)
-//! fun      := 'fun' lower '(' (pat ':' ty),* ')' ':' ty '=' expr
-//! let      := 'let' lower (':' ty)? '=' expr
-//! expr     := if | match | block | lambda | prefix
+//! item     := type | class | instance | extern | fn | let | import | use
+//! type     := 'type' Name ('<' params '>')? '='
+//!             '|' ctor ('|' ctor)*          -- sum
+//!           | '{' (name ':' ty ',')* '}'    -- record (single constructor
+//!                                             named like the type)
+//! extern   := 'extern' string? name ':' [for<...>] ty
+//! ctor     := Name ('(' ty (',' ty)* ')')?
+//! class    := 'class' Name ('<' params '>')? '{' (name ':' [for<...>] ty ';')* '}'
+//! instance := 'instance' ('<' params '>')? Name '<' ty '>' ('when' ty (',' ty)*)?
+//!             '{' method* '}'
+//! method   := name '(' pat-list? ')' '=' expr ';'?   (params may be empty)
+//! fn       := 'async'? 'fn' name '(' pat-list? ')' ':' [for<...>] ty '->' ty '=' expr
+//!             -- the parameter list is one pattern matched against the
+//!             -- annotation's domain; a nullary fn is 'fn f() : -> ty'
+//! let      := 'let' name (':' [for<...>] ty)? '=' expr
+//! expr     := if | match | block | closure | prefix
+//! closure  := '|' pat-list? '|' expr | '||' expr
 //! if       := 'if' expr 'then' expr 'else' expr
 //! match    := 'match' expr '{' ('case' pat ('when' expr)? '=>' expr ';')* '}'
 //! block    := '{' ('let' pat '=' expr ';')* (expr ';')* expr? '}'
+//! ty       := [for<...>] ty_app ('->' ty)?
+//! ty_app   := Name ('<' ty (',' ty)* '>')?
 //! ```
 //!
 //! Binary operators, loosest first: `||`, `&&`, comparisons, `|>`
 //! (left-assoc value pipe), `::` (right-assoc cons), `+ -`, `* /`;
-//! unary `-`; postfix calls `f(x, y)`.
+//! unary `-`; postfix `.await`, `?`, `.field`, calls `f(x, y)`.
 
 use crate::ast::*;
 use crate::lexer::{Tok, Token};
@@ -113,16 +124,9 @@ impl Parser {
         }
     }
 
-    fn upper(&mut self, what: &str) -> KResult<String> {
+    fn ident(&mut self, what: &str) -> KResult<String> {
         match self.bump() {
-            Token { tok: Tok::Upper(name), .. } => Ok(name),
-            other => Err(Diag::new(format!("expected {what}, found {}", other.tok.describe()), other.span)),
-        }
-    }
-
-    fn lower(&mut self, what: &str) -> KResult<String> {
-        match self.bump() {
-            Token { tok: Tok::Lower(name), .. } => Ok(name),
+            Token { tok: Tok::Ident(name), .. } => Ok(name),
             other => Err(Diag::new(format!("expected {what}, found {}", other.tok.describe()), other.span)),
         }
     }
@@ -205,11 +209,11 @@ impl Parser {
     fn item(&mut self) -> KResult<Item> {
         let lo = self.span();
         let kind = match self.peek() {
-            Tok::Data => ItemKind::Data(self.data_item()?),
+            Tok::Type => ItemKind::Type(self.type_item()?),
             Tok::Class => ItemKind::Class(self.class_item()?),
             Tok::Instance => ItemKind::Instance(self.instance_item()?),
             Tok::Extern => ItemKind::Extern(self.extern_item()?),
-            Tok::Async | Tok::Fun => ItemKind::Fun(self.fun_item()?),
+            Tok::Async | Tok::Fn => ItemKind::Fn(self.fn_item()?),
             Tok::Let => ItemKind::Let(self.let_item()?),
             Tok::Import => ItemKind::Import(self.import_item()?),
             Tok::Use => ItemKind::Use(self.use_item()?),
@@ -219,7 +223,7 @@ impl Parser {
             other => {
                 return Err(self.complete_if_eof(Diag::new(
                     format!(
-                        "expected an item (`data`, `class`, `instance`, `extern`, `fun`, `let`, `import`, or `use`), found {}",
+                        "expected an item (`type`, `class`, `instance`, `extern`, `fn`, `let`, `import`, or `use`), found {}",
                         other.describe()
                     ),
                     self.span(),
@@ -233,67 +237,82 @@ impl Parser {
         })
     }
 
-    fn data_item(&mut self) -> KResult<DataDecl> {
+    /// `type Name<P> = | Ctor(Ty) | ...` (leading bar required) or
+    /// `type Name<P> = { field : Ty, ... }` (a record, whose single
+    /// constructor is named like the type).
+    fn type_item(&mut self) -> KResult<TypeDecl> {
         let start = self.span();
         self.bump();
-        let name = self.upper("a data type name")?;
-        let mut params = Vec::new();
-        while matches!(self.peek(), Tok::Lower(_)) {
-            params.push(self.lower("a type parameter")?);
-        }
-        self.expect(&Tok::Eq, "`=` after the data head")?;
-        let mut ctor_names = Vec::new();
+        let name = self.ident("a type name")?;
+        let params = self.type_params()?;
+        self.expect(&Tok::Eq, "`=` after the type head")?;
         let mut ctors = Vec::new();
-        loop {
-            let ctor_span = self.span();
-            let name = self.upper("a constructor name")?;
-            if ctor_names.contains(&name) {
-                return Err(Diag::new(format!("duplicate constructor `{name}`"), ctor_span));
-            }
-            ctor_names.push(name.clone());
+        if self.is(&Tok::LBrace) {
+            self.bump();
             let mut fields = Vec::new();
-            let mut field_names = None;
-            if self.is(&Tok::LParen) {
-                self.bump();
-                if !self.is(&Tok::RParen) {
-                    loop {
-                        fields.push(self.ty_expr()?);
-                        if self.eat(&Tok::Comma) {
-                            continue;
-                        }
-                        break;
+            let mut names = Vec::new();
+            if !self.is(&Tok::RBrace) {
+                loop {
+                    let field_span = self.span();
+                    let field = self.ident("a record field name")?;
+                    if names.contains(&field) {
+                        return Err(Diag::new(format!("duplicate record field `{field}`"), field_span));
                     }
-                }
-                self.expect(&Tok::RParen, "`)` after the constructor fields")?;
-            } else if self.is(&Tok::LBrace) {
-                self.bump();
-                let mut names = Vec::new();
-                if !self.is(&Tok::RBrace) {
-                    loop {
-                        let field_span = self.span();
-                        let field = self.lower("a record field name")?;
-                        if names.contains(&field) {
-                            return Err(Diag::new(format!("duplicate record field `{field}`"), field_span));
-                        }
-                        names.push(field);
-                        self.expect(&Tok::Colon, "`:` after the record field name")?;
-                        fields.push(self.ty_expr()?);
-                        if self.eat(&Tok::Comma) {
-                            continue;
-                        }
-                        break;
+                    names.push(field);
+                    self.expect(&Tok::Colon, "`:` after the record field name")?;
+                    fields.push(self.ty_expr()?);
+                    if self.eat(&Tok::Comma) {
+                        continue;
                     }
+                    break;
                 }
-                self.expect(&Tok::RBrace, "`}` after the record fields")?;
-                field_names = Some(names);
             }
-            ctors.push(CtorDecl { name, fields, field_names });
-            if self.eat(&Tok::Pipe) {
-                continue;
+            self.expect(&Tok::RBrace, "`}` after the record fields")?;
+            ctors.push(CtorDecl {
+                name: name.clone(),
+                fields,
+                field_names: Some(names),
+            });
+        } else if self.eat(&Tok::Pipe) {
+            let mut ctor_names = Vec::new();
+            loop {
+                let ctor_span = self.span();
+                let ctor = self.ident("a constructor name")?;
+                if ctor_names.contains(&ctor) {
+                    return Err(Diag::new(format!("duplicate constructor `{ctor}`"), ctor_span));
+                }
+                ctor_names.push(ctor.clone());
+                let mut fields = Vec::new();
+                if self.is(&Tok::LParen) {
+                    self.bump();
+                    if !self.is(&Tok::RParen) {
+                        loop {
+                            fields.push(self.ty_expr()?);
+                            if self.eat(&Tok::Comma) {
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                    self.expect(&Tok::RParen, "`)` after the constructor fields")?;
+                }
+                ctors.push(CtorDecl {
+                    name: ctor,
+                    fields,
+                    field_names: None,
+                });
+                if self.eat(&Tok::Pipe) {
+                    continue;
+                }
+                break;
             }
-            break;
+        } else {
+            return Err(Diag::new(
+                "expected `|` and constructors or `{` and record fields after `=` (type aliases are not supported)",
+                self.span(),
+            ));
         }
-        Ok(DataDecl {
+        Ok(TypeDecl {
             span: start.to(self.prev_span()),
             name,
             params,
@@ -301,17 +320,27 @@ impl Parser {
         })
     }
 
+    /// `<A, B>` after a `type`/`class`/`instance` head.
+    fn type_params(&mut self) -> KResult<Vec<String>> {
+        if !self.eat(&Tok::Lt) {
+            return Ok(Vec::new());
+        }
+        let mut params = vec![self.ident("a type parameter")?];
+        while self.eat(&Tok::Comma) {
+            params.push(self.ident("a type parameter")?);
+        }
+        if let Some(i) = (0..params.len()).find(|&i| params[i + 1..].contains(&params[i])) {
+            return Err(Diag::new(format!("duplicate type parameter `{}`", params[i]), self.span()));
+        }
+        self.expect(&Tok::Gt, "`>` closing the type parameters")?;
+        Ok(params)
+    }
+
     fn class_item(&mut self) -> KResult<ClassDecl> {
         let start = self.span();
         self.bump();
-        let name = self.upper("a class name")?;
-        let mut params = Vec::new();
-        while matches!(self.peek(), Tok::Lower(_)) {
-            params.push(self.lower("a class parameter")?);
-        }
-        if let Some(i) = (0..params.len()).find(|&i| params[i + 1..].contains(&params[i])) {
-            return Err(Diag::new(format!("duplicate class parameter `{}`", params[i]), start));
-        }
+        let name = self.ident("a class name")?;
+        let params = self.type_params()?;
         self.expect(&Tok::LBrace, "`{` opening the class body")?;
         let mut method_names = Vec::new();
         let mut methods = Vec::new();
@@ -320,7 +349,7 @@ impl Parser {
             if self.is(&Tok::RBrace) || self.is(&Tok::Eof) {
                 break;
             }
-            let name = self.lower("a method name")?;
+            let name = self.ident("a method name")?;
             if method_names.contains(&name) {
                 return Err(Diag::new(format!("duplicate class method `{name}`"), self.span()));
             }
@@ -341,8 +370,18 @@ impl Parser {
     fn instance_item(&mut self) -> KResult<InstanceDecl> {
         let start = self.span();
         self.bump();
-        let class = self.upper("a class name")?;
-        let self_ty = self.ty_expr()?;
+        let params = self.type_params()?;
+        let class = self.ident("a class name")?;
+        self.expect(&Tok::Lt, "`<` and the instance type after the class name")?;
+        let mut args = Vec::new();
+        loop {
+            args.push(self.ty_expr()?);
+            if self.eat(&Tok::Comma) {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Tok::Gt, "`>` closing the instance type")?;
         let mut ctx = Vec::new();
         if self.eat(&Tok::When) {
             loop {
@@ -361,31 +400,17 @@ impl Parser {
             if self.is(&Tok::RBrace) || self.is(&Tok::Eof) {
                 break;
             }
-            let name = self.lower("a method name")?;
+            let name = self.ident("a method name")?;
             if method_names.contains(&name) {
                 return Err(Diag::new(format!("duplicate method `{name}`"), self.span()));
             }
             method_names.push(name.clone());
-            self.expect(&Tok::LParen, "`(` after the method name")?;
-            let params = if self.is(&Tok::RParen) {
-                Vec::new()
-            } else {
-                let mut params = Vec::new();
-                loop {
-                    params.push(self.pat()?);
-                    if self.eat(&Tok::Comma) {
-                        continue;
-                    }
-                    break;
-                }
-                params
-            };
-            self.expect(&Tok::RParen, "`)` after the method parameters")?;
+            let param = self.param_list_pattern()?;
             self.expect(&Tok::Eq, "`=` before the method body")?;
             let body = self.expr()?;
             methods.push(MethodBody {
                 name,
-                params,
+                param,
                 body,
                 span: start.to(self.prev_span()),
             });
@@ -393,9 +418,10 @@ impl Parser {
         self.expect(&Tok::RBrace, "`}` closing the instance body")?;
         Ok(InstanceDecl {
             span: start.to(self.prev_span()),
+            params,
             class,
+            args,
             ctx,
-            self_ty,
             methods,
         })
     }
@@ -411,7 +437,7 @@ impl Parser {
         } else {
             None
         };
-        let name = self.lower("an extern name")?;
+        let name = self.ident("an extern name")?;
         self.expect(&Tok::Colon, "`:` before the extern signature")?;
         let ty = self.ty_expr()?;
         Ok(ExternDecl {
@@ -422,47 +448,63 @@ impl Parser {
         })
     }
 
-    fn fun_item(&mut self) -> KResult<FnDecl> {
+    fn fn_item(&mut self) -> KResult<FnDecl> {
         let start = self.span();
         let is_async = self.eat(&Tok::Async);
-        self.expect(&Tok::Fun, "`fun` after `async`")?;
-        let name = self.lower("a function name")?;
-        self.expect(&Tok::LParen, "`(` after the function name")?;
-        let params = if self.is(&Tok::RParen) {
-            Vec::new()
-        } else {
-            let mut params = Vec::new();
-            loop {
-                let pat = self.pat()?;
-                self.expect(&Tok::Colon, "`:` and a type annotation after the parameter")?;
-                let ty = self.ty_expr()?;
-                params.push(FnParam { pat, ty });
-                if self.eat(&Tok::Comma) {
-                    continue;
-                }
-                break;
-            }
-            params
-        };
-        self.expect(&Tok::RParen, "`)` after the function parameters")?;
-        self.expect(&Tok::Colon, "`:` and the return type after the function parameters")?;
-        let ret = self.ty_expr()?;
+        self.expect(&Tok::Fn, "`fn` after `async`")?;
+        let name = self.ident("a function name")?;
+        let param = self.param_list_pattern()?;
+        self.expect(&Tok::Colon, "`:` and a type annotation after the parameters")?;
+        let ann = self.ty_expr()?;
+        let (_, bare) = ann.strip_for();
+        if !matches!(bare.kind, TyExprKind::Arrow(..)) {
+            return Err(Diag::new(
+                "a function annotation must be a function type: write `->` before the return type (a nullary function is `fn f() : -> Int`)",
+                self.span(),
+            ));
+        }
         self.expect(&Tok::Eq, "`=` before the function body")?;
         let body = self.expr()?;
         Ok(FnDecl {
             span: start.to(self.prev_span()),
             name,
-            params,
-            ret,
+            param,
+            ann,
             body,
             is_async,
         })
     }
 
+    /// The `(pat, pat, ...)` parameter list as ONE pattern: empty is the
+    /// unit pattern, a single pattern stays bare, several become a tuple
+    /// pattern.
+    fn param_list_pattern(&mut self) -> KResult<Pat> {
+        self.expect(&Tok::LParen, "`(`")?;
+        if self.eat(&Tok::RParen) {
+            return Ok(Pat::Tuple(Vec::new()));
+        }
+        let first = self.pat()?;
+        if self.eat(&Tok::Comma) {
+            let mut items = vec![first];
+            loop {
+                items.push(self.pat()?);
+                if self.eat(&Tok::Comma) {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Tok::RParen, "`)` closing the parameters")?;
+            Ok(Pat::Tuple(items))
+        } else {
+            self.expect(&Tok::RParen, "`)` closing the parameters")?;
+            Ok(first)
+        }
+    }
+
     fn let_item(&mut self) -> KResult<ValueDecl> {
         let start = self.span();
         self.bump();
-        let name = self.lower("a value name")?;
+        let name = self.ident("a value name")?;
         let ty = if self.eat(&Tok::Colon) { Some(self.ty_expr()?) } else { None };
         self.expect(&Tok::Eq, "`=` after the value name")?;
         let body = self.expr()?;
@@ -478,7 +520,7 @@ impl Parser {
         let start = self.span();
         self.bump();
         let path = self.module_path("a module path")?;
-        let alias = if self.eat(&Tok::As) { Some(self.lower("an import alias")?) } else { None };
+        let alias = if self.eat(&Tok::As) { Some(self.ident("an import alias")?) } else { None };
         Ok(ImportDecl {
             span: start.to(self.prev_span()),
             path,
@@ -489,15 +531,11 @@ impl Parser {
     fn use_item(&mut self) -> KResult<UseDecl> {
         let start = self.span();
         self.bump();
-        let mut path = vec![self.lower("a module path")?];
+        let mut path = vec![self.ident("a module path")?];
         while self.eat(&Tok::ColonColon) {
-            if matches!(self.peek(), Tok::Upper(_)) {
-                path.push(self.upper("an imported item")?);
-            } else {
-                path.push(self.lower("a module path or imported item")?);
-            }
+            path.push(self.ident("a module path or imported item")?);
         }
-        let alias = if self.eat(&Tok::As) { Some(self.lower("an import alias")?) } else { None };
+        let alias = if self.eat(&Tok::As) { Some(self.ident("an import alias")?) } else { None };
         Ok(UseDecl {
             span: start.to(self.prev_span()),
             path,
@@ -506,17 +544,51 @@ impl Parser {
     }
 
     fn module_path(&mut self, what: &str) -> KResult<Vec<String>> {
-        let mut path = vec![self.lower(what)?];
+        let mut path = vec![self.ident(what)?];
         while self.eat(&Tok::ColonColon) {
-            path.push(self.lower("a module path segment")?);
+            path.push(self.ident("a module path segment")?);
         }
         Ok(path)
     }
 
     // ------------------------------------------------------------ types --
 
-    /// `ty := ty_app ('->' ty)*`: arrows are right-assoc.
+    /// `ty := 'for' '<' params '>' ty | '->' ty | ty_app ('->' ty)?`.
+    /// Arrows are right-assoc; an empty domain is the unit tuple, the
+    /// type of a nullary function.
     fn ty_expr(&mut self) -> KResult<TyExpr> {
+        if self.is(&Tok::For) {
+            let start = self.span();
+            self.bump();
+            self.expect(&Tok::Lt, "`<` after `for`")?;
+            let mut params = vec![self.ident("a type parameter")?];
+            while self.eat(&Tok::Comma) {
+                params.push(self.ident("a type parameter")?);
+            }
+            if let Some(i) = (0..params.len()).find(|&i| params[i + 1..].contains(&params[i])) {
+                return Err(Diag::new(format!("duplicate type parameter `{}`", params[i]), start));
+            }
+            self.expect(&Tok::Gt, "`>` closing the `for` binders")?;
+            let ty = self.ty_expr()?;
+            return Ok(TyExpr {
+                kind: TyExprKind::For {
+                    params,
+                    ty: Box::new(ty),
+                },
+                span: start.to(self.prev_span()),
+            });
+        }
+        if self.eat(&Tok::Arrow) {
+            let rest = self.ty_expr()?;
+            let span = rest.span;
+            return Ok(TyExpr {
+                kind: TyExprKind::Arrow(Box::new(TyExpr {
+                    kind: TyExprKind::Tuple(Vec::new()),
+                    span,
+                }), Box::new(rest)),
+                span,
+            });
+        }
         let first = self.ty_app()?;
         if self.eat(&Tok::Arrow) {
             let rest = self.ty_expr()?;
@@ -530,41 +602,39 @@ impl Parser {
         }
     }
 
+    /// `Name<T1, T2>`: bracket application. Juxtaposition application is
+    /// gone; complex arguments need their own brackets or parens.
     fn ty_app(&mut self) -> KResult<TyExpr> {
         let first = self.ty_atom()?;
-        let mut out = first;
-        while matches!(self.peek(), Tok::Upper(_) | Tok::Lower(_) | Tok::LParen) {
-            let arg = self.ty_atom()?;
-            let span = out.span.to(arg.span);
-            out = TyExpr {
-                kind: TyExprKind::App(Box::new(out), Box::new(arg)),
-                span,
-            };
+        if self.is(&Tok::Lt) {
+            let head_span = first.span;
+            self.bump();
+            let mut args = Vec::new();
+            if !self.is(&Tok::Gt) {
+                loop {
+                    args.push(self.ty_expr()?);
+                    if self.eat(&Tok::Comma) {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect(&Tok::Gt, "`>` closing the type arguments")?;
+            return Ok(TyExpr {
+                kind: TyExprKind::App(Box::new(first), args),
+                span: head_span.to(self.prev_span()),
+            });
         }
-        Ok(out)
+        Ok(first)
     }
 
     fn ty_atom(&mut self) -> KResult<TyExpr> {
         let span = self.span();
         match self.peek() {
-            Tok::Upper(_) | Tok::Lower(_) => {
-                let mut name = match self.bump() {
-                    Token {
-                        tok: Tok::Upper(name) | Tok::Lower(name),
-                        ..
-                    } => name,
-                    _ => unreachable!("checked above"),
-                };
+            Tok::Ident(_) => {
+                let mut name = self.ident("a type")?;
                 while self.eat(&Tok::Dot) {
-                    let segment = match self.bump() {
-                        Token {
-                            tok: Tok::Upper(segment) | Tok::Lower(segment),
-                            ..
-                        } => segment,
-                        other => {
-                            return Err(Diag::new(format!("expected a type name after `.`, found {}", other.tok.describe()), other.span));
-                        }
-                    };
+                    let segment = self.ident("a type name after `.`")?;
                     name.push('.');
                     name.push_str(&segment);
                 }
@@ -637,6 +707,11 @@ impl Parser {
                 self.bump();
                 Ok(Pat::Int(v))
             }
+            Tok::Char(c) => {
+                let c = *c;
+                self.bump();
+                Ok(Pat::Char(c))
+            }
             Tok::True => {
                 self.bump();
                 Ok(Pat::Bool(true))
@@ -646,36 +721,15 @@ impl Parser {
                 Ok(Pat::Bool(false))
             }
             Tok::Float(_) => Err(Diag::new("float literals cannot be matched; compare with `==` instead".to_string(), self.span())),
-            Tok::Lower(_) => {
-                let mut name = self.lower("a pattern")?;
+            Tok::Ident(_) => {
+                // A bare name is a binding or a nullary constructor;
+                // resolution decides. With fields it is unambiguously a
+                // constructor pattern.
+                let mut name = self.ident("a pattern")?;
                 while self.eat(&Tok::Dot) {
                     name.push('.');
-                    name.push_str(&self.upper("a constructor name after `.`")?);
+                    name.push_str(&self.ident("a constructor name after `.`")?);
                 }
-                if !name.contains('.') {
-                    return Ok(Pat::Bind(name));
-                }
-                let fields = if self.is(&Tok::LParen) {
-                    self.bump();
-                    let mut fields = Vec::new();
-                    if !self.is(&Tok::RParen) {
-                        loop {
-                            fields.push(self.pat()?);
-                            if self.eat(&Tok::Comma) {
-                                continue;
-                            }
-                            break;
-                        }
-                    }
-                    self.expect(&Tok::RParen, "`)` after the constructor pattern")?;
-                    fields
-                } else {
-                    Vec::new()
-                };
-                Ok(Pat::Ctor { name, fields })
-            }
-            Tok::Upper(_) => {
-                let name = self.upper("a pattern")?;
                 if self.is(&Tok::LParen) {
                     self.bump();
                     let mut fields = Vec::new();
@@ -690,8 +744,10 @@ impl Parser {
                     }
                     self.expect(&Tok::RParen, "`)` after the constructor pattern")?;
                     Ok(Pat::Ctor { name, fields })
-                } else {
+                } else if name.contains('.') {
                     Ok(Pat::Ctor { name, fields: Vec::new() })
+                } else {
+                    Ok(Pat::Bind(name))
                 }
             }
             Tok::LParen => {
@@ -902,15 +958,6 @@ impl Parser {
     }
 
     fn prefix(&mut self) -> KResult<Expr> {
-        if self.is(&Tok::Await) {
-            let lo = self.span();
-            self.bump();
-            let operand = self.prefix()?;
-            return Ok(Expr {
-                kind: ExprKind::Await(Box::new(operand)),
-                span: lo.to(self.prev_span()),
-            });
-        }
         if self.is(&Tok::Minus) {
             let lo = self.span();
             self.bump();
@@ -920,7 +967,44 @@ impl Parser {
                 span: lo.to(self.prev_span()),
             });
         }
+        if self.is(&Tok::Pipe) || self.is(&Tok::PipePipe) {
+            return self.closure();
+        }
         self.postfix()
+    }
+
+    /// `|pat, pat| body` or `|| body`: the body is a full expression, so
+    /// it extends through binary operators but stops at `,`/`)`/`;`.
+    fn closure(&mut self) -> KResult<Expr> {
+        let lo = self.span();
+        let zero_params = self.eat(&Tok::PipePipe);
+        let mut params = Vec::new();
+        if !zero_params {
+            self.expect(&Tok::Pipe, "`|` opening the closure parameters")?;
+            if !self.is(&Tok::Pipe) {
+                loop {
+                    let mut pat = self.pat()?;
+                    if self.eat(&Tok::Colon) {
+                        let ty = self.ty_expr()?;
+                        pat = Pat::Typed(Box::new(pat), ty);
+                    }
+                    params.push(pat);
+                    if self.eat(&Tok::Comma) {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            self.expect(&Tok::Pipe, "`|` closing the closure parameters")?;
+        }
+        let body = self.expr()?;
+        Ok(Expr {
+            kind: ExprKind::Lambda {
+                params,
+                body: Box::new(body),
+            },
+            span: lo.to(self.prev_span()),
+        })
     }
 
     fn postfix(&mut self) -> KResult<Expr> {
@@ -935,23 +1019,24 @@ impl Parser {
                 continue;
             }
             if self.is(&Tok::LBrace) {
-                let ExprKind::Ctor { name } = &atom.kind else {
+                // `name { field = value, ... }`: a record literal. The
+                // lookahead keeps `{`-blocks after expressions working.
+                let Some(name) = expr_path(&atom) else {
                     break;
                 };
                 let opens_record = matches!(
                     (self.tokens.get(self.pos + 1), self.tokens.get(self.pos + 2)),
-                    (Some(Token { tok: Tok::RBrace, .. }), _) | (Some(Token { tok: Tok::Lower(_), .. }), Some(Token { tok: Tok::Eq, .. }))
+                    (Some(Token { tok: Tok::RBrace, .. }), _) | (Some(Token { tok: Tok::Ident(_), .. }), Some(Token { tok: Tok::Eq, .. }))
                 );
                 if !opens_record {
                     break;
                 }
-                let name = name.clone();
                 let open_span = atom.span;
                 self.bump();
                 let mut fields = Vec::new();
                 if !self.is(&Tok::RBrace) {
                     loop {
-                        let field = self.lower("a record field name")?;
+                        let field = self.ident("a record field name")?;
                         self.expect(&Tok::Eq, "`=` after the record field name")?;
                         let value = self.expr()?;
                         fields.push((field, value));
@@ -969,25 +1054,16 @@ impl Parser {
                 continue;
             }
             if self.eat(&Tok::Dot) {
-                let member = match self.bump() {
-                    Token {
-                        tok: Tok::Upper(name) | Tok::Lower(name),
-                        ..
-                    } => name,
-                    other => {
-                        return Err(Diag::new(format!("expected a member name, found {}", other.tok.describe()), other.span));
-                    }
-                };
-                let upper = member.as_bytes()[0].is_ascii_uppercase();
+                if self.eat(&Tok::Await) {
+                    let span = atom.span.to(self.prev_span());
+                    atom = Expr {
+                        kind: ExprKind::Await(Box::new(atom)),
+                        span,
+                    };
+                    continue;
+                }
+                let member = self.ident("a member name after `.`")?;
                 let span = atom.span.to(self.prev_span());
-                if upper
-                    && let Some(path) = expr_path(&atom) {
-                        atom = Expr {
-                            kind: ExprKind::Ctor { name: format!("{path}.{member}") },
-                            span,
-                        };
-                        continue;
-                    }
                 atom = Expr {
                     kind: ExprKind::Field {
                         base: Box::new(atom),
@@ -1011,16 +1087,9 @@ impl Parser {
                     }
                 }
                 self.expect(&Tok::RParen, "`)` after the call arguments")?;
-                atom = match atom.kind {
-                    // `Ctor(args)`: a saturated constructor call.
-                    ExprKind::Ctor { name } => Expr {
-                        kind: ExprKind::CtorCall { name, args },
-                        span: callee_span.to(self.prev_span()),
-                    },
-                    _ => Expr {
-                        kind: ExprKind::Call(Box::new(atom), args),
-                        span: callee_span.to(self.prev_span()),
-                    },
+                atom = Expr {
+                    kind: ExprKind::Call(Box::new(atom), args),
+                    span: callee_span.to(self.prev_span()),
                 };
                 continue;
             }
@@ -1043,6 +1112,10 @@ impl Parser {
                 let Token { tok: Tok::Float(v), span } = self.bump() else { unreachable!() };
                 Ok(Expr { kind: ExprKind::Float(v), span })
             }
+            Tok::Char(_) => {
+                let Token { tok: Tok::Char(c), span } = self.bump() else { unreachable!() };
+                Ok(Expr { kind: ExprKind::Char(c), span })
+            }
             Tok::Str(_) => {
                 let Token { tok: Tok::Str(s), span } = self.bump() else { unreachable!() };
                 Ok(Expr { kind: ExprKind::Str(s), span })
@@ -1058,10 +1131,10 @@ impl Parser {
                 self.bump();
                 Err(Diag::new("`_` is not a value; use it only in patterns", lo))
             }
-            Tok::Upper(_) => {
-                let name = self.upper("a value")?;
+            Tok::Ident(_) => {
+                let name = self.ident("a value")?;
                 if self.eat(&Tok::ColonColon) {
-                    let method = self.lower("a method name")?;
+                    let method = self.ident("a method name")?;
                     self.expect(&Tok::LParen, "`(` after the method name: a class method is always applied")?;
                     let mut args = Vec::new();
                     if !self.is(&Tok::RParen) {
@@ -1080,7 +1153,7 @@ impl Parser {
                     });
                 }
                 Ok(Expr {
-                    kind: ExprKind::Ctor { name },
+                    kind: ExprKind::Var(name),
                     span: lo.to(self.prev_span()),
                 })
             }
@@ -1112,25 +1185,6 @@ impl Parser {
                     span,
                 })
             }
-            Tok::Lower(_) => {
-                let name = self.lower("a value")?;
-                // Bare `x -> body` is a one-parameter lambda.
-                if self.is(&Tok::Arrow) {
-                    self.bump();
-                    let body = self.expr()?;
-                    return Ok(Expr {
-                        kind: ExprKind::Lambda {
-                            params: vec![Pat::Bind(name)],
-                            body: Box::new(body),
-                        },
-                        span: lo.to(self.prev_span()),
-                    });
-                }
-                Ok(Expr {
-                    kind: ExprKind::Var(name),
-                    span: lo.to(self.prev_span()),
-                })
-            }
             Tok::LParen => {
                 self.bump();
                 self.paren_expr(lo)
@@ -1147,41 +1201,14 @@ impl Parser {
         }
     }
 
-    /// After an opening `(`: unit, grouping, tuple, or a paren-list lambda.
+    /// After an opening `(`: unit, grouping, or a tuple.
     fn paren_expr(&mut self, open: Span) -> KResult<Expr> {
-        // `()` is the unit value, unless an arrow makes it a zero-arg
-        // lambda head.
         if self.is(&Tok::RParen) {
             self.bump();
-            if self.eat(&Tok::Arrow) {
-                let body = self.expr()?;
-                return Ok(Expr {
-                    kind: ExprKind::Lambda {
-                        params: Vec::new(),
-                        body: Box::new(body),
-                    },
-                    span: open.to(self.prev_span()),
-                });
-            }
             return Ok(Expr {
                 kind: ExprKind::Unit,
                 span: open.to(self.prev_span()),
             });
-        }
-        // Lambda attempt: `(pat, pat, ...) ->`. Rewind on any failure and
-        // reparse as a plain expression; patterns are a small subset of
-        // the expression grammar, so nothing is lost.
-        let mark = self.pos;
-        match self.try_lambda_pats() {
-            Ok(Some(params)) => {
-                self.expect(&Tok::Arrow, "`->` for a lambda")?;
-                let body = self.expr()?;
-                return Ok(Expr {
-                    kind: ExprKind::Lambda { params, body: Box::new(body) },
-                    span: open.to(self.prev_span()),
-                });
-            }
-            _ => self.pos = mark,
         }
         let first = self.expr()?;
         if self.is(&Tok::Comma) {
@@ -1233,22 +1260,6 @@ impl Parser {
         Ok(ShellWord { parts, span: raw.span })
     }
 
-    fn try_lambda_pats(&mut self) -> KResult<Option<Vec<Pat>>> {
-        if !matches!(self.peek(), Tok::Underscore | Tok::Lower(_) | Tok::Upper(_) | Tok::LParen | Tok::LBracket) {
-            return Ok(None);
-        }
-        let mut params = Vec::new();
-        loop {
-            params.push(self.pat()?);
-            if self.eat(&Tok::Comma) {
-                continue;
-            }
-            break;
-        }
-        self.expect(&Tok::RParen, "`)` closing the parameters")?;
-        if self.is(&Tok::Arrow) { Ok(Some(params)) } else { Ok(None) }
-    }
-
     fn list_expr(&mut self, open: Span) -> KResult<Expr> {
         self.bump();
         let mut items = Vec::new();
@@ -1280,7 +1291,7 @@ fn expr_path(expr: &Expr) -> Option<String> {
 fn is_item_start(tok: &Tok) -> bool {
     matches!(
         tok,
-        Tok::Data | Tok::Class | Tok::Instance | Tok::Extern | Tok::Async | Tok::Fun | Tok::Let | Tok::Import | Tok::Use | Tok::Priv
+        Tok::Type | Tok::Class | Tok::Instance | Tok::Extern | Tok::Async | Tok::Fn | Tok::Let | Tok::Import | Tok::Use | Tok::Priv
     )
 }
 

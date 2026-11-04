@@ -5,10 +5,10 @@ use fern::{Diag, FileId, Span};
 
 #[test]
 fn user_spans_render_against_the_source() {
-    let src = "fun main() = nope\n";
-    let text = fern::render_diag(src, &Diag::new("boom", Span::new(13, 17)));
+    let src = "fn main() : -> Unit = nope\n";
+    let text = fern::render_diag(src, &Diag::new("boom", Span::new(22, 26)));
     assert!(text.contains("error: boom"), "{text}");
-    assert!(text.contains(" --> 1:14"), "{text}");
+    assert!(text.contains(" --> 1:23"), "{text}");
     assert!(text.contains("nope"), "{text}");
     assert!(text.contains("^^^^"), "{text}");
 }
@@ -18,13 +18,14 @@ fn prelude_spans_render_against_the_prelude() {
     let text = fern::render_diag("", &Diag::new("boom", Span::in_file(FileId::PRELUDE, 0, 8)));
     assert!(text.contains("error: boom"), "{text}");
     assert!(text.contains(" --> prelude:1:"), "{text}");
-    assert!(text.contains("data List a"), "{text}");
+    assert!(text.contains("type List<A>"), "{text}");
 }
 
 #[test]
 fn wide_spans_do_not_run_off_the_line() {
-    let src = "fun main() = 1\n";
+    let src = "fn main() : -> Unit = 1\n";
     let text = fern::render_diag(src, &Diag::new("boom", Span::new(0, 999)));
     assert!(text.contains('^'), "{text}");
-    assert!(!text.contains("^^^^^^^^^^^^^^^^"), "{text}");
+    let longer_than_the_line = "^".repeat(src.len() + 1);
+    assert!(!text.contains(longer_than_the_line.as_str()), "{text}");
 }

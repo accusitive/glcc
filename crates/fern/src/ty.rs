@@ -97,8 +97,8 @@ impl Ty {
     }
 
     /// Primitive type names with special lowering behavior.
-    pub fn intros() -> [&'static str; 8] {
-        ["Int", "Float", "Bool", "Unit", "String", "Argv", "Pipe", "Future"]
+    pub fn intros() -> [&'static str; 9] {
+        ["Int", "Float", "Bool", "Char", "Unit", "String", "Argv", "Pipe", "Future"]
     }
 
     pub fn future_ty(inner: Ty) -> Ty {
@@ -126,6 +126,10 @@ impl Ty {
 
     pub fn bool_ty() -> Ty {
         Ty::named0("Bool")
+    }
+
+    pub fn char_ty() -> Ty {
+        Ty::named0("Char")
     }
 
     pub fn unit_named_ty() -> Ty {
@@ -212,12 +216,19 @@ impl fmt::Display for Ty {
             Ty::Named { name, args } if args.is_empty() => write!(f, "{name}"),
             Ty::Named { name, args } => {
                 write!(f, "{name}")?;
-                for a in args {
-                    write!(f, " {}", operand_of(a))?;
+                if !args.is_empty() {
+                    write!(f, "<")?;
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{a}")?;
+                    }
+                    write!(f, ">")?;
                 }
                 Ok(())
             }
-            Ty::App(h, a) => write!(f, "{} {}", self_operand(h), operand_of(a)),
+            Ty::App(h, a) => write!(f, "{}<{}>", self_operand(h), a),
             Ty::Arrow(s, d) => write!(f, "{} -> {d}", self_operand(s)),
             Ty::Tuple(vs) => {
                 write!(f, "(")?;
@@ -232,16 +243,6 @@ impl fmt::Display for Ty {
             Ty::Param(name) => write!(f, "{name}"),
             Ty::Var(v) => write!(f, "t{v}"),
         }
-    }
-}
-
-/// Render a type in argument position (parenthesized when its display
-/// could run on with a following application).
-fn operand_of(ty: &Ty) -> String {
-    match ty {
-        Ty::Named { args, .. } | Ty::Tuple(args) if !args.is_empty() => format!("({ty})"),
-        Ty::Arrow(..) | Ty::App(..) => format!("({ty})"),
-        other => format!("{other}"),
     }
 }
 

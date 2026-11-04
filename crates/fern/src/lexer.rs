@@ -1,21 +1,23 @@
 //! Hand-written fern lexer. Every token carries its byte span.
 //!
 //! fern has a small token set: construction keywords, literals, and a
-//! few operators. Names are split into `Lower` (values, type variables)
-//! and `Upper` (type and constructor names) — the ML convention.
+//! few operators. Names are a single `Ident` token — case carries no
+//! grammatical meaning; resolution decides whether a name is a
+//! constructor or a value.
 
 use crate::span::{Diag, FileId, KResult, Span};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Tok {
     // keywords
-    Data,
+    Type,
     Class,
     Instance,
     Extern,
     Async,
     Await,
-    Fun,
+    Fn,
+    For,
     Let,
     Import,
     Use,
@@ -30,12 +32,12 @@ pub enum Tok {
     True,
     False,
     // names and literals
-    Lower(String),
-    Upper(String),
+    Ident(String),
     /// `#name`: a builtin namespace reference.
     Builtin(String),
     Int(i64),
     Float(f64),
+    Char(char),
     Str(String),
     /// `$ command` or `$(command)`: `src` is the command text, `capture`
     /// selects `$()`.
@@ -71,7 +73,7 @@ pub enum Tok {
     AmpAmp,
     PipePipe,
     PipeGt, // |> value pipe
-    Pipe,   // | (data decl separator)
+    Pipe,   // | (closure parameter delimiter)
     Question,
     Underscore,
     Eof,
@@ -81,11 +83,11 @@ impl Tok {
     /// Human-readable name for parser diagnostics.
     pub fn describe(&self) -> String {
         match self {
-            Tok::Lower(s) => format!("name `{s}`"),
-            Tok::Upper(s) => format!("name `{s}`"),
+            Tok::Ident(s) => format!("name `{s}`"),
             Tok::Builtin(s) => format!("builtin `#{s}`"),
             Tok::Int(v) => format!("integer `{v}`"),
             Tok::Float(v) => format!("float `{v}`"),
+            Tok::Char(_) => "a char literal".to_string(),
             Tok::Str(_) => "a string literal".to_string(),
             Tok::Shell { .. } => "a shell command".to_string(),
             Tok::Eof => "end of file".to_string(),
@@ -95,13 +97,14 @@ impl Tok {
 
     fn spelling(&self) -> &'static str {
         match self {
-            Tok::Data => "data",
+            Tok::Type => "type",
             Tok::Class => "class",
             Tok::Instance => "instance",
             Tok::Extern => "extern",
             Tok::Async => "async",
             Tok::Await => "await",
-            Tok::Fun => "fun",
+            Tok::Fn => "fn",
+            Tok::For => "for",
             Tok::Let => "let",
             Tok::Import => "import",
             Tok::Use => "use",
@@ -227,7 +230,6 @@ impl<'s> Lexer<'s> {
                 b' ' | b'\t' | b'\r' | b'\n' => {
                     self.pos += 1;
                 }
-                b'-' if self.peek2() == b'-' => self.line_comment(),
                 b'/' if self.peek2() == b'/' => self.line_comment(),
                 b'/' if self.peek2() == b'*' => self.block_comment()?,
                 _ => break,
@@ -285,13 +287,14 @@ impl<'s> Lexer<'s> {
             return Ok(());
         }
         let tok = match word.as_str() {
-            "data" => Tok::Data,
+            "type" => Tok::Type,
             "class" => Tok::Class,
             "instance" => Tok::Instance,
             "extern" => Tok::Extern,
             "async" => Tok::Async,
             "await" => Tok::Await,
-            "fun" => Tok::Fun,
+            "fn" => Tok::Fn,
+            "for" => Tok::For,
             "let" => Tok::Let,
             "import" => Tok::Import,
             "use" => Tok::Use,
@@ -305,13 +308,7 @@ impl<'s> Lexer<'s> {
             "when" => Tok::When,
             "true" => Tok::True,
             "false" => Tok::False,
-            _ => {
-                if word.as_bytes()[0].is_ascii_uppercase() {
-                    Tok::Upper(word)
-                } else {
-                    Tok::Lower(word)
-                }
-            }
+            _ => Tok::Ident(word),
         };
         self.push(tok, lo, tokens);
         Ok(())
@@ -362,6 +359,9 @@ impl<'s> Lexer<'s> {
     }
 
     fn number(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        if self.peek() == b'0' && (self.peek2() | 0x20) == b'x' {
+            return self.hex_number(lo, tokens);
+        }
         let mut end = self.pos;
         while end < self.bytes.len() && self.bytes[end].is_ascii_digit() {
             end += 1;
@@ -383,6 +383,61 @@ impl<'s> Lexer<'s> {
             let value = text.parse::<i64>().map_err(|_| self.err(format!("integer literal `{text}` is out of range"), lo, end))?;
             self.push(Tok::Int(value), lo, tokens);
         }
+        Ok(())
+    }
+
+    /// `0x1F`: hexadecimal integer, same i64 range as decimal literals.
+    fn hex_number(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        let mut end = self.pos + 2;
+        let digits_start = end;
+        while end < self.bytes.len() && self.bytes[end].is_ascii_hexdigit() {
+            end += 1;
+        }
+        if end == digits_start {
+            return Err(self.err("hex literal needs at least one digit after `0x`", lo, end));
+        }
+        let text = &self.src[lo..end];
+        self.pos = end;
+        let value = i64::from_str_radix(&text[2..], 16)
+            .map_err(|_| self.err(format!("integer literal `{text}` is out of range"), lo, end))?;
+        self.push(Tok::Int(value), lo, tokens);
+        Ok(())
+    }
+
+    /// `'a'`: a single code point, with the same escape set as strings
+    /// plus `\'`; a raw `"` is allowed.
+    fn char_lit(&mut self, lo: usize, tokens: &mut Vec<Token>) -> KResult<()> {
+        self.pos += 1;
+        let value = if self.peek() == b'\\' {
+            self.pos += 1;
+            if self.pos >= self.bytes.len() {
+                return Err(Diag::incomplete("unterminated char literal", self.span(lo, self.pos)));
+            }
+            let escape = self.src[self.pos..].chars().next().expect("char boundary");
+            self.pos += escape.len_utf8();
+            match escape {
+                'n' => '\n',
+                't' => '\t',
+                'r' => '\r',
+                '0' => '\0',
+                '\\' => '\\',
+                '\'' => '\'',
+                '"' => '"',
+                other => return Err(self.err(format!("unknown char escape `\\{other}`"), lo, self.pos)),
+            }
+        } else {
+            if self.pos >= self.bytes.len() {
+                return Err(Diag::incomplete("unterminated char literal", self.span(lo, self.pos)));
+            }
+            let c = self.src[self.pos..].chars().next().expect("char boundary");
+            self.pos += c.len_utf8();
+            c
+        };
+        if self.peek() != b'\'' {
+            return Err(self.err("char literal must contain exactly one character", lo, self.pos.max(lo + 1)));
+        }
+        self.pos += 1;
+        self.push(Tok::Char(value), lo, tokens);
         Ok(())
     }
 
@@ -620,12 +675,6 @@ impl<'s> Lexer<'s> {
             self.push(Tok::Eof, lo, tokens);
             return Ok(());
         }
-        if b == b'-' && self.peek2() == b'-' {
-            // `--` starts a comment even mid-expression (`a - -b` must be
-            // written `a - (-b)`).
-            self.line_comment();
-            return self.skip_trivia();
-        }
         if b.is_ascii_digit() {
             return self.number(lo, tokens);
         }
@@ -634,6 +683,9 @@ impl<'s> Lexer<'s> {
         }
         if b == b'"' {
             return self.string(lo, tokens);
+        }
+        if b == b'\'' {
+            return self.char_lit(lo, tokens);
         }
         if b == b'#' {
             return self.builtin(lo, tokens);

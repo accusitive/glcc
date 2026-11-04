@@ -12,7 +12,7 @@ use fern_repl::{Repl, input_incomplete, is_definition};
 #[test]
 fn defines_and_calls_a_function() {
     let mut repl = Repl::new();
-    let sig = repl.define("fun twice(x : Int) : Int = x * 2").expect("defines");
+    let sig = repl.define("fn twice(x) : Int -> Int = x * 2").expect("defines");
     assert_eq!(sig, vec!["twice : Int -> Int"]);
     assert_eq!(repl.eval_expr("twice(21)").expect("runs"), "42");
 }
@@ -20,8 +20,8 @@ fn defines_and_calls_a_function() {
 #[test]
 fn a_later_definition_wins() {
     let mut repl = Repl::new();
-    repl.define("fun f(x : Int) : Int = x + 1").expect("defines");
-    repl.define("fun f(x : Int) : Int = x * 10").expect("redefines");
+    repl.define("fn f(x) : Int -> Int = x + 1").expect("defines");
+    repl.define("fn f(x) : Int -> Int = x * 10").expect("redefines");
     assert_eq!(repl.eval_expr("f(4)").expect("runs"), "40");
 }
 
@@ -35,8 +35,8 @@ fn let_values_persist() {
 #[test]
 fn a_failed_definition_rolls_back() {
     let mut repl = Repl::new();
-    repl.define("fun good(x : Int) : Int = x + 1").expect("defines");
-    let err = repl.define("fun bad(x : Int) : Int = x + true").expect_err("rejects");
+    repl.define("fn good(x) : Int -> Int = x + 1").expect("defines");
+    let err = repl.define("fn bad(x) : Int -> Int = x + true").expect_err("rejects");
     assert!(err[0].msg.contains("Bool"), "{:?}", err[0].msg);
     assert_eq!(repl.eval_expr("good(41)").expect("still works"), "42");
 }
@@ -44,37 +44,37 @@ fn a_failed_definition_rolls_back() {
 #[test]
 fn adt_match_and_recursion() {
     let mut repl = Repl::new();
-    repl.define("data Color = Red | Green | Blue").expect("data");
-    repl.define("fun to_int(c : Color) : Int = match c { case Red => 0 case Green => 1 case Blue => 2 }")
+    repl.define("type Color = | Red | Green | Blue").expect("data");
+    repl.define("fn to_int(c) : Color -> Int = match c { case Red => 0 case Green => 1 case Blue => 2 }")
         .expect("matches");
     assert_eq!(repl.eval_expr("to_int(Green)").expect("runs"), "1");
 
-    repl.define("fun fac(n : Int) : Int = if n == 0 then 1 else n * fac(n - 1)").expect("recursion");
+    repl.define("fn fac(n) : Int -> Int = if n == 0 then 1 else n * fac(n - 1)").expect("recursion");
     assert_eq!(repl.eval_expr("fac(6)").expect("runs"), "720");
 }
 
 #[test]
 fn polymorphic_signature_uses_letters() {
     let mut repl = Repl::new();
-    let sig = repl.define("fun id(x : a) : a = x").expect("defines");
-    assert!(sig[0].contains("forall a"), "{sig:?}");
+    let sig = repl.define("fn id(x) : for<A> A -> A = x").expect("defines");
+    assert!(sig[0].contains("for<a>"), "{sig:?}");
     assert!(!sig[0].contains("t$"), "{sig:?}");
 }
 
 #[test]
 fn closures_and_higher_order_functions() {
     let mut repl = Repl::new();
-    repl.define("fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, rest) => x + sum(rest) }")
+    repl.define("fn sum(xs) : List<Int> -> Int = match xs { case Nil => 0 case Cons(x, rest) => x + sum(rest) }")
         .expect("defines");
-    repl.define("fun map(f : a -> b, xs : List a) : List b = match xs { case Nil => Nil case Cons(x, rest) => Cons(f(x), map(f, rest)) }")
+    repl.define("fn map(f, xs) : for<A, B> (A -> B) -> List<A> -> List<B> = match xs { case Nil => Nil case Cons(x, rest) => Cons(f(x), map(f, rest)) }")
         .expect("defines");
-    assert_eq!(repl.eval_expr("sum(map((x) -> x * 2, [1, 2, 3]))").expect("runs"), "12");
+    assert_eq!(repl.eval_expr("sum(map(|x| x * 2, [1, 2, 3]))").expect("runs"), "12");
 }
 
 #[test]
 fn clear_forgets_definitions() {
     let mut repl = Repl::new();
-    repl.define("fun f(x : Int) : Int = x").expect("defines");
+    repl.define("fn f(x) : Int -> Int = x").expect("defines");
     repl.clear();
     let err = repl.eval_expr("f(1)").expect_err("f is gone");
     assert!(err[0].msg.contains("cannot find"), "{:?}", err[0].msg);
@@ -85,7 +85,7 @@ fn string_literals_evaluate() {
     let mut repl = Repl::new();
     assert_eq!(repl.eval_expr("\"hello\"").expect("runs"), "hello");
     assert_eq!(repl.eval_expr("\"a\\nb\"").expect("runs"), "a\nb");
-    repl.define("fun greeting(name : String) : String = name").expect("defines");
+    repl.define("fn greeting(name) : String -> String = name").expect("defines");
     assert_eq!(repl.eval_expr("greeting(\"fern\")").expect("runs"), "fern");
 }
 
@@ -122,7 +122,7 @@ fn shell_commands_work_in_definitions() {
     let sig = repl.define("let shell_ok = $ true").expect("defines a command value");
     assert_eq!(sig, vec!["shell_ok : Bool"]);
     assert_eq!(repl.eval_expr("shell_ok").expect("runs"), "true");
-    repl.define("fun upper(s : String) : String = $(printf \"%s\" ${s} | tr a-z A-Z)")
+    repl.define("fn upper(s) : String -> String = $(printf \"%s\" ${s} | tr a-z A-Z)")
         .expect("defines a capture");
     assert_eq!(repl.eval_expr("upper(\"abc\")").expect("runs"), "ABC");
 }
@@ -140,31 +140,33 @@ fn incomplete_shell_input_is_recognized() {
     assert!(!input_incomplete("$ true && $ false"));
     assert!(!input_incomplete(""));
     assert!(!input_incomplete("   \n"));
-    assert!(!input_incomplete("-- just a comment"));
+    assert!(!input_incomplete("// just a comment"));
 }
 
 #[test]
 fn classifies_input_for_the_driver() {
-    assert!(is_definition("fun f(x : Int) : Int = x"));
+    assert!(is_definition("fn f(x) : Int -> Int = x"));
+    assert!(is_definition("async fn f(x) : Int -> Int = x"));
+    assert!(is_definition("type Color = | Red | Green | Blue"));
     assert!(is_definition("let a = 1"));
     assert!(!is_definition("1 + 2"));
-    assert!(input_incomplete("fun f(x : Int) : Int = {"));
-    assert!(!input_incomplete("fun f(x : Int) : Int = x"));
+    assert!(input_incomplete("fn f(x) : Int -> Int = {"));
+    assert!(!input_incomplete("fn f(x) : Int -> Int = x"));
 }
 
 #[test]
 fn redefining_after_an_evaluation_uses_the_new_body() {
     let mut repl = Repl::new();
-    repl.define("fun f(x : Int) : Int = x + 1").expect("defines");
+    repl.define("fn f(x) : Int -> Int = x + 1").expect("defines");
     assert_eq!(repl.eval_expr("f(1)").expect("runs"), "2");
-    repl.define("fun f(x : Int) : Int = x + 2").expect("redefines");
+    repl.define("fn f(x) : Int -> Int = x + 2").expect("redefines");
     assert_eq!(repl.eval_expr("f(1)").expect("runs the new body"), "3");
 }
 
 #[test]
 fn new_monomorphizations_work_across_evaluations() {
     let mut repl = Repl::new();
-    repl.define("fun id(x : a) : a = x").expect("defines");
+    repl.define("fn id(x) : for<A> A -> A = x").expect("defines");
     assert_eq!(repl.eval_expr("id(1)").expect("runs"), "1");
     assert_eq!(repl.eval_expr("id(true)").expect("runs"), "true");
 }
@@ -174,7 +176,7 @@ fn a_heavy_library_is_checked_and_lowered_incrementally() {
     let mut repl = Repl::new();
     let mut library = String::new();
     for i in 0..150 {
-        library.push_str(&format!("fun f{i}(x : Int) : Int = x + {i}\n"));
+        library.push_str(&format!("fn f{i}(x) : Int -> Int = x + {i}\n"));
     }
     repl.define(&library).expect("defines a library");
 
@@ -193,7 +195,7 @@ fn imports_load_a_module_and_expose_qualified_names() {
     let dir = std::env::temp_dir().join(format!("fern-repl-modules-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
-    std::fs::write(dir.join("math.fern"), "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 0\n").expect("write math");
+    std::fs::write(dir.join("math.fern"), "fn double(x) : Int -> Int = x * 2\nfn origin() : -> Int = 0\n").expect("write math");
 
     let mut repl = Repl::new();
     repl.set_module_root(&dir);
@@ -217,14 +219,14 @@ fn reload_picks_up_changed_module_bodies() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir");
     let module = dir.join("math.fern");
-    std::fs::write(&module, "fun double(x : Int) : Int = x * 2\n").expect("write math");
+    std::fs::write(&module, "fn double(x) : Int -> Int = x * 2\n").expect("write math");
 
     let mut repl = Repl::new();
     repl.set_module_root(&dir);
     repl.define("import math").expect("import");
     assert_eq!(repl.eval_expr("math.double(21)").expect("runs"), "42");
 
-    std::fs::write(&module, "fun double(x : Int) : Int = x * 3\n").expect("rewrite math");
+    std::fs::write(&module, "fn double(x) : Int -> Int = x * 3\n").expect("rewrite math");
     repl.reload().expect("reload");
     assert_eq!(repl.eval_expr("math.double(14)").expect("runs"), "42");
     let _ = std::fs::remove_dir_all(&dir);
@@ -234,5 +236,5 @@ fn reload_picks_up_changed_module_bodies() {
 fn the_repl_can_import_the_bundled_std() {
     let mut repl = Repl::new();
     repl.define("import std::foldable").expect("import std");
-    assert_eq!(repl.eval_expr("fold((h, b) -> h + b, 0, [1, 2, 3])").expect("runs"), "6");
+    assert_eq!(repl.eval_expr("fold(|h, b| h + b, 0, [1, 2, 3])").expect("runs"), "6");
 }

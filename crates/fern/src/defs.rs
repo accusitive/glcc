@@ -120,7 +120,9 @@ pub struct Bound {
 #[derive(Debug, Clone)]
 pub struct ImplMethod {
     pub name: String,
-    pub params: Vec<ast::Pat>,
+    /// The parameter list as one pattern matched against the method's
+    /// domain.
+    pub param: ast::Pat,
     pub body: ast::Expr,
     pub span: Span,
 }
@@ -129,8 +131,8 @@ pub struct ImplMethod {
 pub struct InstanceDef {
     pub span: Span,
     pub class_id: ClassId,
-    /// Every free type parameter of the head and the constraints, in
-    /// first-use order, with kinds resolved.
+    /// The `instance<A, B>` binders, in declaration order, with kinds
+    /// resolved.
     pub generics: Vec<(String, Kind)>,
     /// The class's parameter instantiation: instantiating the class
     /// sets parameter `i` to this type. Classes have at least one
@@ -184,7 +186,8 @@ pub struct ExternDef {
     pub span: Span,
     pub name: String,
     pub symbol: String,
-    /// Domain types of the arity chain, outermost first.
+    /// C argument types, outermost first. A tuple domain is the C
+    /// calling convention: `(A, B) -> C` takes two arguments.
     pub params: Vec<Ty>,
     pub ret: Ty,
     /// The whole `params -> ret` type, as written.
@@ -396,6 +399,9 @@ struct ResolveCtx {
     arity: HashMap<String, usize>,
     /// Kind variables currently in item scope, one per type parameter.
     scope: HashMap<String, RawKind>,
+    /// `for<...>` binders bound while resolving the current annotation,
+    /// in binding order: these become the scheme's variables.
+    for_vars: Vec<(String, RawKind)>,
 }
 
 impl ResolveCtx {
@@ -454,7 +460,7 @@ impl ResolveCtx {
                 } else if self.kinds_of.contains_key(name) {
                     Ok(Ty::named0(name))
                 } else {
-                    Err(Diag::new(format!("cannot find type `{name}`"), node.span))
+                    Err(Diag::new(format!("cannot find type `{name}`; type variables must be bound with `for<{name}> ...`"), node.span))
                 }
             }
             ast::TyExprKind::Paren(inner) => self.resolve(inner),
@@ -474,10 +480,31 @@ impl ResolveCtx {
                 self.star_check(&dst, b.span)?;
                 Ok(Ty::arrow(src, dst))
             }
-            ast::TyExprKind::App(f, a) => {
+            ast::TyExprKind::For { params, ty } => {
+                let mut bound = Vec::new();
+                for name in params {
+                    if self.scope.contains_key(name) {
+                        return Err(Diag::new(format!("type parameter `{name}` is already bound in scope"), node.span));
+                    }
+                    let k = self.kinds.var();
+                    self.scope.insert(name.clone(), k.clone());
+                    self.for_vars.push((name.clone(), k));
+                    bound.push(name.clone());
+                }
+                let out = self.resolve(ty)?;
+                for name in &bound {
+                    self.scope.remove(name);
+                }
+                Ok(out)
+            }
+            ast::TyExprKind::App(f, args) => {
                 let head = self.resolve(f)?;
-                let arg = self.resolve(a)?;
-                self.apply_ty(&head, &arg, node.span)
+                let mut cur = head;
+                for arg in args {
+                    let arg = self.resolve(arg)?;
+                    cur = self.apply_ty(&cur, &arg, node.span)?;
+                }
+                Ok(cur)
             }
         }
     }
@@ -500,20 +527,11 @@ impl ResolveCtx {
     }
 }
 
-fn split_chain(node: &ast::TyExpr) -> (&ast::TyExpr, Vec<&ast::TyExpr>) {
-    let mut args = Vec::new();
-    let mut head = node;
-    while let ast::TyExprKind::App(f, a) = &head.kind {
-        args.push(&**a);
-        head = &**f;
-    }
-    args.reverse();
-    (head, args)
-}
-
-/// Names a bound introduces: `when C a b`.
+/// Names a bound introduces: `when Eq<A>`.
 fn parse_bound(ctx: &mut ResolveCtx, defs: &Defs, node: &ast::TyExpr) -> KResult<(ClassId, Vec<Ty>)> {
-    let (head, args) = split_chain(node);
+    let ast::TyExprKind::App(head, args) = &node.kind else {
+        return Err(Diag::new("expected a class application like `Eq<A>` in this bound", node.span));
+    };
     let name = match &head.kind {
         ast::TyExprKind::Name(name) => name.clone(),
         _ => return Err(Diag::new("expected a class name in this bound", head.span)),
@@ -544,32 +562,34 @@ fn parse_bound(ctx: &mut ResolveCtx, defs: &Defs, node: &ast::TyExpr) -> KResult
     Ok((class_id, parts))
 }
 
-/// The class-argument list of an instance head. Unary classes take the
-/// whole written type; n-ary classes take an application chain of n
-/// arguments.
-fn instance_args(ctx: &mut ResolveCtx, defs: &Defs, class_id: ClassId, node: &ast::TyExpr) -> KResult<Vec<Ty>> {
-    let class = &defs.classes[class_id.index()];
-    let expected = class.params.len();
-    if expected == 1 {
-        return Ok(vec![ctx.resolve(node)?]);
+/// `(A, B) -> C` is a parameter list everywhere: any tuple domain of an
+/// arrow spreads into a curried chain, so function types are curried
+/// uniformly with call syntax and higher-order composition. An empty
+/// tuple domain (`-> C`, or `Unit -> C`) stays a unit-taking function:
+/// the thunk type of a nullary closure.
+fn spread_signature(ty: Ty) -> Ty {
+    match ty {
+        Ty::Arrow(domain, ret) => {
+            let ret = spread_signature(*ret);
+            match *domain {
+                Ty::Tuple(domains) if domains.len() > 1 => domains
+                    .into_iter()
+                    .map(spread_signature)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .fold(ret, |acc, dom| Ty::arrow(dom, acc)),
+                domain => Ty::arrow(spread_signature(domain), ret),
+            }
+        }
+        Ty::Tuple(items) => Ty::Tuple(items.into_iter().map(spread_signature).collect()),
+        Ty::Named { name, args } => Ty::Named {
+            name,
+            args: args.into_iter().map(spread_signature).collect(),
+        },
+        Ty::App(head, arg) => Ty::app(spread_signature(*head), spread_signature(*arg)),
+        other => other,
     }
-    let (head, args) = split_chain(node);
-    if args.len() + 1 != expected {
-        return Err(Diag::new(
-            format!("class `{}` takes {expected} type arguments, but this instance head has {}", class.name, args.len() + 1),
-            node.span,
-        ));
-    }
-    let mut parts = Vec::with_capacity(expected);
-    parts.push(ctx.resolve(head)?);
-    for arg in args {
-        parts.push(ctx.resolve(arg)?);
-    }
-    Ok(parts)
-}
-
-fn free_type_vars(node: &ast::TyExpr, kinds_of: &HashMap<String, RawKind>) -> Vec<String> {
-    node.free_tyvars().into_iter().filter(|name| !kinds_of.contains_key(name)).collect()
 }
 
 fn fresh_head(kinds: &mut Kinds, params: usize) -> RawKind {
@@ -588,8 +608,7 @@ fn fresh_head(kinds: &mut Kinds, params: usize) -> RawKind {
 
 /// Function and value names become object-file symbols, a namespace
 /// shared with the runtime (`rt/gc.c`), whose internals are all
-/// `fern_`-prefixed. Constructors cannot collide: their names must be
-/// capitalized.
+/// `fern_`-prefixed.
 fn check_reserved(name: &str, span: Span) -> KResult<()> {
     if name.starts_with("fern_") {
         return Err(Diag::new(format!("`{name}` is reserved: `fern_` names belong to the runtime"), span));
@@ -643,7 +662,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     let mut seen_names: HashSet<String> = HashSet::new();
     for item in &program.items {
         match &item.kind {
-            ast::ItemKind::Data(d) => {
+            ast::ItemKind::Type(d) => {
                 if Ty::intros().contains(&d.name.as_str()) {
                     return Err(Diag::new(format!("`{}` is a built-in type", d.name), d.span));
                 }
@@ -716,7 +735,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 });
                 defs.extern_ids.insert(e.name.clone(), id);
             }
-            ast::ItemKind::Fun(f) => {
+            ast::ItemKind::Fn(f) => {
                 check_reserved(&f.name, f.span)?;
                 if !seen_names.insert(f.name.clone()) {
                     return Err(Diag::new(format!("`{}` is already defined", f.name), f.span));
@@ -725,14 +744,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 defs.fns.push(FnDef {
                     span: f.span,
                     name: f.name.clone(),
-                    params: f
-                        .params
-                        .iter()
-                        .map(|p| FnParamDef {
-                            pat: p.pat.clone(),
-                            ty: Ty::unit_ty(),
-                        })
-                        .collect(),
+                    params: Vec::new(),
                     ret: Ty::unit_ty(),
                     body: f.body.clone(),
                     scheme: None,
@@ -764,6 +776,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         kinds_of,
         arity,
         scope: HashMap::new(),
+        for_vars: Vec::new(),
     };
 
     // Data and class signatures resolve first, so instance heads see
@@ -771,16 +784,13 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     let mut method_var_kinds: HashMap<ClassId, Vec<Vec<(String, RawKind)>>> = HashMap::new();
     for item in &program.items {
         match &item.kind {
-            ast::ItemKind::Data(d) => {
+            ast::ItemKind::Type(d) => {
                 let mut scope = HashMap::new();
                 for (i, p) in d.params.iter().enumerate() {
                     scope.insert(p.clone(), ctx.peel_param(&d.name, i, d.span)?);
                 }
                 ctx.scope = scope;
                 let data_id = defs.data_ids[&d.name];
-                if d.ctors.iter().any(|c| c.field_names.is_some()) && d.ctors.len() != 1 {
-                    return Err(Diag::new(format!("record type `{}` must have exactly one constructor", d.name), d.span));
-                }
                 let mut ctors = Vec::with_capacity(d.ctors.len());
                 for ctor in &d.ctors {
                     let mut args = Vec::with_capacity(ctor.fields.len());
@@ -806,23 +816,15 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                 }
                 let mut vars_per_method = Vec::with_capacity(c.methods.len());
                 for (mi, m) in c.methods.iter().enumerate() {
-                    let free = free_type_vars(&m.ty, &ctx.kinds_of);
-                    let mut vars = Vec::with_capacity(free.len());
-                    for name in free {
-                        if !ctx.scope.contains_key(&name) {
-                            let k = ctx.kinds.var();
-                            ctx.scope.insert(name.clone(), k);
-                        }
-                        vars.push((name.clone(), ctx.scope[&name].clone()));
-                    }
-                    let ty = ctx.resolve(&m.ty)?;
+                    ctx.for_vars.clear();
+                    let ty = spread_signature(ctx.resolve(&m.ty)?);
                     ctx.star_check(&ty, m.ty.span)?;
                     defs.classes[class_id.index()].methods[mi].ty = ty;
-                    vars_per_method.push(vars);
+                    vars_per_method.push(std::mem::take(&mut ctx.for_vars));
                 }
                 method_var_kinds.insert(class_id, vars_per_method);
             }
-            ast::ItemKind::Instance(..) | ast::ItemKind::Extern(..) | ast::ItemKind::Fun(..) | ast::ItemKind::Let(..) | ast::ItemKind::Import(..) | ast::ItemKind::Use(..) => {}
+            ast::ItemKind::Instance(..) | ast::ItemKind::Extern(..) | ast::ItemKind::Fn(..) | ast::ItemKind::Let(..) | ast::ItemKind::Import(..) | ast::ItemKind::Use(..) => {}
         }
     }
 
@@ -833,66 +835,130 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
     let mut value_signature_vars: Vec<Vec<(String, RawKind)>> = vec![Vec::new(); defs.values.len()];
     for item in &program.items {
         match &item.kind {
-            ast::ItemKind::Fun(f) => {
+            ast::ItemKind::Fn(f) => {
                 let id = defs.fn_ids[&f.name];
-                let mut free_names = Vec::new();
-                for param in &f.params {
-                    for name in free_type_vars(&param.ty, &ctx.kinds_of) {
-                        if !free_names.contains(&name) {
-                            free_names.push(name);
-                        }
+                ctx.scope = HashMap::new();
+                ctx.for_vars.clear();
+                // `(A, B) -> C` is a parameter list. With n>1 patterns the
+                // annotation spreads fully into a curried chain (uniform
+                // with every other type position); with one pattern a
+                // tuple domain stays one tuple argument; with none the fn
+                // is a plain value of the return type.
+                let bare = ctx.resolve(&f.ann)?;
+                let pats: &[ast::Pat] = match &f.param {
+                    ast::Pat::Tuple(pats) => pats,
+                    pat => std::slice::from_ref(pat),
+                };
+                let (params, fn_ty, ret) = if pats.len() >= 2 {
+                    // Tuple form `((A, B) -> C, A, B) -> C`: the top tuple
+                    // is the parameter list and the codomain stays as
+                    // written (it may itself be a function type). Chain
+                    // form `d1 -> d2 -> ret` splits across all arrows.
+                    let (param_tys, ret) = match &bare {
+                        Ty::Arrow(domain, ret) => match &**domain {
+                            Ty::Tuple(ds) if ds.len() == pats.len() => {
+                                (ds.iter().map(|d| spread_signature(d.clone())).collect::<Vec<_>>(), spread_signature((**ret).clone()))
+                            }
+                            _ => {
+                                let (pt, r) = split_arrows(&spread_signature(bare.clone()));
+                                (pt, r)
+                            }
+                        },
+                        _ => unreachable!("the parser requires an arrow annotation"),
+                    };
+                    if pats.len() != param_tys.len() {
+                        return Err(Diag::new(
+                            format!(
+                                "the parameter list binds {} parameter{}, but the annotation `{}` takes {}",
+                                pats.len(),
+                                if pats.len() == 1 { "" } else { "s" },
+                                f.ann.display(),
+                                param_tys.len()
+                            ),
+                            f.ann.span,
+                        ));
                     }
-                }
-                for name in free_type_vars(&f.ret, &ctx.kinds_of) {
-                    if !free_names.contains(&name) {
-                        free_names.push(name);
+                    for d in &param_tys {
+                        ctx.star_check(d, f.ann.span)?;
                     }
-                }
-                let mut scope = HashMap::new();
-                let mut vars = Vec::with_capacity(free_names.len());
-                for name in free_names {
-                    let kind = ctx.kinds.var();
-                    scope.insert(name.clone(), kind.clone());
-                    vars.push((name, kind));
-                }
-                ctx.scope = scope;
-                let mut param_tys = Vec::with_capacity(f.params.len());
-                for param in &f.params {
-                    let ty = ctx.resolve(&param.ty)?;
-                    ctx.star_check(&ty, param.ty.span)?;
-                    param_tys.push(ty);
-                }
-                let ret = ctx.resolve(&f.ret)?;
-                ctx.star_check(&ret, f.ret.span)?;
-                let call_ret = if f.is_async { Ty::future_ty(ret.clone()) } else { ret.clone() };
-                let fn_ty = param_tys.iter().rev().fold(call_ret, |acc, ty| Ty::arrow(ty.clone(), acc));
+                    let call_ret = if f.is_async { Ty::future_ty(ret.clone()) } else { ret.clone() };
+                    let params: Vec<FnParamDef> = pats
+                        .iter()
+                        .zip(&param_tys)
+                        .map(|(p, d)| FnParamDef {
+                            pat: p.clone(),
+                            ty: d.clone(),
+                        })
+                        .collect();
+                    let ty = param_tys.iter().rev().fold(call_ret, |acc, d| Ty::arrow(d.clone(), acc));
+                    (params, ty, ret)
+                } else if pats.len() == 1 {
+                    let (dom_expr, ret) = match bare {
+                        Ty::Arrow(domain, ret) => (*domain, *ret),
+                        _ => unreachable!("the parser requires an arrow annotation"),
+                    };
+                    let ret = spread_signature(ret);
+                    let call_ret = if f.is_async { Ty::future_ty(ret.clone()) } else { ret.clone() };
+                    let domain = match dom_expr {
+                        Ty::Tuple(domains) if domains.len() > 1 => Ty::Tuple(domains),
+                        domain => spread_signature(domain),
+                    };
+                    ctx.star_check(&domain, f.ann.span)?;
+                    (
+                        vec![FnParamDef {
+                            pat: pats[0].clone(),
+                            ty: domain.clone(),
+                        }],
+                        Ty::arrow(domain, call_ret),
+                        ret,
+                    )
+                } else {
+                    let (dom_expr, ret) = match bare {
+                        Ty::Arrow(domain, ret) => (*domain, *ret),
+                        _ => unreachable!("the parser requires an arrow annotation"),
+                    };
+                    let ret = spread_signature(ret);
+                    let call_ret = if f.is_async { Ty::future_ty(ret.clone()) } else { ret.clone() };
+                    // `fn answer() : -> Int` is a plain value of the
+                    // return type.
+                    if !dom_expr.is_unit() {
+                        return Err(Diag::new(
+                            format!(
+                                "the parameter list binds 0 parameters, but the annotation `{}` takes {}",
+                                f.ann.display(),
+                                match &dom_expr {
+                                    Ty::Tuple(domains) => domains.len(),
+                                    _ => 1,
+                                }
+                            ),
+                            f.ann.span,
+                        ));
+                    }
+                    (Vec::new(), call_ret, ret)
+                };
                 let def = &mut defs.fns[id.index()];
-                for (param, ty) in def.params.iter_mut().zip(param_tys) {
-                    param.ty = ty;
-                }
+                def.params = params;
                 def.ret = ret;
-                def.scheme = Some(Scheme { vars: Vec::new(), ty: fn_ty });
-                fn_signature_vars[id.index()] = vars;
+                def.scheme = Some(Scheme {
+                    vars: Vec::new(),
+                    ty: fn_ty,
+                });
+                fn_signature_vars[id.index()] = std::mem::take(&mut ctx.for_vars);
             }
             ast::ItemKind::Let(v) => {
                 let Some(ty_expr) = &v.ty else {
                     continue;
                 };
                 let id = defs.value_ids[&v.name];
-                let mut scope = HashMap::new();
-                let mut vars = Vec::new();
-                for name in free_type_vars(ty_expr, &ctx.kinds_of) {
-                    let kind = ctx.kinds.var();
-                    scope.insert(name.clone(), kind.clone());
-                    vars.push((name, kind));
-                }
-                ctx.scope = scope;
+                ctx.scope = HashMap::new();
+                ctx.for_vars.clear();
                 let ty = ctx.resolve(ty_expr)?;
                 ctx.star_check(&ty, ty_expr.span)?;
+                let ty = spread_signature(ty);
                 let def = &mut defs.values[id.index()];
                 def.ty = Some(ty.clone());
                 def.scheme = Some(Scheme { vars: Vec::new(), ty });
-                value_signature_vars[id.index()] = vars;
+                value_signature_vars[id.index()] = std::mem::take(&mut ctx.for_vars);
             }
             _ => {}
         }
@@ -906,11 +972,13 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         };
         let id = defs.extern_ids[&e.name];
         ctx.scope = HashMap::new();
+        ctx.for_vars.clear();
         let ty = ctx.resolve(&e.ty)?;
         ctx.star_check(&ty, e.ty.span)?;
         if !ty.is_concrete() {
             return Err(Diag::new("extern signatures must be monomorphic", e.ty.span));
         }
+        let ty = spread_signature(ty);
         let (params, ret) = split_arrows(&ty);
         defs.externs[id.index()].params = params;
         defs.externs[id.index()].ret = ret;
@@ -925,27 +993,32 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
         let Some(class_id) = defs.class_by_name(&inst.class) else {
             return Err(Diag::new(format!("cannot find class `{}`", inst.class), inst.span));
         };
-
-        let mut free_names: Vec<String> = Vec::new();
-        for node in std::iter::once(&inst.self_ty).chain(inst.ctx.iter()) {
-            for name in free_type_vars(node, &ctx.kinds_of) {
-                if !free_names.contains(&name) {
-                    free_names.push(name);
-                }
-            }
+        let expected = defs.classes[class_id.index()].params.len();
+        if inst.args.len() != expected {
+            return Err(Diag::new(
+                format!(
+                    "class `{}` takes {expected} type argument{}, but this instance head has {}",
+                    inst.class,
+                    if expected == 1 { "" } else { "s" },
+                    inst.args.len()
+                ),
+                inst.span,
+            ));
         }
+
         let mut scope = HashMap::new();
-        let mut generics = Vec::with_capacity(free_names.len());
-        for name in free_names {
+        let mut generics = Vec::with_capacity(inst.params.len());
+        for name in &inst.params {
             let k = ctx.kinds.var();
             scope.insert(name.clone(), k.clone());
-            generics.push((name, k));
+            generics.push((name.clone(), k));
         }
         ctx.scope = scope;
 
-        let parts = instance_args(&mut ctx, &defs, class_id, &inst.self_ty)?;
-        for part in &parts {
-            if let Ty::Param(name) = part {
+        let mut parts = Vec::with_capacity(inst.args.len());
+        for arg in &inst.args {
+            let ty = ctx.resolve(arg)?;
+            if let Ty::Param(name) = &ty {
                 return Err(Diag::new(
                     format!(
                         "the instance head argument `{name}` is a bare type parameter; \
@@ -954,10 +1027,11 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
                     inst.span,
                 ));
             }
+            parts.push(ty);
         }
         if defs.instances.iter().any(|prev| prev.class_id == class_id && prev.args == parts) {
             let display = parts.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(" ");
-            return Err(Diag::new(format!("duplicate instance for `{} {display}`", inst.class), inst.span));
+            return Err(Diag::new(format!("duplicate instance for `{}<{display}>`", inst.class), inst.span));
         }
         let mut cur = ctx.kind_of_name(&inst.class, inst.span)?;
         for part in &parts {
@@ -981,7 +1055,7 @@ pub fn collect(program: &ast::Program) -> KResult<Defs> {
             .iter()
             .map(|m| ImplMethod {
                 name: m.name.clone(),
-                params: m.params.clone(),
+                param: m.param.clone(),
                 body: m.body.clone(),
                 span: m.span,
             })

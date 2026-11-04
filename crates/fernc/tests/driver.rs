@@ -118,19 +118,21 @@ fn run_linked(dir: &Path, object: &Path, input: Option<&str>) -> (String, i32) {
 }
 
 const PROGRAM: &str = r#"
-fun range(n : Int) : List Int = if n == 0 then Nil else Cons(n, range(n - 1))
-fun sum(xs : List Int) : Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }
-fun twice(f : a -> a, x : a) : a = f(f(x))
-fun inc(x : Int) : Int = x + 1
-fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)
+fn range(n) : Int -> List<Int> = if n == 0 then Nil else Cons(n, range(n - 1))
+fn sum(xs) : List<Int> -> Int = match xs { case Nil => 0 case Cons(x, xs) => x + sum(xs) }
+fn twice(f, x) : for<A> (A -> A, A) -> A = f(f(x))
+fn inc(x) : Int -> Int = x + 1
+fn fib(n) : Int -> Int = if n < 2 then n else fib(n - 1) + fib(n - 2)
 
-class Functor f { map : (a -> b) -> f a -> f b }
+class Functor<F> {
+    map: for<A, B> (A -> B) -> F<A> -> F<B>
+}
 
-instance Functor List {
+instance Functor<List> {
     map(f, xs) = match xs { case Nil => Nil case Cons(x, xs) => Cons(f(x), map(f, xs)) }
 }
 
-fun answer() : Int = sum(map(x -> x * 2, range(10))) + twice(inc, 0) + if eq([1], [1]) then 1 else 0
+fn answer() : -> Int = sum(map(|x| x * 2, range(10))) + twice(inc, 0) + if eq([1], [1]) then 1 else 0
 "#;
 
 #[test]
@@ -151,8 +153,8 @@ fn tail_calls_do_not_grow_the_native_stack() {
     if !have_cc() {
         return;
     }
-    let src = "fun sum(n : Int, acc : Int) : Int = if n == 0 then acc else sum(n - 1, acc + n)\n\
-               fun answer() : Int = sum(1000000, 0)\n";
+    let src = "fn sum(n, acc) : (Int, Int) -> Int = if n == 0 then acc else sum(n - 1, acc + n)\n\
+               fn answer() : -> Int = sum(1000000, 0)\n";
     let (dir, object) = run_fernc(src, "tail-calls", &[]);
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
@@ -176,15 +178,15 @@ fn optimized_recursive_data_match_lowers() {
     if !have_cc() {
         return;
     }
-    let src = "data Expr = Lit(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\
+    let src = "type Expr = | Lit(Int) | Add(Expr, Expr) | Mul(Expr, Expr)\n\
                \n\
-               fun eval(e : Expr) : Int = match e {\n\
+               fn eval(e) : Expr -> Int = match e {\n\
                    case Lit(n) => n\n\
                    case Add(a, b) => eval(a) + eval(b)\n\
                    case Mul(a, b) => eval(a) * eval(b)\n\
                }\n\
                \n\
-               fun answer() : Int = eval(Add(Lit(2), Mul(Lit(3), Lit(4))))\n";
+               fn answer() : -> Int = eval(Add(Lit(2), Mul(Lit(3), Lit(4))))\n";
     let (dir, object) = run_fernc(src, "opt-data-match", &["-O2"]);
     let (stdout, code) = link_and_run(&dir, &object);
     assert_eq!(code, 0, "program failed: {stdout}");
@@ -202,12 +204,12 @@ fn async_io_round_trips_a_file() {
     let src = format!(
         "import std::io\n\
          \n\
-         async fun roundtrip(p : String) : String = {{\n\
-         let _ = await io.write_file(p, \"hello native io\");\n\
-         await io.read_file(p)\n\
+         async fn roundtrip(p) : String -> String = {{\n\
+         let _ = io.write_file(p, \"hello native io\").await;\n\
+         io.read_file(p).await\n\
          }}\n\
          \n\
-         fun answer() : Int = if block_on_string(roundtrip(\"{path}\")) == \"hello native io\" then 1 else 0\n"
+         fn answer() : -> Int = if block_on_string(roundtrip(\"{path}\")) == \"hello native io\" then 1 else 0\n"
     );
     let (dir, object) = run_fernc(&src, "async-io", &[]);
     assert!(object.exists(), "no object written");
@@ -223,8 +225,8 @@ fn async_read_line_reads_piped_stdin() {
         return;
     }
     let src = "import std::io\n\
-               async fun line() : String = await io.read_line()\n\
-               fun answer() : Int = if block_on_string(line()) == \"hello stdin\" then 1 else 0\n";
+               async fn line() : -> String = io.read_line().await\n\
+               fn answer() : -> Int = if block_on_string(line()) == \"hello stdin\" then 1 else 0\n";
     let (dir, object) = run_fernc(src, "async-stdin-line", &[]);
     let (stdout, code) = link_and_run_with_stdin(&dir, &object, "hello stdin\n");
     assert_eq!(code, 0, "program failed: {stdout}");
@@ -237,15 +239,15 @@ fn async_read_stdin_reads_piped_input() {
         return;
     }
     let src = "import std::io\n\
-               async fun all() : String = await io.read_stdin(64)\n\
-               fun answer() : Int = if block_on_string(all()) == \"hello stdin\" then 1 else 0\n";
+               async fn all() : -> String = io.read_stdin(64).await\n\
+               fn answer() : -> Int = if block_on_string(all()) == \"hello stdin\" then 1 else 0\n";
     let (dir, object) = run_fernc(src, "async-stdin-all", &[]);
     let (stdout, code) = link_and_run_with_stdin(&dir, &object, "hello stdin");
     assert_eq!(code, 0, "program failed: {stdout}");
     assert_eq!(stdout, "1\n");
 }
 
-const FIB: &str = "fun fib(n : Int) : Int = if n < 2 then n else fib(n - 1) + fib(n - 2)\n";
+const FIB: &str = "fn fib(n) : Int -> Int = if n < 2 then n else fib(n - 1) + fib(n - 2)\n";
 
 #[test]
 fn emit_mir_writes_the_module_to_stdout() {
@@ -291,7 +293,7 @@ fn emit_full_mir_honors_the_output_path() {
 fn emit_check_stops_before_object_emission() {
     let dir = temp_dir("check");
     let fern_path = dir.join("main.fern");
-    fs::write(&fern_path, "fun main() : Int = 1\n").expect("write source");
+    fs::write(&fern_path, "fn main() : -> Int = 1\n").expect("write source");
     let out = Command::new(FERNC).arg(&fern_path).arg("--emit=check").output().expect("run fernc");
     assert!(out.status.success());
     assert!(!dir.join("main.o").exists());
@@ -308,20 +310,20 @@ fn try_and_records_link_and_run() {
         &source,
         "import std::result\n\
          \n\
-         data Failure = Failure { message : String }\n\
-         data Box = Box { value : Int }\n\
+         type Failure = { message: String }\n\
+         type Box = { value: Int }\n\
          \n\
-         fun parse(ok : Bool) : result.Result Int Failure =\n\
+         fn parse(ok) : Bool -> result.Result<Int, Failure> =\n\
              if ok then result.Ok(3) else result.Err(Failure { message = \"bad\" })\n\
-         fun label(ok : Bool) : result.Result String Failure = {\n\
+         fn label(ok) : Bool -> result.Result<String, Failure> = {\n\
              let n = parse(ok)?;\n\
              result.Ok(concat(\"n=\", str_of_int(n)))\n\
          }\n\
-         fun nested(ok : Bool) : result.Result String Failure = {\n\
+         fn nested(ok) : Bool -> result.Result<String, Failure> = {\n\
              let s = label(ok)?;\n\
              result.Ok(s)\n\
          }\n\
-         fun answer() : Int = {\n\
+         fn answer() : -> Int = {\n\
              let b = Box { value = 4 };\n\
              (match nested(true) {\n\
                  case result.Ok(s) => if s == \"n=3\" then b.value else 0\n\
@@ -353,7 +355,7 @@ fn try_and_records_link_and_run() {
 fn type_errors_are_reported_with_a_location() {
     let dir = temp_dir("error");
     let fern_path = dir.join("main.fern");
-    fs::write(&fern_path, "fun main() : Int = 1 + true\n").expect("write source");
+    fs::write(&fern_path, "fn main() : -> Int = 1 + true\n").expect("write source");
     let out = Command::new(FERNC).arg(&fern_path).arg("-o").arg(object_path(&dir)).output().expect("run fernc");
     assert!(!out.status.success(), "expected a compile error");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -572,24 +574,24 @@ fn stdlib_modules_link_and_run() {
          import std::result\n\
          import std::string\n\
          \n\
-         fun use_result(r : result.Result Int String) : Int = result.unwrap_or(0, r)\n\
-         fun ext_len(p : String) : Int = match path.extension(p) {\n\
+         fn use_result(r) : result.Result<Int, String> -> Int = result.unwrap_or(0, r)\n\
+         fn ext_len(p) : String -> Int = match path.extension(p) {\n\
              case Nothing => 0\n\
              case Just(ext) => str_len(ext)\n\
          }\n\
-         fun answer() : Int = {\n\
+         fn answer() : -> Int = {\n\
              let xs = list.range(1, 6);\n\
-             let ys = list.map(x -> x * 2, list.filter(x -> x > 2, xs));\n\
+             let ys = list.map(|x| x * 2, list.filter(|x| x > 2, xs));\n\
              let repeated = iter.collect(iter.take(5, iter.repeat(7)));\n\
-             let flat = iter.collect(iter.take(5, iter.flat_map(x -> iter.range(0, x), iter.range(1, 10))));\n\
+             let flat = iter.collect(iter.take(5, iter.flat_map(|x| iter.range(0, x), iter.range(1, 10))));\n\
              let zipped = list.zip(list.range(0, 3), list.range(10, 20));\n\
-             let dropped = iter.collect(iter.take(2, iter.drop_while(x -> x < 5, iter.range(0, 10))));\n\
+             let dropped = iter.collect(iter.take(2, iter.drop_while(|x| x < 5, iter.range(0, 10))));\n\
              let p = path.join(\"examples/fern\", \"make/main.fern\");\n\
              let text = string.replace(\"world\", \"fern\", string.trim(\"  hello world  \"));\n\
              if list.contains(6, ys) && eq(list.sum(ys), 24) && eq(list.sum(repeated), 35)\n\
                 && eq(list.sum(flat), 2) && eq(list.length(zipped), 3) && eq(list.sum(dropped), 11)\n\
                 && eq(str_len(text), 10) && eq(ext_len(p), 4) && eq(path.basename(\"/\"), \"/\")\n\
-                && eq(option.unwrap_or_else(u -> 3, Nothing), 3)\n\
+                && eq(option.unwrap_or_else(|u| 3, Nothing), 3)\n\
                 && eq(use_result(option.to_result(\"bad\", Just(7))), 7) then 42 else 0\n\
          }\n",
     )
@@ -616,8 +618,8 @@ fn module_imports_link_and_run() {
     }
     let dir = temp_dir("modules");
     let main_path = dir.join("main.fern");
-    fs::write(&main_path, "import math\nfun answer() : Int = math.double(math.origin()) + 1\n").expect("write main");
-    fs::write(dir.join("math.fern"), "fun double(x : Int) : Int = x * 2\nfun origin() : Int = 20\n").expect("write math");
+    fs::write(&main_path, "import math\nfn answer() : -> Int = math.double(math.origin()) + 1\n").expect("write main");
+    fs::write(dir.join("math.fern"), "fn double(x) : Int -> Int = x * 2\nfn origin() : -> Int = 20\n").expect("write math");
     let object = object_path(&dir);
     let out = Command::new(FERNC).arg(&main_path).arg("-o").arg(&object).output().expect("run fernc");
     assert!(out.status.success(), "fernc failed:\n{}", String::from_utf8_lossy(&out.stderr));
@@ -634,13 +636,13 @@ fn same_named_modules_link_and_run() {
     let dir = temp_dir("module-names");
     let source = |n: i64| {
         format!(
-            "data Tree a = Leaf(a)\n\
-             fun make() : Tree Int = Leaf({n})\n\
-             fun get(t : Tree Int) : Int = match t {{ case Leaf(x) => x }}\n"
+            "type Tree<A> = | Leaf(A)\n\
+             fn make() : -> Tree<Int> = Leaf({n})\n\
+             fn get(t) : Tree<Int> -> Int = match t {{ case Leaf(x) => x }}\n"
         )
     };
     let main_path = dir.join("main.fern");
-    fs::write(&main_path, "import a\nimport b\nfun answer() : Int = a.get(a.make()) + b.get(b.make())\n").expect("write main");
+    fs::write(&main_path, "import a\nimport b\nfn answer() : -> Int = a.get(a.make()) + b.get(b.make())\n").expect("write main");
     fs::write(dir.join("a.fern"), source(20)).expect("write a");
     fs::write(dir.join("b.fern"), source(22)).expect("write b");
     let object = object_path(&dir);
