@@ -797,3 +797,35 @@ fn error_init_non_void_target() {
     let error = parse_module(module_text).expect_err("parse should fail");
     assert!(error.message.contains("must take no parameters and return void"), "{}", error.message);
 }
+
+#[test]
+fn vector_types_and_ops() {
+    let module = ok(
+        ".func @v sig=(ptr(i32)) -> i32\n\
+         .params %0:ptr(i32)\n\
+         b0:\n\
+         \x20 %1:ptr(i32) = gep %0, 0\n\
+         \x20 %2:v4xi32 = load %1\n\
+         \x20 %3:v4xi32 = splat 7\n\
+         \x20 %4:v4xi32 = add %2, %3\n\
+         \x20 %5:i32 = extractlane %4, 2\n\
+         \x20 ret %5\n",
+    );
+    let func = &module.funcs[Func::from_usize(0)];
+    let kinds: Vec<&InstKind> = func.blocks[func.entry].insts.iter().map(|inst| &func.insts[*inst].kind).collect();
+    assert!(matches!(kinds[2], InstKind::Splat(_)), "{kinds:?}");
+    assert!(matches!(kinds[4], InstKind::ExtractLane { lane: 2, .. }), "{kinds:?}");
+    let splatted = match &kinds[2] {
+        InstKind::Splat(v) => *v,
+        _ => unreachable!(),
+    };
+    assert_eq!(func.values[splatted].ty, Ty::int(32));
+}
+#[test]
+fn const_operand_round_trip_probe() {
+    let text = ".func @f sig=(i64) -> i64\n.params %0:i64\nb0:\n %1:i64 = add %0, i64(4)\n ret %1\n";
+    match glcc_mir::parse_module(text) {
+        Ok(_) => println!("parses fine"),
+        Err(e) => println!("ERR: {}", e.message),
+    }
+}

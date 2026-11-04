@@ -2,6 +2,7 @@
 use cranelift_jit::{JITBuilder, JITModule};
 
 use glcc_mir as mir;
+use smallvec::smallvec;
 
 use super::inst::dense_switch_span;
 use super::lower_module;
@@ -117,6 +118,129 @@ fn run_u32(jit: &JITModule, ids: &std::collections::HashMap<mir::Func, cranelift
 
 fn i32_sig(params: usize) -> mir::Signature {
     mir::Signature::new(vec![mir::Ty::int(32); params], mir::Ty::int(32))
+}
+
+/// Vectors need SIMD machine code, which this backend only lowers on
+/// x86-64 and aarch64.
+fn native_has_simd() -> bool {
+    !matches!(crate::abi::Target::native().arch, crate::abi::Arch::Riscv64)
+}
+
+#[test]
+fn slp_vectorized_mir_executes() {
+    if !native_has_simd() {
+        return;
+    }
+    // Straight-line `dst[i] = src[i] + 1` over four i32 lanes, run
+    // through the SLP pass and then executed: the pass output must both
+    // lower and compute the scalar results.
+    let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::ptr(mir::Ty::int(32))], mir::Ty::Void);
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("bump", sig);
+    let src = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 0);
+    let dst = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 1);
+    let mut addrs = Vec::new();
+    for i in 0u64..4 {
+        let to = emit(
+            &mut f,
+            entry,
+            mir::InstKind::GetElementPtr { base: dst, indices: smallvec![mir::GepIndex::ConstIndex(i)] },
+            mir::Ty::ptr(mir::Ty::int(32)),
+        );
+        addrs.push(to);
+    }
+    for (i, to) in addrs.iter().enumerate() {
+        let from = emit(
+            &mut f,
+            entry,
+            mir::InstKind::GetElementPtr { base: src, indices: smallvec![mir::GepIndex::ConstIndex(i as u64)] },
+            mir::Ty::ptr(mir::Ty::int(32)),
+        );
+        let loaded = emit(&mut f, entry, mir::InstKind::Load { addr: from, flags: mir::MemFlags::plain() }, mir::Ty::int(32));
+        let one = iconst(&mut f, 32, 1);
+        let bumped = emit(&mut f, entry, mir::InstKind::Add(loaded, one), mir::Ty::int(32));
+        emit_unit(&mut f, entry, mir::InstKind::Store { addr: *to, val: bumped, flags: mir::MemFlags::plain() });
+    }
+    ret(&mut f, entry, None);
+    let mut slp = mir::passes::Slp;
+    assert!(mir::pass::FunctionPass::run(&mut slp, &mut f), "SLP should pack the four lanes");
+    let errors = mir::verify::verify_func(&f);
+    assert!(errors.is_empty(), "verifier: {errors:?}");
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    let input = [10i32, 20, 30, 40];
+    let mut output = [0i32; 4];
+    unsafe {
+        let func: extern "C" fn(*const i32, *mut i32) = std::mem::transmute(func_addr(&jit, &ids, 0));
+        func(input.as_ptr(), output.as_mut_ptr());
+    }
+    assert_eq!(output, [11, 21, 31, 41]);
+}
+
+#[test]
+fn vector_integer_arithmetic_executes() {
+    if !native_has_simd() {
+        return;
+    }
+    // Sum lanes of (a[i] + b[i] + 10) after storing the vector to b.
+    let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::ptr(mir::Ty::int(32))], mir::Ty::int(32));
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("vadd_sum", sig);
+    let a = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 0);
+    let b = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 1);
+    let v4 = mir::Ty::vector(mir::Ty::int(32), 4);
+    let va = emit(&mut f, entry, mir::InstKind::Load { addr: a, flags: mir::MemFlags::plain() }, v4.clone());
+    let vb = emit(&mut f, entry, mir::InstKind::Load { addr: b, flags: mir::MemFlags::plain() }, v4.clone());
+    let vsum = emit(&mut f, entry, mir::InstKind::Add(va, vb), v4.clone());
+    let ten = iconst(&mut f, 32, 10);
+    let spread = emit(&mut f, entry, mir::InstKind::Splat(ten), v4.clone());
+    let vtotal = emit(&mut f, entry, mir::InstKind::Add(vsum, spread), v4.clone());
+    emit_unit(&mut f, entry, mir::InstKind::Store { addr: b, val: vtotal, flags: mir::MemFlags::plain() });
+    let mut sum = emit(&mut f, entry, mir::InstKind::ExtractLane { vec: vtotal, lane: 0 }, mir::Ty::int(32));
+    for lane in 1..4 {
+        let part = emit(&mut f, entry, mir::InstKind::ExtractLane { vec: vtotal, lane }, mir::Ty::int(32));
+        sum = emit(&mut f, entry, mir::InstKind::Add(sum, part), mir::Ty::int(32));
+    }
+    ret(&mut f, entry, Some(sum));
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    let mut left = [1i32, 2, 3, 4];
+    let mut right = [10i32, 20, 30, 40];
+    unsafe {
+        let func: extern "C" fn(*const i32, *mut i32) -> i32 =
+            std::mem::transmute(func_addr(&jit, &ids, 0));
+        assert_eq!(func(left.as_ptr(), right.as_mut_ptr()), 21 + 32 + 43 + 54);
+    }
+    assert_eq!(right, [21, 32, 43, 54]);
+    assert_eq!(left, [1, 2, 3, 4]);
+}
+
+#[test]
+fn vector_float_arithmetic_executes() {
+    if !native_has_simd() {
+        return;
+    }
+    // (a0 * 2.0) + (a1 * 2.0) over a f64x2 loaded from memory.
+    let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::Float(mir::FloatKind::F64))], mir::Ty::Float(mir::FloatKind::F64));
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("vscale_sum", sig);
+    let a = param(&mut f, entry, mir::Ty::ptr(mir::Ty::Float(mir::FloatKind::F64)), 0);
+    let v2 = mir::Ty::vector(mir::Ty::Float(mir::FloatKind::F64), 2);
+    let va = emit(&mut f, entry, mir::InstKind::Load { addr: a, flags: mir::MemFlags::plain() }, v2.clone());
+    let two = f.push_const(mir::Const::Float { kind: mir::FloatKind::F64, bits: (2.0f64).to_bits() as u128 });
+    let spread = emit(&mut f, entry, mir::InstKind::Splat(two), v2.clone());
+    let scaled = emit(&mut f, entry, mir::InstKind::FMul(va, spread), v2.clone());
+    let lo = emit(&mut f, entry, mir::InstKind::ExtractLane { vec: scaled, lane: 0 }, mir::Ty::Float(mir::FloatKind::F64));
+    let hi = emit(&mut f, entry, mir::InstKind::ExtractLane { vec: scaled, lane: 1 }, mir::Ty::Float(mir::FloatKind::F64));
+    let sum = emit(&mut f, entry, mir::InstKind::FAdd(lo, hi), mir::Ty::Float(mir::FloatKind::F64));
+    ret(&mut f, entry, Some(sum));
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    let data = [1.5f64, 2.5];
+    unsafe {
+        let func: extern "C" fn(*const f64) -> f64 = std::mem::transmute(func_addr(&jit, &ids, 0));
+        assert_eq!(func(data.as_ptr()), 8.0);
+    }
 }
 
 #[test]

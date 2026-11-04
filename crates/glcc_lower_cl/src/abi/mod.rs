@@ -569,6 +569,9 @@ fn classify_value(target: Target, ty: &mir::Ty, counters: &mut Counters, is_ret:
             }
         },
         mir::Ty::Array { .. } | mir::Ty::Struct { .. } | mir::Ty::WideInt { .. } => classify_aggregate(target, ty, counters, variadic),
+        // Vectors are produced only by the vectorizer inside a function
+        // body; nothing hands them across a signature.
+        mir::Ty::Vector { .. } => panic!("vector values do not cross function signatures"),
     }
 }
 
@@ -603,6 +606,7 @@ fn mir_align(ty: &mir::Ty) -> u64 {
         },
         mir::Ty::Ptr { bits, .. } => ((*bits as u64).max(8) / 8).min(16),
         mir::Ty::BuiltinVaList { align, .. } => *align,
+        mir::Ty::Vector { elem, .. } => mir_align(elem),
         mir::Ty::Array { elem, .. } => mir_align(elem),
         mir::Ty::Struct { fields, .. } => fields.iter().map(mir_align).max().unwrap_or(1),
     }
@@ -626,6 +630,9 @@ fn aggregate_leaves(ty: &mir::Ty, base: u64, out: &mut Vec<(u64, u64, LeafClass)
         mir::Ty::Float(mir::FloatKind::F80) | mir::Ty::Void | mir::Ty::BuiltinVaList { .. } => {
             out.push((base, 1, LeafClass::Memory));
         }
+        // Unreachable: classify_value rejects vectors before aggregate
+        // classification could recurse into one.
+        mir::Ty::Vector { .. } => out.push((base, ty.size_bytes(), LeafClass::Memory)),
         mir::Ty::Array { elem, len } => {
             let stride = elem.size_bytes();
             for i in 0..*len {

@@ -29,6 +29,15 @@ pub fn clif_ty(ty: &mir::Ty) -> Option<Type> {
         // as a value (only its address does).
         mir::Ty::BuiltinVaList { size, .. } if *size == 8 => Some(types::I64),
         mir::Ty::BuiltinVaList { .. } => panic!("va_list has no value type"),
+        mir::Ty::Vector { elem, lanes } => Some(match (elem.as_ref(), *lanes) {
+            (mir::Ty::Int { bits: 8 }, 16) => types::I8X16,
+            (mir::Ty::Int { bits: 16 }, 8) => types::I16X8,
+            (mir::Ty::Int { bits: 32 }, 4) => types::I32X4,
+            (mir::Ty::Int { bits: 64 }, 2) => types::I64X2,
+            (mir::Ty::Float(mir::FloatKind::F32), 4) => types::F32X4,
+            (mir::Ty::Float(mir::FloatKind::F64), 2) => types::F64X2,
+            _ => panic!("vector {elem:?} x {lanes} has no Clif lowering"),
+        }),
         mir::Ty::Array { .. } | mir::Ty::Struct { .. } | mir::Ty::WideInt { .. } => None,
     }
 }

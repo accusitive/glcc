@@ -91,6 +91,14 @@ impl<'f> FunctionBuilder<'f> {
         self.emit_typed(InstKind::Load { addr, flags: MemFlags::plain() }, ty)
     }
 
+    pub fn splat(&mut self, scalar: Value, ty: Ty) -> Value {
+        self.emit_typed(InstKind::Splat(scalar), ty)
+    }
+
+    pub fn extractlane(&mut self, vec: Value, lane: u8, ty: Ty) -> Value {
+        self.emit_typed(InstKind::ExtractLane { vec, lane }, ty)
+    }
+
     pub fn global_addr(&mut self, global: crate::ir::Global, pointee: Ty) -> Value {
         self.emit_typed(InstKind::GlobalAddr { global }, Ty::ptr(pointee))
     }

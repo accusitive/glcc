@@ -1107,6 +1107,17 @@ pub(crate) fn emit_inst<M: Module>(
             }
             Some(dst)
         }
+        mir::InstKind::Splat(a) => {
+            let scalar = self.operand(builder, a);
+            let ty = result_clif(&result_ty);
+            Some(builder.ins().splat(ty, scalar))
+        }
+        mir::InstKind::ExtractLane { vec, lane } => {
+            let v = self.operand(builder, vec);
+            let ty = clif_ty(&result_ty.expect("extractlane needs a result type"))
+                .expect("extractlane result is a scalar");
+            Some(builder.ins().extractlane(v, lane))
+        }
         mir::InstKind::Memcpy { dst, src, len } => {
             let d = self.addr_operand(builder, dst);
             let s = self.addr_operand(builder, src);

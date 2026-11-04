@@ -6,6 +6,7 @@ pub mod licm;
 pub mod loadstore;
 pub mod mem;
 pub mod sccp;
+pub mod slp;
 pub mod sroa;
 pub mod unroll;
 pub mod wide_int;
@@ -18,6 +19,7 @@ pub use licm::Licm;
 pub use loadstore::LoadStoreForward;
 pub use mem::LowerLibcMemory;
 pub use sccp::Sccp;
+pub use slp::Slp;
 pub use sroa::Sroa;
 pub use unroll::LoopUnroll;
 pub use wide_int::LegalizeWideInts;
@@ -1439,7 +1441,7 @@ struct MemoryRead {
     len: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum MemoryObject {
     Stack(Value),
     Global(Value),

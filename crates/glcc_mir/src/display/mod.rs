@@ -19,6 +19,7 @@ fn ty_str(ty: &Ty) -> String {
             }
         }
         Ty::BuiltinVaList { .. } => "va_list".to_string(),
+        Ty::Vector { elem, lanes } => format!("v{}x{}", lanes, ty_str(elem)),
         Ty::Array { elem, len } => format!("[{} x {}]", ty_str(elem), len),
         Ty::Struct { fields, .. } => {
             let mut s = String::from("struct{");
@@ -134,6 +135,8 @@ pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
             format!("extract {} .{index}", val_name(func, *agg))
         }
         InstKind::InsertValue { agg, elem, index } => format!("insert {} {} .{index}", val_name(func, *agg), val_name(func, *elem)),
+        InstKind::Splat(a) => format!("splat {}", val_name(func, *a)),
+        InstKind::ExtractLane { vec, lane } => format!("extractlane {} {}", val_name(func, *vec), lane),
         InstKind::GlobalAddr { global } => format!("global g{}", global.index()),
         InstKind::Ceil(a) => format!("ceil {}", val_name(func, *a)),
         InstKind::Floor(a) => format!("floor {}", val_name(func, *a)),

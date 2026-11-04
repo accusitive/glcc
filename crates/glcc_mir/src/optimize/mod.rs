@@ -95,6 +95,7 @@ fn function_pipeline(pm: PassManager) -> PassManager {
         .add_func_pass(passes::DeadStoreElim)
         .add_func_pass(passes::LoadStoreForward)
         .add_func_pass(passes::InstCombine)
+        .add_func_pass(passes::Slp)
         .add_func_pass(passes::ConstMerge)
         .add_func_pass(passes::Cse)
         .add_func_pass(passes::Licm)

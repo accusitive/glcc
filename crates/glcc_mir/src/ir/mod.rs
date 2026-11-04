@@ -292,6 +292,14 @@ pub enum InstKind {
         elem: Value,
         index: u32,
     },
+    /// Broadcast one scalar to every lane of a [`Ty::Vector`].
+    Splat(Value),
+    /// Read lane `lane` of a vector back as a scalar of the lane type.
+    /// The lane index is an immediate, like `ExtractValue`.
+    ExtractLane {
+        vec: Value,
+        lane: u8,
+    },
     Memcpy {
         dst: Value,
         src: Value,
@@ -488,7 +496,9 @@ impl InstKind {
             | InstKind::Clz(a)
             | InstKind::Ctz(a)
             | InstKind::Popcnt(a)
-            | InstKind::Bswap(a) => f(*a),
+            | InstKind::Bswap(a)
+            | InstKind::Splat(a)
+            | InstKind::ExtractLane { vec: a, .. } => f(*a),
             InstKind::Icmp { lhs, rhs, .. } | InstKind::Fcmp { lhs, rhs, .. } => {
                 f(*lhs);
                 f(*rhs);
@@ -622,6 +632,8 @@ impl InstKind {
                 | InstKind::GetElementPtr { .. }
                 | InstKind::ExtractValue { .. }
                 | InstKind::InsertValue { .. }
+                | InstKind::Splat(_)
+                | InstKind::ExtractLane { .. }
                 | InstKind::EhTypeId { .. }
         )
     }
@@ -1070,6 +1082,8 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         InstKind::Ctz(a) => InstKind::Ctz(swap(*a)),
         InstKind::Popcnt(a) => InstKind::Popcnt(swap(*a)),
         InstKind::Bswap(a) => InstKind::Bswap(swap(*a)),
+        InstKind::Splat(a) => InstKind::Splat(swap(*a)),
+        InstKind::ExtractLane { vec, lane } => InstKind::ExtractLane { vec: swap(*vec), lane: *lane },
         InstKind::Icmp { pred, lhs, rhs } => InstKind::Icmp {
             pred: *pred,
             lhs: swap(*lhs),

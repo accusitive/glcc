@@ -59,6 +59,14 @@ pub enum Ty {
         size: u64,
         align: u64,
     },
+    /// A SIMD vector of scalar lanes, first-class in SSA: it lives in a
+    /// register, not memory, so it is neither scalar nor aggregate. Only
+    /// the 128-bit shapes [`Ty::vector`] accepts exist; produced by the
+    /// vectorizer, never by a frontend.
+    Vector {
+        elem: Box<Ty>,
+        lanes: u32,
+    },
     Array {
         elem: Box<Ty>,
         len: u64,
@@ -84,6 +92,33 @@ impl Ty {
 
     pub fn ptr_bits(pointee: Ty, bits: u32) -> Self {
         Ty::Ptr { pointee: Box::new(pointee), bits }
+    }
+
+    /// Total width in bits of every [`Ty::Vector`] (one xmm register).
+    pub const VECTOR_BITS: u32 = 128;
+
+    /// A SIMD vector of `lanes` `elem` lanes. Only the shapes the backend
+    /// lowers natively are accepted: an integer or `f32`/`f64` element and
+    /// a lane count filling exactly one 128-bit vector.
+    pub fn vector(elem: Ty, lanes: u32) -> Self {
+        let lane_bits = match &elem {
+            Ty::Int { bits } => *bits,
+            Ty::Float(FloatKind::F32) => 32,
+            Ty::Float(FloatKind::F64) => 64,
+            other => panic!("vector lane type {other:?} is not an integer or f32/f64"),
+        };
+        if lanes == 0 || !lanes.is_power_of_two() || lane_bits * lanes != Self::VECTOR_BITS {
+            panic!("{lanes} x {lane_bits} vector lanes do not fill a 128-bit vector");
+        }
+        Ty::Vector { elem: Box::new(elem), lanes }
+    }
+
+    /// Element type and lane count of a vector, or `None`.
+    pub fn as_vector(&self) -> Option<(&Ty, u32)> {
+        match self {
+            Ty::Vector { elem, lanes } => Some((elem, *lanes)),
+            _ => None,
+        }
     }
 
     /// Width in bits of a pointer type, `None` for anything else.
@@ -147,6 +182,7 @@ impl Ty {
             },
             Ty::Ptr { bits, .. } => (*bits as u64).max(8) / 8,
             Ty::BuiltinVaList { size, .. } => *size,
+            Ty::Vector { elem, lanes } => elem.size_bytes() * (*lanes as u64),
             Ty::Array { elem, len } => elem.size_bytes() * len,
             Ty::Struct { size, .. } => *size,
         }
@@ -235,6 +271,10 @@ pub fn ty_align(ty: &Ty) -> u64 {
         },
         Ty::Ptr { bits, .. } => ((*bits as u64).max(8) / 8).min(16),
         Ty::BuiltinVaList { align, .. } => *align,
+        // Vectors are register values, never C objects, so only the lane
+        // alignment is meaningful; anything storing a whole vector uses
+        // the address the scalar accesses it replaces would have had.
+        Ty::Vector { elem, .. } => ty_align(elem),
         Ty::Array { elem, .. } => ty_align(elem),
         Ty::Struct { fields, .. } => fields.iter().map(ty_align).max().unwrap_or(1),
     }

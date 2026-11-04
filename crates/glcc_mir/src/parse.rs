@@ -469,6 +469,9 @@ fn parse_ty_word(c: &mut Cursor, word: &str) -> Result<Ty, MirParseError> {
         }
         _ => {}
     }
+    if let Some(ty) = vector_ty_from_word(word) {
+        return Ok(ty);
+    }
     if let Some(ty) = int_ty_from_word(word) {
         return Ok(ty);
     }
@@ -479,6 +482,19 @@ impl<'t> Cursor<'t> {
     fn peek_ahead_is(&self, offset: usize, p: char) -> bool {
         self.toks.get(self.pos + offset) == Some(&Tok::Punct(p))
     }
+}
+
+/// `v<lanes>x<lanety>`: a SIMD vector type as displayed by the printer.
+fn vector_ty_from_word(word: &str) -> Option<Ty> {
+    let rest = word.strip_prefix('v')?;
+    let (lanes, lane) = rest.split_once('x')?;
+    let lanes: u32 = lanes.parse().ok()?;
+    let elem = match lane {
+        "f32" => Ty::Float(FloatKind::F32),
+        "f64" => Ty::Float(FloatKind::F64),
+        other => int_ty_from_word(other)?,
+    };
+    Some(Ty::vector(elem, lanes))
 }
 
 fn parse_sig(c: &mut Cursor) -> Result<Signature, MirParseError> {
@@ -1741,6 +1757,22 @@ fn parse_inst(module: &mut Module, ctx: &mut FnCtx, names: &Names, c: &mut Curso
             let expected = elem_ty_of(module, ctx, agg, index);
             let elem = materialize(module, ctx, raw, expected.as_ref(), line)?;
             emit_value(module, ctx, cur, InstKind::InsertValue { agg, elem, index }, n, ty, line)?;
+        }
+        "splat" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let raw = parse_operand(module, ctx, c)?;
+            let expected = ty.as_vector().map(|(elem, _)| elem.clone());
+            let v = materialize(module, ctx, raw, expected.as_ref(), line)?;
+            emit_value(module, ctx, cur, InstKind::Splat(v), n, ty, line)?;
+        }
+        "extractlane" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let vec = need_val_operand(module, ctx, c, "extractlane vector")?;
+            c.expect_punct(',')?;
+            let word = c.word()?;
+            let lane = parse_u64_lit(&word).ok_or_else(|| c.err(format!("bad extractlane index `{word}`")))?;
+            let lane = u8::try_from(lane).map_err(|_| c.err(format!("extractlane index `{word}` out of range")))?;
+            emit_value(module, ctx, cur, InstKind::ExtractLane { vec, lane }, n, ty, line)?;
         }
         "memcpy" => {
             no_result(&result, &op, line)?;
