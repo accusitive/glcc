@@ -405,7 +405,11 @@ fn lower_to_object(module: &glcc_mir::Module, target: FrontendTarget, opt: OptLe
             glcc_frontend::target::Os::Linux => glcc_lower_cl::Os::Linux,
             glcc_frontend::target::Os::Windows => glcc_lower_cl::Os::Windows,
         };
-        let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os };
+        let cl_env = match target.env {
+            glcc_frontend::target::Env::Msvc => glcc_lower_cl::Env::Msvc,
+            glcc_frontend::target::Env::Gnu => glcc_lower_cl::Env::Gnu,
+        };
+        let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os, env: cl_env };
         use cranelift_codegen::settings::Configurable;
         let mut flag_builder = cranelift_codegen::settings::builder();
         for (name, value) in glcc_lower_cl::codegen_flags() {
@@ -420,7 +424,7 @@ fn lower_to_object(module: &glcc_mir::Module, target: FrontendTarget, opt: OptLe
         let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() && !cfg!(target_arch = "wasm32") {
             cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
         } else {
-            cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
+            cranelift_codegen::isa::lookup(target.isa_triple().parse().expect("known target triple"))
                 .expect("known isa")
                 .finish(flags)
                 .expect("isa flags")

@@ -52,6 +52,7 @@ fn main() {
     } else {
         println!("cargo:warning=runtime staging is implemented for ELF and x86-64 Windows hosts; skipping on this platform");
     }
+    stage_mingw(&root);
 }
 
 /// glcc-owned standard headers (`tgmath.h`) shadow the toolchain copies
@@ -181,6 +182,76 @@ fn stage_windows(root: &Path) {
     let mut args: Vec<OsString> = vec!["/nologo".into(), format!("/out:{}", out.display()).into()];
     args.extend(objects.iter().map(|o| o.as_os_str().to_os_string()));
     run(&lib_exe, &args, "lib.exe combining the Win64 runtime");
+}
+
+/// The mingw-w64 runtime for cross compiles (`--target=\
+/// x86_64-w64-mingw32`): the same objects as the Win64 library —
+/// rt/glccrt.c's `_WIN32` setjmp block plus the soft-float subset —
+/// assembled by clang and archived by the cross binutils. Skipped
+/// silently when the cross tools are absent (most ELF hosts do not
+/// have mingw-w64 installed); the driver warns at link time if a
+/// mingw job needs the runtime and it is missing.
+fn stage_mingw(root: &Path) {
+    let out = home_dir().join(".local/lib/glcc/glccrt-mingw.a");
+    let Some(clang) = glcc_toolchain::find_clang() else {
+        return;
+    };
+    let Some(glcc) = find_glcc(root) else {
+        return;
+    };
+    let Some(ar) = find_tool("", "x86_64-w64-mingw32-ar") else {
+        return;
+    };
+    let ar = PathBuf::from(ar);
+    if is_fresh(&out, root) {
+        return;
+    }
+    let dst_dir = out.parent().expect("staged archive has a parent");
+    if !dst_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(dst_dir) {
+            panic!("cannot create {}: {e}", dst_dir.display());
+        }
+    let objdir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("mingw-runtime");
+    std::fs::create_dir_all(&objdir).expect("cannot create mingw runtime objdir");
+
+    let rt_obj = objdir.join("glccrt-mingw.obj");
+    let args: Vec<OsString> = vec![
+        "-c".into(),
+        "--target=x86_64-w64-mingw32".into(),
+        root.join("rt/glccrt.c").into(),
+        "-o".into(),
+        rt_obj.clone().into(),
+    ];
+    run(&clang, &args, "clang assembly of the mingw rt/glccrt.c");
+
+    // Same subset and renames as the Win64 library (see stage_windows;
+    // the predefine note there applies here too).
+    const TUS: [&str; 6] = ["addtf3", "subtf3", "multf3", "divtf3", "clzti2", "glcc-fe-win"];
+    const WIN_RENAMES: [&str; 5] = [
+        "-D__addtf3=__glcc_addtf3",
+        "-D__subtf3=__glcc_subtf3",
+        "-D__multf3=__glcc_multf3",
+        "-D__divtf3=__glcc_divtf3",
+        "-D__clzti2=__glcc_clzti2",
+    ];
+    let softfloat = root.join("rt/softfloat");
+    let mut objects = vec![rt_obj];
+    for tu in TUS {
+        let obj = objdir.join(format!("{tu}.obj"));
+        let mut args: Vec<OsString> = vec!["--target=x86_64-w64-mingw32".into(), "-c".into(), "-Os".into(), format!("-I{}", softfloat.display()).into()];
+        args.push("-U__clang_major__".into());
+        args.push("-D__SIZEOF_FLOAT128__=16".into());
+        args.extend(WIN_RENAMES.map(OsString::from));
+        args.push(softfloat.join(format!("{tu}.c")).into());
+        args.push("-o".into());
+        args.push(obj.clone().into());
+        run(&glcc, &args, &format!("glcc compile of {tu}.c for mingw"));
+        objects.push(obj);
+    }
+
+    let mut args: Vec<OsString> = vec![OsString::from("rcs"), out.clone().into_os_string()];
+    args.extend(objects.iter().map(|o| o.as_os_str().to_os_string()));
+    run(&ar, &args, "x86_64-w64-mingw32-ar archiving the mingw runtime");
 }
 
 /// The glcc binary to compile the soft-float subset with: `$GLCC`, else

@@ -10,7 +10,7 @@
 //! library feature detection — see `predefines`.
 
 use glcc_frontend::lang::Std;
-use glcc_frontend::target::{Arch, LongDoubleKind, Os, Target};
+use glcc_frontend::target::{Arch, Env, LongDoubleKind, Os, Target};
 
 /// The predefined macro table for `target` under `std_flag`
 /// (`-std=...`/`-ansi`), in definition order.
@@ -126,7 +126,7 @@ fn integer_model(d: &mut Vec<(String, String)>, t: &Target) {
     def(d, "__SIZEOF_SIZE_T__", "8");
     def(d, "__SIZEOF_PTRDIFF_T__", "8");
     def(d, "__SIZEOF_WCHAR_T__", t.wchar_size.to_string());
-    def(d, "__SIZEOF_WINT_T__", "4");
+    def(d, "__SIZEOF_WINT_T__", if t.env == Env::Gnu { "2" } else { "4" });
     def(d, "__SIZEOF_INT128__", "16");
     def(d, "__BITINT_MAXWIDTH__", "128");
     def(d, "__BOOL_WIDTH__", "8");
@@ -289,9 +289,17 @@ fn wchar_wint(d: &mut Vec<(String, String)>, t: &Target) {
         }
     }
     def(d, "__WCHAR_WIDTH__", (t.wchar_size * 8).to_string());
-    def(d, "__WINT_MAX__", "4294967295U");
-    def(d, "__WINT_MIN__", "0U");
-    def(d, "__WINT_WIDTH__", "32");
+    // wint_t follows __WINT_TYPE__: `unsigned short` on mingw-w64
+    // (16-bit, per its stdint.h), `unsigned int` on MSVC.
+    if t.env == Env::Gnu {
+        def(d, "__WINT_MAX__", "65535");
+        def(d, "__WINT_MIN__", "0");
+        def(d, "__WINT_WIDTH__", "16");
+    } else {
+        def(d, "__WINT_MAX__", "4294967295U");
+        def(d, "__WINT_MIN__", "0U");
+        def(d, "__WINT_WIDTH__", "32");
+    }
     def(d, "__SIG_ATOMIC_MAX__", "2147483647");
     def(d, "__SIG_ATOMIC_MIN__", "(-2147483647 - 1)");
     if !t.char_signed {
@@ -401,7 +409,7 @@ fn arch(d: &mut Vec<(String, String)>, t: &Target) {
             def(d, "__FXSR__", "1");
             def(d, "__SEG_FS", "1");
             def(d, "__SEG_GS", "1");
-            if t.os == Os::Windows {
+            if t.os == Os::Windows && t.env == Env::Msvc {
                 def(d, "_M_X64", "100");
                 def(d, "_M_AMD64", "100");
             }
@@ -434,6 +442,20 @@ fn os(d: &mut Vec<(String, String)>, t: &Target) {
             def(d, "_LP64", "1");
             def(d, "__PIC__", "2");
             def(d, "__pic__", "2");
+        }
+        Os::Windows if t.env == Env::Gnu => {
+            def(d, "_WIN32", "1");
+            def(d, "_WIN64", "1");
+            // What x86_64-w64-mingw32-gcc defines for the runtime
+            // headers to select on (verified with `-dM`).
+            def(d, "__MINGW32__", "1");
+            def(d, "__MINGW64__", "1");
+            def(d, "__MSVCRT__", "1");
+            // mingw-w64's freestanding headers (stddef.h via
+            // crtdefs.h) spell wchar_t/wint_t through these GCC type
+            // macros instead of hardcoding the MSVC types.
+            def(d, "__WCHAR_TYPE__", "unsigned short");
+            def(d, "__WINT_TYPE__", "short unsigned int");
         }
         Os::Windows => {
             def(d, "_WIN32", "1");

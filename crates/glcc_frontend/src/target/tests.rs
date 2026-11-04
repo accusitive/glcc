@@ -94,9 +94,29 @@ fn windows_target_name_triple_and_size_type() {
     assert_eq!(t.triple(), "x86_64-pc-windows-msvc");
     assert_eq!(t.size_type(), crate::parse::Ty::UnsignedLongLong);
     assert_eq!(Target::X86_64.size_type(), crate::parse::Ty::UnsignedLong);
-    for name in ["x86_64-windows", "x86_64-pc-windows-msvc", "x86_64-windows-gnu", "AMD64-MSVC"] {
+    for name in ["x86_64-windows", "x86_64-pc-windows-msvc", "AMD64-MSVC"] {
         assert_eq!(Target::from_name(name), Some(t), "{name}");
     }
+}
+
+#[test]
+fn windows_gnu_flavor_matches_mingw() {
+    // Same LLP64 data model as the MSVC flavor; only the toolchain
+    // env and the triple spellings differ. Verified against
+    // `x86_64-w64-mingw32-gcc -dM` (`__SIZEOF_LONG__` 4 and friends).
+    let t = Target::WINDOWS_X86_64_GNU;
+    assert_eq!(t.os, Os::Windows);
+    assert_eq!(t.env, Env::Gnu);
+    assert_eq!(t.long_size, 4);
+    assert_eq!(t.name(), "x86_64-windows-gnu");
+    // binutils spelling for cross tools, Rust spelling for --target,
+    // and the data-model-free isa triple for Cranelift.
+    assert_eq!(t.triple(), "x86_64-w64-mingw32");
+    assert_eq!(t.isa_triple(), "x86_64-pc-windows-gnu");
+    for name in ["x86_64-w64-mingw32", "x86_64-windows-gnu", "x86_64-pc-windows-gnu", "x86_64-windows-mingw32"] {
+        assert_eq!(Target::from_name(name), Some(t), "{name}");
+    }
+    assert_eq!(t.size_type(), Target::WINDOWS_X86_64.size_type());
 }
 
 #[test]

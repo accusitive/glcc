@@ -28,7 +28,7 @@ use glcc_frontend::{
     parse::Parser,
     sema::Sema,
     span::take_diagnostic_emitted,
-    target::{Arch, Os, Target},
+    target::{Arch, Env, Os, Target},
 };
 
 /// Preprocessor binary (`clang` unless `GLCC_PP` overrides); only used
@@ -65,17 +65,33 @@ fn pp_flags_native_compatible(cpp: &[OsString]) -> bool {
     !cpp.iter().any(|a| INCOMPATIBLE.iter().any(|f| a.as_os_str() == OsStr::new(f)))
 }
 
-/// Link-driver binary (`cc` unless `GLCC_CC` overrides): supplies
+/// Link-driver binary: the cross gcc driver for mingw targets, `cc`
+/// otherwise (`GLCC_CC` overrides in both cases). The driver supplies
 /// crt files and default libraries, so linking looks like gcc's.
-fn link_driver() -> OsString {
-    std::env::var_os("GLCC_CC").unwrap_or_else(|| OsString::from("cc"))
+fn link_driver(target: &Target) -> OsString {
+    if let Some(cc) = std::env::var_os("GLCC_CC")
+        && !cc.is_empty() {
+            return cc;
+        }
+    if matches!(target.os, Os::Windows) && target.env == Env::Gnu {
+        // binutils' canonical triple names the installed cross tools
+        return OsString::from(format!("{}-gcc", target.triple()));
+    }
+    OsString::from("cc")
 }
 
-/// Whether the final link drives MSVC's `link.exe`: a Windows target
-/// on a Windows host, unless `GLCC_CC` names a gcc-shaped driver.
-/// Object inputs are COFF either way.
+/// Whether the link/assembler driver is the triple-named cross gcc:
+/// its name already selects the target, and GCC has no `--target=`
+/// flag to forward, so command lines skip [`Job::target_args`].
+fn link_driver_implies_target(target: &Target) -> bool {
+    matches!(target.os, Os::Windows) && target.env == Env::Gnu
+}
+
+/// Whether the final link drives MSVC's `link.exe`: an MSVC-flavor
+/// Windows target on a Windows host, unless `GLCC_CC` names a
+/// gcc-shaped driver. Object inputs are COFF either way.
 fn msvc_link(job: &Job) -> bool {
-    cfg!(windows) && matches!(job.target.os, glcc_frontend::target::Os::Windows) && std::env::var_os("GLCC_CC").is_none()
+    cfg!(windows) && job.target.os == Os::Windows && job.target.env == Env::Msvc && std::env::var_os("GLCC_CC").is_none()
 }
 
 /// MSVC linker binary; `GLCC_LD` overrides (e.g. `lld-link`), the same
@@ -1347,7 +1363,11 @@ fn emit_object(
         glcc_frontend::target::Os::Linux => glcc_lower_cl::Os::Linux,
         glcc_frontend::target::Os::Windows => glcc_lower_cl::Os::Windows,
     };
-    let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os };
+    let cl_env = match target.env {
+        glcc_frontend::target::Env::Msvc => glcc_lower_cl::Env::Msvc,
+        glcc_frontend::target::Env::Gnu => glcc_lower_cl::Env::Gnu,
+    };
+    let cl_target = glcc_lower_cl::Target { arch: cl_target, os: cl_os, env: cl_env };
     use cranelift_codegen::settings::Configurable;
     let mut flag_builder = cranelift_codegen::settings::builder();
     flag_builder.set("opt_level", opt_level.flag()).expect("known opt level");
@@ -1374,7 +1394,7 @@ fn emit_object(
     let isa: cranelift_codegen::isa::OwnedTargetIsa = if target.is_native() {
         cranelift_native::builder().expect("native isa").finish(flags).expect("isa flags")
     } else {
-        cranelift_codegen::isa::lookup(target.triple().parse().expect("known target triple"))
+        cranelift_codegen::isa::lookup(target.isa_triple().parse().expect("known target triple"))
             .expect("known isa")
             .finish(flags)
             .expect("isa flags")
@@ -1634,7 +1654,9 @@ fn assemble_cmd(job: &Job, input: &OsStr, output: &Path) -> (OsString, Vec<OsStr
             return (prog, args);
         }
     let mut args = vec![OsString::from("-c")];
-    args.extend(job.target_args());
+    if !link_driver_implies_target(&job.target) {
+        args.extend(job.target_args());
+    }
     if preprocessed {
         args.extend(job.cpp.iter().cloned());
     }
@@ -1644,7 +1666,7 @@ fn assemble_cmd(job: &Job, input: &OsStr, output: &Path) -> (OsString, Vec<OsStr
     args.push(OsString::from("-o"));
     args.push(output.as_os_str().to_os_string());
     args.push(input.to_os_string());
-    (link_driver(), args)
+    (link_driver(&job.target), args)
 }
 
 /// Dependency generation over compilable inputs:
@@ -1781,7 +1803,9 @@ fn mold_available() -> bool {
 /// reference its symbols; `use_mold` is decided by the caller.
 fn link_command(job: &Job, objects: &dyn Fn(usize) -> OsString, out: &OsStr, use_mold: bool, runtime: Option<&OsStr>, asm_objects: &[PathBuf]) -> (OsString, Vec<OsString>) {
     let mut args = Vec::new();
-    args.extend(job.target_args());
+    if !link_driver_implies_target(&job.target) {
+        args.extend(job.target_args());
+    }
     if use_mold {
         args.push(OsString::from("-fuse-ld=mold"));
     }
@@ -1805,7 +1829,7 @@ fn link_command(job: &Job, objects: &dyn Fn(usize) -> OsString, out: &OsStr, use
     for l in &job.link_libs {
         args.push(l.clone());
     }
-    (link_driver(), args)
+    (link_driver(&job.target), args)
 }
 
 fn is_object_arg(arg: &OsStr) -> bool {
@@ -1846,10 +1870,12 @@ fn merge_objects(ctx: &Ctx, job: &Job, primary: &Path, extra: &Path) -> Outcome<
     let name = primary.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let tmp = primary.with_file_name(format!("{name}.glcc-merge-{}", std::process::id()));
     let mut args = vec![OsString::from("-r"), OsString::from("-o"), tmp.as_os_str().to_os_string()];
-    args.extend(job.target_args());
+    if !link_driver_implies_target(&job.target) {
+        args.extend(job.target_args());
+    }
     args.push(primary.as_os_str().to_os_string());
     args.push(extra.as_os_str().to_os_string());
-    let prog = link_driver();
+    let prog = link_driver(&job.target);
     let out = run_cmd(ctx, &prog, &args).map_err(|e| fail(format!("cannot run linker driver: {e}")))?.unwrap();
     if !out.status.success() {
         let _ = std::fs::remove_file(&tmp);
@@ -2765,6 +2791,16 @@ fn do_cc_link(ctx: &Ctx, job: &Job, produced: &[(OsString, PathBuf)], asm_object
             return Err(fail("-r partial links are not supported for the Windows target yet"));
         }
         msvc_link_command(job, &|i| by_index[&i].clone(), out, asm_objects)
+    } else if job.target.os == Os::Windows && job.target.env == Env::Gnu {
+        // mingw-w64: the cross gcc driver supplies the mingw crt and
+        // default libraries like any gcc-shaped link. mold is
+        // ELF-only, so PE links always go to the driver's own linker.
+        let runtime = if wants_glcc_runtime(job) { find_glcc_runtime("glccrt-mingw.a") } else { None };
+        if runtime.is_none() && wants_glcc_runtime(job) {
+            eprintln!("glcc: warning: no glccrt-mingw.a (run `cargo build` to stage it, or set GLCC_RT); builtin setjmp/longjmp and quad arithmetic will not link");
+        }
+        let runtime_arg = runtime.as_ref().map(|p| p.as_os_str().to_os_string());
+        link_command(job, &|i| by_index[&i].clone(), out, false, runtime_arg.as_deref(), asm_objects)
     } else {
         let mut use_mold = false;
         if job.use_ld.is_none() {
@@ -2945,7 +2981,7 @@ fn delegate_cc(flag: &str, target: Target) -> i32 {
         println!("{}", target.triple());
         return 0;
     }
-    match Command::new(link_driver()).arg(flag).output() {
+    match Command::new(link_driver(&target)).arg(flag).output() {
         Ok(out) if out.status.success() => {
             print!("{}", String::from_utf8_lossy(&out.stdout));
             0
@@ -3900,7 +3936,7 @@ mod tests {
             assert_eq!(prog, "as");
             assert_eq!(args, ["-adhln", "-k", "-o", "a.o", "a.s"]);
         } else {
-            assert_eq!(prog, link_driver());
+            assert_eq!(prog, link_driver(&job.target));
             assert_eq!(args, ["-c", "-Wa,-adhln,-k", "-o", "a.o", "a.s"]);
         }
     }
@@ -3909,7 +3945,7 @@ mod tests {
     fn preprocessed_asm_stays_on_the_link_driver() {
         let job = parse(&["a.S"]);
         let (prog, args) = assemble_cmd(&job, OsStr::new("a.S"), Path::new("a.o"));
-        assert_eq!(prog, link_driver());
+        assert_eq!(prog, link_driver(&job.target));
         let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(args, ["-c", "-o", "a.o", "a.S"]);
     }
@@ -4060,6 +4096,23 @@ mod tests {
         let (_, args) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("a.out"), false, Some(OsStr::new("/r/glccrt.o")), &[]);
         let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
         assert!(!s.contains(&"-lm".to_string()), "x86-64 link line: {s:?}");
+    }
+
+    /// The mingw link runs through the triple-named cross gcc driver,
+    /// which is its own target: no `--target=` forwarding (GCC has no
+    /// such flag) and no mold (ELF-only).
+    #[test]
+    fn mingw_link_drives_the_cross_gcc() {
+        let job = parse(&["--target=x86_64-w64-mingw32", "a.c"]);
+        assert!(link_driver_implies_target(&job.target));
+        assert_eq!(link_driver(&job.target), OsString::from("x86_64-w64-mingw32-gcc"));
+        let (prog, args) = link_command(&job, &|_| OsString::from("a.o"), OsStr::new("hello.exe"), false, None, &[]);
+        assert_eq!(prog, OsString::from("x86_64-w64-mingw32-gcc"));
+        let s: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(s, ["-o", "hello.exe", "a.o"]);
+        // GLCC_CC still overrides, and forwards nothing target-ish.
+        // (The environment-sensitive override itself is exercised by
+        // the link_driver call above through its absence.)
     }
 
     /// The MSVC link path spells gcc-shaped flags in `link.exe` terms:

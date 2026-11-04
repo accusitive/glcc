@@ -38,14 +38,17 @@ fn param0(target: Target, ty: &mir::Ty) -> ParamLoc {
 const X86: Target = Target {
     arch: Arch::X86_64,
     os: Os::Linux,
+    env: Env::Msvc,
 };
 const ARM: Target = Target {
     arch: Arch::Aarch64,
     os: Os::Linux,
+    env: Env::Msvc,
 };
 const RV: Target = Target {
     arch: Arch::Riscv64,
     os: Os::Linux,
+    env: Env::Msvc,
 };
 const WIN64: Target = Target::WINDOWS_X86_64;
 
@@ -220,6 +223,15 @@ fn win64_target_shape() {
     assert_eq!(WIN64.va_save_size(), 0);
     assert_eq!(Target::from_triple("x86_64-pc-windows-msvc"), Some(WIN64));
     assert_eq!(Target::from_triple("x86_64-unknown-linux-gnu"), Some(X86));
+    // mingw flavor: identical ABI shape, different env and the
+    // pc-windows-gnu spelling for Cranelift's triple parser.
+    let mingw = Target::WINDOWS_X86_64_GNU;
+    assert_eq!(mingw.call_conv(), WIN64.call_conv());
+    assert_eq!(mingw.gp_regs(), WIN64.gp_regs());
+    assert_eq!(mingw.triple(), "x86_64-pc-windows-msvc");
+    assert_eq!(mingw.isa_triple(), "x86_64-pc-windows-gnu");
+    assert_eq!(Target::from_triple("x86_64-w64-mingw32"), Some(mingw));
+    assert_eq!(Target::from_triple("x86_64-pc-windows-gnu"), Some(mingw));
     assert_eq!(Target::from_triple("mips64-unknown-linux-gnu"), None);
 }
 

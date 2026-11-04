@@ -33,7 +33,7 @@ mod memflags;
 pub mod quad;
 pub mod ty;
 
-pub use abi::{Arch, Os, Target};
+pub use abi::{Arch, Env, Os, Target};
 pub use ehframe::{emit_unwind, FuncEh};
 pub use initarray::emit_init_array;
 pub use lower::{NarrowReloc, NarrowTarget, WinUnwindEntry, lower_module, lower_module_collecting, lower_module_collecting_with_ids, lower_module_selected, lower_module_with_debug};

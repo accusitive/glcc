@@ -2,7 +2,7 @@ use super::*;
 use glcc_mir::{Const, Function, Signature, Ty};
 
 fn target(arch: Arch) -> Target {
-    Target { arch, os: crate::abi::Os::Linux }
+    Target { arch, os: crate::abi::Os::Linux, env: crate::abi::Env::Msvc }
 }
 
 /// Build a site over `constraints` (GCC order) with all-i64 operands
