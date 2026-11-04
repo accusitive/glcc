@@ -67,6 +67,16 @@ pub enum Os {
     Windows,
 }
 
+/// Windows toolchain flavor. The calling convention and object format
+/// are identical across flavors, so nothing here reads it; it rides
+/// along so the driver's `Target` conversion is lossless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Env {
+    #[default]
+    Msvc,
+    Gnu,
+}
+
 /// Calling-convention target: architecture plus the triple needed to
 /// build an ISA. Independent of the frontend's `Target` so this crate
 /// stays usable without it.
@@ -74,6 +84,7 @@ pub enum Os {
 pub struct Target {
     pub arch: Arch,
     pub os: Os,
+    pub env: Env,
 }
 
 impl Target {
@@ -89,6 +100,7 @@ impl Target {
                 other => panic!("unsupported host architecture {other}"),
             },
             os: if cfg!(windows) { Os::Windows } else { Os::Linux },
+            env: Env::Msvc,
         }
     }
 
@@ -96,6 +108,14 @@ impl Target {
     pub const WINDOWS_X86_64: Target = Target {
         arch: Arch::X86_64,
         os: Os::Windows,
+        env: Env::Msvc,
+    };
+
+    /// x86-64 Windows target, mingw-w64 flavor. Identical code-visible
+    /// ABI; the flavor only matters to the driver's toolchain choices.
+    pub const WINDOWS_X86_64_GNU: Target = Target {
+        env: Env::Gnu,
+        ..Target::WINDOWS_X86_64
     };
 
     pub fn from_triple(triple: &str) -> Option<Target> {
@@ -113,7 +133,22 @@ impl Target {
         } else {
             Os::Linux
         };
-        Some(Target { arch, os })
+        let env = if os == Os::Windows && (triple.contains("mingw") || triple.contains("gnu")) {
+            Env::Gnu
+        } else {
+            Env::Msvc
+        };
+        Some(Target { arch, os, env })
+    }
+
+    /// Triple for Cranelift's ISA lookup: the mingw flavor uses the
+    /// `pc-windows-gnu` spelling because target-lexicon does not know
+    /// binutils' `w64-mingw32` (and the ISA is the same either way).
+    pub fn isa_triple(&self) -> &'static str {
+        match (self.arch, self.os, self.env) {
+            (Arch::X86_64, Os::Windows, Env::Gnu) => "x86_64-pc-windows-gnu",
+            _ => self.triple(),
+        }
     }
 
     pub fn triple(&self) -> &'static str {

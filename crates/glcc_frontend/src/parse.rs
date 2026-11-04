@@ -3575,6 +3575,10 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// a real lowering exists — an implicit declaration would only
     /// move the failure to a link error.
     fn declare_implicit_function_if_called(&mut self, func: &Expr<'a>) {
+        self.declare_implicit_function(func, true);
+    }
+
+    fn declare_implicit_function(&mut self, func: &Expr<'a>, warn: bool) {
         let Expr::Ident { name, .. } = func else {
             return;
         };
@@ -3596,7 +3600,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Some((ret, params, variadic)) => (ret, params, variadic, true, "C library prototype assumed"),
             None => (Ty::Int, vec![], false, false, "C89 `extern int` assumed"),
         };
-        if !text.starts_with("__glccrt_") {
+        if warn && !text.starts_with("__glccrt_") {
             let strict = self.sema.lang.rejects_implicit();
             let message = if strict {
                 format!("implicit declaration of function '{text}'; ISO C99 and later do not support implicit function declarations")
@@ -7172,10 +7176,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // well, but a call needs no block-terminator
                     // surgery and the implicit-declaration path (or the
                     // real header) applies unchanged.
+                    let mut rewritten = false;
                     if matches!(&expr, Expr::Ident { name, .. } if self.intern.resolve(*name) == Some("__builtin_unreachable")) {
                         let span = expr.span();
                         let abort = self.intern.get_or_intern("abort");
                         expr = Expr::Ident { name: abort, span };
+                        rewritten = true;
                     }
                     // `__builtin_X()` for X a known C library function
                     // is exactly `X()` (same contract; only compile-time
@@ -7204,6 +7210,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                                 let span = expr.span();
                                 let id = self.intern.get_or_intern(&target);
                                 expr = Expr::Ident { name: id, span };
+                                rewritten = true;
                             }
                         }
                     // Implicit GCC builtins behind <stdarg.h> (`va_start`
@@ -7211,7 +7218,17 @@ impl<'a, 'b> Parser<'a, 'b> {
                     // first call so the later check resolves. Anything
                     // else undeclared gets a C89 implicit declaration.
                     self.declare_builtin_if_called(&expr);
-                    self.declare_implicit_function_if_called(&expr);
+                    // A rewritten builtin (`__builtin_unreachable` ->
+                    // `abort`, `__builtin_llabs` -> `llabs`, runtime
+                    // symbols) declares silently: these come from
+                    // system-header inline bodies and compiler
+                    // lowering, where the implicit-declaration warning
+                    // is noise. Handwritten calls keep the warning.
+                    if rewritten {
+                        self.declare_implicit_function(&expr, false);
+                    } else {
+                        self.declare_implicit_function_if_called(&expr);
+                    }
                     expr = Expr::Call {
                         func: self.alloc(expr),
                         args: self.alloc_slice(args),

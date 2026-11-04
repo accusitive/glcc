@@ -9,17 +9,20 @@
 /// Machine description for layout and `sizeof`.
 ///
 /// All sizes and alignments are in bytes. The associated constants
-/// describe the four targets glcc supports: [`Target::X86_64`]
+/// describe the five targets glcc supports: [`Target::X86_64`]
 /// (x86-64 System V), [`Target::AARCH64`] (AArch64 AAPCS64),
-/// [`Target::RISCV64`] (RISC-V psABI, LP64D), and
-/// [`Target::WINDOWS_X86_64`] (Windows LLP64). The three Linux
+/// [`Target::RISCV64`] (RISC-V psABI, LP64D),
+/// [`Target::WINDOWS_X86_64`] (Windows LLP64, MSVC flavor), and
+/// [`Target::WINDOWS_X86_64_GNU`] (Windows LLP64, mingw-w64 flavor).
+/// The three Linux
 /// targets agree on integer and pointer sizes; they differ in
 /// plain-`char` signedness (signed on x86-64, unsigned on
 /// AArch64/RISC-V per clang), in `long double` representation
 /// (x86 80-bit extended vs IEEE quad), and in `va_list` shape
 /// (24 vs 32 vs 8 bytes). Windows differs in data model (`long` is
 /// 4 bytes), `long double` (`double`), `wchar_t` (16-bit), and
-/// `va_list` (8-byte pointer).
+/// `va_list` (8-byte pointer); the two Windows flavors differ only
+/// in the toolchain around the object files (see [`Env`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Target {
     /// Which instruction set / ABI family this describes.
@@ -28,6 +31,13 @@ pub struct Target {
     /// same instruction set can carry different data models (LP64 vs
     /// LLP64) and calling conventions.
     pub os: Os,
+    /// Toolchain flavor of a Windows target: whose CRT and link driver
+    /// the objects are meant for. The code-visible ABI is identical
+    /// (same calling convention, same object format), so this is only
+    /// consulted by the driver (link command, predefines, include
+    /// paths) and by the triple spellings; Linux targets carry a
+    /// placeholder that nothing reads.
+    pub env: Env,
     /// How `long double` values behave: x86 80-bit extended (`F80`),
     /// IEEE-754 quad precision (`F128`, AArch64 and RISC-V), or plain
     /// `double` (`F64`, Windows). Size and alignment are 16/16 in the
@@ -107,6 +117,21 @@ pub enum Os {
     Windows,
 }
 
+/// Windows toolchain flavor: Microsoft's CRT (`link.exe`, `_MSC_VER`
+/// predefines) or the mingw-w64 GNU toolchain (`x86_64-w64-mingw32-gcc`
+/// link driver, `__MINGW64__` predefines). Both flavors run the same
+/// Microsoft x64 calling convention over COFF objects; only the
+/// surrounding toolchain — predefines, system headers, crt files,
+/// default libraries, runtime object — differs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Env {
+    /// Microsoft Visual C++ toolchain (the native flavor on Windows
+    /// hosts, and the placeholder on Linux targets).
+    Msvc,
+    /// mingw-w64 GNU toolchain (`x86_64-w64-mingw32` triples).
+    Gnu,
+}
+
 /// Representation of C `long double`: x86 80-bit extended precision
 /// (`F80`), IEEE-754 binary128 quad precision (`F128`, used on
 /// AArch64 and RISC-V where `long double` is an alias for
@@ -147,6 +172,7 @@ impl Target {
     pub const X86_64: Target = Target {
         arch: Arch::X86_64,
         os: Os::Linux,
+        env: Env::Msvc,
         long_double: LongDoubleKind::F80,
         va_list_size: 24,
         // System V only requires 8, but the backend spills 16-byte SSE
@@ -194,6 +220,7 @@ impl Target {
     pub const AARCH64: Target = Target {
         arch: Arch::Aarch64,
         os: Os::Linux,
+        env: Env::Msvc,
         long_double: LongDoubleKind::F128,
         va_list_size: 32,
         va_list_align: 8,
@@ -234,6 +261,7 @@ impl Target {
     pub const RISCV64: Target = Target {
         arch: Arch::Riscv64,
         os: Os::Linux,
+        env: Env::Msvc,
         long_double: LongDoubleKind::F128,
         va_list_size: 8,
         va_list_align: 8,
@@ -279,6 +307,7 @@ impl Target {
     pub const WINDOWS_X86_64: Target = Target {
         arch: Arch::X86_64,
         os: Os::Windows,
+        env: Env::Msvc,
         long_double: LongDoubleKind::F64,
         va_list_size: 8,
         va_list_align: 8,
@@ -313,6 +342,15 @@ impl Target {
         little_endian: true,
     };
 
+    /// x86-64 Windows, mingw-w64 flavor: the same data model and ABI as
+    /// [`Target::WINDOWS_X86_64`] (the two flavors are indistinguishable
+    /// at the C level); only [`Target::env`] differs, steering the
+    /// predefines, include paths, and link command.
+    pub const WINDOWS_X86_64_GNU: Target = Target {
+        env: Env::Gnu,
+        ..Target::WINDOWS_X86_64
+    };
+
     /// Native target of this build (host architecture and OS): a
     /// Windows host compiles the Windows data model and ABI by default.
     pub fn native() -> Target {
@@ -331,24 +369,42 @@ impl Target {
     }
 
     /// Short name used by `--target`: `x86_64`, `aarch64`, `riscv64`
-    /// (plus `x86_64-windows`).
+    /// (plus `x86_64-windows` and `x86_64-windows-gnu`).
     pub fn name(&self) -> &'static str {
-        match (self.arch, self.os) {
-            (Arch::X86_64, Os::Windows) => "x86_64-windows",
-            (Arch::X86_64, Os::Linux) => "x86_64",
-            (Arch::Aarch64, _) => "aarch64",
-            (Arch::Riscv64, _) => "riscv64",
+        match (self.arch, self.os, self.env) {
+            (Arch::X86_64, Os::Windows, Env::Gnu) => "x86_64-windows-gnu",
+            (Arch::X86_64, Os::Windows, Env::Msvc) => "x86_64-windows",
+            (Arch::X86_64, Os::Linux, _) => "x86_64",
+            (Arch::Aarch64, _, _) => "aarch64",
+            (Arch::Riscv64, _, _) => "riscv64",
         }
     }
 
-    /// Triple forwarded to `clang --target=` and the system link
-    /// driver, and to Cranelift's ISA lookup.
+    /// Triple forwarded to `clang --target=`, the system link driver,
+    /// and cross tool names. The mingw flavor uses binutils' canonical
+    /// `x86_64-w64-mingw32` spelling: it names the installed cross
+    /// tools (`x86_64-w64-mingw32-gcc`) and is what clang's MinGW
+    /// driver expects when finding the sysroot.
     pub fn triple(&self) -> &'static str {
-        match (self.arch, self.os) {
-            (Arch::X86_64, Os::Windows) => "x86_64-pc-windows-msvc",
-            (Arch::X86_64, Os::Linux) => "x86_64-linux-gnu",
-            (Arch::Aarch64, _) => "aarch64-linux-gnu",
-            (Arch::Riscv64, _) => "riscv64-linux-gnu",
+        match (self.arch, self.os, self.env) {
+            (Arch::X86_64, Os::Windows, Env::Gnu) => "x86_64-w64-mingw32",
+            (Arch::X86_64, Os::Windows, Env::Msvc) => "x86_64-pc-windows-msvc",
+            (Arch::X86_64, Os::Linux, _) => "x86_64-linux-gnu",
+            (Arch::Aarch64, _, _) => "aarch64-linux-gnu",
+            (Arch::Riscv64, _, _) => "riscv64-linux-gnu",
+        }
+    }
+
+    /// Triple for Cranelift's ISA lookup. Same as [`Target::triple`]
+    /// except the mingw flavor: target-lexicon (Cranelift's triple
+    /// parser) knows `x86_64-pc-windows-gnu` but not the binutils
+    /// `w64-mingw32` spelling, and the code-visible result is identical
+    /// (x86-64 ISA over COFF; the calling convention is chosen
+    /// separately).
+    pub fn isa_triple(&self) -> &'static str {
+        match (self.arch, self.os, self.env) {
+            (Arch::X86_64, Os::Windows, Env::Gnu) => "x86_64-pc-windows-gnu",
+            _ => self.triple(),
         }
     }
 
@@ -356,14 +412,22 @@ impl Target {
     /// `riscv64`, plus `x64`/`arm64` aliases) or a full triple
     /// starting with one (`aarch64-linux-gnu`, `riscv64-linux-gnueabihf`
     /// style spellings all map to the same `Target`). A triple naming
-    /// Windows (`x86_64-pc-windows-msvc`, `...-windows-gnu`) selects
-    /// the LLP64 [`Target::WINDOWS_X86_64`].
+    /// Windows selects the LLP64 Windows target, with the flavor from
+    /// its environment: `...-mingw32`/`...-gnu` is mingw-w64
+    /// ([`Target::WINDOWS_X86_64_GNU`]), everything else
+    /// (`...-msvc`, plain `x86_64-windows`) is MSVC
+    /// ([`Target::WINDOWS_X86_64`]).
     pub fn from_name(name: &str) -> Option<Target> {
         let lower = name.to_ascii_lowercase();
         let os = if lower.contains("windows") || lower.contains("msvc") || lower.contains("mingw") {
             Os::Windows
         } else {
             Os::Linux
+        };
+        let env = if os == Os::Windows && (lower.contains("mingw") || lower.contains("gnu")) {
+            Env::Gnu
+        } else {
+            Env::Msvc
         };
         let prefix = lower.split('-').next().unwrap_or(&lower);
         let arch = match prefix {
@@ -372,11 +436,12 @@ impl Target {
             "riscv64" => Arch::Riscv64,
             _ => return None,
         };
-        Some(match (arch, os) {
-            (Arch::X86_64, Os::Windows) => Target::WINDOWS_X86_64,
-            (Arch::X86_64, Os::Linux) => Target::X86_64,
-            (Arch::Aarch64, _) => Target::AARCH64,
-            (Arch::Riscv64, _) => Target::RISCV64,
+        Some(match (arch, os, env) {
+            (Arch::X86_64, Os::Windows, Env::Gnu) => Target::WINDOWS_X86_64_GNU,
+            (Arch::X86_64, Os::Windows, Env::Msvc) => Target::WINDOWS_X86_64,
+            (Arch::X86_64, Os::Linux, _) => Target::X86_64,
+            (Arch::Aarch64, _, _) => Target::AARCH64,
+            (Arch::Riscv64, _, _) => Target::RISCV64,
         })
     }
 

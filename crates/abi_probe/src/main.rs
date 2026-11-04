@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use glcc_lower_cl::{Arch, Os, Target};
+use glcc_lower_cl::{Arch, Env, Os, Target};
 
 const WORKDIR: &str = "/tmp/opencode/abi_probe";
 
@@ -31,6 +31,7 @@ impl Machine {
                 Machine::Riscv64 => Arch::Riscv64,
             },
             os: Os::Linux,
+            env: Env::Msvc,
         }
     }
 
