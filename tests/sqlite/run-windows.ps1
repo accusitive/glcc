@@ -12,7 +12,8 @@
   ilammy/msvc-dev-cmd on CI, or let the script locate vcvars64.bat.
 
   Environment:
-    GLCC              path to glcc (default: target/debug/glcc.exe)
+    GLCC              path to glcc (default: target/release/glcc.exe,
+                      falling back to target/debug/glcc.exe)
     SQLITE_WORKDIR    scratch/download dir (default: %TEMP%\glcc-sqlite)
     TCLSH_CMD         an existing tclsh86t.exe to reuse (skips the build)
     TCL_LIBRARY       Tcl script library matching TCLSH_CMD
@@ -76,7 +77,9 @@ function Get-GlccFlags {
 }
 
 $repo = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
-$glcc = if ($env:GLCC) { $env:GLCC } else { Join-Path $repo "target\debug\glcc.exe" }
+$glcc = if ($env:GLCC) { $env:GLCC }
+        elseif (Test-Path (Join-Path $repo "target\release\glcc.exe")) { Join-Path $repo "target\release\glcc.exe" }
+        else { Join-Path $repo "target\debug\glcc.exe" }
 if (-not (Test-Path $glcc)) { throw "glcc not found at $glcc (run 'cargo build' or set GLCC=...)" }
 
 $work = if ($env:SQLITE_WORKDIR) { $env:SQLITE_WORKDIR } else {

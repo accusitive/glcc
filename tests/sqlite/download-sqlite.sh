@@ -10,7 +10,13 @@ SRC="sqlite-src-$VERSION"
 URL="https://sqlite.org/2026/sqlite-src-$VERSION.zip"
 
 REPO_ROOT=$(cd ../.. && pwd)
-GLCC=${GLCC:-"$REPO_ROOT/target/debug/glcc"}
+if [ -n "${GLCC:-}" ]; then
+  :
+elif [ -x "$REPO_ROOT/target/release/glcc" ]; then
+  GLCC=$REPO_ROOT/target/release/glcc
+else
+  GLCC=$REPO_ROOT/target/debug/glcc
+fi
 
 if [ ! -x "$GLCC" ]; then
   echo "glcc not found at $GLCC (run 'cargo build' or set GLCC=...)" >&2

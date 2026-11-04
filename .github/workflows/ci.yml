@@ -161,7 +161,7 @@ jobs:
       - name: Install Tcl
         run: sudo apt-get update && sudo apt-get install -y tcl tcl-dev
       - name: Build glcc
-        run: cargo build --locked
+        run: cargo build --release --locked
       - name: SQLite veryquick suite
         run: tests/sqlite/download-sqlite.sh
 
@@ -186,7 +186,7 @@ jobs:
           key: sqlite-windows
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - name: Build glcc
-        run: cargo build --locked
+        run: cargo build --release --locked
       - name: SQLite veryquick suite
         shell: pwsh
         run: tests/sqlite/run-windows.ps1
