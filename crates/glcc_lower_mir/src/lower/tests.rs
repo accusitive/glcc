@@ -1933,6 +1933,27 @@ fn unprototyped_signatures_admit_arguments() {
 }
 
 #[test]
+fn unprototyped_definitions_take_their_own_shape() {
+    // A parameterless definition (`int f()`) reads no arguments (no
+    // `...`, so no `va_start`), so its signature must not carry the
+    // variadic register save area. Declarations without a body keep
+    // the variadic shape: callers may pass any argument list.
+    let module = lower_module("int main(){return 0;}");
+    let main = module.funcs.iter().find(|f| f.name == "main").expect("main");
+    assert!(!main.sig.variadic, "{:?}", main.sig);
+
+    let module = lower_module("int div3(int n){return n/3;} int main(){return div3(4);}");
+    let div3 = module.funcs.iter().find(|f| f.name == "div3").expect("div3");
+    assert!(!div3.sig.variadic, "{:?}", div3.sig);
+
+    // K&R definitions are rewritten into prototyped functions with
+    // promoted parameter types, so they are fixed shapes as well.
+    let module = lower_module("int f(a) int a; { return a; } int main(){return f(1);}");
+    let f = module.funcs.iter().find(|f| f.name == "f").expect("f");
+    assert!(!f.sig.variadic && f.sig.params.len() == 1, "{:?}", f.sig);
+}
+
+#[test]
 fn anonymous_member_initializers_flatten() {
     // Flat positional items descend through anonymous members in
     // both locals and globals (C17 §6.7.9p20).

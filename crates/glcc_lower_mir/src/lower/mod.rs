@@ -629,11 +629,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             lower_ty(self.declared_ret(binding), self.sema, self.interner)
         };
         let mut sig = mir::Signature::new(params.iter().map(|p| lower_ty(p, self.sema, self.interner)).collect(), ret);
-        // An unprototyped declaration (`int f()`, C89 implicit
-        // `extern int f()`) fixes no parameter list: calls supply any
-        // arguments, default-promoted. The variadic ABI is exactly
-        // that shape, so callee and caller agree on the count.
-        sig.variadic = *variadic || !*prototyped;
+        // Unprototyped declarations (`int f()`, C89 implicit
+        // `extern int f()`) fix no parameter list: callers supply any
+        // arguments, default-promoted, so their signature takes the
+        // variadic shape. A definition with no parameters (`int f()`)
+        // never reads its arguments (no `...`, so no `va_start`),
+        // though — the variadic register save area would be dead
+        // weight, so it keeps a fixed signature.
+        let has_body = binding.defined;
+        sig.variadic = *variadic || (!*prototyped && (!has_body || !params.is_empty()));
         sig
     }
 
