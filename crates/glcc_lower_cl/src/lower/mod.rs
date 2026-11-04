@@ -324,6 +324,7 @@ pub(crate) fn needs_libc_memcpy(func: &mir::Function) -> bool {
 #[derive(Default)]
 pub struct Wrappers {
     pub(crate) seen: std::collections::HashSet<String>,
+    fallbacks: std::collections::HashSet<String>,
     pub(crate) text: String,
 }
 
@@ -331,6 +332,14 @@ impl Wrappers {
     pub(crate) fn add(&mut self, name: &str, text: &str) {
         if self.seen.insert(name.to_string()) {
             self.text.push_str(text);
+        }
+    }
+
+    /// One note per distinct reason per module, so a unit full of
+    /// `"+r"` blocks reports once.
+    pub(crate) fn note_fallback(&mut self, reason: &str) {
+        if self.fallbacks.insert(reason.to_string()) {
+            eprintln!("glcc: note: inline asm lowered to the out-of-line wrapper: {reason}");
         }
     }
 }

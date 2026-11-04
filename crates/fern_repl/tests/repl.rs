@@ -76,7 +76,7 @@ fn clear_forgets_definitions() {
     let mut repl = Repl::new();
     repl.define("fn f(x) : Int -> Int = x").expect("defines");
     repl.clear();
-    let err = repl.eval_expr("f(1)").expect_err("f is gone");
+    let err = repl.eval_expr("f(1)").expect_err("unknown value `f`");
     assert!(err[0].msg.contains("cannot find"), "{:?}", err[0].msg);
 }
 

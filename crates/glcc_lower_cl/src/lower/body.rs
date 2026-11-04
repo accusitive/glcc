@@ -203,7 +203,7 @@ pub(crate) fn param_mir_ty(mir_func: &mir::Function, owner: usize) -> mir::Ty {
 impl<'m> Body<'m> {
 /// Map entry block params to MIR values: scalars directly, aggregates
 /// reassembled into fresh slots from their pieces, chunk groups stored
-/// whole, and `StructArgument` addresses copied to locals.
+/// whole, and `StructArgument` addresses used in place.
 pub(crate) fn map_entry_params(&mut self, builder: &mut FunctionBuilder, mir_func: &mir::Function, entry: ClifBlock) {
     let params = builder.block_params(entry).to_vec();
     // Per-owner piece collection: (MIR type, [(offset, ClifValue)]).
@@ -212,6 +212,9 @@ pub(crate) fn map_entry_params(&mut self, builder: &mut FunctionBuilder, mir_fun
     // (`HashMap` iteration would permute them via its random seed).
     let mut pieces: BTreeMap<usize, (mir::Ty, Vec<(u64, ClifValue)>)> = BTreeMap::new();
     let mut addrs: BTreeMap<usize, ClifValue> = BTreeMap::new();
+    // `StructArgument` already points at the callee's own copy in the
+    // incoming stack area, so it can be used in place.
+    let mut stack_addrs: BTreeMap<usize, ClifValue> = BTreeMap::new();
     let mut slot_idx = 0;
     for slot in self.layout.slots.clone() {
         match slot.kind {
@@ -240,7 +243,12 @@ pub(crate) fn map_entry_params(&mut self, builder: &mut FunctionBuilder, mir_fun
                 let mir_ty = param_mir_ty(mir_func, owner);
                 pieces.entry(owner).or_insert_with(|| (mir_ty, Vec::new())).1.push((index * 8, v));
             }
-            abi::SlotKind::StackAddr { owner } | abi::SlotKind::RefAddr { owner } => {
+            abi::SlotKind::StackAddr { owner } => {
+                let v = params[slot_idx];
+                slot_idx += 1;
+                stack_addrs.insert(owner, v);
+            }
+            abi::SlotKind::RefAddr { owner } => {
                 let v = params[slot_idx];
                 slot_idx += 1;
                 addrs.insert(owner, v);
@@ -297,6 +305,12 @@ pub(crate) fn map_entry_params(&mut self, builder: &mut FunctionBuilder, mir_fun
             let v = builder.ins().load(ty, memflags::notrap(), *addr, Offset32::new(0));
             self.values.insert(mir_param, v);
         }
+    }
+    for (owner, addr) in &stack_addrs {
+        let Some(mir_param) = mir_func.blocks[mir_func.entry].params.get(*owner).copied() else {
+            continue;
+        };
+        self.values.insert(mir_param, *addr);
     }
     // Zero-sized aggregate parameters cross as nothing and so have no
     // slot: bind them to a dummy address of their own, since MIR uses

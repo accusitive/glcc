@@ -22,7 +22,7 @@ use cranelift_codegen::gimli::write::{
 use cranelift_codegen::gimli::{Encoding, Format, Register, RunTimeEndian};
 use cranelift_codegen::isa::unwind::{systemv, UnwindInfo};
 use cranelift_codegen::isa::TargetIsa;
-use cranelift_codegen::{Context, FinalizedMachExceptionHandler};
+use cranelift_codegen::{Context, MachExceptionHandler};
 use cranelift_module::FuncId;
 use glcc_mir as mir;
 use object::write::{
@@ -75,7 +75,7 @@ pub(crate) fn collect_func_eh(
             .call_sites()
             .filter_map(|cs| {
                 let lpad = cs.exception_handlers.iter().find_map(|h| match h {
-                    FinalizedMachExceptionHandler::Default(offset) => Some(*offset),
+                    MachExceptionHandler::Default(offset) => Some(offset.as_offset()),
                     _ => None,
                 })?;
                 Some((cs.ret_addr, lpad))

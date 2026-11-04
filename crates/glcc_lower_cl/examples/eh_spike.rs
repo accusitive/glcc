@@ -25,7 +25,7 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::isa::unwind::UnwindInfo;
 use cranelift_codegen::isa::OwnedTargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_codegen::{Context, FinalizedMachExceptionHandler};
+use cranelift_codegen::{Context, MachExceptionHandler};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
@@ -325,7 +325,7 @@ fn main() {
                         .exception_handlers
                         .iter()
                         .find_map(|h| match h {
-                            FinalizedMachExceptionHandler::Default(off) => Some(*off),
+                            MachExceptionHandler::Default(off) => Some(off.as_offset()),
                             _ => None,
                         })
                         .expect("invoke call site without a Default handler");

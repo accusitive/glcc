@@ -18,12 +18,6 @@ use crate::memflags;
 use crate::ty::clif_ty;
 use super::*;
 
-/// Lower one inline-asm block: fill the operand area, call the generated
-/// wrapper, and copy the register outputs back out. The wrapper text
-/// goes into `wrappers` and is assembled into the TU's `.s`; see
-/// [`crate::asm`]. An `asm goto` block's result is the label selector
-/// (0 = fallthrough), which the MIR terminator dispatches on.
-
 /// Byte offset and element type of one aggregate position: struct field
 /// or array element by index.
 pub(crate) fn field_offset(ty: &mir::Ty, index: u32) -> (u64, mir::Ty) {
@@ -57,7 +51,20 @@ pub(crate) fn dense_switch_span(base: i128, max: i128, count: usize) -> bool {
 
 
 impl<'m> Body<'m> {
+/// Lower one inline-asm block. On x86-64, blocks the fork's native
+/// `inline_asm` instruction can express ([`crate::asm_native::plan`])
+/// lower in place; everything else — and every block on aarch64 and
+/// riscv64, where the fork has no inline asm — uses the out-of-line
+/// wrapper (see [`crate::asm`]). An `asm goto` block's result is the
+/// label selector (0 = fallthrough), which the MIR terminator
+/// dispatches on.
 pub(crate) fn emit_inline_asm<M: Module>(&mut self, builder: &mut FunctionBuilder, clif: &mut M, block: &mir::AsmBlock, wrappers: &mut Wrappers) -> Option<ClifValue> {
+    if self.target.arch == Arch::X86_64 {
+        match crate::asm_native::plan(block, self.target.arch, self.func) {
+            Ok(native) => return self.emit_native_inline_asm(builder, block, native),
+            Err(reason) => wrappers.note_fallback(&reason),
+        }
+    }
     let site = crate::asm::build(block, self.func, self.target);
     let is_goto = !block.labels.is_empty();
     let sig = crate::asm::wrapper_sig(self.target, is_goto);
@@ -129,6 +136,71 @@ pub(crate) fn emit_inline_asm<M: Module>(&mut self, builder: &mut FunctionBuilde
         builder.ins().store(user_flags, value, addr, Offset32::new(0));
     }
     selector
+}
+
+/// Lower an inline-asm block with the fork's native `inline_asm`
+/// instruction: inputs become instruction arguments (widened to the
+/// full 64-bit registers the fork passes operands in), outputs become
+/// the instruction's `i64` results, reduced back to the C type and
+/// stored through the output lvalue's address.
+pub(crate) fn emit_native_inline_asm(
+    &mut self,
+    builder: &mut FunctionBuilder,
+    block: &mir::AsmBlock,
+    native: crate::asm_native::NativeAsm,
+) -> Option<ClifValue> {
+    let mut contents = cranelift_codegen::ir::InlineAsmContents::new(native.template, true);
+    for constraint in &native.constraints {
+        contents = contents.operand(constraint.clone());
+    }
+    for clobber in &native.clobbers {
+        contents = contents.clobber(clobber.clone());
+    }
+    let asm_ref = builder.create_inline_asm(contents);
+
+    let outputs = block.outputs as usize;
+    let mut args: Vec<ClifValue> = Vec::new();
+    // The fork consumes input values in GCC order: the read sides of
+    // `+` outputs first, then the plain inputs.
+    for op in &block.operands[..outputs] {
+        if !op.constraint.contains('+') {
+            continue;
+        }
+        let addr = self.addr_operand(builder, op.value);
+        let value = load_operand(builder, &op.ty, addr);
+        args.push(widen_operand(builder, &op.ty, value));
+    }
+    for (op, kind) in block.operands[outputs..]
+        .iter()
+        .zip(&native.operand_kinds[outputs..])
+    {
+        match *kind {
+            crate::asm_native::NativeKind::Reg => {
+                let value = self.operand(builder, op.value);
+                args.push(widen_operand(builder, &op.ty, value));
+            }
+            crate::asm_native::NativeKind::Mem => {
+                // The fork's "m" semantics: the template sees the memory
+                // at the address held in the input value.
+                args.push(self.addr_operand(builder, op.value));
+            }
+            crate::asm_native::NativeKind::Imm => {
+                let v = crate::asm::const_int(self.func, op.value);
+                let imm = i64::try_from(v)
+                    .unwrap_or_else(|_| panic!("asm immediate {v} does not fit in i64"));
+                args.push(builder.ins().iconst(types::I64, imm));
+            }
+        }
+    }
+    let inst = builder.ins().inline_asm(asm_ref, &args);
+    let results: Vec<ClifValue> = builder.inst_results(inst).to_vec();
+    for (i, op) in block.operands[..outputs].iter().enumerate() {
+        let addr = self.addr_operand(builder, op.value);
+        let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
+        let value = if ty == types::I64 { results[i] } else { builder.ins().ireduce(ty, results[i]) };
+        builder.ins().store(memflags::notrap(), value, addr, Offset32::new(0));
+    }
+    None
 }
 
 pub(crate) fn emit_inst<M: Module>(
@@ -1010,7 +1082,10 @@ pub(crate) fn emit_inst<M: Module>(
             let mir_ty = self.func.values[agg].ty.clone();
             let (off, elem) = field_offset(&mir_ty, index);
             match clif_ty(&elem) {
-                Some(ty) => Some(builder.ins().load(ty, memflags::notrap(), addr, Offset32::new(off as i32))),
+                Some(ty) => {
+                    let addr = if off == 0 { addr } else { builder.ins().iadd_imm_u(addr, off as i64) };
+                    Some(atomic_load_value(builder, ty, addr))
+                }
                 // Nested aggregates address into the base slot.
                 None => Some(if off == 0 { addr } else { builder.ins().iadd_imm_u(addr, off as i64) }),
             }
@@ -1198,7 +1273,7 @@ pub(crate) fn emit_inst<M: Module>(
                 Some(dst)
             } else {
                 let ty = result_clif(&Some(mir_ty));
-                Some(builder.ins().atomic_load(ty, MemFlagsData::new(), a))
+                Some(atomic_load_value(builder, ty, a))
             }
         }
         mir::InstKind::AtomicStore { addr, val } => {
@@ -1210,7 +1285,8 @@ pub(crate) fn emit_inst<M: Module>(
                 emit_memcpy(builder, a, v, mir_ty.size_bytes());
                 builder.ins().fence();
             } else {
-                builder.ins().atomic_store(MemFlagsData::new(), v, a);
+                let ty = clif_ty(&mir_ty).unwrap_or_else(|| panic!("atomic store of non-scalar type {mir_ty:?}"));
+                atomic_store_value(builder, ty, v, a);
             }
             None
         }
@@ -1594,4 +1670,20 @@ pub(crate) fn switch_to(&mut self, builder: &mut FunctionBuilder, target: ClifBl
         self.current = Some(target);
     }
 }
+}
+
+/// The current value of an output lvalue, for a `+` operand's read side.
+fn load_operand(builder: &mut FunctionBuilder, ty: &mir::Ty, addr: ClifValue) -> ClifValue {
+    let clif_ty = clif_ty(ty).expect("asm register operand needs a scalar type");
+    builder.ins().load(clif_ty, memflags::notrap(), addr, Offset32::new(0))
+}
+
+/// Widen an operand value to the 64-bit register the fork passes
+/// operands in; upper bits are unspecified, as in GCC.
+fn widen_operand(builder: &mut FunctionBuilder, ty: &mir::Ty, value: ClifValue) -> ClifValue {
+    match clif_ty(ty) {
+        Some(t) if t == types::I64 => value,
+        Some(_) => builder.ins().uextend(types::I64, value),
+        None => panic!("asm register operand needs a scalar type"),
+    }
 }

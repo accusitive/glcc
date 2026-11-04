@@ -135,6 +135,112 @@ fn scalar_arithmetic_executes() {
     assert_eq!(run_i32(&jit, &ids, 0, 20), 41);
 }
 
+/// One asm operand in GCC order.
+fn asm_operand(value: mir::Value, constraint: &str, ty: mir::Ty) -> mir::AsmOperand {
+    mir::AsmOperand {
+        value,
+        constraint: constraint.to_string(),
+        ty,
+        tie: None,
+        name: None,
+    }
+}
+
+#[test]
+fn native_inline_asm_executes_in_place() {
+    // x86-64 only: a 64-bit output+input block lowers onto the
+    // fork's `inline_asm` instruction and runs without a wrapper.
+    if crate::abi::Target::native().arch != crate::abi::Arch::X86_64 {
+        return;
+    }
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("invert", mir::Signature::new(vec![mir::Ty::int(64)], mir::Ty::int(64)));
+    let input = param(&mut f, entry, mir::Ty::int(64), 0);
+    let out = emit(
+        &mut f,
+        entry,
+        mir::InstKind::Alloca {
+            pointee: mir::Ty::int(64),
+            count: 1,
+        },
+        mir::Ty::ptr(mir::Ty::int(64)),
+    );
+    emit_unit(
+        &mut f,
+        entry,
+        mir::InstKind::InlineAsm {
+            block: Box::new(mir::AsmBlock {
+                template: "movq %1, %0\n\tnotq %0".to_string(),
+                operands: vec![asm_operand(out, "=r", mir::Ty::int(64)), asm_operand(input, "r", mir::Ty::int(64))],
+                outputs: 1,
+                clobbers: Vec::new(),
+                labels: Vec::new(),
+                is_volatile: false,
+                is_basic: false,
+            }),
+        },
+    );
+    let result = emit(&mut f, entry, mir::InstKind::Load { addr: out, flags: mir::MemFlags::plain() }, mir::Ty::int(64));
+    ret(&mut f, entry, Some(result));
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    let func = unsafe { std::mem::transmute::<*const u8, extern "C" fn(i64) -> i64>(func_addr(&jit, &ids, 0)) };
+    assert_eq!(func(5), !5i64);
+    assert_eq!(func(0), -1);
+}
+
+#[test]
+fn native_inline_asm_fixed_inout_executes() {
+    // x86-64 only: a 32-bit `"+a"` inout — the fork's fixed-register
+    // inout pattern, with the mode-sized register substituted into
+    // the template statically.
+    if crate::abi::Target::native().arch != crate::abi::Arch::X86_64 {
+        return;
+    }
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("notl_a", mir::Signature::new(vec![mir::Ty::int(32)], mir::Ty::int(32)));
+    let input = param(&mut f, entry, mir::Ty::int(32), 0);
+    let out = emit(
+        &mut f,
+        entry,
+        mir::InstKind::Alloca {
+            pointee: mir::Ty::int(32),
+            count: 1,
+        },
+        mir::Ty::ptr(mir::Ty::int(32)),
+    );
+    emit_unit(
+        &mut f,
+        entry,
+        mir::InstKind::Store {
+            addr: out,
+            val: input,
+            flags: mir::MemFlags::plain(),
+        },
+    );
+    emit_unit(
+        &mut f,
+        entry,
+        mir::InstKind::InlineAsm {
+            block: Box::new(mir::AsmBlock {
+                template: "notl %0".to_string(),
+                operands: vec![asm_operand(out, "+a", mir::Ty::int(32))],
+                outputs: 1,
+                clobbers: Vec::new(),
+                labels: Vec::new(),
+                is_volatile: false,
+                is_basic: false,
+            }),
+        },
+    );
+    let result = emit(&mut f, entry, mir::InstKind::Load { addr: out, flags: mir::MemFlags::plain() }, mir::Ty::int(32));
+    ret(&mut f, entry, Some(result));
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    assert_eq!(run_i32(&jit, &ids, 0, 5), !5i32);
+    assert_eq!(run_i32(&jit, &ids, 0, 0), -1);
+}
+
 /// `f(base, i)` = `gep(base, steps(i)) - base` in bytes, with `i`
 /// feeding every [`mir::GepIndex::Index`] step. Pins the byte stride
 /// each step form advances against the result type `gep_step` walks.

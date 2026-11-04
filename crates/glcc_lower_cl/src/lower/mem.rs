@@ -70,6 +70,29 @@ pub(crate) fn atomic_ty(ty: Type) -> Option<Type> {
     }
 }
 
+/// One atomic scalar load (`_Atomic` reads, struct-field extraction).
+/// [`atomic_ty`] carries 32/64-bit floats through an integer bitcast
+/// (this Cranelift only takes integers in `atomic_load`); every other
+/// type loads directly.
+pub(crate) fn atomic_load_value(builder: &mut FunctionBuilder, ty: Type, addr: ClifValue) -> ClifValue {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = builder.ins().atomic_load(int_ty, MemFlagsData::new(), addr);
+        if int_ty == ty { raw } else { builder.ins().bitcast(ty, MemFlagsData::new(), raw) }
+    } else {
+        builder.ins().atomic_load(ty, MemFlagsData::new(), addr)
+    }
+}
+
+/// The store counterpart of [`atomic_load_value`].
+pub(crate) fn atomic_store_value(builder: &mut FunctionBuilder, ty: Type, val: ClifValue, addr: ClifValue) {
+    if let Some(int_ty) = atomic_ty(ty) {
+        let raw = if int_ty == ty { val } else { builder.ins().bitcast(int_ty, MemFlagsData::new(), val) };
+        builder.ins().atomic_store(MemFlagsData::new(), raw, addr);
+    } else {
+        builder.ins().atomic_store(MemFlagsData::new(), val, addr);
+    }
+}
+
 /// A compile-time constant as a Clif value. Aggregate-typed values have
 /// no constant form besides `undef`, which materializes as a fresh,
 /// uninitialized slot whose address is returned.
