@@ -82,7 +82,7 @@ impl<'a> Sema<'a> {
     /// "list of variables protected by the memory barrier"): checked
     /// so their side effects still happen, like the `__atomic` order
     /// operands they shadow.
-    fn sync_val_and_extras(&self, val: &Expr<'a>, extras: &[Expr<'a>], op_ty: &Ty, interner: &Interner, what: &str) -> Result<(CheckedExpr<'a>, Vec<CheckedExpr<'a>>), CompileError> {
+    fn sync_val_and_extras(&self, val: &Expr<'a>, extras: &[Expr<'a>], op_ty: &Ty, interner: &Interner, _what: &str) -> Result<(CheckedExpr<'a>, Vec<CheckedExpr<'a>>), CompileError> {
         // Pointer targets take either an integer (the documented
         // `uintptr_t` treatment, unscaled) or a pointer value: the
         // Itanium signature overloads the value to the pointed-to
@@ -187,7 +187,7 @@ impl<'a> Sema<'a> {
     /// `void __sync_synchronize(...)`: a full memory barrier. The
     /// ignored trailing barrier list still evaluates, like the other
     /// `__sync` forms.
-    fn sync_fence(&self, args: &[Expr<'a>], interner: &Interner, span: Span, what: &str) -> Result<CheckedExpr<'a>, CompileError> {
+    fn sync_fence(&self, args: &[Expr<'a>], interner: &Interner, span: Span, _what: &str) -> Result<CheckedExpr<'a>, CompileError> {
         let extras = args.iter().map(|e| self.check_expr(e, interner).map(|v| self.decay_checked(v))).collect::<Result<Vec<_>, _>>()?;
         Ok(CheckedExpr {
             ty: Ty::Void,

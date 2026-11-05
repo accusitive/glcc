@@ -33,12 +33,14 @@ use crate::{
 
 mod atomic;
 mod gnu;
+mod ia32;
 mod msvc;
 mod prototypes;
 mod sync;
 
 pub use atomic::{AtomicOp, RmwOp};
 pub use gnu::{FpPredicate, OverflowOp};
+pub use ia32::Ia32Op;
 pub(crate) use prototypes::builtin_prototype;
 use gnu::typed_overflow_builtin;
 
@@ -124,6 +126,11 @@ pub enum CheckedExprKind<'a> {
     /// no declared function stands behind it.
     Atomic {
         op: AtomicOp,
+        args: &'a [CheckedExpr<'a>],
+    },
+    /// A GCC x86 `__builtin_ia32_*` builtin (see `ia32::Ia32Op`).
+    Ia32 {
+        op: Ia32Op,
         args: &'a [CheckedExpr<'a>],
     },
     /// A GCC overflow builtin (`__builtin_mul_overflow` and friends):
@@ -3012,6 +3019,15 @@ impl<'a> Sema<'a> {
                 }
                 if text.starts_with("__c11_atomic_") {
                     return self.check_c11_atomic(text, args, interner, span);
+                }
+                // GCC's x86 `__builtin_ia32_*` builtins.
+                if text.starts_with("__builtin_ia32_") {
+                    return match self.check_ia32(text, args, interner, span) {
+                        Some(result) => result,
+                        None => {
+                            Err(CompileError::new(format!("unsupported builtin `{text}`"), span).with_code(DiagCode::UnsupportedAtomicBuiltin))
+                        }
+                    };
                 }
                 // The legacy `__sync` atomics (GCC §7.9.2), which the
                 // docs define in terms of the `__atomic` builtins.

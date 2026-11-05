@@ -254,6 +254,13 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             }
             format!("(atomic-{:?} {} :{})", op, parts.join(" "), t)
         }
+        CheckedExprKind::Ia32 { op, args } => {
+            let mut parts = Vec::new();
+            for arg in *args {
+                parts.push(dump_ex(arg, sema, interner));
+            }
+            format!("(ia32-{:?} {} :{})", op, parts.join(" "), t)
+        }
         CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => format!(
             "({:?}-overflow {} {} {} :{})",
             op,

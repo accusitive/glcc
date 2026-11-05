@@ -144,6 +144,40 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
     }
 
     let template = translate_template(&block.template, &operands)?;
+    // Probe-encode the template the way the fork's emitter will, with
+    // every operand reference standing in for a full register: the
+    // fork's encoder refuses VEX/EVEX instructions and other operand
+    // shapes its table lacks, and its failure is a panic mid-compile.
+    // Anything it cannot encode goes to the out-of-line wrapper,
+    // whose glasm assembler is complete.
+    let mut probe = String::with_capacity(template.len());
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            probe.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'[') {
+            for x in chars.by_ref() {
+                probe.push(x);
+                if x == ']' {
+                    break;
+                }
+            }
+            probe.push_str("%r11");
+            continue;
+        }
+        match chars.peek() {
+            Some(d) if d.is_ascii_digit() => {
+                chars.next();
+                probe.push_str("%r11");
+            }
+            _ => probe.push('%'),
+        }
+    }
+    if let Err(e) = cranelift_assembler_glasm::encode_module(&probe, true) {
+        return Err(format!("fork cannot encode template: {e}"));
+    }
     Ok(NativeAsm {
         template,
         constraints,

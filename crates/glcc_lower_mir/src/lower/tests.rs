@@ -2894,6 +2894,26 @@ fn sync_lock_round_trip() {
 }
 
 #[test]
+fn ia32_integer_builtins() {
+    // The x86 builtins with pure-MIR lowering: bsr off clz, the
+    // rotates off shifts, tzcnt/lzcnt off ctz/clz with the zero case
+    // defined, bextr/bzhi off masks, and the carry/borrow chains
+    // behind `_addcarry_u32`/`_subborrow_u32`.
+    assert_eq!(
+        run_main(
+            "int main(){int ok = 0;            ok += __builtin_ia32_bsrsi(0x1234) == 12;            ok += __builtin_ia32_rolqi(0x80, 1) == 0x01;            ok += __builtin_ia32_rorhi(0x0008, 4) == 0x8000;            ok += __builtin_ia32_tzcnt_u32(0) == 32;            ok += __builtin_ia32_lzcnt_u32(0) == 32;            ok += __builtin_ia32_bextr_u32(0xAABBCCDD, 0x0810) == 0xBB;            ok += __builtin_ia32_bzhi_si(0xFFFFFFFF, 8) == 0xFF;            return ok;}"
+        ),
+        7
+    );
+    assert_eq!(
+        run_main(
+            "int main(){unsigned int s; unsigned long long q; int ok = 0;            ok += __builtin_ia32_addcarryx_u32(0, 0xFFFFFFFF, 1, &s) == 1 && s == 0;            ok += __builtin_ia32_sbb_u32(0, 5, 3, &s) == 0 && s == 2;            ok += __builtin_ia32_sbb_u64(0, 0, 1, &q) == 1 && q == 0xFFFFFFFFFFFFFFFFull;            return ok;}"
+        ),
+        3
+    );
+}
+
+#[test]
 fn sync_on_pointer_target_is_unscaled() {
     // Pointer operands act as `uintptr_t`: the addend counts in
     // bytes, not elements.

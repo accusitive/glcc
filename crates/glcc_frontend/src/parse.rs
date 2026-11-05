@@ -3034,6 +3034,11 @@ impl<'a, 'b> Parser<'a, 'b> {
                     self.check_flow_expr(arg, labels, gotos, scope, fv);
                 }
             }
+            CheckedExprKind::Ia32 { args, .. } => {
+                for arg in *args {
+                    self.check_flow_expr(arg, labels, gotos, scope, fv);
+                }
+            }
             CheckedExprKind::Overflow { lhs, rhs, res, .. } => {
                 self.check_flow_expr(lhs, labels, gotos, scope, fv);
                 self.check_flow_expr(rhs, labels, gotos, scope, fv);

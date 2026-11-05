@@ -941,6 +941,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::CheckedExprKind::Atomic { op, args } => {
                 self.lower_atomic(module, func, frame, funcs, externs, globals, op, args, &expr.ty, &mir_ty)
             }
+            fe::check::CheckedExprKind::Ia32 { op, args } => {
+                self.lower_ia32(module, func, frame, funcs, externs, globals, op, args, &expr.ty)
+            }
             fe::check::CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => {
                 self.lower_overflow(module, func, frame, funcs, externs, globals, op, lhs, rhs, res, res_ty, &mir_ty)
             }

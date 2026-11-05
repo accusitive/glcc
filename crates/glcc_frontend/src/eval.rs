@@ -1052,6 +1052,7 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         CheckedExprKind::Call { .. }
         | CheckedExprKind::VaArg { .. }
         | CheckedExprKind::Atomic { .. }
+        | CheckedExprKind::Ia32 { .. }
         | CheckedExprKind::Overflow { .. }
         | CheckedExprKind::Alloca { .. }
         | CheckedExprKind::FrameAddress { .. }

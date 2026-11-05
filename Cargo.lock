@@ -469,6 +469,7 @@ dependencies = [
 name = "glcc_lower_cl"
 version = "0.1.0"
 dependencies = [
+ "cranelift-assembler-glasm",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",

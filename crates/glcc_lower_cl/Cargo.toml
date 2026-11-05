@@ -12,6 +12,7 @@ glcc_mir = { path = "../glcc_mir" }
 glcc_dwarf = { path = "../glcc_dwarf" }
 cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64", "unwind"] }
 cranelift-frontend = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+cranelift-assembler-glasm = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
 smallvec = "1.16.3"

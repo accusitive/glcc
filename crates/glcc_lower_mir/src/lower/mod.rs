@@ -589,6 +589,7 @@ mod emit;
 mod expr;
 mod fp;
 mod function;
+mod ia32;
 mod init;
 mod vla;
 #[cfg(test)]

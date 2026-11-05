@@ -6788,6 +6788,21 @@ fn sync_builtins_reject_bad_targets_and_arities() {
 }
 
 #[test]
+fn ia32_builtins_check_against_arguments() {
+    // The GCC x86 builtins: fixed signatures, no declarations.
+    let checked = check_with(&["int n;"], "__builtin_ia32_bsrsi(n)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["unsigned n;"], "__builtin_ia32_crc32si(0u, n)");
+    assert_eq!(checked.ty, Ty::UnsignedInt);
+    let checked = check_with(&["unsigned n;"], "__builtin_ia32_tzcnt_u32(n)");
+    assert_eq!(checked.ty, Ty::UnsignedInt);
+    let checked = check_with(&["int n;"], "__builtin_ia32_addcarryx_u32(0, n, n, &n)");
+    assert_eq!(checked.ty, Ty::Bool);
+    assert!(check_with_err(&["int n;"], "__builtin_ia32_bsrsi()").contains("takes exactly 1 argument"));
+    assert!(check_with_err(&["int n;"], "__builtin_ia32_ia32_nosuch(n)").contains("unsupported builtin"));
+}
+
+#[test]
 fn sync_synchronize_takes_no_operands() {
     // A full barrier; the ignored barrier list of the Itanium
     // signature evaluates, so extra arguments are accepted.
