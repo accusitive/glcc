@@ -247,6 +247,29 @@ fn has_builtin(name: &str) -> bool {
             | "__builtin_conj"
             | "__builtin_conjf"
             | "__builtin_conjl"
+    ) || legacy_sync_builtin(name)
+}
+
+/// The legacy `__sync` atomic builtins (GCC §7.9.2), checked in the
+/// frontend and lowered to the same MIR atomic instructions as the
+/// `__atomic` builtins.
+fn legacy_sync_builtin(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("__sync_") else {
+        return false;
+    };
+    if rest == "synchronize" {
+        return true;
+    }
+    let op = if let Some(op) = rest.strip_prefix("fetch_and_") {
+        op
+    } else if let Some(op) = rest.strip_suffix("_and_fetch") {
+        op
+    } else {
+        rest
+    };
+    matches!(
+        op,
+        "add" | "sub" | "and" | "or" | "xor" | "nand" | "val_compare_and_swap" | "bool_compare_and_swap" | "lock_test_and_set" | "lock_release"
     )
 }
 

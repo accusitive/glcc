@@ -2839,6 +2839,81 @@ fn atomic_min_max_signedness() {
 }
 
 #[test]
+fn sync_fetch_and_rmw_semantics() {
+    // The legacy `__sync` RMWs return the old value (`fetch_and_X`)
+    // or the new value (`X_and_fetch`); nand is the GCC 4.4 form
+    // `~(tmp & value)`.
+    assert_eq!(
+        run_main("int main(){int x = 7; int a = __sync_fetch_and_add(&x, 5); return (a == 7) + (x == 12) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){int x = 7; int a = __sync_sub_and_fetch(&x, 5); return (a == 2) + (x == 2) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){int x = 6; int a = __sync_fetch_and_nand(&x, 5); return (a == 6) + (x == ~(6 & 5)) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){char c = 10; char a = __sync_fetch_and_or(&c, 3); return (a == 10) + (c == 11) * 2;}"),
+        1 + 2
+    );
+}
+
+#[test]
+fn sync_compare_and_swap_semantics() {
+    // `val` returns the previous contents (swapped or not); `bool`
+    // returns whether newval was written.
+    assert_eq!(
+        run_main("int main(){int x = 5; int r = __sync_val_compare_and_swap(&x, 5, 9); return (r == 5) + (x == 9) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){int x = 5; int r = __sync_val_compare_and_swap(&x, 6, 9); return (r == 5) + (x == 5) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){int x = 5; int r = __sync_bool_compare_and_swap(&x, 5, 9); return (r == 1) + (x == 9) * 2;}"),
+        1 + 2
+    );
+    assert_eq!(
+        run_main("int main(){int x = 5; int r = __sync_bool_compare_and_swap(&x, 6, 9); return (r == 0) + (x == 5) * 2;}"),
+        1 + 2
+    );
+}
+
+#[test]
+fn sync_lock_round_trip() {
+    // `lock_test_and_set` is an atomic exchange; `lock_release`
+    // stores zero.
+    assert_eq!(
+        run_main("int main(){int x = 3; int r = __sync_lock_test_and_set(&x, 1); __sync_lock_release(&x); return (r == 3) + (x == 0) * 2;}"),
+        1 + 2
+    );
+}
+
+#[test]
+fn sync_on_pointer_target_is_unscaled() {
+    // Pointer operands act as `uintptr_t`: the addend counts in
+    // bytes, not elements.
+    assert_eq!(
+        run_main("int a[4]; int main(){int *p = a; int *q = __sync_fetch_and_add(&p, 4); return (q == a) + (p == &a[1]) * 2;}"),
+        1 + 2
+    );
+}
+
+#[test]
+fn sync_pointer_exchange() {
+    // mingw's `_InterlockedExchangePointer` swaps pointers through
+    // `__sync_lock_test_and_set`, so the value may be a pointer too.
+    assert_eq!(
+        run_main("int a, b; int main(){int *p = &a, *q = &b; int *r = __sync_lock_test_and_set(&p, q); return (r == &a) + (p == &b) * 2;}"),
+        1 + 2
+    );
+}
+
+#[test]
 fn struct_pointer_arithmetic() {
     // Steps over struct pointees scale by the frontend element
     // size (the MIR pointee is erased): `p++`, `p + i`, `p - i`,

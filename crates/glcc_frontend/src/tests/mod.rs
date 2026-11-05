@@ -6292,13 +6292,15 @@ fn function_returning_function_pointer_defines_params() {
 }
 
 #[test]
-fn builtin_sync_synchronize_declares_on_call() {
-    // sqlite's memory barrier: an undeclared nullary builtin call.
+fn builtin_sync_synchronize_checks_inline() {
+    // sqlite's memory barrier: an undeclared nullary builtin call
+    // checks inline (no implicit C89 declaration, no warning).
     let mut sema = Sema::leak_for_tests();
     let mut interner = Interner::new();
     let mut parser = test_parser("static void sqlite3MemoryBarrier(void) { __sync_synchronize(); }", &mut sema, &mut interner);
     let tu = parser.parse_translation_unit();
     assert_eq!(tu.external_declarations.len(), 1);
+    assert!(parser.diagnostics().is_empty());
 }
 
 #[test]
@@ -6744,6 +6746,55 @@ fn interlocked_compare_exchange_checks_against_arguments() {
 #[test]
 fn interlocked_compare_exchange_without_pointer_panics() {
     assert!(check_with_err(&["int n;"], "_InterlockedCompareExchange(n, 1, 0)").contains("needs a pointer argument"));
+}
+
+#[test]
+fn sync_builtins_check_against_arguments() {
+    // The legacy Itanium-ABI atomics: the pointee gives the operand
+    // type; RMWs return the old or new value, CAS the old value
+    // (`val`) or a success flag (`bool`), and the lock forms are an
+    // exchange and a zeroing store. Pointer targets work and take an
+    // unscaled integer addend.
+    let checked = check_with(&["int n;"], "__sync_fetch_and_add(&n, 1)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["int n;"], "__sync_add_and_fetch(&n, 1)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["char n;"], "__sync_fetch_and_nand(&n, 3)");
+    assert_eq!(checked.ty, Ty::Char);
+    let checked = check_with(&["short n;"], "__sync_sub_and_fetch(&n, 2)");
+    assert_eq!(checked.ty, Ty::Short);
+    let checked = check_with(&["long n;"], "__sync_val_compare_and_swap(&n, 0, 1)");
+    assert_eq!(checked.ty, Ty::Long);
+    let checked = check_with(&["int n;"], "__sync_bool_compare_and_swap(&n, 0, 1)");
+    assert_eq!(checked.ty, Ty::Bool);
+    let checked = check_with(&["int n;"], "__sync_lock_test_and_set(&n, 1)");
+    assert_eq!(checked.ty, Ty::Int);
+    let checked = check_with(&["int n;"], "__sync_lock_release(&n)");
+    assert_eq!(checked.ty, Ty::Void);
+    let checked = check_with(&["int *p;"], "__sync_fetch_and_add(&p, 1)");
+    assert!(matches!(checked.ty, Ty::Pointer { .. }));
+}
+
+#[test]
+fn sync_builtins_reject_bad_targets_and_arities() {
+    // GCC: the object must be an integer or pointer type 1/2/4/8
+    // bytes wide, never `_Bool`; the RMW forms take a pointer and a
+    // value.
+    assert!(check_with_err(&["_Bool n;"], "__sync_fetch_and_add(&n, 1)").contains("needs a pointer to an integer or pointer type"));
+    assert!(check_with_err(&["double d;"], "__sync_fetch_and_add(&d, 1)").contains("needs a pointer to an integer or pointer type"));
+    assert!(check_with_err(&["struct { char c[3]; } s;"], "__sync_fetch_and_add(&s, 0)").contains("needs a pointer to an integer or pointer type"));
+    assert!(check_with_err(&["int n;"], "__sync_fetch_and_add(&n)").contains("takes a pointer and a value"));
+    assert!(check_with_err(&["int n;"], "__sync_val_compare_and_swap(&n, 0)").contains("takes a pointer, the expected value, and the new value"));
+}
+
+#[test]
+fn sync_synchronize_takes_no_operands() {
+    // A full barrier; the ignored barrier list of the Itanium
+    // signature evaluates, so extra arguments are accepted.
+    let checked = check_with(&["int n;"], "__sync_synchronize()");
+    assert_eq!(checked.ty, Ty::Void);
+    let checked = check_with(&["int n;"], "__sync_synchronize(1 ? 2 : 3)");
+    assert_eq!(checked.ty, Ty::Void);
 }
 
 #[test]

@@ -54,7 +54,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             Some("__builtin_ceil" | "__builtin_ceill") => Some(ScalarBuiltin::Ceil),
             Some("__builtin_floor" | "__builtin_floorl") => Some(ScalarBuiltin::Floor),
             Some("__builtin_trap") => Some(ScalarBuiltin::Trap),
-            Some("__sync_synchronize" | "_ReadWriteBarrier") => Some(ScalarBuiltin::Sync),
+            Some("_ReadWriteBarrier") => Some(ScalarBuiltin::Sync),
             // The `abs` family and the libm rounding builtins expand
             // inline, like GCC: a program may still define the names,
             // but direct calls use the builtin. A declaration with a

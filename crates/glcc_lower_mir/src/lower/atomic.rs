@@ -97,7 +97,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             AtomicOp::StoreN { .. } => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let val = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                for arg in &args[2..] {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
                 self.emit_unit(func, frame, mir::InstKind::AtomicStore { addr: ptr, val });
                 self.iconst(func, 32, 0)
             }
@@ -133,7 +135,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             AtomicOp::ExchangeN { .. } => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let val = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                for arg in &args[2..] {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
                 let result = self.atomic_result(func, mir_ty.clone());
                 self.atomic_finish(
                     func,
@@ -217,6 +221,43 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 );
                 self.convert(func, frame, old, &pointed, fe_ty)
             }
+            // The legacy `__sync` compare-and-swaps take values like
+            // the interlocked form; the `bool` spelling reports whether
+            // the swap happened instead of returning the old value.
+            AtomicOp::SyncCmpXchg { want_bool } => {
+                let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
+                let expected = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                let desired = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                for arg in &args[3..] {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
+                let pointed = Self::atomic_pointee_of(&args[0]);
+                let pointed_mir = lower_ty(&pointed, self.sema, self.interner);
+                let old = self.emit(
+                    func,
+                    frame,
+                    mir::InstKind::AtomicCas {
+                        addr: ptr,
+                        expected,
+                        replacement: desired,
+                    },
+                    pointed_mir,
+                );
+                if !*want_bool {
+                    return self.convert(func, frame, old, &pointed, fe_ty);
+                }
+                let ok = self.emit(
+                    func,
+                    frame,
+                    mir::InstKind::Icmp {
+                        pred: mir::IcmpPred::Eq,
+                        lhs: old,
+                        rhs: expected,
+                    },
+                    mir::Ty::Bool,
+                );
+                self.convert_bool(func, frame, ok, mir_ty)
+            }
             AtomicOp::CmpXchg => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let expected_ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[1]);
@@ -254,7 +295,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             AtomicOp::Rmw { op, fetch, .. } => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
                 let val = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[2]);
+                for arg in &args[2..] {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
                 // The operand converts to the result width first.
                 let v = self.convert(func, frame, val, &args[1].ty, fe_ty);
                 let signed = is_signed(fe_ty, self.sema);
@@ -309,7 +352,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.emit(func, frame, combined, mir_ty.clone())
             }
             AtomicOp::Fence { .. } => {
-                let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                for arg in args {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
                 self.emit_unit(func, frame, mir::InstKind::AtomicFence);
                 self.iconst(func, 32, 0)
             }
@@ -373,10 +418,26 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 );
                 self.convert_bool(func, frame, was_set, mir_ty)
             }
+            // Storing an atomic zero: `__atomic_clear`, and the
+            // release side of the legacy `__sync_lock_release`. The
+            // pointee gives the width; a pointer target stores null.
             AtomicOp::Clear => {
                 let ptr = self.atomic_addr(module, func, frame, funcs, externs, globals, &args[0]);
-                let _ = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let zero = self.iconst(func, 8, 0);
+                for arg in &args[1..] {
+                    let _ = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                }
+                let pointed = Self::atomic_pointee_of(&args[0]);
+                let pointed_mir = lower_ty(&pointed, self.sema, self.interner);
+                let int_bits = match pointed_mir {
+                    mir::Ty::Int { bits } => bits,
+                    mir::Ty::Ptr { bits, .. } => bits,
+                    _ => 8,
+                };
+                let zero = self.iconst(func, int_bits, 0);
+                let zero = match pointed_mir {
+                    mir::Ty::Ptr { pointee, .. } => self.emit(func, frame, mir::InstKind::IntToPtr(zero), mir::Ty::ptr((*pointee).clone())),
+                    _ => zero,
+                };
                 self.emit_unit(func, frame, mir::InstKind::AtomicStore { addr: ptr, val: zero });
                 self.iconst(func, 32, 0)
             }

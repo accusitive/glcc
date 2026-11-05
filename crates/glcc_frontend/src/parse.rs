@@ -3430,101 +3430,22 @@ impl<'a, 'b> Parser<'a, 'b> {
 
     /// Implicit GCC builtins, none declared anywhere: the `<stdarg.h>`
     /// expansions (`__builtin_va_start`, `__builtin_va_end`), sqlite's
-    /// `__sync_synchronize()`, `__builtin_clzll(m)`,
-    /// `__builtin_inff()`, `__builtin_nanf(tag)`, and
-    /// `__builtin_floor`/`__builtin_ceil(x)`. When a call's callee
+    /// `__builtin_clzll(m)`, `__builtin_inff()`, `__builtin_nanf(tag)`,
+    /// and `__builtin_floor`/`__builtin_ceil(x)`. When a call's callee
     /// names one, declare its prototype on first use so the later
     /// check resolves like any declared function. (`va_arg` takes a
     /// *type* operand, which calls cannot check, and is handled
-    /// separately in postfix parsing.)
+    /// separately in postfix parsing.) The name table lives with the
+    /// other builtin knowledge in `check::prototypes`.
     fn declare_builtin_if_called(&mut self, func: &Expr<'a>) {
         let Expr::Ident { name, .. } = func else {
             return;
         };
-        let (ret, params, variadic) = match self.intern.resolve(*name) {
-            Some("__builtin_va_start" | "__builtin_c23_va_start") => (Ty::Void, vec![Ty::BuiltinVaList], true),
-            Some("__builtin_va_end") => (Ty::Void, vec![Ty::BuiltinVaList], false),
-            Some("__builtin_va_copy") => (Ty::Void, vec![Ty::BuiltinVaList, Ty::BuiltinVaList], false),
-            Some("__sync_synchronize") => (Ty::Void, vec![], false),
-            Some("__builtin_clz") => (Ty::Int, vec![Ty::UnsignedInt], false),
-            Some("__builtin_clzl") => (Ty::Int, vec![Ty::UnsignedLong], false),
-            Some("__builtin_clzll") => (Ty::Int, vec![Ty::UnsignedLongLong], false),
-            Some("__builtin_ctz") => (Ty::Int, vec![Ty::UnsignedInt], false),
-            Some("__builtin_ctzl") => (Ty::Int, vec![Ty::UnsignedLong], false),
-            Some("__builtin_ctzll") => (Ty::Int, vec![Ty::UnsignedLongLong], false),
-            Some("__builtin_popcount") => (Ty::Int, vec![Ty::UnsignedInt], false),
-            Some("__builtin_popcountl") => (Ty::Int, vec![Ty::UnsignedLong], false),
-            Some("__builtin_popcountll") => (Ty::Int, vec![Ty::UnsignedLongLong], false),
-            Some("__builtin_clrsb") => (Ty::Int, vec![Ty::Int], false),
-            Some("__builtin_clrsbl") => (Ty::Int, vec![Ty::Long], false),
-            Some("__builtin_clrsbll") => (Ty::Int, vec![Ty::LongLong], false),
-            Some("__builtin_parity") => (Ty::Int, vec![Ty::UnsignedInt], false),
-            Some("__builtin_parityl") => (Ty::Int, vec![Ty::UnsignedLong], false),
-            Some("__builtin_parityll") => (Ty::Int, vec![Ty::UnsignedLongLong], false),
-            Some("__builtin_copysign") => (Ty::Double, vec![Ty::Double, Ty::Double], false),
-            Some("__builtin_copysignf") => (Ty::Float, vec![Ty::Float, Ty::Float], false),
-            Some("__builtin_copysignl") => (Ty::LongDouble, vec![Ty::LongDouble, Ty::LongDouble], false),
-            Some("__builtin_inff") => (Ty::Float, vec![], false),
-            Some("__builtin_inf") => (Ty::Double, vec![], false),
-            Some("__builtin_infl") => (Ty::LongDouble, vec![], false),
-            Some("__builtin_huge_valf") => (Ty::Float, vec![], false),
-            Some("__builtin_huge_val") => (Ty::Double, vec![], false),
-            Some("__builtin_huge_vall") => (Ty::LongDouble, vec![], false),
-            Some("__builtin_nanf") => (
-                Ty::Float,
-                vec![Ty::Pointer {
-                    qualifiers: TypeQualifiers::empty(),
-                    size: PtrSize::Default,
-                    pointee: Box::new(Ty::Char),
-                }],
-                false,
-            ),
-            Some("__builtin_nan" | "__builtin_nanl") => (
-                if self.intern.resolve(*name) == Some("__builtin_nanl") {
-                    Ty::LongDouble
-                } else {
-                    Ty::Double
-                },
-                vec![Ty::Pointer {
-                    qualifiers: TypeQualifiers::empty(),
-                    size: PtrSize::Default,
-                    pointee: Box::new(Ty::Char),
-                }],
-                false,
-            ),
-            Some("__builtin_floor" | "__builtin_ceil") => (Ty::Double, vec![Ty::Double], false),
-            Some("__builtin_floorf" | "__builtin_ceilf") => (Ty::Float, vec![Ty::Float], false),
-            Some("__builtin_floorl" | "__builtin_ceill") => (Ty::LongDouble, vec![Ty::LongDouble], false),
-            Some("__builtin_abs") => (Ty::Int, vec![Ty::Int], false),
-            Some("__builtin_labs") => (Ty::Long, vec![Ty::Long], false),
-            Some("__builtin_llabs") => (Ty::LongLong, vec![Ty::LongLong], false),
-            Some("__builtin_fabs") => (Ty::Double, vec![Ty::Double], false),
-            Some("__builtin_fabsf") => (Ty::Float, vec![Ty::Float], false),
-            Some("__builtin_fabsl") => (Ty::LongDouble, vec![Ty::LongDouble], false),
-            Some("__builtin_trap") => (Ty::Int, vec![], false),
-            Some("__builtin_bswap16") => (Ty::UnsignedShort, vec![Ty::UnsignedShort], false),
-            Some("__builtin_bswap32") => (Ty::UnsignedInt, vec![Ty::UnsignedInt], false),
-            Some("__builtin_bswap64") => (Ty::UnsignedLongLong, vec![Ty::UnsignedLongLong], false),
-            // Complex conjugates: `__builtin_conjf` over
-            // `float _Complex`, `__builtin_conj` over
-            // `double _Complex`, `__builtin_conjl` over
-            // `long double _Complex`.
-            Some("__builtin_conjf") => (Ty::Complex(Box::new(Ty::Float)), vec![Ty::Complex(Box::new(Ty::Float))], false),
-            Some("__builtin_conj") => (Ty::Complex(Box::new(Ty::Double)), vec![Ty::Complex(Box::new(Ty::Double))], false),
-            Some("__builtin_conjl") => (Ty::Complex(Box::new(Ty::LongDouble)), vec![Ty::Complex(Box::new(Ty::LongDouble))], false),
-            // Complex accessors (`__builtin_creal/cimag/cabs` and
-            // `f`/`l` variants): the real part, the imaginary part,
-            // and the magnitude of a complex number.
-            Some("__builtin_crealf") => (Ty::Float, vec![Ty::Complex(Box::new(Ty::Float))], false),
-            Some("__builtin_creal") => (Ty::Double, vec![Ty::Complex(Box::new(Ty::Double))], false),
-            Some("__builtin_creall") => (Ty::LongDouble, vec![Ty::Complex(Box::new(Ty::LongDouble))], false),
-            Some("__builtin_cimagf") => (Ty::Float, vec![Ty::Complex(Box::new(Ty::Float))], false),
-            Some("__builtin_cimag") => (Ty::Double, vec![Ty::Complex(Box::new(Ty::Double))], false),
-            Some("__builtin_cimagl") => (Ty::LongDouble, vec![Ty::Complex(Box::new(Ty::LongDouble))], false),
-            Some("__builtin_cabsf") => (Ty::Float, vec![Ty::Complex(Box::new(Ty::Float))], false),
-            Some("__builtin_cabs") => (Ty::Double, vec![Ty::Complex(Box::new(Ty::Double))], false),
-            Some("__builtin_cabsl") => (Ty::LongDouble, vec![Ty::Complex(Box::new(Ty::LongDouble))], false),
-            _ => return,
+        let Some(text) = self.intern.resolve(*name) else {
+            return;
+        };
+        let Some((ret, params, variadic)) = crate::check::builtin_prototype(text) else {
+            return;
         };
         if self.sema.lookup_symbol(*name).is_some() {
             return;
@@ -3601,7 +3522,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         let Some(text) = self.intern.resolve(*name) else {
             return;
         };
-        if text.starts_with("__builtin_") || text.starts_with("__atomic_") || text.starts_with("__c11_atomic_") {
+        if text.starts_with("__builtin_") || text.starts_with("__atomic_") || text.starts_with("__c11_atomic_") || text.starts_with("__sync_") {
             return;
         }
         let span = func.span();
