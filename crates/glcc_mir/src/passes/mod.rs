@@ -3306,7 +3306,8 @@ fn sink_pure_instructions(func: &mut Function) -> bool {
 /// - Keyword: callees with `Function::inline` (the C `inline` hint
 ///   from the frontend) inline up to `max_inline_insts`, including
 ///   multi-block bodies via return-block rewiring through block
-///   params.
+///   params. `Function::force_inline` (MSVC `__forceinline`) drops
+///   the size budget entirely.
 ///
 /// Refuses variadic callees, (mutually) recursive calls, frame-bound
 /// `Va*` or `GetFramePointer` bodies, and arity/void mismatches.
@@ -3412,7 +3413,12 @@ impl ModulePass for Inline {
                 }
                 let marked = module.funcs[callee].inline;
                 let total: usize = module.funcs[callee].blocks.iter().map(|b| b.insts.len()).sum();
-                let limit = if marked {
+                // `force_inline` (MSVC `__forceinline`) drops the
+                // cost/benefit analysis: no size budget, only the
+                // structural refusals above and in `callee_eligible`.
+                let limit = if module.funcs[callee].force_inline {
+                    usize::MAX
+                } else if marked {
                     self.max_inline_insts
                 } else if call_counts[callee.index()] == 1 {
                     self.max_single_insts

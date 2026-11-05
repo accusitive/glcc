@@ -540,6 +540,7 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
     let mut local = false;
     let mut weak = false;
     let mut inline = false;
+    let mut force_inline = false;
     let mut personality: Option<Extern> = None;
     loop {
         let flag = c.peek_word().map(str::to_string);
@@ -555,6 +556,11 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
             Some("inline") => {
                 c.next();
                 inline = true;
+            }
+            Some("force_inline") => {
+                c.next();
+                inline = true;
+                force_inline = true;
             }
             Some("sig") => break,
             Some(other) => return Err(c.err(format!("unexpected `.func` flag `{other}`"))),
@@ -583,6 +589,7 @@ fn parse_func_decl(builder: &mut ModuleBuilder, names: &mut Names, c: &mut Curso
     func.local = local;
     func.weak = weak;
     func.inline = inline;
+    func.force_inline = force_inline;
     func.personality = personality;
     names.funcs.insert(name.to_string(), id);
     Ok(id)

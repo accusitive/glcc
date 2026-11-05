@@ -807,6 +807,10 @@ pub struct Function {
     pub local: bool,
     pub weak: bool,
     pub inline: bool,
+    /// MSVC `__forceinline`: the inline pass inlines this function at
+    /// its call sites regardless of the size budget (recursion and the
+    /// other structural refusals still apply).
+    pub force_inline: bool,
     /// `__attribute__((noinline))`: the inline pass never inlines this
     /// function at its call sites.
     pub noinline: bool,
@@ -853,6 +857,7 @@ impl Function {
             local: false,
             weak: false,
             inline: false,
+            force_inline: false,
             noinline: false,
             returns_twice: false,
             coroutine: None,

@@ -252,7 +252,9 @@ fn provenance_suffix(func: &Function, module: &Module, values: &[crate::ir::Valu
 /// pass-materialized value carries its provenance after that.
 fn dump_function_inner(out: &mut String, func: &Function, module: Option<&Module>) -> fmt::Result {
     let personality = func.personality.map(|e| format!(" personality=e{}", e.index())).unwrap_or_default();
-    if func.inline {
+    if func.force_inline {
+        writeln!(out, "func @{} force_inline{personality}:", func.name)?;
+    } else if func.inline {
         writeln!(out, "func @{} inline{personality}:", func.name)?;
     } else {
         writeln!(out, "func @{func_name}{personality}:", func_name = func.name)?;

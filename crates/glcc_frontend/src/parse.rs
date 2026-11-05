@@ -1333,6 +1333,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 naked,
                 is_async,
                 inline: specifiers.is_inline(),
+                forceinline: specifiers.force_inline,
                 noinline: attrs.is_noinline() || specifiers.attrs.is_noinline(),
                 align: attrs.aligned.or(specifiers.attrs.aligned),
                 section,
@@ -1390,6 +1391,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         section: None,
                         asm_label: None,
                         inline: false,
+                        forceinline: false,
                         align: None,
                         span: param.span,
                     },
@@ -1648,6 +1650,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     section: None,
                     asm_label: None,
                     inline: false,
+                    forceinline: false,
                     align: None,
                     span: decl_span,
                 },
@@ -3145,33 +3148,35 @@ impl<'a, 'b> Parser<'a, 'b> {
                 | Keyword::_Atomic
                 | Keyword::_Noreturn,
             )) => true,
-            // A typedef name may open a declaration (`Arg a;`), as may
-            // the alternate `inline` spellings (`__inline__ int f();`
-            // and `__forceinline int f();`) and the GNU qualifier
-            // spellings (`__const char *`).
-            Some(Token::Identifier(sym)) => {
-                // `t :` in a block is a label named like a typedef
-                // (C17 §6.8.1): the colon of a member bit-field only
-                // follows a struct member core declarator (C17
-                // §6.7.2.1), so a declaration cannot open at this shape.
-                if matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon))) {
-                    return false;
-                }
-                self.is_typedef_name(*sym)
-                    || self.is_gnu_type_keyword(*sym)
-                    || self.peek_c23_keyword("typeof_unqual")
-                    || self.peek_c23_keyword("bool")
-                    || self.peek_c23_keyword("constexpr")
-                    || self.peek_c23_keyword("_BitInt")
-                    || self.peek_alternate_inline()
-                    || self.peek_gnu_qualifier().is_some()
-                    // MSVC declaration prefixes (`__declspec(noreturn)
-                    // void f(...);`, `__cdecl int f(void);`).
-                    || self.peek_msvc_operator("__declspec")
-                    || self.peek_msvc_operator("_declspec")
-                    || ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"]
-                        .into_iter()
-                        .any(|kw| self.peek_ext(kw))
+                // A typedef name may open a declaration (`Arg a;`), as may
+                // the alternate `inline` spellings (`__inline__ int f();`
+                // and `__forceinline int f();`) and the GNU qualifier
+                // spellings (`__const char *`).
+                Some(Token::Identifier(sym)) => {
+                    // `t :` in a block is a label named like a typedef
+                    // (C17 §6.8.1): the colon of a member bit-field only
+                    // follows a struct member core declarator (C17
+                    // §6.7.2.1), so a declaration cannot open at this shape.
+                    if matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::Colon))) {
+                        return false;
+                    }
+                    self.is_typedef_name(*sym)
+                        || self.is_gnu_type_keyword(*sym)
+                        || self.peek_c23_keyword("typeof_unqual")
+                        || self.peek_c23_keyword("bool")
+                        || self.peek_c23_keyword("constexpr")
+                        || self.peek_c23_keyword("_BitInt")
+                        || self.peek_alternate_inline()
+                        || self.peek_gnu_qualifier().is_some()
+                        // MSVC declaration prefixes (`__declspec(noreturn)
+                        // void f(...);`, `__cdecl int f(void);`,
+                        // `__unaligned WCHAR *p;`).
+                        || self.peek_msvc_operator("__declspec")
+                        || self.peek_msvc_operator("_declspec")
+                        || ["__cdecl", "__stdcall", "__fastcall", "__thiscall", "__vectorcall", "__clrcall"]
+                            .into_iter()
+                            .any(|kw| self.peek_ext(kw))
+                        || self.peek_ms_unaligned()
                     // `_Future(T)` opens a declaration like a typedef name does.
                     || self.is_future_specifier(*sym)
             }
@@ -3224,6 +3229,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(Token::Identifier(sym)) => {
                             self.is_typedef_name(*sym)
                                 || self.is_gnu_type_keyword(*sym)
+                                || self.is_ms_unaligned_sym(*sym)
                                 || matches!(
                                     self.intern.resolve(*sym),
                                     Some("typeof_unqual" | "bool" | "constexpr" | "_BitInt" | "_Thread_local" | "__thread" | "thread_local")
@@ -3357,7 +3363,13 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// aligned; our codegen already emits every access unaligned-safe,
     /// so it is accepted in MS mode and erased like `_Atomic`.
     fn peek_ms_unaligned(&self) -> bool {
-        self.peek_ext("__unaligned")
+        matches!(self.tokens.peek_val(), Some(Token::Identifier(sym)) if self.is_ms_unaligned_sym(*sym))
+    }
+    /// Whether `sym` spells MSVC's `__unaligned`/`_unaligned` qualifier.
+    /// Symbol-based so lookahead positions (parameter-list vs grouped
+    /// declarator, casts) can probe tokens that are not at the cursor.
+    fn is_ms_unaligned_sym(&self, sym: SymbolU32) -> bool {
+        self.intern.resolve(sym).is_some_and(crate::ext::is_ms_unaligned_spelling) && crate::ext::Fam::Ms.allowed(self.sema.lang)
     }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
@@ -3544,6 +3556,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 section: None,
                 asm_label: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 span,
             },
@@ -3637,6 +3650,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 section: None,
                 asm_label: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 span,
             },
@@ -4300,6 +4314,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 naked,
                 is_async,
                 inline: kind == BindingKind::Func && specifiers.is_inline(),
+                forceinline: kind == BindingKind::Func && specifiers.force_inline,
                 noinline: kind == BindingKind::Func && (suffix.is_noinline() || specifiers.attrs.is_noinline()),
                 align: suffix.aligned.or(specifiers.attrs.aligned),
                 section,
@@ -4704,7 +4719,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                         )) if content == 0 => {
                             first_is_specifier = true;
                         }
-                        Some(Token::Identifier(sym)) if content == 0 && (self.is_typedef_name(*sym) || self.is_gnu_type_keyword(*sym)) => {
+                        Some(Token::Identifier(sym))
+                            if content == 0
+                                && (self.is_typedef_name(*sym)
+                                    || self.is_gnu_type_keyword(*sym)
+                                    // `f(__unaligned WCHAR *p)`: a leading
+                                    // `__unaligned` names the parameter's
+                                    // specifiers, not a grouped declarator.
+                                    || self.is_ms_unaligned_sym(*sym)) =>
+                        {
                             first_is_specifier = true;
                         }
                         _ => {}
@@ -4946,6 +4969,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         section: None,
                         asm_label: None,
                         inline: false,
+                        forceinline: false,
                         align: None,
                         span: param.span,
                     },
@@ -5146,6 +5170,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             if self.peek_alternate_inline() {
                 ds.function_specifier += 1;
+                if self.peek_ext("__forceinline") {
+                    ds.force_inline = true;
+                }
                 self.tokens.advance();
                 continue;
             }
@@ -6330,6 +6357,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     section: None,
                     asm_label: None,
                     inline: false,
+                    forceinline: false,
                     align: None,
                     span,
                 },
@@ -6925,6 +6953,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
                     || self.is_future_specifier(*sym)
+                    // `(__unaligned Big *)&b`: the cast type-name opens
+                    // with the qualifier.
+                    || self.is_ms_unaligned_sym(*sym)
                     || self.is_c23_keyword(*sym, "typeof_unqual")
                     || self.is_c23_keyword(*sym, "bool")
                     || self.is_c23_keyword(*sym, "_BitInt")
@@ -8293,6 +8324,9 @@ pub struct DeclarationSpecifiers {
     /// and only valid on functions, so it is tracked separately and
     /// otherwise ignored.
     noreturn: bool,
+    /// MSVC `__forceinline`: `inline` plus a must-inline request, so
+    /// the MIR inline pass drops the size budget for these callees.
+    pub(crate) force_inline: bool,
     /// Thread-local storage (`_Thread_local`, `__thread`,
     /// `thread_local`): combines with `static`/`extern` like GCC.
     pub(crate) thread_local: bool,

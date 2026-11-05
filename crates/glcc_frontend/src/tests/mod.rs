@@ -1189,6 +1189,7 @@ fn try_declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -
             weak: false,
             alias: None,
             inline: false,
+            forceinline: false,
             align: None,
             naked: false,
             noinline: false,
@@ -1252,6 +1253,7 @@ fn sema_inner_scope_shadows() {
                 weak: false,
                 alias: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 naked: false,
                 noinline: false,
@@ -1674,6 +1676,60 @@ fn unaligned_qualifier_is_erased() {
     };
     assert_eq!(parser.sema.decls[p.0 as usize].ty, plain);
     assert_eq!(parser.sema.decls[q.0 as usize].ty, plain);
+}
+
+#[test]
+fn unaligned_leading_specifier_positions_parse() {
+    // The remaining Windows spellings: `__unaligned` (and `_unaligned`)
+    // leading the declaration specifiers — as a global, a statement, a
+    // parameter, a typedef'd parameter, and a cast type-name. All
+    // erase to the plain pointer type.
+    let plain = |pointee| {
+        Ty::Pointer {
+            qualifiers: TypeQualifiers::empty(),
+            size: PtrSize::Default,
+            pointee: Box::new(pointee),
+        }
+    };
+    for src in [
+        "__unaligned int *p; _unaligned int *q;",
+        "typedef struct { int a; } Big; __unaligned Big *g; _unaligned Big *g2;",
+    ] {
+        let mut sema = gated_sema(LangOpts { ms: true, ..LangOpts::default() });
+        let mut interner = Interner::new();
+        let mut parser = test_parser(src, &mut sema, &mut interner);
+        parser.parse_translation_unit();
+        assert!(!parser.has_errors(), "{src}: {:#?}", parser.diagnostics().iter().map(|d| &d.message).collect::<Vec<_>>());
+    }
+    let mut sema = gated_sema(LangOpts { ms: true, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser(
+        "int f(__unaligned int *p, _unaligned int *q) { return *p + *q; }
+         int g(void) { int b; __unaligned int *u = (_unaligned int *)&b; return *u; }",
+        &mut sema,
+        &mut interner,
+    );
+    parser.parse_translation_unit();
+    assert!(!parser.has_errors(), "{:#?}", parser.diagnostics().iter().map(|d| &d.message).collect::<Vec<_>>());
+    // Scopes are popped after the parse, so find the locals by name
+    // in the decl table.
+    let mut by_name = |name: &str| {
+        let sym = parser.intern.get_or_intern(name);
+        parser.sema.decls.iter().find(|b| b.name == Some(sym)).unwrap_or_else(|| panic!("{name} declared"))
+    };
+    assert_eq!(by_name("p").ty, plain(Ty::Int));
+    assert_eq!(by_name("u").ty, plain(Ty::Int));
+}
+
+#[test]
+fn unaligned_parameter_list_vs_grouped_declarator() {
+    // `f(__unaligned Big *p)` opens a parameter list, not a grouped
+    // declarator, even though `__unaligned` is a plain identifier.
+    let mut sema = gated_sema(LangOpts { ms: true, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("typedef struct { int a; } Big; typedef int (*FN)(__unaligned Big *p);", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(!parser.has_errors(), "{:#?}", parser.diagnostics().iter().map(|d| &d.message).collect::<Vec<_>>());
 }
 
 #[test]
@@ -2827,6 +2883,31 @@ fn inline_specifier_lands_on_binding() {
     let sym = parser.intern.get_or_intern("f");
     let id = parser.sema.lookup_symbol(sym).unwrap();
     assert!(!parser.sema.decls[id.0 as usize].inline);
+}
+
+#[test]
+fn forceinline_specifier_lands_on_binding() {
+    // MSVC `__forceinline` marks the binding `forceinline` while still
+    // counting as `inline` (the hint's linkage/emit behavior applies
+    // too); plain `inline` and no specifier stay unmarked.
+    for (src, expect_force) in [
+        ("__forceinline int f(void) { return 1; }", true),
+        ("static __forceinline int f(void) { return 1; }", true),
+        ("inline int f(void) { return 1; }", false),
+        ("int f(void) { return 1; }", false),
+    ] {
+        let mut sema = Sema::leak_for_tests();
+        let mut interner = Interner::new();
+        let mut parser = test_parser(src, &mut sema, &mut interner);
+        let tu = parser.parse_translation_unit();
+        assert_eq!(tu.external_declarations.len(), 1, "{src}");
+        let sym = parser.intern.get_or_intern("f");
+        let id = parser.sema.lookup_symbol(sym).unwrap();
+        assert_eq!(parser.sema.decls[id.0 as usize].forceinline, expect_force, "{src}");
+        if expect_force {
+            assert!(parser.sema.decls[id.0 as usize].inline, "{src}");
+        }
+    }
 }
 
 #[test]
@@ -8166,6 +8247,7 @@ fn block_extern_reuses_file_entity() {
                 weak: false,
                 alias: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 naked: false,
                 noinline: false,
@@ -8194,6 +8276,7 @@ fn block_extern_reuses_file_entity() {
                 weak: false,
                 alias: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 naked: false,
                 noinline: false,
@@ -8231,6 +8314,7 @@ fn block_extern_after_local_reports() {
             weak: false,
             alias: None,
             inline: false,
+            forceinline: false,
             align: None,
             naked: false,
             noinline: false,
@@ -8258,6 +8342,7 @@ fn block_extern_after_local_reports() {
                 weak: false,
                 alias: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 naked: false,
                 noinline: false,
@@ -8491,6 +8576,7 @@ fn conflicting_redeclaration_renders_both_sites() {
             weak: false,
             alias: None,
             inline: false,
+            forceinline: false,
             align: None,
             naked: false,
             noinline: false,
@@ -8519,6 +8605,7 @@ fn conflicting_redeclaration_renders_both_sites() {
                 weak: false,
                 alias: None,
                 inline: false,
+                forceinline: false,
                 align: None,
                 naked: false,
                 noinline: false,

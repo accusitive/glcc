@@ -318,6 +318,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                     module.module.funcs[fid].local = binding.linkage == fe::sema::Linkage::Internal;
                     module.module.funcs[fid].weak = binding.weak;
                     module.module.funcs[fid].inline = binding.inline;
+                    module.module.funcs[fid].force_inline = binding.forceinline;
                     // An async definition's body is a coroutine over
                     // its declared result; `LowerCoroutines` splits it
                     // after lowering (see `Function::coroutine`).
@@ -452,6 +453,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                 func.local = binding.linkage == fe::sema::Linkage::Internal;
                 func.weak = binding.weak;
                 func.inline = binding.inline;
+                func.force_inline = binding.forceinline;
                 func.noinline = binding.noinline;
                 // The fresh `Function` replaces the predeclared shell,
                 // so facts recorded at declaration time ride along: an
@@ -525,6 +527,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
             let (mut func, _) = mir::Function::new(&name, lx.func_sig(binding));
             func.local = true;
             func.inline = binding.inline;
+            func.force_inline = binding.forceinline;
             func.noinline = binding.noinline;
             func.coroutine = module.module.funcs[fid].coroutine.clone();
             let mut frame = Frame {

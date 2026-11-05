@@ -208,13 +208,20 @@ pub struct Binding {
     /// definition that omits the attribute (cross-TU headers).
     pub is_async: bool,
     /// C `inline` function specifier (`inline`, `__inline__`,
-    /// `__inline`, `__forceinline`): an optimization hint requesting call-site
+    /// `__inline`): an optimization hint requesting call-site
     /// inlining. Recorded on function bindings only (the parser
     /// rejects it elsewhere); merged with OR like `weak`, so an
     /// `inline` prototype marks the definition too. The MIR
     /// lowering copies it to `Function::inline`, where the `inline`
     /// pass uses a larger budget for marked callees.
     pub inline: bool,
+    /// MSVC `__forceinline`: `inline` with the cost/benefit analysis
+    /// dropped. Recorded on function bindings only, merged with OR
+    /// like `inline`; the MIR lowering copies it to
+    /// `Function::force_inline`, where the inline pass inlines these
+    /// callees regardless of size (recursion and the other structural
+    /// refusals still apply).
+    pub forceinline: bool,
     /// `__attribute__((noinline))`: the definition must not be inlined
     /// at its call sites. Merged with OR like `inline`, so a prototype
     /// may carry it for a definition that omits the attribute; the MIR
@@ -785,6 +792,8 @@ impl<'a> Sema<'a> {
             stored.weak |= binding.weak;
             // `inline` merges the same way: any declaration marks it.
             stored.inline |= binding.inline;
+            // `__forceinline` merges the same way.
+            stored.forceinline |= binding.forceinline;
             // An alias target may arrive with any declaration; first wins.
             stored.alias = stored.alias.or(binding.alias);
             // `naked` merges like `inline`: any declaration marks it.

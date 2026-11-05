@@ -21,6 +21,9 @@ pub const KEYWORDS: &[&str] = &[
     "__ptr32",
     "__ptr64",
     "__unaligned",
+    // Pre-`__unaligned` synonym; accepted unconditionally because there
+    // is no `/Za` equivalent to turn it off.
+    "_unaligned",
 ];
 
 pub fn is_keyword(word: &str) -> bool {
@@ -30,6 +33,11 @@ pub fn is_keyword(word: &str) -> bool {
 /// MSVC's `__forceinline`.
 pub fn is_inline_spelling(word: &str) -> bool {
     word == "__forceinline"
+}
+
+/// MSVC's `__unaligned` pointer qualifier and its `_unaligned` synonym.
+pub fn is_unaligned_spelling(word: &str) -> bool {
+    word == "__unaligned" || word == "_unaligned"
 }
 
 /// MSVC's pointer-size attributes, which follow the `*` they modify.

@@ -3184,6 +3184,38 @@ fn inline_end_to_end_through_jit() {
 }
 
 #[test]
+fn forceinline_flag_reaches_mir() {
+    // MSVC `__forceinline` rides the binding into MIR so the `inline`
+    // pass can drop the size budget for it. It still counts as
+    // `inline` (the hint's linkage/emit behavior applies too).
+    for (src, name, expect_force) in [
+        ("__forceinline int f(void){return 1;} int main(){return f();}", "f", true),
+        ("static __forceinline int f(void){return 1;} int main(){return f();}", "f", true),
+        ("inline int f(void){return 1;} int main(){return f();}", "f", false),
+        ("int f(void){return 1;} int main(){return f();}", "f", false),
+    ] {
+        let mut interner = fe::lexer::Interner::new();
+        let mut sema = fe::sema::Sema::leak_for_tests();
+        let tokens = fe::lexer::Lexer::new(src, &mut interner).lex_all();
+        let mut parser = fe::parse::Parser::new(src, tokens, sema.arena, &mut sema, &mut interner);
+        let tu = parser.parse_translation_unit();
+        drop(parser);
+        let module = lower_translation_unit(&sema, &interner, &tu);
+        let func = module.funcs.iter().find(|f| f.name == name).expect("function lowered");
+        assert_eq!(func.force_inline, expect_force, "{src}");
+        assert!(mir::verify::verify_module(&module).is_empty(), "{src}");
+    }
+}
+
+#[test]
+fn forceinline_end_to_end_through_jit() {
+    // `__forceinline` callees (including multi-block bodies) execute
+    // correctly, whether or not the pass inlines them here.
+    assert_eq!(run_main("__forceinline int add1(int x){return x+1;} int main(){return add1(41);}"), 42);
+    assert_eq!(run_main("__forceinline int pick(int x){if(x>0) return 1; return 0;} int main(){return pick(5)*10+pick(-3);}"), 10);
+}
+
+#[test]
 fn opt_pipeline_promotes_spills() {
     // The driver pipeline (inline, mem2reg, fold, simplify, DCE)
     // removes the -O0 spill slots from a trivial function while

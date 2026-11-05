@@ -1881,6 +1881,23 @@ fn inlines_single_call_callee_on_the_larger_budget() {
 }
 
 #[test]
+fn force_inline_drops_the_size_budget() {
+    // MSVC `__forceinline`: with every budget at zero a `force_inline`
+    // callee still inlines, where the unmarked one is refused.
+    let (mut module, _) = branchy_callee(false);
+    module.funcs[crate::ir::Func::from_usize(0)].force_inline = true;
+    let caller = crate::ir::Func::from_usize(1);
+    let mut inline = Inline::small();
+    inline.max_insts = 0;
+    inline.max_hot_insts = 0;
+    inline.max_single_insts = 0;
+    inline.max_inline_insts = 0;
+    assert!(inline.run(&mut module));
+    assert!(!caller_still_calls(&module, caller));
+    assert!(crate::verify::verify_module(&module).is_empty());
+}
+
+#[test]
 fn inline_only_config_inlines_marked_but_not_plain() {
     let (mut marked, _) = branchy_callee(true);
     let mut only = Inline::inline_only();

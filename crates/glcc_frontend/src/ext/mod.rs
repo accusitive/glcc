@@ -14,7 +14,7 @@ mod msvc;
 
 pub use clang::{FLOAT_SPELLINGS, is_float_spelling};
 pub use gnu::{QUALIFIER_SPELLINGS, is_inline_spelling, qualifier_of};
-pub use msvc::{PTR_SIZE_SPELLINGS, is_inline_spelling as is_ms_inline_spelling, KEYWORDS as MS_KEYWORDS};
+pub use msvc::{PTR_SIZE_SPELLINGS, is_inline_spelling as is_ms_inline_spelling, is_unaligned_spelling as is_ms_unaligned_spelling, KEYWORDS as MS_KEYWORDS};
 
 use crate::lang::{LangOpts, Std};
 

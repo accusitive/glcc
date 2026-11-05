@@ -77,7 +77,7 @@ fn clear_forgets_definitions() {
     repl.define("fn f(x) : Int -> Int = x").expect("defines");
     repl.clear();
     let err = repl.eval_expr("f(1)").expect_err("unknown value `f`");
-    assert!(err[0].msg.contains("cannot find"), "{:?}", err[0].msg);
+    assert!(err[0].msg.contains("unknown value"), "{:?}", err[0].msg);
 }
 
 #[test]
