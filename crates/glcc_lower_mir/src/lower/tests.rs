@@ -2449,6 +2449,46 @@ fn complex_globals() {
     );
 }
 
+/// Aggregate elements convert to their target type before the global
+/// byte image is built: an integer element of a floating aggregate
+/// must hold the converted float, not the integer's little-endian bits.
+#[test]
+fn global_aggregate_initializers_convert_integer_elements() {
+    let module = lower_module(
+        "double d[4] = {0, 1, 2, 3};\n\
+         float f[4] = {0, 1, 2, 3};\n\
+         struct S { double x, y; } s = {1, 2};\n\
+         double nested[2][2] = {{1, 2}, {3, 4}};\n\
+         double expr[2] = {1 + 1, 2 * 2};\n\
+         double chars[2] = {'A', 'B'};\n\
+         double longs[2] = {1L, 2L};\n\
+         double partial[4] = {1, 2};\n\
+         double float_literals[2] = {1.5f, 2.5f};\n\
+         int ints[2] = {1.5, 2.5};",
+    );
+    let image = |name: &str| match &global_named(&module, name).init {
+        Some(mir::Const::Bytes(bytes)) => bytes.clone(),
+        other => panic!("global {name} has non-byte initializer {other:?}"),
+    };
+    let f64s = |values: &[f64]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+    let f32s = |values: &[f32]| values.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<_>>();
+
+    assert_eq!(image("d"), f64s(&[0.0, 1.0, 2.0, 3.0]));
+    assert_eq!(image("f"), f32s(&[0.0, 1.0, 2.0, 3.0]));
+    assert_eq!(image("s"), f64s(&[1.0, 2.0]));
+    assert_eq!(image("nested"), f64s(&[1.0, 2.0, 3.0, 4.0]));
+    assert_eq!(image("expr"), f64s(&[2.0, 4.0]));
+    assert_eq!(image("chars"), f64s(&[65.0, 66.0]));
+    assert_eq!(image("longs"), f64s(&[1.0, 2.0]));
+    assert_eq!(image("partial"), f64s(&[1.0, 2.0, 0.0, 0.0]));
+    assert_eq!(image("float_literals"), f64s(&[1.5, 2.5]));
+    assert_eq!(image("ints"), [1u8, 0, 0, 0, 2, 0, 0, 0]);
+
+    // The neighbouring scalar and local conversions keep working.
+    assert_eq!(run_main("double x = 7; int main(){ return x == 7.0 ? 0 : 1; }"), 0);
+    assert_eq!(run_main("int main(){ double a[4] = {0, 1, 2, 3}; return a[0] == 0.0 && a[1] == 1.0 && a[2] == 2.0 && a[3] == 3.0 ? 0 : 1; }"), 0);
+}
+
 #[test]
 fn flexible_array_member_globals() {
     // An initialized flexible array member grows the object past
