@@ -25,6 +25,20 @@ pub(crate) enum Object {
     Opaque(Value),
 }
 
+impl Object {
+    /// The base pointer the object is named by: the alloca, global,
+    /// allocation site, or parameter itself. Offsets reported alongside
+    /// this base are relative to it.
+    pub(crate) fn base_value(self) -> Value {
+        match self {
+            Object::Known(MemoryObject::Stack(v))
+            | Object::Known(MemoryObject::Global(v))
+            | Object::Known(MemoryObject::Heap(v))
+            | Object::Opaque(v) => v,
+        }
+    }
+}
+
 /// Resolve an address to its [`Object`] and constant byte offset.
 pub(crate) fn resolve(func: &Function, value: Value) -> Option<(Object, Option<u64>)> {
     if let Some(info) = address_info(func, value) {

@@ -123,6 +123,79 @@ fn empty_and_exact_trips_keep_structures() {
     assert_eq!(func.blocks.len(), 9, "4 original (3 retired) + vector header/body/exit + scalar header/latch");
 }
 
+/// A loop storing a value loaded through a derived invariant pointer
+/// (`inttoptr(base + 36)`): the affine walk stops at the pointer itself,
+/// so the plan must decompose it to its object base — emission adds
+/// `abs_off` to `ptrtoint(root)`, and an offset already baked into the
+/// root would be added a second time, reading the wrong field.
+#[test]
+fn derived_invariant_load_does_not_double_count_offset() {
+    let sig = Signature::new(vec![Ty::ptr(Ty::int(32)), Ty::ptr(Ty::int(8)), Ty::int(32)], Ty::Void);
+    let (mut func, entry) = Function::new("f", sig);
+    let dst = param(&mut func, entry, Ty::ptr(Ty::int(32)), 0);
+    let ctx = param(&mut func, entry, Ty::ptr(Ty::int(8)), 1);
+    let n = param(&mut func, entry, Ty::int(32), 2);
+    let ctxi = emit(&mut func, entry, InstKind::PtrToInt(ctx), Ty::int(64));
+    let f36 = iconst(&mut func, 64, 36);
+    let fieldi = emit(&mut func, entry, InstKind::Add(ctxi, f36), Ty::int(64));
+    let field = emit(&mut func, entry, InstKind::IntToPtr(fieldi), Ty::ptr(Ty::int(32)));
+    let dsti = emit(&mut func, entry, InstKind::PtrToInt(dst), Ty::int(64));
+    let header = func.push_block(vec![Ty::int(32)]);
+    let iv = func.blocks[header].params[0];
+    func.blocks[entry].term = Some(Terminator::Br { dest: header, args: smallvec![iconst(&mut func, 32, 0)] });
+    let body = func.push_block(vec![]);
+    let exit = func.push_block(vec![]);
+    let cond = emit(&mut func, header, InstKind::Icmp { pred: IcmpPred::Slt, lhs: iv, rhs: n }, Ty::Bool);
+    func.blocks[header].term = Some(Terminator::CondBr { cond, then_block: body, else_block: exit, then_args: smallvec![], else_args: smallvec![] });
+    let sext = emit(&mut func, body, InstKind::Sext(iv), Ty::int(64));
+    let two = iconst(&mut func, 64, 2);
+    let scaled = emit(&mut func, body, InstKind::Shl(sext, two), Ty::int(64));
+    let daddr = emit(&mut func, body, InstKind::Add(dsti, scaled), Ty::int(64));
+    let dptr = emit(&mut func, body, InstKind::IntToPtr(daddr), Ty::ptr(Ty::int(32)));
+    let loaded = emit(&mut func, body, InstKind::Load { addr: field, flags: MemFlags::plain() }, Ty::int(32));
+    emit_unit(&mut func, body, InstKind::Store { addr: dptr, val: loaded, flags: MemFlags::plain() });
+    let one = iconst(&mut func, 32, 1);
+    let next = emit(&mut func, body, InstKind::Add(iv, one), Ty::int(32));
+    func.blocks[body].term = Some(Terminator::Br { dest: header, args: smallvec![next] });
+    func.blocks[exit].term = Some(Terminator::Return { val: None });
+
+    // The plan's broadcast access names the object base, offset 36.
+    let reachable = func.reachable_blocks();
+    let dom = DomInfo::compute(&func, &reachable);
+    let loops = super::super::licm::natural_loops(&func, &dom);
+    let (header, set) = loops.first().expect("loop found");
+    let shape = analyze(&func, &dom, *header, set).expect("shape recognized");
+    let p = plan(&func, &shape).expect("plan built");
+    let access = p.loads.iter().find(|a| a.invariant).expect("broadcast load");
+    assert_eq!(access.root, ctx, "root must be the object base, not the derived address");
+    assert_eq!(access.abs_off, 36);
+
+    assert!(run(&mut func));
+    // Emission must read `ctx + 36` in the vector body — no doubled
+    // offset anywhere.
+    let mut saw_broadcast = false;
+    for data in func.insts.iter() {
+        if let InstKind::Load { addr, .. } = &data.kind {
+            if let Def::Inst(inst) = &func.values[*addr].def {
+                if let InstKind::IntToPtr(base) = &func.insts[*inst].kind {
+                    if let Def::Inst(bi) = &func.values[*base].def {
+                        if let InstKind::Add(a, b) = &func.insts[*bi].kind {
+                            if let Def::Inst(ai) = &func.values[*a].def {
+                                if let InstKind::PtrToInt(inner) = &func.insts[*ai].kind {
+                                    assert_eq!(*inner, ctx, "broadcast base must be ctx");
+                                    assert_eq!(int_const(&func, *b).map(|(_, v)| v), Some(36), "broadcast offset");
+                                    saw_broadcast = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(saw_broadcast, "no broadcast load through ctx + 36");
+}
+
 #[test]
 fn backward_dependence_keeps_loop_scalar() {
     // dst[i + 1] = src[i] with src aliasing dst: the store sweeps one

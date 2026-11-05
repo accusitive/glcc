@@ -298,10 +298,9 @@ fn preheader_of(func: &Function, dom: &DomInfo, header: Block, set: &HashSet<Blo
 
 /// One memory access the plan vectorizes or reasons about.
 struct Access {
-    /// Invariant pointer value feeding the address math.
+    /// The object base the access addresses within.
     root: Value,
-    /// Byte offset from the root's object base: the root's own object
-    /// offset plus the affine constant.
+    /// Byte offset from `root` to the access's lowest address.
     abs_off: i64,
     /// Bytes per element.
     elem_size: u64,
@@ -370,7 +369,8 @@ fn plan(func: &Function, shape: &Shape) -> Option<Plan> {
                 elem = Some(elem_ty.clone());
             }
         }
-        let access = Access { root, abs_off: abs_off(func, root, aff.base_off)?, elem_size: es, invariant: false };
+        let (root, abs) = object_offset(func, root, aff.base_off)?;
+        let access = Access { root, abs_off: abs, elem_size: es, invariant: false };
         value_tree(func, shape, *val, &elem_ty, &in_loop, &mut loads, &mut trees)?;
         stores.push((access, *val));
     }
@@ -461,12 +461,14 @@ fn push_root(roots: &mut Vec<Value>, root: Value) {
     }
 }
 
-/// Object-relative byte offset of an access: the root's own offset in
-/// its object plus the affine constant.
-fn abs_off(func: &Function, root: Value, base_off: i64) -> Option<i64> {
-    let (_, off) = resolve(func, root)?;
+/// Object base and offset of an access: the affine root may be a
+/// derived address (`inttoptr(base + n)`, a GEP) that already carries an
+/// offset, so decompose it first — emission adds `abs_off` to the base
+/// pointer, and the offset baked into the root must not be added twice.
+fn object_offset(func: &Function, root: Value, base_off: i64) -> Option<(Value, i64)> {
+    let (object, off) = resolve(func, root)?;
     let off = i64::try_from(off?).ok()?;
-    Some(off.checked_add(base_off)?)
+    Some((object.base_value(), off.checked_add(base_off)?))
 }
 
 /// The vector form of one in-loop scalar value, memoized so shared
@@ -500,12 +502,12 @@ fn build_tree(func: &Function, shape: &Shape, value: Value, elem: &Ty, in_loop: 
             let root = aff.root?;
             let es = elem.size_bytes();
             if aff.iv_coeff == es as i64 && aff.base_off % es as i64 == 0 {
-                let abs = abs_off(func, root, aff.base_off)?;
+                let (root, abs) = object_offset(func, root, aff.base_off)?;
                 loads.push(Access { root, abs_off: abs, elem_size: es, invariant: false });
                 Some(VNode::VLoad(loads.len() - 1))
             } else if aff.iv_coeff == 0 {
                 // Invariant address: read once per vector iteration.
-                let abs = abs_off(func, root, aff.base_off)?;
+                let (root, abs) = object_offset(func, root, aff.base_off)?;
                 loads.push(Access { root, abs_off: abs, elem_size: es, invariant: true });
                 Some(VNode::ILoad(loads.len() - 1))
             } else {

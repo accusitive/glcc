@@ -276,7 +276,10 @@ fn heap_keeps_up_with_allocations() {
 
 #[test]
 fn tuples_and_patterns() {
-    assert_eq!(run_i64("fn fst(p) : for<A, B> (A, B) -> A = match p { case (a, _) => a }\nfn main() :  -> Int = fst((7, 9))"), 7);
+    assert_eq!(
+        run_i64("fn fst(p) : for<A, B> (A, B) -> A = match p { case (a, _) => a }\nfn main() :  -> Int = fst((7, 9))"),
+        7
+    );
     assert_eq!(
         run_i64(
             "fn fst(p) : for<A, B> (A, B) -> A = match p { case (a, _) => a }\n\
@@ -385,7 +388,7 @@ fn literal_patterns_and_guards() {
 #[test]
 fn higher_order_functions() {
     assert_eq!(
-        run_i64("fn apply(f, x) : for<A, B> (A -> B, A) -> B = f(x)\nfn adder(n) : Int -> Int -> Int = y -> y + n\nfn main() :  -> Int = apply(adder(3), 4)"),
+        run_i64("fn apply(f, x) : for<A, B> (A -> B, A) -> B = f(x)\nfn adder(n) : Int -> Int -> Int = |y| y + n\nfn main() :  -> Int = apply(adder(3), 4)"),
         7
     );
     assert_eq!(
@@ -394,7 +397,7 @@ fn higher_order_functions() {
     );
     assert_eq!(
         run_i64(
-            "fn compose(f, g) : for<A, B, C> (B -> C, A -> B) -> A -> C = x -> f(g(x))\n\
+            "fn compose(f, g) : for<A, B, C> (B -> C, A -> B) -> A -> C = |x| f(g(x))\n\
              fn main() :  -> Int = { let h = compose(|y| y + 1, |y| y * 2); h(5) }"
         ),
         11
