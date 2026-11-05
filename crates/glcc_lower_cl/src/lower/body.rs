@@ -146,6 +146,10 @@ pub(crate) fn lower_function<M: Module>(
         ctx.func.preserve_frame_pointer = true;
     }
     let clif_id = func_ids[&id];
+    if let Err(e) = ctx.verify(clif.isa()) {
+        eprintln!("VERIFY FAILED {}:\n{}", mir_func.name, ctx.func.display());
+        panic!("verify failed: {e:?}");
+    }
     if let Err(e) = clif.define_function(clif_id, &mut ctx) {
         eprintln!(
             "FAILED {}:

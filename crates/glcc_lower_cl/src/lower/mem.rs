@@ -169,6 +169,11 @@ pub(crate) fn zero_value(builder: &mut FunctionBuilder, ty: Type) -> ClifValue {
             let hi = builder.ins().iconst(types::I64, 0);
             builder.ins().iconcat(lo, hi)
         }
+        ty if ty.is_vector() => {
+            // Vector undef: zero the scalar element and splat.
+            let scalar = zero_value(builder, ty.lane_type());
+            builder.ins().splat(ty, scalar)
+        }
         _ => builder.ins().iconst(ty, 0),
     }
 }

@@ -591,6 +591,7 @@ mod fp;
 mod function;
 mod ia32;
 mod init;
+mod vector;
 mod vla;
 #[cfg(test)]
 mod tests;

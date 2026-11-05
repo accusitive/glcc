@@ -40,7 +40,7 @@ mod sync;
 
 pub use atomic::{AtomicOp, RmwOp};
 pub use gnu::{FpPredicate, OverflowOp};
-pub use ia32::Ia32Op;
+pub use ia32::{ComiPred, CmpPred, CvtfTy, Ia32Op, PsBitOp, SsOp, Vec128BinOp, Vec128PackKind, Vec128ShufMode, Vec128ShiftDir};
 pub(crate) use prototypes::builtin_prototype;
 use gnu::typed_overflow_builtin;
 
@@ -208,6 +208,22 @@ pub enum CheckedExprKind<'a> {
     Subscript {
         base: &'a CheckedExpr<'a>,
         index: &'a CheckedExpr<'a>,
+    },
+    /// GNU `__builtin_shuffle(v, mask)` / `(v0, v1, mask)`: lane `i`
+    /// of the result is lane `mask[i]` of `v` (indices below the lane
+    /// count) or of `v1` (above it). The last argument is the mask; it
+    /// is an integer vector whose lane width matches the operands'.
+    Shuffle {
+        args: &'a [CheckedExpr<'a>],
+    },
+    /// Clang `__builtin_shufflevector(v0[, v1], idx...)`: lane `i` of
+    /// the result is lane `idx[i]` of the concatenated operands;
+    /// `-1` and out-of-range indices are undef, like clang's poison.
+    /// The index list is variadic and constant, so the operands alone
+    /// are carried (one or two vectors).
+    ShuffleVector {
+        args: &'a [CheckedExpr<'a>],
+        indices: &'a [i128],
     },
     Member {
         base: &'a CheckedExpr<'a>,
@@ -424,6 +440,11 @@ pub fn is_complex(ty: &Ty) -> bool {
     matches!(ty.unqualified(), Ty::Complex(_))
 }
 
+/// Whether `ty` is a GNU vector type (`vector_size`).
+pub fn is_vector(ty: &Ty) -> bool {
+    matches!(ty.unqualified(), Ty::Vector { .. })
+}
+
 /// The corresponding real type: complex maps to its component, anything
 /// else maps to itself.
 pub(crate) fn corresponding_real(ty: &Ty) -> Ty {
@@ -515,6 +536,10 @@ pub fn is_lvalue<'a>(expr: &CheckedExpr<'a>, decls: &[Binding]) -> bool {
         // A complex part of an lvalue is itself an lvalue
         // (`__real__ x = 1.0`), like a struct member of one.
         CheckedExprKind::Unary(crate::parse::UnaryOp::Real, inner) | CheckedExprKind::Unary(crate::parse::UnaryOp::Imag, inner) => is_lvalue(inner, decls),
+        // Array/pointer subscripts are lvalues, and so are vector
+        // lanes (clang's intrinsic headers assign `__a[0] += __b[0]`;
+        // GCC keeps them rvalues, but the lvalue reading is a strict
+        // superset of the programs it accepts).
         CheckedExprKind::Subscript { .. } => true,
         // Compound<'a> literals are lvalues (C17 §6.5.2.5p5).
         CheckedExprKind::CompoundLiteral { .. } => true,
@@ -1035,6 +1060,24 @@ impl<'a> Sema<'a> {
             let CheckedExpr { span, kind, .. } = expr;
             return Ok(CheckedExpr { ty: target.clone(), span, kind });
         }
+        // Same-shaped GNU vector, ignoring top-level qualifiers: like
+        // the struct case, a value copy with no `Convert` lowering for
+        // the aggregate shape (the MIR value moves bit-exact).
+        if matches!(expr.ty.unqualified(), Ty::Vector { .. }) && expr.ty.unqualified() == target.unqualified() {
+            let CheckedExpr { span, kind, .. } = expr;
+            return Ok(CheckedExpr { ty: target.clone(), span, kind });
+        }
+        // Same-size GNU vectors of different spellings retype too
+        // (GCC: vectors of the same overall size assign; clang's
+        // intrinsic headers return `__v4si`-class values as
+        // `__m128i`).
+        if matches!(expr.ty.unqualified(), Ty::Vector { .. })
+            && matches!(target.unqualified(), Ty::Vector { .. })
+            && self.type_size(&expr.ty, interner) == self.type_size(target, interner)
+        {
+            let CheckedExpr { span, kind, .. } = expr;
+            return Ok(CheckedExpr { ty: target.clone(), span, kind });
+        }
         let span = expr.span;
         if matches!(target.unqualified(), Ty::Nullptr) {
             let from_same = matches!(expr.ty.unqualified(), Ty::Nullptr);
@@ -1357,6 +1400,28 @@ impl<'a> Sema<'a> {
         match target.unqualified() {
             Ty::Struct(id) => self.check_struct_init(*id, items, interner),
             Ty::Array { .. } => self.check_array_init(target.unqualified(), items, interner),
+            // GNU vector initializer: at most one scalar item per lane
+            // in order (GCC zero-fills the missing tail); designators
+            // have no vector form.
+            Ty::Vector { elem, len } => {
+                let len = *len as usize;
+                if items.len() > len {
+                    return Err(CompileError::new("excess elements in vector initializer", items[len].span));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    if !item.designators.is_empty() {
+                        return Err(CompileError::new("designator in vector initializer", item.span));
+                    }
+                    let checked = self.check_initializer(elem, item.init, interner)?;
+                    out.push(InitItem {
+                        designators: &[],
+                        init: self.alloc(checked),
+                        span: item.span,
+                    });
+                }
+                Ok(out)
+            }
             _ if is_scalar(target) => {
                 // Redundant braces around a scalar are legal (`int x =
                 // {{1}}`), but only for a single bare item.
@@ -2504,7 +2569,8 @@ impl<'a> Sema<'a> {
         match op {
             Pos | Neg => {
                 let operand = self.decay_checked(self.check_expr(operand, interner)?);
-                if !is_arithmetic(&operand.ty) {
+                // GNU vectors negate lane-wise (`-v`); no promotion.
+                if !is_arithmetic(&operand.ty) && !is_vector(&operand.ty) {
                     return Err(CompileError::new("unary operand must have arithmetic type", operand.span));
                 }
                 let operand = self.integer_promote(operand);
@@ -2538,7 +2604,10 @@ impl<'a> Sema<'a> {
                         kind: CheckedExprKind::Unary(op, self.alloc(operand)),
                     });
                 }
-                if !is_integer(&operand.ty) {
+                if !is_integer(&operand.ty)
+                    && !(is_vector(&operand.ty)
+                        && matches!(operand.ty.unqualified(), Ty::Vector { elem, .. } if is_integer(elem)))
+                {
                     return Err(CompileError::new("operand of `~` must have integer type", operand.span));
                 }
                 let operand = self.integer_promote(operand);
@@ -2655,6 +2724,80 @@ impl<'a> Sema<'a> {
         }
     }
 
+    /// GNU vector extension operands for a binary operator (GCC "Vector
+    /// Extensions"): two same-shaped vectors compute lane-wise, and one
+    /// arithmetic scalar splats across the lanes (converted to the
+    /// element type first). Comparisons produce the same vector shape
+    /// with 0/`-1` lanes, like GCC. Returns `None` when neither operand
+    /// is a vector, so scalar paths proceed untouched.
+    fn check_vector_binary(&self, op: BinaryOp, l: CheckedExpr<'a>, r: CheckedExpr<'a>, interner: &Interner, span: Span) -> Option<Result<CheckedExpr<'a>, CompileError>> {
+        use BinaryOp::*;
+        if !is_vector(&l.ty) && !is_vector(&r.ty) {
+            return None;
+        }
+        let supported = matches!(
+            op,
+            Add | Sub | Mul | Div | Rem | BitAnd | BitOr | BitXor | Shl | Shr | Lt | Le | Gt | Ge | Eq | Ne
+        );
+        if !supported {
+            return Some(Err(CompileError::new("invalid operands to binary operator", span)));
+        }
+        let (v, s, vector_first) = if is_vector(&l.ty) { (l, r, true) } else { (r, l, false) };
+        // `%`, shifts, and bitwise operators need integer lanes, like
+        // their scalar counterparts.
+        if matches!(op, Rem | BitAnd | BitOr | BitXor | Shl | Shr)
+            && let Ty::Vector { elem, .. } = v.ty.unqualified()
+            && !is_integer(elem)
+        {
+            return Some(Err(CompileError::new("invalid operands to binary operator", span)));
+        }
+        let (vec_ty, elem) = match v.ty.unqualified() {
+            Ty::Vector { elem, len } => {
+                // Comparisons mask lane-wise: the result is a signed
+                // integer vector of the operand shape (GCC: "a signed
+                // vector of the same size"), so `v4sf < v4sf` yields
+                // `v4si` masks, not float lanes.
+                let result_ty = if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
+                    let mask_elem = match self.type_size(elem, interner) {
+                        Some(1) => Ty::SignedChar,
+                        Some(2) => Ty::Short,
+                        Some(4) => Ty::Int,
+                        _ => Ty::LongLong,
+                    };
+                    Ty::Vector {
+                        elem: Box::new(mask_elem),
+                        len: *len,
+                    }
+                } else {
+                    v.ty.clone()
+                };
+                (result_ty, elem.as_ref().clone())
+            }
+            _ => unreachable!("vector operand selected above"),
+        };
+        if is_vector(&s.ty) {
+            if s.ty.unqualified() != v.ty.unqualified() {
+                return Some(Err(CompileError::new("vector operands must have the same shape", span)));
+            }
+            let node = if vector_first { (v, s) } else { (s, v) };
+            return Some(Ok(CheckedExpr {
+                ty: vec_ty,
+                span,
+                kind: CheckedExprKind::Binary(op, self.alloc(node.0), self.alloc(node.1)),
+            }));
+        }
+        if !is_arithmetic(&s.ty) {
+            return Some(Err(CompileError::new("invalid operands to binary operator", span)));
+        }
+        let s = self.convert(s, elem);
+        let node = if vector_first { (v, s) } else { (s, v) };
+        Some(Ok(CheckedExpr {
+            ty: vec_ty,
+            span,
+            kind: CheckedExprKind::Binary(op, self.alloc(node.0), self.alloc(node.1)),
+        }))
+    }
+
     fn check_binary(&self, op: BinaryOp, lhs: &Expr<'a>, rhs: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         use BinaryOp::*;
         let lhs = self.check_expr(lhs, interner)?;
@@ -2682,6 +2825,9 @@ impl<'a> Sema<'a> {
             // (C17 §6.5.9p2) so the backend compares equal widths.
             Eq | Ne => {
                 let (l, r) = (self.decay_checked(lhs), self.decay_checked(rhs));
+                if let Some(result) = self.check_vector_binary(op, l.clone(), r.clone(), interner, span) {
+                    return result;
+                }
                 if is_arithmetic(&l.ty) && is_arithmetic(&r.ty) {
                     let (l, r, _) = self.usual_arithmetic_conversions(l, r);
                     return Ok(build(l, r, Ty::Int));
@@ -2731,6 +2877,9 @@ impl<'a> Sema<'a> {
                 if is_complex(&l.ty) || is_complex(&r.ty) {
                     return Err(CompileError::new("invalid operands to relational operator", span));
                 }
+                if let Some(result) = self.check_vector_binary(op, l.clone(), r.clone(), interner, span) {
+                    return result;
+                }
                 if is_arithmetic(&l.ty) && is_arithmetic(&r.ty) {
                     let (l, r, _) = self.usual_arithmetic_conversions(l, r);
                     return Ok(build(l, r, Ty::Int));
@@ -2757,6 +2906,11 @@ impl<'a> Sema<'a> {
             // arithmetic folded in (C17 §6.5.6).
             _ => {
                 let (l, r) = (self.decay_checked(lhs), self.decay_checked(rhs));
+                // GNU vectors compute lane-wise; the scalar operand
+                // splats (see `check_vector_binary`).
+                if let Some(result) = self.check_vector_binary(op, l.clone(), r.clone(), interner, span) {
+                    return result;
+                }
                 // Complex operands only add, subtract, multiply, and
                 // divide: `%`, shifts, and bitwise operators need real
                 // (integer) operands.
@@ -2849,6 +3003,8 @@ impl<'a> Sema<'a> {
         let ptr_op = matches!(&l_dec.ty, Ty::Pointer { .. }) && matches!(op, AssignOp::Add | AssignOp::Sub) && is_integer(&r_dec.ty);
         let (op_l, op_r) = if ptr_op {
             (l_dec, self.integer_promote(r_dec.clone()))
+        } else if is_vector(&l_dec.ty) || is_vector(&r_dec.ty) {
+            self.vector_compound_assign(op, l_dec, r_dec.clone(), span)?
         } else if is_arithmetic(&l_dec.ty) && is_arithmetic(&r_dec.ty) {
             let (a, b, _) = self.usual_arithmetic_conversions(l_dec, r_dec.clone());
             (a, b)
@@ -2869,6 +3025,37 @@ impl<'a> Sema<'a> {
                 rhs_ty: Box::new(op_r.ty.clone()),
             },
         })
+    }
+
+    /// GNU vector compound assignment (`v += w`, `v *= 2`): the left
+    /// side is the vector, the right a same-shaped vector or a scalar
+    /// splatting into the element type. The op operands carry the
+    /// conversions; the assignment's own type stays the lvalue's.
+    fn vector_compound_assign(&self, op: AssignOp, l: CheckedExpr<'a>, r: CheckedExpr<'a>, span: Span) -> Result<(CheckedExpr<'a>, CheckedExpr<'a>), CompileError> {
+        if !matches!(
+            op,
+            AssignOp::Add | AssignOp::Sub | AssignOp::Mul | AssignOp::Div | AssignOp::Rem | AssignOp::BitAnd | AssignOp::BitOr | AssignOp::BitXor | AssignOp::Shl | AssignOp::Shr
+        ) {
+            return Err(CompileError::new("invalid operands to compound assignment", span));
+        }
+        if !is_vector(&l.ty) {
+            return Err(CompileError::new("compound assignment to a scalar with a vector operand", span));
+        }
+        let elem = match l.ty.unqualified() {
+            Ty::Vector { elem, .. } => elem.as_ref().clone(),
+            _ => unreachable!("vector left operand checked above"),
+        };
+        let r = if is_vector(&r.ty) {
+            if r.ty.unqualified() != l.ty.unqualified() {
+                return Err(CompileError::new("vector operands must have the same shape", span));
+            }
+            r
+        } else if is_arithmetic(&r.ty) {
+            self.convert(r, elem)
+        } else {
+            return Err(CompileError::new("invalid operands to compound assignment", span));
+        };
+        Ok((l, r))
     }
 
     fn check_ternary(&self, cond: &Expr<'a>, then: &Expr<'a>, els: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
@@ -3076,6 +3263,13 @@ impl<'a> Sema<'a> {
                 Some("__builtin_fpclassify") => return self.check_fpclassify(args, interner, span),
                 Some("__builtin_classify_type") => return self.check_classify_type(args, interner, span),
                 Some("__builtin_choose_expr") => return self.check_choose_expr(args, interner, span),
+                Some("__builtin_shuffle") => return self.check_shuffle(args, interner, span),
+                Some("__builtin_shufflevector") => return self.check_shufflevector(args, interner, span),
+                Some("__builtin_convertvector") => return self.check_convertvector(args, interner, span),
+                Some("__builtin_nontemporal_store") => return self.check_nontemporal_store(args, interner, span),
+                Some(n @ ("__builtin_elementwise_add_sat" | "__builtin_elementwise_sub_sat" | "__builtin_elementwise_min" | "__builtin_elementwise_max" | "__builtin_elementwise_sqrt")) => {
+                    return self.check_elementwise(n, args, interner, span);
+                }
                 Some("__builtin_prefetch") => return self.check_prefetch(args, interner, span),
                 Some("alloca" | "__builtin_alloca") => {
                     return self.check_alloca(args, interner, span);
@@ -3162,6 +3356,28 @@ impl<'a> Sema<'a> {
     }
 
     fn check_subscript(&self, base: &Expr<'a>, index: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        // GNU vector subscript reads (`v[i]`, the rvalue of lane `i`):
+        // reads only, like GCC — a subscripted vector is not a
+        // per-lane lvalue, so `v[i] = x` fails as an assignment to a
+        // non-lvalue. Indexing works on rvalues too (`(a + b)[0]`).
+        {
+            let base = self.check_expr(base, interner)?;
+            let index = self.decay_checked(self.check_expr(index, interner)?);
+            if let Ty::Vector { elem, .. } = base.ty.unqualified() {
+                if !is_integer(&index.ty) {
+                    return Err(CompileError::new("vector subscript requires an integer index", span));
+                }
+                let index = self.integer_promote(index);
+                return Ok(CheckedExpr {
+                    ty: elem.as_ref().clone(),
+                    span,
+                    kind: CheckedExprKind::Subscript {
+                        base: self.alloc(base),
+                        index: self.alloc(index),
+                    },
+                });
+            }
+        }
         let base = self.decay_checked(self.check_expr(base, interner)?);
         let index = self.decay_checked(self.check_expr(index, interner)?);
         // Either side may be the pointer (`i[a]` is legal).
@@ -3529,6 +3745,26 @@ impl<'a> Sema<'a> {
             if !matches!(ty.unqualified(), Ty::Pointer { .. } | Ty::Bool) {
                 return Err(CompileError::new("cannot cast `nullptr_t` to a non-pointer type", span));
             }
+            return Ok(CheckedExpr {
+                ty: ty.clone(),
+                span,
+                kind: CheckedExprKind::Cast {
+                    ty: ty.clone(),
+                    expr: self.alloc(operand),
+                },
+            });
+        }
+        // GNU vector casts: between vectors of the same size, and
+        // between a vector and an arithmetic scalar of the same size —
+        // the bits move untouched (`(__m64)__i` in mmintrin.h). Scalars
+        // keep the ordinary scalar-cast rules below.
+        if (is_vector(&operand.ty) || is_vector(ty))
+            && !is_complex(&operand.ty)
+            && !is_complex(ty)
+            && (is_arithmetic(&operand.ty) || is_vector(&operand.ty))
+            && (is_arithmetic(ty) || is_vector(ty))
+            && self.type_size(&operand.ty, interner) == self.type_size(ty, interner)
+        {
             return Ok(CheckedExpr {
                 ty: ty.clone(),
                 span,

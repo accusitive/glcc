@@ -362,6 +362,14 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             format!("(generic-ty {} [{}] {} :{})", dump_ty(ty, sema, interner), index, parts.join(" "), t)
         }
         CheckedExprKind::VaArg { ap, ty } => format!("(va-arg {} {} :{})", dump_ex(ap, sema, interner), dump_ty(ty, sema, interner), t),
+        CheckedExprKind::Shuffle { args } => {
+            let parts: Vec<String> = args.iter().map(|a| dump_ex(a, sema, interner)).collect();
+            format!("(shuffle {} :{})", parts.join(" "), t)
+        }
+        CheckedExprKind::ShuffleVector { args, indices } => {
+            let parts: Vec<String> = args.iter().map(|a| dump_ex(a, sema, interner)).collect();
+            format!("(shuffle-vector {} {:?} :{})", parts.join(" "), indices, t)
+        }
         CheckedExprKind::StmtExpr { items } => {
             let mut parts = Vec::new();
             for item in *items {
@@ -488,6 +496,7 @@ pub fn dump_ty(t: &Ty, sema: &Sema, interner: &Interner) -> String {
         Ty::Double => "double".to_string(),
         Ty::LongDouble => "long double".to_string(),
         Ty::Complex(inner) => format!("{} _Complex", dump_ty(inner, sema, interner)),
+        Ty::Vector { elem, len } => format!("{}[{}]", dump_ty(elem, sema, interner), len),
         Ty::Pointer { qualifiers, size, pointee } => {
             let size = match size {
                 crate::parse::PtrSize::Default => "",

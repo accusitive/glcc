@@ -39,6 +39,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     (fe::parse::Ty::Array { elem, .. }, mir::Ty::Array { elem: mir_elem, len }) => {
                         items.len() as u64 == *len && items.iter().all(|item| self.initializer_covers_object(elem, mir_elem, item.init))
                     }
+                    // Vector lanes cover the object only when the list
+                    // fills every lane with expression items (the 8-byte
+                    // shape lowers to an i64, so the FE type decides).
+                    (fe::parse::Ty::Vector { elem, len }, _) => {
+                        items.len() as u64 == u64::from(*len)
+                            && items.iter().all(|item| matches!(item.init, fe::parse::Initializer::Expr(_)) && self.initializer_covers_object(elem, &lower_ty(elem, self.sema, self.interner), item.init))
+                    }
                     (fe::parse::Ty::Struct(id), mir::Ty::Struct { fields, .. }) => {
                         let def = &self.sema.structs[id.0 as usize];
                         if def.is_union || def.members.iter().any(|member| member.bitfield.is_some()) {
@@ -143,6 +150,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         let mut field = 0usize;
                         for item in *items {
                             field = self.struct_init_item(module, func, frame, funcs, externs, globals, slot, *id, item, field);
+                        }
+                    }
+                    // GNU vector lanes fill in order (the checker caps
+                    // the count at the lane number); a partial list
+                    // zero-fills through the memset above.
+                    fe::parse::Ty::Vector { elem, .. } => {
+                        let shape = self.vector_shape(fe_ty);
+                        for (i, item) in items.iter().enumerate() {
+                            let idx = self.iconst(func, 64, i as i128);
+                            let addr = self.vector_lane_addr(func, frame, slot, idx, &fe::parse::Ty::LongLong, &shape);
+                            self.lower_init(module, func, frame, funcs, externs, globals, addr, elem, item.init);
                         }
                     }
                     // `int x = {1}` is legal C: bare scalar braces.

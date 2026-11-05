@@ -3010,6 +3010,16 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.check_flow_expr(lhs, labels, gotos, scope, fv);
                 self.check_flow_expr(rhs, labels, gotos, scope, fv);
             }
+            CheckedExprKind::Shuffle { args } => {
+                for arg in *args {
+                    self.check_flow_expr(arg, labels, gotos, scope, fv);
+                }
+            }
+            CheckedExprKind::ShuffleVector { args, .. } => {
+                for arg in *args {
+                    self.check_flow_expr(arg, labels, gotos, scope, fv);
+                }
+            }
             CheckedExprKind::CompoundAssign { lhs, rhs, .. } => {
                 self.check_flow_expr(lhs, labels, gotos, scope, fv);
                 self.check_flow_expr(rhs, labels, gotos, scope, fv);
@@ -3399,6 +3409,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                         | "__int64"
                         | "_Float32"
                         | "_Float64"
+                        | "_Float16"
+                        | "__bf16"
                         | "__complex__"
                         | "__complex"
                         | "__auto_type"
@@ -3870,7 +3882,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 inferred_init = Some(init);
                 ty
             } else {
-                self.spec_to_ty(specifiers, &declarator)
+                let ty = self.spec_to_ty(specifiers, &declarator);
+                self.apply_vector_size(ty, suffix.vector_size.or(specifiers.attrs.vector_size))
             };
             // A `{` after a function declarator opens a definition, which
             // takes exactly one declarator (C17 §6.9.1p2). Leading
@@ -5272,6 +5285,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                 ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Double));
                 continue;
             }
+            // `_Float16` and clang's `__bf16`: a 16-bit placeholder.
+            // The SSE2 headers only typedef vectors of these (the
+            // arithmetic users sit behind AVX512FP16 guards), so the
+            // shape is all that matters.
+            if ds.type_specifier.is_empty() && (self.peek_ext("_Float16") || self.peek_ext("__bf16")) {
+                self.tokens.advance();
+                ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Short));
+                continue;
+            }
             if self.peek_c23_keyword("constexpr") {
                 ds.constexpr = true;
                 ds.type_qualifier.insert(TypeQualifiers::CONST);
@@ -5991,6 +6013,20 @@ impl<'a, 'b> Parser<'a, 'b> {
                         }
                     }
                     self.expect_punct(Punctuator::RParen);
+                } else if normalized == "vector_size" {
+                    self.tokens.advance();
+                    let arg = self.parse_assignment_expression();
+                    let checked = self.checked_expr(&arg);
+                    let n = match crate::eval::eval_const(&checked, self.sema, self.intern) {
+                        Some(crate::eval::Value::Int(n)) if n > 0 => u64::try_from(n).unwrap_or(u64::MAX),
+                        _ => return self.fail(name_span, "attribute `vector_size` needs a positive integer constant"),
+                    };
+                    if !n.is_power_of_two() {
+                        return self.fail_code(name_span, DiagCode::InvalidAlignment, format!("vector size '{n}' is not a power of 2"));
+                    }
+                    let n = u32::try_from(n).unwrap_or(u32::MAX);
+                    out.vector_size = out.vector_size.or(Some((n, name_span)));
+                    self.expect_punct(Punctuator::RParen);
                 } else {
                     // Unknown attributes never evaluate their arguments
                     // (`format(printf, 1, 2)` names formats, not values).
@@ -6011,6 +6047,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 // the target (16 on x86-64).
                 let max = self.sema.target.max_useful_align;
                 out.aligned = Some(out.aligned.map_or(max, |m: u64| m.max(max)));
+            } else if normalized == "vector_size" {
+                return self.fail(name_span, "attribute `vector_size` requires an integer constant");
+            } else if normalized == "may_alias" {
+                // An aliasing-analysis hint (`__m128` carries it); the
+                // frontend runs no strict-aliasing pass, so nothing to
+                // honor — accepted and ignored like GCC's other hints.
             } else if normalized == "constructor" {
                 // Bare `constructor`: default priority 65535.
                 out.constructor = out.constructor.or(Some(65535));
@@ -6653,6 +6695,12 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// member access, subscripting, and calls attach to the literal
     /// itself (`(int[]){1, 2}[0]`).
     fn parse_cast_expression(&mut self) -> Expr<'a> {
+        // `__extension__` prefixes expressions in system headers
+        // (GCC: suppresses pedantic warnings for the extension that
+        // follows); it has no semantic effect here.
+        while self.peek_ext("__extension__") {
+            self.tokens.advance();
+        }
         if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) && self.paren_starts_compound_literal() {
             return self.parse_unary_expression();
         }
@@ -6909,7 +6957,9 @@ impl<'a, 'b> Parser<'a, 'b> {
         if declarator.name().is_some() {
             return self.fail(declarator.span(), "declarator in type name");
         }
-        self.spec_to_ty(&specs, &declarator)
+        // An anonymous GNU vector type (`(__attribute__((vector_size(16)))
+        // int){4,1,2,3}` in xmmintrin's `__builtin_shuffle` masks).
+        self.apply_vector_size(self.spec_to_ty(&specs, &declarator), specs.attrs.vector_size)
     }
 
     /// Unary operators (right-associative) and `sizeof` in both forms.
@@ -7525,6 +7575,45 @@ impl<'a, 'b> Parser<'a, 'b> {
         }
     }
 
+    /// Wrap `ty` in a GNU vector type when the declarator or the
+    /// declaration specifiers carried `vector_size(n)` (GCC applies the
+    /// attribute to the declared type, so a `typedef` names the vector
+    /// itself). The element must be a real scalar type and the size a
+    /// power-of-two multiple of it. Supported shapes: 16 bytes (a
+    /// first-class MIR vector, as the vectorizer produces) and 2/4/8
+    /// bytes (bit-punned to an integer of the vector's size, the MMX
+    /// class's own register story; lane arithmetic expands per lane at
+    /// lowering). Above 16 bytes has no MIR shape and is rejected.
+    fn apply_vector_size(&mut self, ty: Ty, vector_size: Option<(u32, Span)>) -> Ty {
+        let Some((n, span)) = vector_size else {
+            return ty;
+        };
+        let elem = match ty.unqualified() {
+            Ty::Bool | Ty::Char | Ty::SignedChar | Ty::UnsignedChar | Ty::Short | Ty::UnsignedShort | Ty::Int | Ty::UnsignedInt | Ty::Long | Ty::UnsignedLong | Ty::LongLong | Ty::UnsignedLongLong | Ty::Float | Ty::Double => ty.unqualified().clone(),
+            _ => return self.fail(span, "attribute `vector_size` applies to an integer or floating-point type"),
+        };
+        let Some(elem_size) = self.sema.type_size(&elem, self.intern) else {
+            return self.fail(span, "attribute `vector_size` applies to a type of known size");
+        };
+        if (n as u64) % elem_size != 0 {
+            let msg = format!("vector size {n} is not a multiple of the element size {elem_size}");
+            return self.fail(span, msg);
+        }
+        let lanes = (n as u64) / elem_size;
+        if n > 16 || (n < 16 && (n != 2 && n != 4 && n != 8)) {
+            let msg = format!("vector size {n} is outside the supported range (2, 4, 8, or 16 bytes)");
+            return self.fail(span, msg);
+        }
+        if n == 16 && !lanes.is_power_of_two() {
+            let msg = format!("vector of {lanes} elements does not fill a 128-bit vector");
+            return self.fail(span, msg);
+        }
+        Ty::Vector {
+            elem: Box::new(elem),
+            len: lanes as u32,
+        }
+    }
+
     pub fn spec_to_ty(&self, specs: &DeclarationSpecifiers, decl: &Declarator) -> Ty {
         if self.failed() {
             return Ty::recover();
@@ -7755,6 +7844,11 @@ pub(crate) struct GnuAttributes {
     pub flags: GnuAttrFlags,
     /// `__attribute__((aligned(n)))`: a minimum alignment.
     pub aligned: Option<u64>,
+    /// `__attribute__((vector_size(n)))`: the declared type becomes an
+    /// n-byte GNU vector of its base type. Applied where the attribute
+    /// list meets the declarator's type (`Parser::apply_vector_size`),
+    /// so a `typedef` names the vector type itself.
+    pub vector_size: Option<(u32, Span)>,
     /// `__attribute__((constructor[(prio)]))`: startup hook priority
     /// (`None` = absent; bare attributes are 65535, like GCC).
     pub constructor: Option<u64>,
@@ -7799,6 +7893,7 @@ impl GnuAttributes {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
+        self.vector_size = self.vector_size.or(other.vector_size);
         self.constructor = self.constructor.or(other.constructor);
         self.destructor = self.destructor.or(other.destructor);
         self.alias = self.alias.or(other.alias);
@@ -9183,6 +9278,12 @@ pub enum Ty {
     /// any integer type as a GNU extension (`__complex__ int`).
     /// Twice the component's size, same alignment.
     Complex(Box<Ty>),
+    /// A GNU vector type (`__attribute__((vector_size(N)))`, `__m128`
+    /// and friends): `len` lanes of one arithmetic element, `N` bytes
+    /// in total. Size-N alignment (up to 16) is load-bearing for the
+    /// SSE calling conventions. Only 8- and 16-byte shapes are
+    /// supported (see `Parser::apply_vector_size`).
+    Vector { elem: Box<Ty>, len: u32 },
     Pointer {
         qualifiers: TypeQualifiers,
         size: PtrSize,

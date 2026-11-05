@@ -63,6 +63,23 @@ pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer:
                 size: size * 2,
             }
         }
+        // GNU vectors lower two ways, per `apply_vector_size`: a
+        // 16-byte vector becomes a first-class MIR vector (the shapes
+        // the vectorizer also produces, so arithmetic, load/store, and
+        // the ABI all work as for vectorizer output); every smaller
+        // shape (`__m64`, `__m32`, `__v2sf`, ...) bit-puns to an
+        // integer of the vector's byte size — the MMX class's own
+        // register story. Movement, storage, and the ABI ride the
+        // integer; lane-wise operations expand per lane at lowering
+        // (`lower/vector.rs`), bitcasting float lanes through the
+        // image's integer lanes.
+        fe::parse::Ty::Vector { elem, len } => {
+            let elem_size = sema.type_size(elem, interner).expect("vector element has a size");
+            match elem_size * (*len as u64) {
+                16 => mir::Ty::vector(lower_ty(elem, sema, interner), *len),
+                bytes => mir::Ty::int((bytes * 8) as u32),
+            }
+        }
         fe::parse::Ty::Pointer { pointee, size, .. } => {
             // Struct pointees erase to `void`: navigating into one
             // re-derives its layout from the frontend per hop

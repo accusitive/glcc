@@ -983,9 +983,7 @@ fn jit_run_main(mut mir_module: mir::Module) -> i32 {
         // re-requests the frame chain per function for it. Win64
         // F128/I128 follow LLVM's ABI there.
         let mut flags = glcc_lower_cl::codegen_flags();
-        if cfg!(windows) {
-            flags.push(("enable_llvm_abi_extensions", "true"));
-        }
+        flags.push(("enable_llvm_abi_extensions", "true"));
         let builder = JITBuilder::with_flags(&flags, cranelift_module::default_libcall_names()).expect("jit builder");
         let mut jit = JITModule::new(builder);
         let ids = glcc_lower_cl::lower_module(&mir_module, &mut jit, glcc_lower_cl::Target::native());
@@ -4104,4 +4102,216 @@ fn bitint_signed_comparison_uses_the_magnitude_of_the_top_limb() {
                return ok;\n\
            }";
     assert_eq!(jit_run_main(lower_module_c23(src)), 63);
+}
+
+// ---- GNU vector types (`vector_size`) ----
+
+#[test]
+fn vec_add_only() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,2,3,4}; v4si b = {10,20,30,40}; v4si c = a + b; return c[0] + c[3] - 55; }"), 0);
+}
+#[test]
+fn vec_mul_only() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,2,3,4}; v4si b = {10,20,30,40}; v4si c = a * b; return c[2] - 90; }"), 0);
+}
+#[test]
+fn vec_div_only() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,2,3,4}; v4si b = {10,20,30,40}; v4si c = b / a; return c[0] + c[3] - 20; }"), 0);
+}
+#[test]
+fn vec_splat_scalar() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,2,3,4}; v4si m = a * 2; return m[0] - 2; }"), 0);
+}
+#[test]
+fn vec_scalar_first() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,2,3,4}; v4si n = 3 + a; return n[2] - 6; }"), 0);
+}
+#[test]
+fn vec_compound_assign() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si c = {11,22,33,44}; v4si a = {1,2,3,4}; c += a; return c[1] - 24; }"), 0);
+}
+#[test]
+fn vec_cmp_only() {
+    assert_eq!(run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+        int main(void) { v4si a = {1,6,15,8}; v4si b = {3,3,51,4}; v4si m = (a < b); return (m[0] != -1) + (m[1] != 0)*2 + (m[2] != -1)*4 + (m[3] != 0)*8; }"), 0);
+}
+
+
+#[test]
+fn vector_sizes_and_alignments() {
+    assert_eq!(
+        run_main(
+            "typedef int v4si __attribute__((vector_size(16)));\n\
+             typedef float v4sf __attribute__((vector_size(16)));\n\
+             typedef char v16qi __attribute__((vector_size(16)));\n\
+             typedef int v2si __attribute__((vector_size(8)));\n\
+             int main(void) {\n\
+                 int ok = 0;\n\
+                 if (sizeof(v4si) == 16 && _Alignof(v4si) == 16) ok |= 1;\n\
+                 if (sizeof(v4sf) == 16 && _Alignof(v4sf) == 16) ok |= 2;\n\
+                 if (sizeof(v16qi) == 16 && _Alignof(v16qi) == 16) ok |= 4;\n\
+                 if (sizeof(v2si) == 8 && _Alignof(v2si) == 8) ok |= 8;\n\
+                 if (sizeof(v4si) - sizeof(v2si) == 8) ok |= 16;\n\
+                 return ok;\n\
+             }"
+        ),
+        31
+    );
+}
+
+#[test]
+fn vector_elementwise_arithmetic() {
+    assert_eq!(
+        run_main(
+            "typedef int v4si __attribute__((vector_size(16)));\n\
+             int main(void) {\n\
+                 v4si a = {1, 2, 3, 4};\n\
+                 v4si b = {10, 20, 30, 40};\n\
+                 v4si c = a + b;\n\
+                 if (c[0] != 11 || c[1] != 22 || c[2] != 33 || c[3] != 44) return 1;\n\
+                 v4si d = b - a;\n\
+                 if (d[3] != 36) return 2;\n\
+                 v4si e = a * b;\n\
+                 if (e[2] != 90) return 3;\n\
+                 v4si q = b / a;\n\
+                 if (q[0] != 10 || q[3] != 10) return 4;\n\
+                 c += a;\n\
+                 if (c[1] != 24) return 5;\n\
+                 v4si m = c * 2;\n\
+                 if (m[0] != 24) return 6;\n\
+                 v4si n = 3 + a;\n\
+                 if (n[2] != 6) return 7;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn vector_float_arithmetic_and_compound_literals() {
+    assert_eq!(
+        run_main(
+            "typedef float v4sf __attribute__((vector_size(16)));\n\
+             int main(void) {\n\
+                 v4sf f = (v4sf){1.0f, 2.0f, 3.0f, 4.0f} + (v4sf){0.5f, 0.5f, 0.5f, 0.5f};\n\
+                 if (f[0] != 1.5f || f[3] != 4.5f) return 1;\n\
+                 v4sf g = f * (v4sf){2.0f, 2.0f, 2.0f, 2.0f};\n\
+                 if (g[1] != 5.0f) return 2;\n\
+                 v4sf h = g / (v4sf){2.0f, 2.0f, 2.0f, 2.0f};\n\
+                 if (h[2] != 3.5f) return 3;\n\
+                 v4sf z = (v4sf){1.0f};\n\
+                 if (z[0] != 1.0f || z[3] != 0.0f) return 4;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn vector_bitwise_ops_and_masks() {
+    assert_eq!(
+        run_main(
+            "typedef int v4si __attribute__((vector_size(16)));\n\
+             int main(void) {\n\
+                 v4si a = {1, 6, 0x0f, 8};\n\
+                 v4si b = {3, 3, 0x33, 4};\n\
+                 v4si x = a & b;\n\
+                 if (x[0] != 1 || x[2] != 3) return 1;\n\
+                 v4si o = a | b;\n\
+                 if (o[1] != 7 || o[3] != 12) return 2;\n\
+                 v4si e = a ^ b;\n\
+                 if (e[0] != 2) return 3;\n\
+                 v4si m = (a < b);\n\
+                 if (m[0] != -1 || m[1] != 0 || m[2] != -1 || m[3] != 0) return 4;\n\
+                 v4si p = (a > b);\n\
+                 if (p[0] != 0 || p[1] != -1 || p[2] != 0 || p[3] != -1) return 5;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn vector_locals_copied_and_passed() {
+    assert_eq!(
+        run_main(
+            "typedef int v4si __attribute__((vector_size(16)));\n\
+             int lane1(v4si v) { return v[1]; }\n\
+             int main(void) {\n\
+                 v4si a = {1, 2, 3, 4};\n\
+                 v4si b = a + 40;\n\
+                 if (b[1] != 42 || a[1] != 2) return 1;\n\
+                 if (lane1(b) != 42) return 2;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn mmx_sized_integer_vector_ops() {
+    assert_eq!(
+        run_main(
+            "typedef int v2si __attribute__((vector_size(8)));\n\
+             int main(void) {\n\
+                 v2si a = {1, 2};\n\
+                 v2si b = {10, 20};\n\
+                 v2si c = a + b;\n\
+                 if (c[0] != 11 || c[1] != 22) return 1;\n\
+                 v2si d = b * a;\n\
+                 if (d[1] != 40) return 2;\n\
+                 if (sizeof(v2si) != 8 || _Alignof(v2si) != 8) return 3;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn vec_ret_isolate() {
+    assert_eq!(
+        run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+            v4si bump(v4si a) { return a + 1; }\n\
+            int main(void) { v4si a = {1,5,3,7}; v4si m = bump(a);\n\
+            return (m[0] != 2) + (m[1] != 6)*2 + (m[2] != 4)*4 + (m[3] != 8)*8; }"),
+        0
+    );
+    assert_eq!(
+        run_main("typedef int v4si __attribute__((vector_size(16)));\n\
+            v4si mask(v4si a, v4si b) { return a < b; }\n\
+            int main(void) { v4si a = {1,5,3,7}; v4si b = {2,2,2,8}; v4si m = mask(a, b);\n\
+            return (m[0] != -1) + (m[1] != 0)*2 + (m[2] != 0)*4 + (m[3] != -1)*8; }"),
+        0
+    );
+}
+
+#[test]
+fn vector_returns_and_cross_calls() {
+    assert_eq!(
+        run_main(
+            "typedef float v4sf __attribute__((vector_size(16)));\n\
+             typedef int v4si __attribute__((vector_size(16)));\n\
+             v4sf scale(v4sf v, float k) { return v * k; }\n\
+             v4si mask(v4si a, v4si b) { return a < b; }\n\
+             int main(void) {\n\
+                 v4sf f = scale((v4sf){1.0f, 2.0f, 3.0f, 4.0f}, 2.0f);\n\
+                 if (f[0] != 2.0f || f[3] != 8.0f) return 1;\n\
+                 v4si m = mask((v4si){1, 5, 3, 7}, (v4si){2, 2, 2, 2});\n\
+                 if (m[0] != -1 || m[1] != 0 || m[2] != 0 || m[3] != 0) return 2;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
 }

@@ -1050,6 +1050,8 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             Some(Value::Int(rotated as i128))
         }
         CheckedExprKind::Call { .. }
+        | CheckedExprKind::Shuffle { .. }
+        | CheckedExprKind::ShuffleVector { .. }
         | CheckedExprKind::VaArg { .. }
         | CheckedExprKind::Atomic { .. }
         | CheckedExprKind::Ia32 { .. }

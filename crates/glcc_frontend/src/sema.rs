@@ -1482,6 +1482,13 @@ fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits:
             op: *op,
             args: remap_expr_slice(args, arena, inits, map),
         },
+        CheckedExprKind::Shuffle { args } => CheckedExprKind::Shuffle {
+            args: remap_expr_slice(args, arena, inits, map),
+        },
+        CheckedExprKind::ShuffleVector { args, indices } => CheckedExprKind::ShuffleVector {
+            args: remap_expr_slice(args, arena, inits, map),
+            indices,
+        },
         CheckedExprKind::Overflow { op, lhs, rhs, res, res_ty } => CheckedExprKind::Overflow {
             op: *op,
             lhs: arena.alloc(remap_expr_ident(lhs, arena, inits, map)),

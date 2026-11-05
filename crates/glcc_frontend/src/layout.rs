@@ -163,6 +163,7 @@ impl<'a> Sema<'a> {
             Ty::Double => Some(t.double_size),
             Ty::LongDouble => Some(t.long_double_size),
             Ty::Complex(inner) => self.type_size(inner, interner)?.checked_mul(2),
+            Ty::Vector { elem, len } => self.type_size(elem, interner)?.checked_mul(*len as u64),
             Ty::Pointer { size, .. } => Some(pointer_size_bytes(t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;
@@ -202,6 +203,10 @@ impl<'a> Sema<'a> {
             Ty::Double => Some(t.double_align),
             Ty::LongDouble => Some(t.long_double_align),
             Ty::Complex(inner) => self.type_align(inner, interner),
+            // GCC aligns a vector at its total size (up to 16: SSE
+            // wants natural `movaps` alignment; 8-byte MMX vectors get
+            // 8). Larger shapes are unsupported (see `apply_vector_size`).
+            Ty::Vector { .. } => self.type_size(ty, interner).map(|s| s.min(16)),
             Ty::Pointer { size, .. } => Some(pointer_size_bytes(t, *size)),
             Ty::Enum(id) => {
                 let repr = self.enums.get(id.0 as usize).filter(|d| d.complete).map(|d| d.repr.clone())?;

@@ -385,6 +385,23 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             }
             fe::check::CheckedExprKind::Subscript { base, index } => {
                 let base_ty = base.ty.unqualified().clone();
+                // GNU vector lanes live consecutively at
+                // `base + i * elem_size` (see `vector_lane_addr`); an
+                // rvalue base materializes to a slot first.
+                if let fe::parse::Ty::Vector { .. } = &base_ty {
+                    let base_addr = if fe::check::is_lvalue(base, &self.sema.decls) {
+                        self.place(module, func, frame, funcs, externs, globals, base).0
+                    } else {
+                        let value = self.expr_value(module, func, frame, funcs, externs, globals, base);
+                        let slot = self.alloca(func, frame, lower_ty(&base.ty, self.sema, self.interner));
+                        self.store(func, frame, slot, value, false);
+                        slot
+                    };
+                    let shape = self.vector_shape(&base_ty);
+                    let index_value = self.expr_value(module, func, frame, funcs, externs, globals, index);
+                    let addr = self.vector_lane_addr(func, frame, base_addr, index_value, &index.ty, &shape);
+                    return (addr, shape.elem_mir.clone());
+                }
                 // The base address: array storage itself, or the pointer
                 // value for pointer bases.
                 let addr = match &base_ty {

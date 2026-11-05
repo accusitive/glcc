@@ -212,6 +212,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             return self.complex_neg(func, frame, value, &inner.ty);
                         }
                         let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                        if fe::check::is_vector(&inner.ty) {
+                            let shape = self.vector_shape(&inner.ty);
+                            return self.vector_neg(func, frame, value, &shape, &mir_ty);
+                        }
                         match operand_ty {
                             mir::Ty::Float(_) => self.emit(func, frame, mir::InstKind::FNeg(value), mir_ty),
                             _ => {
@@ -229,6 +233,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             return self.complex_conj(func, frame, value, &inner.ty);
                         }
                         let value = self.expr_value(module, func, frame, funcs, externs, globals, inner);
+                        if fe::check::is_vector(&inner.ty) {
+                            let shape = self.vector_shape(&inner.ty);
+                            return self.vector_bitnot(func, frame, value, &shape, &mir_ty);
+                        }
                         let not = self.emit(func, frame, mir::InstKind::Not(value), mir_ty.clone());
                         self.reduce_bitfield_precision(func, frame, not, expr, mir_ty)
                     }
@@ -369,6 +377,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         return self.complex_cmp(func, frame, op, x, y, &lhs.ty, &mir_ty);
                     }
                     return self.complex_binop(func, frame, op, x, y, &lhs.ty);
+                }
+                // GNU vectors compute lane-wise: the scalar operand
+                // splats in, comparisons yield integer mask vectors
+                // (see `vector_binary`).
+                if fe::check::is_vector(&lhs.ty) || fe::check::is_vector(&rhs.ty) {
+                    return self.vector_binary(module, func, frame, funcs, externs, globals, *op, lhs, rhs, &mir_ty);
                 }
                 // Comparisons finish through `Bool` conversion directly.
                 if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
@@ -848,6 +862,104 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::CheckedExprKind::VaArg { ap, .. } => {
                 let (addr, _) = self.place(module, func, frame, funcs, externs, globals, ap);
                 self.emit(func, frame, mir::InstKind::VaArg { ap: addr }, mir_ty)
+            }
+            fe::check::CheckedExprKind::Shuffle { args } => {
+                // Lane i of the result: the mask lane selects within
+                // `v0` below the lane count, within `v1` above it. The
+                // selectors are runtime values, so both operands
+                // materialize to slots and each lane loads through a
+                // computed address.
+                let (v0, v1, mask) = match args.len() {
+                    2 => (&args[0], None, &args[1]),
+                    3 => (&args[0], Some(&args[1]), &args[2]),
+                    _ => panic!("shuffle with two or three operands"),
+                };
+                let shape = self.vector_shape(&v0.ty);
+                let elem_size = shape.elem_mir.size_bytes();
+                let a_val = self.expr_value(module, func, frame, funcs, externs, globals, v0);
+                let a_slot = self.alloca(func, frame, lower_ty(&v0.ty, self.sema, self.interner));
+                self.store(func, frame, a_slot, a_val, false);
+                let b_slot = match v1 {
+                    Some(v1) => {
+                        let b_val = self.expr_value(module, func, frame, funcs, externs, globals, v1);
+                        let b_slot = self.alloca(func, frame, lower_ty(&v1.ty, self.sema, self.interner));
+                        self.store(func, frame, b_slot, b_val, false);
+                        b_slot
+                    }
+                    None => a_slot,
+                };
+                let mask_val = self.expr_value(module, func, frame, funcs, externs, globals, mask);
+                let lane_ty = shape.elem_mir.clone();
+                let out_slot = self.alloca(func, frame, lower_ty(&expr.ty, self.sema, self.interner));
+                for lane in 0..shape.lanes {
+                    let sel = self.emit(func, frame, mir::InstKind::ExtractLane { vec: mask_val, lane: lane as u8 }, lane_ty.clone());
+                    let lanes_i64 = self.emit(func, frame, mir::InstKind::Zext(sel), mir::Ty::int(64));
+                    let lane_count = self.iconst(func, 64, i128::from(shape.lanes));
+                    let in_v0 = self.emit(
+                        func,
+                        frame,
+                        mir::InstKind::Icmp {
+                            pred: mir::IcmpPred::Ult,
+                            lhs: lanes_i64,
+                            rhs: lane_count,
+                        },
+                        mir::Ty::Bool,
+                    );
+                    let idx0 = lanes_i64;
+                    let sub = self.iconst(func, 64, i128::from(shape.lanes));
+                    let idx1 = self.emit(func, frame, mir::InstKind::Sub(lanes_i64, sub), mir::Ty::int(64));
+                    let addr0 = self.scaled_index_addr(func, frame, a_slot, idx0, &fe::parse::Ty::LongLong, elem_size, lane_ty.clone()).0;
+                    let addr1 = self.scaled_index_addr(func, frame, b_slot, idx1, &fe::parse::Ty::LongLong, elem_size, lane_ty.clone()).0;
+                    let from0 = self.load(func, frame, addr0, lane_ty.clone(), false);
+                    let from1 = self.load(func, frame, addr1, lane_ty.clone(), false);
+                    let val = self.emit(func, frame, mir::InstKind::Select { cond: in_v0, then_val: from0, else_val: from1 }, lane_ty.clone());
+                    let dst = self.iconst(func, 64, i128::from(lane));
+                    let out_addr = self.scaled_index_addr(func, frame, out_slot, dst, &fe::parse::Ty::LongLong, elem_size, lane_ty.clone()).0;
+                    self.store(func, frame, out_addr, val, false);
+                }
+                self.load(func, frame, out_slot, mir_ty, false)
+            }
+            fe::check::CheckedExprKind::ShuffleVector { args, indices } => {
+                // Lane `i` takes the constant `indices[i]` of the
+                // concatenated operands; `-1` and out-of-range are
+                // undef. Both shapes (first-class and bit-pun) ride
+                // byte-indexed slot loads.
+                let shape = self.vector_shape(&args[0].ty);
+                let elem_size = shape.elem_mir.size_bytes();
+                let a_val = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
+                self.store(func, frame, a_slot, a_val, false);
+                let b_slot = if args.len() > 1 {
+                    let b_val = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                    let b_slot = self.alloca(func, frame, lower_ty(&args[1].ty, self.sema, self.interner));
+                    self.store(func, frame, b_slot, b_val, false);
+                    b_slot
+                } else {
+                    a_slot
+                };
+                let out_slot = self.alloca(func, frame, mir_ty.clone());
+                let total_lanes = shape.lanes as u64 * if args.len() > 1 { 2 } else { 1 };
+                for (lane, idx) in indices.iter().enumerate() {
+                    let val = if *idx >= 0 && (*idx as u64) < total_lanes {
+                        let (slot, within) = if (*idx as u64) < shape.lanes as u64 {
+                            (a_slot, *idx as u64)
+                        } else {
+                            (b_slot, *idx as u64 - shape.lanes as u64)
+                        };
+                        let sel = self.iconst(func, 64, within as i128);
+                        let addr = self.scaled_index_addr(func, frame, slot, sel, &fe::parse::Ty::LongLong, elem_size, shape.elem_mir.clone()).0;
+                        self.load(func, frame, addr, shape.elem_mir.clone(), false)
+                    } else {
+                        func.values.push(mir::ValueData {
+                            ty: shape.elem_mir.clone(),
+                            def: mir::Def::Const(mir::Const::Undef),
+                        })
+                    };
+                    let dst = self.iconst(func, 64, lane as i128);
+                    let out_addr = self.scaled_index_addr(func, frame, out_slot, dst, &fe::parse::Ty::LongLong, elem_size, shape.elem_mir.clone()).0;
+                    self.store(func, frame, out_addr, val, false);
+                }
+                self.load(func, frame, out_slot, mir_ty, false)
             }
             fe::check::CheckedExprKind::StmtExpr { items } => {
                 // GNU statement expression: lower items in order like
@@ -1474,6 +1586,10 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             }
             (mir::Ty::Ptr { .. }, mir::Ty::Int { .. }) => mir::InstKind::PtrToInt(from),
             (mir::Ty::Ptr { .. }, mir::Ty::Ptr { .. }) => mir::InstKind::Bitcast(from),
+            // Same-size vector and bit-punned image casts move the
+            // bits whole (the SSE intrinsics pass `__m128`-class types
+            // between the lane spellings).
+            (mir::Ty::Vector { .. }, _) | (_, mir::Ty::Vector { .. }) if from_mir.size_bytes() == to_mir.size_bytes() => mir::InstKind::Bitcast(from),
             (mir::Ty::Int { .. } | mir::Ty::Bool, mir::Ty::Ptr { .. }) => {
                 // MIR integer types are signless, so the source's
                 // signedness applies here (C17 6.3.2.3p5-6): widen

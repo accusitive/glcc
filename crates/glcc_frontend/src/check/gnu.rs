@@ -316,6 +316,190 @@ impl<'a> Sema<'a> {
         })
     }
 
+    /// GNU `__builtin_shuffle(v, mask)` / `(v0, v1, mask)`: lane `i`
+    /// of the result comes from lane `mask[i]` of `v0` (indices below
+    /// the lane count) or `v1` (above it). The operands are same-shaped
+    /// vectors and the mask an integer vector with the same lane count;
+    /// GCC requires the lane indices be in range, which is not checked
+    /// here (out-of-range lanes are UB, like GCC).
+    pub(super) fn check_shuffle(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        let (argc, checked) = match args.len() {
+            2 => (2, args.iter().map(|a| self.check_expr(a, interner)).collect::<Result<Vec<_>, _>>()?),
+            3 => (3, args.iter().map(|a| self.check_expr(a, interner)).collect::<Result<Vec<_>, _>>()?),
+            _ => return Err(CompileError::new("`__builtin_shuffle` takes two or three arguments", span)),
+        };
+        let (v0, mask) = (&checked[0], &checked[argc - 1]);
+        let (Ty::Vector { elem, len }, Ty::Vector { elem: mask_elem, len: mask_len }) = (v0.ty.unqualified(), mask.ty.unqualified()) else {
+            return Err(CompileError::new("`__builtin_shuffle` needs vector operands", span));
+        };
+        if argc == 3 {
+            let v1 = &checked[1];
+            let Ty::Vector { elem: e1, len: l1 } = v1.ty.unqualified() else {
+                return Err(CompileError::new("`__builtin_shuffle` needs vector operands", span));
+            };
+            if e1 != elem || l1 != len {
+                return Err(CompileError::new("`__builtin_shuffle` vectors must have the same shape", span));
+            }
+        }
+        if mask_len != len || !is_integer(mask_elem) {
+            return Err(CompileError::new("`__builtin_shuffle` mask must be an integer vector of the same lane count", span));
+        }
+        Ok(CheckedExpr {
+            ty: v0.ty.clone(),
+            span,
+            kind: CheckedExprKind::Shuffle {
+                args: self.alloc_slice(checked),
+            },
+        })
+    }
+
+    /// Clang `__builtin_shufflevector(v0[, v1], idx...)`: one lane per
+    /// constant index over the concatenated operands (`-1` and
+    /// out-of-range indices are undef, like clang's poison). The
+    /// two-vector form is recognized by its second argument being a
+    /// vector; the single-vector form indexes `v0` alone.
+    pub(super) fn check_shufflevector(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        if args.len() < 2 {
+            return Err(CompileError::new("`__builtin_shufflevector` takes at least two arguments", span));
+        }
+        let checked = args.iter().map(|a| self.check_expr(a, interner)).collect::<Result<Vec<_>, _>>()?;
+        let Ty::Vector { elem, .. } = checked[0].ty.unqualified() else {
+            return Err(CompileError::new("`__builtin_shufflevector` needs a vector operand", span));
+        };
+        let (operand_count, first_idx) = match checked[1].ty.unqualified() {
+            Ty::Vector { .. } => (2, 2),
+            _ => (1, 1),
+        };
+        if checked.len() <= first_idx {
+            return Err(CompileError::new("`__builtin_shufflevector` needs at least one index", span));
+        }
+        if operand_count == 2 {
+            let Ty::Vector { elem: e1, .. } = checked[1].ty.unqualified() else {
+                return Err(CompileError::new("`__builtin_shufflevector` needs vector operands", span));
+            };
+            if e1 != elem {
+                return Err(CompileError::new("`__builtin_shufflevector` vectors must have the same element type", span));
+            }
+        }
+        let mut indices = Vec::with_capacity(checked.len() - first_idx);
+        for arg in &checked[first_idx..] {
+            let crate::eval::Value::Int(idx) = crate::eval::eval_const(arg, self, interner).ok_or_else(|| CompileError::new("`__builtin_shufflevector` indices must be constants", arg.span))? else {
+                return Err(CompileError::new("`__builtin_shufflevector` indices must be integers", arg.span));
+            };
+            indices.push(idx);
+        }
+        Ok(CheckedExpr {
+            ty: Ty::Vector { elem: elem.clone(), len: indices.len() as u32 },
+            span,
+            kind: CheckedExprKind::ShuffleVector {
+                args: self.alloc_slice(checked[..operand_count].iter().cloned()),
+                indices: self.alloc_slice(indices),
+            },
+        })
+    }
+
+    /// Clang `__builtin_convertvector(v, T)`: element-wise conversion
+    /// to the target vector type (same lane count, any element
+    /// kinds). The type argument arrives as a typedef identifier, so
+    /// it resolves through the symbol table, not the expression
+    /// checker.
+    pub(super) fn check_convertvector(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        if args.len() != 2 {
+            return Err(CompileError::new("`__builtin_convertvector` takes two arguments", span));
+        }
+        let v = self.check_expr(&args[0], interner)?;
+        let Ty::Vector { len: src_len, .. } = v.ty.unqualified() else {
+            return Err(CompileError::new("`__builtin_convertvector` needs a vector operand", v.span));
+        };
+        let Expr::Ident { name, .. } = &args[1] else {
+            return Err(CompileError::new("`__builtin_convertvector` target must be a type name", span));
+        };
+        let Some(id) = self.lookup_symbol(*name) else {
+            return Err(CompileError::new("`__builtin_convertvector` target must be a type name", span));
+        };
+        let binding = &self.decls[id.0 as usize];
+        if binding.kind != BindingKind::Typedef {
+            return Err(CompileError::new("`__builtin_convertvector` target must be a type name", span));
+        }
+        let ty = binding.ty.clone();
+        let Ty::Vector { len: dst_len, .. } = ty.unqualified() else {
+            return Err(CompileError::new("`__builtin_convertvector` target must be a vector type", span));
+        };
+        if src_len != dst_len {
+            return Err(CompileError::new("`__builtin_convertvector` lane counts must match", span));
+        }
+        Ok(CheckedExpr {
+            ty,
+            span,
+            kind: CheckedExprKind::Ia32 {
+                op: Ia32Op::ConvertVector,
+                args: self.alloc_slice([v]),
+            },
+        })
+    }
+
+    /// Clang `__builtin_nontemporal_store(v, p)`: a non-temporal
+    /// store, an ordinary store in our lowering.
+    pub(super) fn check_nontemporal_store(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        let [v, p] = args else {
+            return Err(CompileError::new("`__builtin_nontemporal_store` takes two arguments", span));
+        };
+        let v = self.check_expr(v, interner)?;
+        let p = self.decay_checked(self.check_expr(p, interner)?);
+        if !matches!(p.ty.unqualified(), Ty::Pointer { .. }) {
+            return Err(CompileError::new("`__builtin_nontemporal_store` needs a pointer target", p.span));
+        }
+        Ok(CheckedExpr {
+            ty: Ty::Void,
+            span,
+            kind: CheckedExprKind::Ia32 {
+                op: Ia32Op::NtStore,
+                args: self.alloc_slice([v, p]),
+            },
+        })
+    }
+
+    /// Clang `__builtin_elementwise_*`: the lane-wise operation over
+    /// any GNU vector shape, its signedness taken from the element
+    /// type (`sqrt` also takes a scalar).
+    pub(super) fn check_elementwise(&self, name: &str, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        let suffix = name.strip_prefix("__builtin_elementwise_").unwrap_or("");
+        let checked = args.iter().map(|a| self.check_expr(a, interner)).collect::<Result<Vec<_>, _>>()?;
+        let vector_elem = |c: &CheckedExpr<'a>| match c.ty.unqualified() {
+            Ty::Vector { elem, .. } => Some((**elem).clone()),
+            _ => None,
+        };
+        let (op, ret) = match (suffix, checked.len()) {
+            ("sqrt", 1) => (Ia32Op::Vec128Sqrt, checked[0].ty.clone()),
+            (_, 2) => {
+                let (Some(e0), Some(e1)) = (vector_elem(&checked[0]), vector_elem(&checked[1])) else {
+                    return Err(CompileError::new(format!("`{name}` needs vector operands"), span));
+                };
+                if e0 != e1 {
+                    return Err(CompileError::new(format!("`{name}` operands must have the same element type"), span));
+                }
+                let unsigned = !is_signed_int_in(&e0, self.target.char_signed).unwrap_or(true);
+                let op = match suffix {
+                    "add_sat" => Ia32Op::Vec128Sat { add: true, unsigned },
+                    "sub_sat" => Ia32Op::Vec128Sat { add: false, unsigned },
+                    "min" => Ia32Op::Vec128MinMax { min: true, signed: !unsigned },
+                    "max" => Ia32Op::Vec128MinMax { min: false, signed: !unsigned },
+                    _ => unreachable!("dispatch selected a two-argument elementwise builtin"),
+                };
+                (op, checked[0].ty.clone())
+            }
+            _ => return Err(CompileError::new(format!("`{name}` takes one or two arguments"), span)),
+        };
+        Ok(CheckedExpr {
+            ty: ret,
+            span,
+            kind: CheckedExprKind::Ia32 {
+                op,
+                args: self.alloc_slice(checked),
+            },
+        })
+    }
+
     /// `void __builtin_prefetch(addr[, rw[, locality]])`: a hint, so
     /// only the address is kept (evaluated and dropped through a
     /// `void` cast); the access/locality arguments are checked and
@@ -464,6 +648,9 @@ impl<'a> Sema<'a> {
             Ty::Pointer { .. } => 5,
             Ty::Float | Ty::Double | Ty::LongDouble | Ty::Float128 => 8,
             Ty::Complex(_) => 9,
+            // Vectors are past the manual's table (GCC/clang answer 18
+            // for `__m128` in practice).
+            Ty::Vector { .. } => 18,
             Ty::Func { .. } => 10,
             // `__builtin_va_list` is an array of one tag on the
             // glcc targets.

@@ -637,7 +637,14 @@ pub(crate) fn emit_inst<M: Module>(
             let lowered = self.operand(builder, a);
             let from = builder.func.dfg.value_type(lowered);
             if from.bytes() == dst.bytes() {
-                Some(builder.ins().bitcast(dst, MemFlagsData::new(), lowered))
+                // A lane-count change needs an explicit byte order;
+                // the bit puns are little-endian images.
+                let flags = if from.lane_count() != dst.lane_count() {
+                    MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little)
+                } else {
+                    MemFlagsData::new()
+                };
+                Some(builder.ins().bitcast(dst, flags, lowered))
             } else if from.bytes() < dst.bytes() {
                 // A narrow pointer widens back to the machine address
                 // width, sign-extended like MSVC's default for `__ptr32`.
@@ -992,10 +999,22 @@ pub(crate) fn emit_inst<M: Module>(
             })
         }
         mir::InstKind::Select { cond, then_val, else_val } => {
-            let c = self.operand(builder, cond);
+            let mut c = self.operand(builder, cond);
             let x = self.operand(builder, then_val);
             let y = self.operand(builder, else_val);
-            Some(builder.ins().select(c, x, y))
+            let data = builder.func.dfg.value_type(x);
+            let cond_ty = builder.func.dfg.value_type(c);
+            if cond_ty.is_vector() && data.is_vector() {
+                // Vector selects are bitwise: cranelift's `select`
+                // only takes a scalar truthy condition, so an `fcmp`
+                // lane mask rides `bitselect` in the data's own shape.
+                if cond_ty != data {
+                    c = builder.ins().bitcast(data, MemFlagsData::new().with_endianness(cranelift_codegen::ir::Endianness::Little), c);
+                }
+                Some(builder.ins().bitselect(c, x, y))
+            } else {
+                Some(builder.ins().select(c, x, y))
+            }
         }
         mir::InstKind::Alloca { pointee, count } => {
             let size = pointee.size_bytes().checked_mul(count).expect("alloca size overflow");

@@ -569,9 +569,43 @@ fn classify_value(target: Target, ty: &mir::Ty, counters: &mut Counters, is_ret:
             }
         },
         mir::Ty::Array { .. } | mir::Ty::Struct { .. } | mir::Ty::WideInt { .. } => classify_aggregate(target, ty, counters, variadic),
-        // Vectors are produced only by the vectorizer inside a function
-        // body; nothing hands them across a signature.
-        mir::Ty::Vector { .. } => panic!("vector values do not cross function signatures"),
+        // GNU vectors crossing a signature (16-byte shapes; 8-byte
+        // vectors lower bit-punned to I64 and classify as INTEGER
+        // above). Verified against gcc: SysV passes every 16-byte
+        // vector — float or integer lanes — in one xmm and returns it
+        // in xmm0; Win64 passes __m128 by reference (MSVC's non-AVX
+        // ABI, matched by mingw gcc, varargs included) but returns it
+        // in xmm0.
+        mir::Ty::Vector { .. } => match target.arch {
+            // Exhausted xmm files send the vector to the stack whole,
+            // like the lone-quad rule below.
+            Arch::X86_64 if target.os == Os::Linux => {
+                if counters.fp + 1 > target.fp_regs() {
+                    ValueClass::Stack { bytes: 16 }
+                } else {
+                    counters.fp += 1;
+                    ValueClass::Regs(vec![(0, crate::ty::clif_ty(ty).expect("supported vector shape"))])
+                }
+            }
+            Arch::X86_64 if !is_ret => ValueClass::Pointer,
+            Arch::X86_64 | Arch::Aarch64 => {
+                counters.fp += 1;
+                ValueClass::Regs(vec![(0, crate::ty::clif_ty(ty).expect("supported vector shape"))])
+            }
+            // RISC-V LP64D: a 16-byte vector splits like a two-member
+            // composite — float lanes over two FP registers, integer
+            // lanes over two GPRs.
+            Arch::Riscv64 => {
+                let vec_ty = crate::ty::clif_ty(ty).expect("supported vector shape");
+                if matches!(vec_ty, types::F32X4 | types::F64X2) {
+                    counters.fp += 2;
+                    ValueClass::Regs(vec![(0, types::F64), (8, types::F64)])
+                } else {
+                    counters.gp += 2;
+                    ValueClass::Regs(vec![(0, types::I64), (8, types::I64)])
+                }
+            }
+        },
     }
 }
 
@@ -606,7 +640,9 @@ fn mir_align(ty: &mir::Ty) -> u64 {
         },
         mir::Ty::Ptr { bits, .. } => ((*bits as u64).max(8) / 8).min(16),
         mir::Ty::BuiltinVaList { align, .. } => *align,
-        mir::Ty::Vector { elem, .. } => mir_align(elem),
+        // A vector's C alignment is its total size up to 16 (GCC), not
+        // the lane's own — load-bearing for stack classification.
+        mir::Ty::Vector { .. } => ty.size_bytes().min(16),
         mir::Ty::Array { elem, .. } => mir_align(elem),
         mir::Ty::Struct { fields, .. } => fields.iter().map(mir_align).max().unwrap_or(1),
     }
@@ -630,9 +666,14 @@ fn aggregate_leaves(ty: &mir::Ty, base: u64, out: &mut Vec<(u64, u64, LeafClass)
         mir::Ty::Float(mir::FloatKind::F80) | mir::Ty::Void | mir::Ty::BuiltinVaList { .. } => {
             out.push((base, 1, LeafClass::Memory));
         }
-        // Unreachable: classify_value rejects vectors before aggregate
-        // classification could recurse into one.
-        mir::Ty::Vector { .. } => out.push((base, ty.size_bytes(), LeafClass::Memory)),
+        // A vector nested in a composite votes SSE for float lanes,
+        // INTEGER for integer lanes (SysV eightbyte classes); other
+        // targets' composite rules consume the same vote.
+        mir::Ty::Vector { elem, .. } => out.push((
+            base,
+            ty.size_bytes(),
+            if matches!(**elem, mir::Ty::Float(_)) { LeafClass::Sse } else { LeafClass::Int },
+        )),
         mir::Ty::Array { elem, len } => {
             let stride = elem.size_bytes();
             for i in 0..*len {
