@@ -1,7 +1,7 @@
 use super::*;
 use smallvec::smallvec;
 use crate::ir::{Const, Terminator};
-use crate::ty::{GepIndex, Signature};
+use crate::ty::{FloatKind, GepIndex, Signature};
 use crate::verify::verify_func;
 
 fn param(func: &mut Function, block: Block, ty: Ty, index: u32) -> Value {

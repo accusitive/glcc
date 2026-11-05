@@ -90,6 +90,7 @@ fn function_pipeline(pm: PassManager) -> PassManager {
         .add_func_pass(passes::Mem2Reg)
         .add_func_pass(passes::ConstFold)
         .add_func_pass(passes::Sccp)
+        .add_func_pass(passes::LoopVec)
         .add_func_pass(passes::LoopUnroll)
         .add_func_pass(passes::ForwardAggregateCopy)
         .add_func_pass(passes::DeadStoreElim)

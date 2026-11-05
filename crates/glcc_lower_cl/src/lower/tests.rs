@@ -2982,3 +2982,153 @@ fn division_by_constants_uses_magic_multipliers() {
         assert_eq!(srem100(x), x.wrapping_rem(100), "i64 {x} % 100");
     }
 }
+
+/// A runtime-bound `dst[i] = src[i] + 1` loop in the frontend's emitted
+/// shape, run through the loop vectorizer and then executed.
+fn build_runtime_loop() -> mir::Module {
+    let sig = mir::Signature::new(vec![mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::int(32)], mir::Ty::Void);
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("bump_n", sig);
+    let dst = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 0);
+    let src = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 1);
+    let n = param(&mut f, entry, mir::Ty::int(32), 2);
+    let dsti = emit(&mut f, entry, mir::InstKind::PtrToInt(dst), mir::Ty::int(64));
+    let srci = emit(&mut f, entry, mir::InstKind::PtrToInt(src), mir::Ty::int(64));
+    let header = f.push_block(vec![mir::Ty::int(32)]);
+    let iv = f.blocks[header].params[0];
+    f.blocks[entry].term = Some(mir::Terminator::Br { dest: header, args: smallvec![iconst(&mut f, 32, 0)] });
+    let body = f.push_block(vec![]);
+    let exit = f.push_block(vec![]);
+    let cond = emit(&mut f, header, mir::InstKind::Icmp { pred: mir::IcmpPred::Slt, lhs: iv, rhs: n }, mir::Ty::Bool);
+    f.blocks[header].term = Some(mir::Terminator::CondBr { cond, then_block: body, else_block: exit, then_args: smallvec![], else_args: smallvec![] });
+    let sext = emit(&mut f, body, mir::InstKind::Sext(iv), mir::Ty::int(64));
+    let two = iconst(&mut f, 64, 2);
+    let scaled = emit(&mut f, body, mir::InstKind::Shl(sext, two), mir::Ty::int(64));
+    let daddr = emit(&mut f, body, mir::InstKind::Add(dsti, scaled), mir::Ty::int(64));
+    let dptr = emit(&mut f, body, mir::InstKind::IntToPtr(daddr), mir::Ty::ptr(mir::Ty::int(32)));
+    let saddr = emit(&mut f, body, mir::InstKind::Add(srci, scaled), mir::Ty::int(64));
+    let sptr = emit(&mut f, body, mir::InstKind::IntToPtr(saddr), mir::Ty::ptr(mir::Ty::int(32)));
+    let loaded = emit(&mut f, body, mir::InstKind::Load { addr: sptr, flags: mir::MemFlags::plain() }, mir::Ty::int(32));
+    let one = iconst(&mut f, 32, 1);
+    let bumped = emit(&mut f, body, mir::InstKind::Add(loaded, one), mir::Ty::int(32));
+    emit_unit(&mut f, body, mir::InstKind::Store { addr: dptr, val: bumped, flags: mir::MemFlags::plain() });
+    let next = emit(&mut f, body, mir::InstKind::Add(iv, one), mir::Ty::int(32));
+    f.blocks[body].term = Some(mir::Terminator::Br { dest: header, args: smallvec![next] });
+    f.blocks[exit].term = Some(mir::Terminator::Return { val: None });
+    assert!(mir::pass::FunctionPass::run(&mut mir::passes::LoopVec, &mut f), "loop should vectorize");
+    let errors = mir::verify::verify_func(&f);
+    assert!(errors.is_empty(), "verifier: {errors:?}");
+    module.push_func(f);
+    module
+}
+
+#[test]
+fn vectorized_loop_executes_across_trip_counts() {
+    if !native_has_simd() {
+        return;
+    }
+    let module = build_runtime_loop();
+    let (jit, ids) = jit_module(&module);
+    let func = unsafe { std::mem::transmute::<*const u8, extern "C" fn(*mut i32, *const i32, i32)>(func_addr(&jit, &ids, 0)) };
+    let input = [10i32; 64];
+    for &n in &[0i32, 1, 3, 4, 5, 7, 8, 9, 16, 33, 64] {
+        let mut out = [0i32; 64];
+        func(out.as_mut_ptr(), input.as_ptr(), n);
+        for i in 0..64 {
+            let want = if (i as i32) < n { 11 } else { 0 };
+            assert_eq!(out[i], want, "n={n} i={i}");
+        }
+    }
+}
+
+#[test]
+fn vectorized_loop_alias_check_runs_scalar_when_overlapping() {
+    if !native_has_simd() {
+        return;
+    }
+    let module = build_runtime_loop();
+    let (jit, ids) = jit_module(&module);
+    let func = unsafe { std::mem::transmute::<*const u8, extern "C" fn(*const i32, *mut i32, i32)>(func_addr(&jit, &ids, 0)) };
+    // dst = src + 3 overlaps: the range check must fall back to the
+    // scalar loop, which shifts by one element per iteration.
+    let mut data = [0i32; 32];
+    for (i, v) in data.iter_mut().enumerate() {
+        *v = i as i32;
+    }
+    let base = data.as_mut_ptr();
+    let (dst, src) = unsafe { (base.add(10), base.add(7)) };
+    let mut expected = data.clone();
+    for i in 0..5 {
+        // Scalar iterations read freshly stored values where the ranges
+        // overlap, so the expectation simulates the loop step by step.
+        expected[10 + i] = expected[7 + i] + 1;
+    }
+    // dst = base+10, src = base+7: overlapping, the runtime check must
+    // route this to the scalar loop.
+    func(dst, src, 5);
+    for i in 0..5 {
+        assert_eq!(data[10 + i], expected[10 + i], "i={i}");
+    }
+}
+
+
+
+/// `dst[i] = a[i]` plus `sum += a[i]` with a runtime bound and a
+/// nonzero initial sum, vectorized and then executed.
+#[test]
+fn vectorized_reduction_executes_across_trip_counts() {
+    if !native_has_simd() {
+        return;
+    }
+    let sig = mir::Signature::new(
+        vec![mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::ptr(mir::Ty::int(32)), mir::Ty::int(32), mir::Ty::int(32)],
+        mir::Ty::int(32),
+    );
+    let mut module = mir::Module::new();
+    let (mut f, entry) = mir::Function::new("copy_sum", sig);
+    let a = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 0);
+    let dst = param(&mut f, entry, mir::Ty::ptr(mir::Ty::int(32)), 1);
+    let sum_init = param(&mut f, entry, mir::Ty::int(32), 2);
+    let n = param(&mut f, entry, mir::Ty::int(32), 3);
+    let ai = emit(&mut f, entry, mir::InstKind::PtrToInt(a), mir::Ty::int(64));
+    let dsti = emit(&mut f, entry, mir::InstKind::PtrToInt(dst), mir::Ty::int(64));
+    let header = f.push_block(vec![mir::Ty::int(32), mir::Ty::int(32)]);
+    let iv = f.blocks[header].params[0];
+    let sum = f.blocks[header].params[1];
+    f.blocks[entry].term = Some(mir::Terminator::Br { dest: header, args: smallvec![iconst(&mut f, 32, 0), sum_init] });
+    let body = f.push_block(vec![]);
+    let exit = f.push_block(vec![]);
+    let cond = emit(&mut f, header, mir::InstKind::Icmp { pred: mir::IcmpPred::Slt, lhs: iv, rhs: n }, mir::Ty::Bool);
+    f.blocks[header].term = Some(mir::Terminator::CondBr { cond, then_block: body, else_block: exit, then_args: smallvec![], else_args: smallvec![] });
+    let sext = emit(&mut f, body, mir::InstKind::Sext(iv), mir::Ty::int(64));
+    let two = iconst(&mut f, 64, 2);
+    let scaled = emit(&mut f, body, mir::InstKind::Shl(sext, two), mir::Ty::int(64));
+    let aaddr = emit(&mut f, body, mir::InstKind::Add(ai, scaled), mir::Ty::int(64));
+    let aptr = emit(&mut f, body, mir::InstKind::IntToPtr(aaddr), mir::Ty::ptr(mir::Ty::int(32)));
+    let loaded = emit(&mut f, body, mir::InstKind::Load { addr: aptr, flags: mir::MemFlags::plain() }, mir::Ty::int(32));
+    let daddr = emit(&mut f, body, mir::InstKind::Add(dsti, scaled), mir::Ty::int(64));
+    let dptr = emit(&mut f, body, mir::InstKind::IntToPtr(daddr), mir::Ty::ptr(mir::Ty::int(32)));
+    emit_unit(&mut f, body, mir::InstKind::Store { addr: dptr, val: loaded, flags: mir::MemFlags::plain() });
+    let one = iconst(&mut f, 32, 1);
+    let acc = emit(&mut f, body, mir::InstKind::Add(sum, loaded), mir::Ty::int(32));
+    let next = emit(&mut f, body, mir::InstKind::Add(iv, one), mir::Ty::int(32));
+    f.blocks[body].term = Some(mir::Terminator::Br { dest: header, args: smallvec![next, acc] });
+    f.blocks[exit].term = Some(mir::Terminator::Return { val: Some(sum) });
+    assert!(mir::pass::FunctionPass::run(&mut mir::passes::LoopVec, &mut f), "loop should vectorize");
+    let errors = mir::verify::verify_func(&f);
+    assert!(errors.is_empty(), "verifier: {errors:?}");
+    module.push_func(f);
+    let (jit, ids) = jit_module(&module);
+    let func = unsafe { std::mem::transmute::<*const u8, extern "C" fn(*const i32, *mut i32, i32, i32) -> i32>(func_addr(&jit, &ids, 0)) };
+    let data: Vec<i32> = (0..64).collect();
+    for &n in &[0i32, 1, 3, 4, 5, 7, 8, 9, 16, 33, 64] {
+        let mut out = [0i32; 64];
+        let sum = func(data.as_ptr(), out.as_mut_ptr(), 1000, n);
+        let want: i32 = 1000 + (0..n).map(|i| i).sum::<i32>();
+        assert_eq!(sum, want, "n={n}");
+        for i in 0..64 {
+            let want = if (i as i32) < n { i as i32 } else { 0 };
+            assert_eq!(out[i], want, "n={n} i={i}");
+        }
+    }
+}
