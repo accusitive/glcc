@@ -456,16 +456,6 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     }
                     return;
                 }
-                // A label address (or arithmetic on one) in a static
-                // initializer (`static void *tab[] = {&&a, &&b}`,
-                // `static int d[] = {&&b - &&a}`): the object holds the
-                // ids `&&label` computes, so `goto *tab[i]` dispatches
-                // and differences stay consecutive.
-                if let Some(n) = self.fold_label_const(e) {
-                    let len = mir_ty.size_bytes() as usize;
-                    image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
-                    return;
-                }
                 match fe::eval::eval_static_init(e, self.sema, self.interner) {
                     Some(fe::eval::Value::Int(n)) => {
                         // Through conversions this covers enums, `_Bool`,
@@ -496,6 +486,18 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         return;
                     }
                     None => {}
+                }
+                // A label address (or arithmetic on one) in a static
+                // initializer (`static void *tab[] = {&&a, &&b}`,
+                // `static int d[] = {&&b - &&a}`): the object holds the
+                // ids `&&label` computes, so `goto *tab[i]` dispatches
+                // and differences stay consecutive. Ordinary constants
+                // fold above first, keeping their converted target type
+                // (a label expression is the only thing left here).
+                if let Some(n) = self.fold_label_const(e) {
+                    let len = mir_ty.size_bytes() as usize;
+                    image[base as usize..base as usize + len].copy_from_slice(&n.to_le_bytes()[..len]);
+                    return;
                 }
                 // A null pointer constant spelled as a cast (`(T *)0`,
                 // and `NULL` from real headers): fold the operand and
