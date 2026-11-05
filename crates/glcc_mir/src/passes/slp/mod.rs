@@ -9,11 +9,11 @@
 //! broadcast to every lane. Anything else leaves the group scalar.
 //!
 //! The rewrite moves memory accesses: the seed stores consolidate into
-//! one vector store at the last seed's position and a fresh vector load
-//! is inserted there, while every scalar load stays where it is. A group
-//! is therefore only taken when no other memory access or call touches
-//! (or may touch) an involved offset range inside that window — see
-//! [`Group::safe_against`].
+//! one vector store spliced after the last seed (and every in-block def
+//! the packed tree reads) with a fresh vector load inserted there, while
+//! every scalar load stays where it is. A group is therefore only taken
+//! when no other memory access or call touches (or may touch) an
+//! involved offset range inside that window — see [`Group::safe_against`].
 
 use std::collections::{HashMap, HashSet};
 
@@ -79,8 +79,8 @@ struct Group {
     reads: Vec<Access>,
     /// Memory ranges the seed stores wrote.
     writes: Vec<Access>,
-    /// Position in the block where the packed tree is emitted (the last
-    /// seed's slot).
+    /// Position in the block where the packed tree is spliced: past the
+    /// last seed and every in-block def the tree reads.
     emit_at: usize,
     node: PackNode,
     elem: Ty,
@@ -152,6 +152,7 @@ impl FunctionPass for Slp {
                 splice.entry(emit_at).or_default().extend(insts);
             }
             let mut out = Vec::with_capacity(old.len());
+            let len = old.len();
             for (pos, inst) in old.into_iter().enumerate() {
                 if let Some(mut insts) = splice.remove(&pos) {
                     out.append(&mut insts);
@@ -161,6 +162,11 @@ impl FunctionPass for Slp {
                     continue;
                 }
                 out.push(inst);
+            }
+            // A splice point of `len` means the tree lands at the very end
+            // of the block.
+            if let Some(mut insts) = splice.remove(&len) {
+                out.append(&mut insts);
             }
             func.blocks[block].insts = out;
         }
@@ -256,13 +262,24 @@ fn chunk_run(
         if chunk.len() != lanes as usize {
             break;
         }
-        let (emit_at, addr) = (chunk.last().unwrap().0, chunk[0].2);
+        let mut emit_at = chunk.last().unwrap().0;
+        let addr = chunk[0].2;
         let values: Vec<Value> = chunk.iter().map(|&(_, _, _, val, _, _)| val).collect();
         let mut leaves: Vec<Inst> = Vec::new();
         let mut reads: Vec<Access> = Vec::new();
         let Some(node) = pack(func, block, &values, elem, 0, pos_of, &mut leaves, &mut reads) else {
             continue;
         };
+        // Seeds are offset-sorted, so block order need not match: the
+        // packed store can consume values defined after the last seed's
+        // slot. Splice after every in-block def the tree reads instead.
+        let mut roots = vec![addr];
+        scalar_roots(&node, &mut roots);
+        for root in roots {
+            if let Some(&pos) = pos_of.get(&root) {
+                emit_at = emit_at.max(pos + 1);
+            }
+        }
         let writes = chunk
             .iter()
             .map(|&(pos, inst, addr, val, _, offset)| Access {
@@ -436,6 +453,16 @@ fn const_of(func: &Function, v: Value) -> Option<crate::ir::Const> {
     match &func.values[v].def {
         Def::Const(c) => Some(c.clone()),
         _ => None,
+    }
+}
+
+/// The scalar values the packed tree reads as-is: splat sources and the
+/// addresses of vector loads. Op nodes consume only tree-internal results.
+fn scalar_roots(node: &PackNode, out: &mut Vec<Value>) {
+    match node {
+        PackNode::Splat(v) => out.push(*v),
+        PackNode::Load { addr } => out.push(*addr),
+        PackNode::Op(_, children) => children.iter().for_each(|child| scalar_roots(child, out)),
     }
 }
 

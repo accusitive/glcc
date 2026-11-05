@@ -130,6 +130,41 @@ fn one_splat_covers_repeated_stores() {
     assert_eq!(stores(&func).len(), 1);
 }
 
+/// Two i64 stores of one value to consecutive offsets, in reverse block
+/// order: the lower offset is stored last, so its address is defined
+/// after the group's first seed. The packed store must splice in after
+/// that address's def, not at the last seed's slot.
+#[test]
+fn reversed_seed_order_splices_after_address_def() {
+    let sig = Signature::new(vec![Ty::ptr(Ty::int(64)), Ty::int(64)], Ty::Void);
+    let (mut func, entry) = Function::new("f", sig);
+    let dst = param(&mut func, entry, Ty::ptr(Ty::int(64)), 0);
+    let x = param(&mut func, entry, Ty::int(64), 1);
+    // Higher offset first, then address math and the lower-offset store.
+    let hi = emit(&mut func, entry, InstKind::GetElementPtr { base: dst, indices: smallvec![GepIndex::ConstIndex(2)] }, Ty::ptr(Ty::int(64)));
+    emit_unit(&mut func, entry, InstKind::Store { addr: hi, val: x, flags: MemFlags::plain() });
+    let eight = iconst(&mut func, 64, 8);
+    let base = emit(&mut func, entry, InstKind::PtrToInt(dst), Ty::int(64));
+    let sum = emit(&mut func, entry, InstKind::Add(base, eight), Ty::int(64));
+    let lo = emit(&mut func, entry, InstKind::IntToPtr(sum), Ty::ptr(Ty::int(64)));
+    emit_unit(&mut func, entry, InstKind::Store { addr: lo, val: x, flags: MemFlags::plain() });
+    func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+    assert!(run(&mut func));
+    assert!(has_vector_value(&func, Ty::int(64), 2));
+    assert_eq!(stores(&func).len(), 1);
+
+    // Every operand of the surviving store must be defined earlier in
+    // the block (or be a param/const).
+    let last = *func.blocks[func.entry].insts.last().unwrap();
+    let InstKind::Store { addr, .. } = &func.insts[last].kind else {
+        panic!("last inst is not a store: {:?}", func.insts[last].kind)
+    };
+    let addr_pos = func.blocks[func.entry].insts.iter().position(|&inst| func.insts[inst].result == Some(*addr));
+    let store_pos = func.blocks[func.entry].insts.iter().position(|&inst| inst == last);
+    assert!(addr_pos.is_some_and(|p| p < store_pos.unwrap()), "store's address defined after the store");
+}
+
 #[test]
 fn non_adjacent_stores_stay_scalar() {
     let sig = Signature::new(vec![Ty::ptr(Ty::int(32)), Ty::ptr(Ty::int(32))], Ty::Void);
