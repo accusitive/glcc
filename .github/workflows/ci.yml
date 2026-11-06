@@ -102,6 +102,15 @@ jobs:
       # workspace and therefore is not built by `cargo test -p fernc`.
       - name: Build glcc and fernc
         run: cargo build -p glcc -p fernc --locked
+      # build.rs stages glccrt-win64.lib by invoking the glcc binary, which
+      # does not exist yet during the first build of a fresh checkout.
+      # Touching the runtime source re-runs build.rs now that glcc.exe does.
+      - name: Stage glccrt (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          (Get-Item rt/glccrt.c).LastWriteTime = Get-Date
+          cargo build -p glcc --locked
       - name: Build and test
         if: runner.os != 'Windows'
         run: cargo test -p fern -p fernc -p fern_exec -p fern_repl --locked

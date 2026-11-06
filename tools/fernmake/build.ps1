@@ -9,13 +9,19 @@ param([string]$Target = "build")
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# $env: assignments survive this script into the caller (and the CI step
+# that runs the examples), so store absolute paths: a tools/fernmake-relative
+# path would resolve against whatever directory the next recipe runs in.
+# build.sh picks plain shell variables and does not have this problem.
 if (-not $env:FERNC) {
-  if (Test-Path "..\..\target\debug\fernc.exe") { $env:FERNC = "..\..\target\debug\fernc.exe" }
-  else { $env:FERNC = "fernc.exe" }
+  $fernc = @("..\..\target\debug\fernc.exe", "..\..\target\release\fernc.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+  $env:FERNC = if ($fernc) { (Resolve-Path $fernc).Path } else { "fernc.exe" }
 }
 if (-not $env:GLCC) {
-  if (Test-Path "..\..\target\debug\glcc.exe") { $env:GLCC = "..\..\target\debug\glcc.exe" }
-  else { $env:GLCC = "glcc.exe" }
+  $glcc = @("..\..\target\debug\glcc.exe", "..\..\target\release\glcc.exe") |
+    Where-Object { Test-Path $_ } | Select-Object -First 1
+  $env:GLCC = if ($glcc) { (Resolve-Path $glcc).Path } else { "glcc.exe" }
 }
 
 switch ($Target) {
