@@ -1193,6 +1193,7 @@ fn try_declare_var(sema: &mut Sema, intern: &mut Interner, name: &str, ty: Ty) -
             align: None,
             naked: false,
             noinline: false,
+            gnu_inline: false,
             is_async: false,
             section: None,
             asm_label: None,
@@ -1257,6 +1258,7 @@ fn sema_inner_scope_shadows() {
                 align: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -6798,6 +6800,16 @@ fn ia32_builtins_check_against_arguments() {
     assert_eq!(checked.ty, Ty::UnsignedInt);
     let checked = check_with(&["int n;"], "__builtin_ia32_addcarryx_u32(0, n, n, &n)");
     assert_eq!(checked.ty, Ty::Bool);
+    // The SSE3 pairs, checked against `__m128`-class spellings.
+    let checked = check_with(&["typedef float v4sf __attribute__((vector_size(16)));"], "__builtin_ia32_addsubps((v4sf){0}, (v4sf){0})");
+    assert_eq!(checked.ty, Ty::Vector { elem: Box::new(Ty::Float), len: 4 });
+    let checked = check_with(&["typedef double v2df __attribute__((vector_size(16)));"], "__builtin_ia32_haddpd((v2df){0}, (v2df){0})");
+    assert_eq!(checked.ty, Ty::Vector { elem: Box::new(Ty::Double), len: 2 });
+    let checked = check_with(&["typedef float v4sf __attribute__((vector_size(16)));"], "__builtin_ia32_movsldup((v4sf){0})");
+    assert_eq!(checked.ty, Ty::Vector { elem: Box::new(Ty::Float), len: 4 });
+    let checked = check_with(&["char buf[16];"], "__builtin_ia32_lddqu(buf)");
+    assert_eq!(checked.ty, Ty::Vector { elem: Box::new(Ty::Char), len: 16 });
+    assert!(check_with_err(&["int n;"], "__builtin_ia32_addsubps((void)0)").contains("takes exactly 2 arguments"));
     assert!(check_with_err(&["int n;"], "__builtin_ia32_bsrsi()").contains("takes exactly 1 argument"));
     assert!(check_with_err(&["int n;"], "__builtin_ia32_ia32_nosuch(n)").contains("unsupported builtin"));
 }
@@ -8317,6 +8329,7 @@ fn block_extern_reuses_file_entity() {
                 align: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -8346,6 +8359,7 @@ fn block_extern_reuses_file_entity() {
                 align: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -8384,6 +8398,7 @@ fn block_extern_after_local_reports() {
             align: None,
             naked: false,
             noinline: false,
+            gnu_inline: false,
             is_async: false,
             section: None,
             asm_label: None,
@@ -8412,6 +8427,7 @@ fn block_extern_after_local_reports() {
                 align: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -8646,6 +8662,7 @@ fn conflicting_redeclaration_renders_both_sites() {
             align: None,
             naked: false,
             noinline: false,
+            gnu_inline: false,
             is_async: false,
             section: None,
             asm_label: None,
@@ -8675,6 +8692,7 @@ fn conflicting_redeclaration_renders_both_sites() {
                 align: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,

@@ -1335,6 +1335,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 inline: specifiers.is_inline(),
                 forceinline: specifiers.force_inline,
                 noinline: attrs.is_noinline() || specifiers.attrs.is_noinline(),
+                gnu_inline: attrs.is_gnu_inline() || specifiers.attrs.is_gnu_inline(),
                 align: attrs.aligned.or(specifiers.attrs.aligned),
                 section,
                 asm_label: attrs.asm_label.or(specifiers.attrs.asm_label),
@@ -1387,6 +1388,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         alias: None,
                         naked: false,
                         noinline: false,
+                        gnu_inline: false,
                         is_async: false,
                         section: None,
                         asm_label: None,
@@ -1646,6 +1648,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     alias: None,
                     naked: false,
                     noinline: false,
+                    gnu_inline: false,
                     is_async: false,
                     section: None,
                     asm_label: None,
@@ -3490,6 +3493,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 alias: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -3584,6 +3588,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 alias: None,
                 naked: false,
                 noinline: false,
+                gnu_inline: false,
                 is_async: false,
                 section: None,
                 asm_label: None,
@@ -4255,6 +4260,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 inline: kind == BindingKind::Func && specifiers.is_inline(),
                 forceinline: kind == BindingKind::Func && specifiers.force_inline,
                 noinline: kind == BindingKind::Func && (suffix.is_noinline() || specifiers.attrs.is_noinline()),
+                gnu_inline: kind == BindingKind::Func && (suffix.is_gnu_inline() || specifiers.attrs.is_gnu_inline()),
                 align: suffix.aligned.or(specifiers.attrs.aligned),
                 section,
                 asm_label: suffix.asm_label.or(specifiers.attrs.asm_label),
@@ -4904,6 +4910,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         alias: None,
                         naked: false,
                         noinline: false,
+                        gnu_inline: false,
                         is_async: false,
                         section: None,
                         asm_label: None,
@@ -5937,6 +5944,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                 } else if normalized == "noinline" {
                     self.skip_balanced_parens();
                     out.flags.insert(GnuAttrFlags::NOINLINE);
+                } else if normalized == "gnu_inline" {
+                    self.skip_balanced_parens();
+                    out.flags.insert(GnuAttrFlags::GNU_INLINE);
                 } else if normalized == "async" {
                     self.skip_balanced_parens();
                     self.set_async_attr(&mut out, name_span);
@@ -6040,6 +6050,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 out.flags.insert(GnuAttrFlags::NAKED);
             } else if normalized == "noinline" {
                 out.flags.insert(GnuAttrFlags::NOINLINE);
+            } else if normalized == "gnu_inline" {
+                out.flags.insert(GnuAttrFlags::GNU_INLINE);
             } else if normalized == "async" {
                 self.set_async_attr(&mut out, name_span);
             } else if normalized == "aligned" {
@@ -6321,6 +6333,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     alias: None,
                     naked: false,
                     noinline: false,
+                    gnu_inline: false,
                     is_async: false,
                     section: None,
                     asm_label: None,
@@ -7830,6 +7843,7 @@ bitflags::bitflags! {
         const WEAK = 1 << 2;
         const NAKED = 1 << 3;
         const ASYNC = 1 << 4;
+        const GNU_INLINE = 1 << 5;
     }
 }
 
@@ -7875,6 +7889,9 @@ impl GnuAttributes {
     }
     pub fn is_noinline(&self) -> bool {
         self.flags.contains(GnuAttrFlags::NOINLINE)
+    }
+    pub fn is_gnu_inline(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::GNU_INLINE)
     }
     pub fn is_weak(&self) -> bool {
         self.flags.contains(GnuAttrFlags::WEAK)

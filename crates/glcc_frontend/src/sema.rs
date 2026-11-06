@@ -227,6 +227,13 @@ pub struct Binding {
     /// may carry it for a definition that omits the attribute; the MIR
     /// lowering copies it to `Function::noinline`.
     pub noinline: bool,
+    /// `__attribute__((gnu_inline))`: GNU C89 `inline` semantics —
+    /// under it an `extern inline` definition provides no external
+    /// symbol, only an inline-if-used body. GCC's x86 headers spell
+    /// every intrinsic this way. Merged with OR like `inline`; the
+    /// MIR lowering routes such definitions through the drop-and-
+    /// revive path (`skips_extern_inline`).
+    pub gnu_inline: bool,
     /// `__attribute__((aligned(n)))` on this declaration: the alignment
     /// from any of its declarations (merged with max, like GCC). The
     /// attribute *sets* the object's alignment — raising or lowering it
@@ -800,6 +807,8 @@ impl<'a> Sema<'a> {
             stored.naked |= binding.naked;
             // `noinline` merges the same way.
             stored.noinline |= binding.noinline;
+            // `gnu_inline` merges the same way.
+            stored.gnu_inline |= binding.gnu_inline;
             // `async` merges the same way: any declaration marks it.
             stored.is_async |= binding.is_async;
             // Alignment attributes are sticky the strictest way.

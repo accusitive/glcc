@@ -235,15 +235,27 @@ pub fn naked_asm_text(sema: &fe::sema::Sema, interner: &fe::lexer::Interner, tu:
     out
 }
 
-/// MSVC's headers define every CRT wrapper as a non-static `__inline`
-/// and rely on COMDAT folding (or the identical CRT export) to avoid
-/// duplicate definitions; glcc emits neither, so on the Windows target
-/// the body is dropped at declaration and calls resolve to the CRT
-/// export. Wrappers that are actually referenced and have no export to
-/// resolve to (`sprintf`) are revived as TU-local copies after
-/// lowering; see the revival pass in `lower_translation_unit`.
-fn skips_msvc_extern_inline(sema: &fe::sema::Sema, binding: &fe::sema::Binding) -> bool {
-    sema.target.os == fe::target::Os::Windows && binding.inline && binding.linkage == fe::sema::Linkage::External
+/// `inline` definitions whose bodies are dropped at declaration and
+/// revived as TU-local copies only when referenced (see the revival
+/// pass in `lower_translation_unit`). Three cases:
+///
+/// - `static inline` (clang's intrinsics headers spell every `_mm_*`
+///   this way): nothing observable, so emitting only referenced
+///   bodies matches GCC/clang and keeps an included-but-unused
+///   header from lowering hundreds of functions per TU.
+/// - MSVC's headers define every CRT wrapper as a non-static
+///   `__inline` and rely on COMDAT folding (or the identical CRT
+///   export) to avoid duplicate definitions; glcc emits neither, so
+///   on the Windows target calls resolve to the CRT export.
+/// - `__attribute__((gnu_inline))` + `extern inline` (GCC's headers
+///   spell every intrinsic `extern __inline` this way) provides no
+///   external definition at all under GCC semantics — emitting each
+///   body would both bloat every TU and collide across them.
+fn skips_extern_inline(sema: &fe::sema::Sema, binding: &fe::sema::Binding) -> bool {
+    if binding.inline && binding.linkage == fe::sema::Linkage::Internal {
+        return true;
+    }
+    binding.inline && binding.linkage == fe::sema::Linkage::External && (sema.target.os == fe::target::Os::Windows || binding.gnu_inline)
 }
 
 /// Lower a whole checked translation unit to a MIR module.
@@ -284,7 +296,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
                     // dropped and calls resolve to the CRT exports.
                     // Referenced wrappers are revived after lowering
                     // (see the revival pass below).
-                    if skips_msvc_extern_inline(sema, binding) {
+                    if skips_extern_inline(sema, binding) {
                         if !externs.contains_key(id) {
                             let sig = lx.func_sig(binding);
                             let name = lx.symbol_name(binding, *id);
@@ -439,7 +451,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
             // (see `skips_msvc_extern_inline`); referenced ones are
             // revived after this loop, with the import standing in for
             // the rest.
-            if sema.bodies.contains_key(id) && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize]) {
+            if sema.bodies.contains_key(id) && skips_extern_inline(sema, &sema.decls[id.0 as usize]) {
                 continue;
             }
             // Duplicate entries (prototype plus definition) lower once.
@@ -512,7 +524,7 @@ pub fn lower_translation_unit(sema: &fe::sema::Sema, interner: &fe::lexer::Inter
         // `HashMap` with no order of its own.
         let mut pending: Vec<(fe::sema::DeclId, mir::Extern)> = Vec::new();
         for (id, eid) in &externs {
-            if used.contains(eid) && !revived.contains(eid) && sema.bodies.contains_key(id) && skips_msvc_extern_inline(sema, &sema.decls[id.0 as usize]) {
+            if used.contains(eid) && !revived.contains(eid) && sema.bodies.contains_key(id) && skips_extern_inline(sema, &sema.decls[id.0 as usize]) {
                 pending.push((*id, *eid));
             }
         }

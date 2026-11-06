@@ -179,6 +179,12 @@ pub(crate) fn emit_native_inline_asm(
                 let value = self.operand(builder, op.value);
                 args.push(widen_operand(builder, &op.ty, value));
             }
+            crate::asm_native::NativeKind::Vec => {
+                // The register class rides the value's type: the vector
+                // value must reach the instruction un-widened.
+                let value = self.operand(builder, op.value);
+                args.push(value);
+            }
             crate::asm_native::NativeKind::Mem => {
                 // The fork's "m" semantics: the template sees the memory
                 // at the address held in the input value.
@@ -196,8 +202,19 @@ pub(crate) fn emit_native_inline_asm(
     let results: Vec<ClifValue> = builder.inst_results(inst).to_vec();
     for (i, op) in block.operands[..outputs].iter().enumerate() {
         let addr = self.addr_operand(builder, op.value);
-        let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
-        let value = if ty == types::I64 { results[i] } else { builder.ins().ireduce(ty, results[i]) };
+        let value = match native.operand_kinds[i] {
+            // Vector results come back as the fork's canonical `I8X16`;
+            // the store keeps the bits and the C vector type reads them.
+            crate::asm_native::NativeKind::Vec => results[i],
+            _ => {
+                let ty = clif_ty(&op.ty).expect("asm register operand needs a scalar type");
+                if ty == types::I64 {
+                    results[i]
+                } else {
+                    builder.ins().ireduce(ty, results[i])
+                }
+            }
+        };
         builder.ins().store(memflags::notrap(), value, addr, Offset32::new(0));
     }
     None

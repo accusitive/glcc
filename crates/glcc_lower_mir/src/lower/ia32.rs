@@ -956,37 +956,36 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.convert(func, frame, r, &args[0].ty, fe_ty)
             }
             fe::check::Ia32Op::RcpSs { rsqrt } => {
-                // The approximate instructions have no MIR opcode: a
-                // memory-operand asm stub loads the vector into
-                // `%xmm0`, applies the instruction to lane 0, and
-                // stores the 16 bytes back.
+                // The approximate instructions have no MIR opcode: one
+                // asm stub applies the instruction to the vector
+                // registers directly (lane semantics come from the
+                // instruction: lane 0 for the `ss` forms).
                 let mnemonic = if *rsqrt { "rsqrtss" } else { "rcpss" };
                 let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let vec_ty = lower_ty(&args[0].ty, self.sema, self.interner);
-                let in_slot = self.alloca(func, frame, vec_ty.clone());
-                self.store(func, frame, in_slot, a, false);
-                let out_slot = self.alloca(func, frame, mir::Ty::int(128));
-                self.asm(
+                let out_slot = self.alloca(func, frame, vec_ty.clone());
+                self.asm_with_clobbers(
                     func,
                     frame,
-                    &format!("movups %1, %%xmm0\n\t{mnemonic} %%xmm0, %%xmm0\n\tmovups %%xmm0, %0"),
+                    &format!("{mnemonic} %1, %0"),
                     1,
                     vec![
                         mir::AsmOperand {
                             value: out_slot,
-                            constraint: "=m".into(),
-                            ty: mir::Ty::int(128),
+                            constraint: "=x".into(),
+                            ty: vec_ty.clone(),
                             tie: None,
                             name: None,
                         },
                         mir::AsmOperand {
-                            value: in_slot,
-                            constraint: "m".into(),
+                            value: a,
+                            constraint: "x".into(),
                             ty: vec_ty.clone(),
                             tie: None,
                             name: None,
                         },
                     ],
+                    &[],
                     true,
                 );
                 let r = self.load(func, frame, out_slot, vec_ty, false);
@@ -1050,36 +1049,36 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let r = self.emit(func, frame, kind, int_ty);
                 self.emit(func, frame, mir::InstKind::Bitcast(r), lower_ty(fe_ty, self.sema, self.interner))
             }
-            // The approximate packed reciprocals: one asm stub moves
-            // the vector through `%xmm0`.
+            // The approximate packed reciprocals: one asm stub applies
+            // the instruction to the vector registers directly (all
+            // lanes).
             fe::check::Ia32Op::RcpPs { rsqrt } => {
                 let mnemonic = if *rsqrt { "rsqrtps" } else { "rcpps" };
                 let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let vec_ty = lower_ty(&args[0].ty, self.sema, self.interner);
-                let in_slot = self.alloca(func, frame, vec_ty.clone());
-                self.store(func, frame, in_slot, a, false);
-                let out_slot = self.alloca(func, frame, mir::Ty::int(128));
-                self.asm(
+                let out_slot = self.alloca(func, frame, vec_ty.clone());
+                self.asm_with_clobbers(
                     func,
                     frame,
-                    &format!("movups %1, %%xmm0\n\t{mnemonic} %%xmm0, %%xmm0\n\tmovups %%xmm0, %0"),
+                    &format!("{mnemonic} %1, %0"),
                     1,
                     vec![
                         mir::AsmOperand {
                             value: out_slot,
-                            constraint: "=m".into(),
-                            ty: mir::Ty::int(128),
+                            constraint: "=x".into(),
+                            ty: vec_ty.clone(),
                             tie: None,
                             name: None,
                         },
                         mir::AsmOperand {
-                            value: in_slot,
-                            constraint: "m".into(),
+                            value: a,
+                            constraint: "x".into(),
                             ty: vec_ty.clone(),
                             tie: None,
                             name: None,
                         },
                     ],
+                    &[],
                     true,
                 );
                 let r = self.load(func, frame, out_slot, vec_ty, false);
@@ -1195,7 +1194,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let a_slot = self.alloca(func, frame, vec_ty.clone());
                 self.store(func, frame, a_slot, a, false);
                 let out_slot = self.alloca(func, frame, mir::Ty::int(128));
-                self.asm(
+                self.asm_with_clobbers(
                     func,
                     frame,
                     "movups %2, %%xmm0\n\tcvtsi2ss %1, %%xmm0\n\tmovups %%xmm0, %0",
@@ -1223,6 +1222,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             name: None,
                         },
                     ],
+                    &["xmm0"],
                     true,
                 );
                 let r = self.load(func, frame, out_slot, lower_ty(&args[0].ty, self.sema, self.interner), false);
@@ -1285,7 +1285,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
                 self.store(func, frame, a_slot, a, false);
-                let out = self.asm_result_in_rax(
+                let out = self.asm_result_in_rax_with_clobbers(
                     func,
                     frame,
                     "movups %1, %%xmm0\n\tcvtps2pi %%xmm0, %%mm0\n\tmovq %%mm0, %0",
@@ -1297,6 +1297,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         tie: None,
                         name: None,
                     }],
+                    &["xmm0"],
                 );
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, &mmx_vec)
             }
@@ -1442,13 +1443,87 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let r = self.load(func, frame, slot, vec_ty, false);
                 self.convert(func, frame, r, &args[0].ty, fe_ty)
             }
+            // SSE3 `addsub`: even lanes subtract, odd lanes add.
+            fe::check::Ia32Op::AddSub { ps } => {
+                let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let b = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                let ft = packed_float_ty(*ps);
+                let lanes = if *ps { 4 } else { 2 };
+                let elem_size = if *ps { 4 } else { 8 };
+                let vec_ty = lower_ty(fe_ty, self.sema, self.interner);
+                let slot = self.alloca(func, frame, vec_ty.clone());
+                for lane in 0..lanes as u8 {
+                    let ax = self.emit(func, frame, mir::InstKind::ExtractLane { vec: a, lane }, ft.clone());
+                    let bx = self.emit(func, frame, mir::InstKind::ExtractLane { vec: b, lane }, ft.clone());
+                    let r = if lane % 2 == 0 {
+                        self.emit(func, frame, mir::InstKind::FSub(ax, bx), ft.clone())
+                    } else {
+                        self.emit(func, frame, mir::InstKind::FAdd(ax, bx), ft.clone())
+                    };
+                    let idx = self.iconst(func, 64, i128::from(lane));
+                    let addr = self.scaled_index_addr(func, frame, slot, idx, &fe::parse::Ty::LongLong, elem_size, ft.clone()).0;
+                    self.store(func, frame, addr, r, false);
+                }
+                let r = self.load(func, frame, slot, vec_ty, false);
+                self.convert(func, frame, r, &args[0].ty, fe_ty)
+            }
+            // The horizontal pairs: each operand's adjacent lane
+            // pairs collapse into the result's own half.
+            fe::check::Ia32Op::HBin { add, ps } => {
+                let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let b = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
+                let ft = packed_float_ty(*ps);
+                let groups = if *ps { 2 } else { 1 };
+                let elem_size = if *ps { 4 } else { 8 };
+                let vec_ty = lower_ty(fe_ty, self.sema, self.interner);
+                let slot = self.alloca(func, frame, vec_ty.clone());
+                for lane in 0..(groups * 2) as u8 {
+                    let src = if lane < groups { a } else { b };
+                    let lo = (lane % groups) * 2;
+                    let x0 = self.emit(func, frame, mir::InstKind::ExtractLane { vec: src, lane: lo }, ft.clone());
+                    let x1 = self.emit(func, frame, mir::InstKind::ExtractLane { vec: src, lane: lo + 1 }, ft.clone());
+                    let r = if *add {
+                        self.emit(func, frame, mir::InstKind::FAdd(x0, x1), ft.clone())
+                    } else {
+                        self.emit(func, frame, mir::InstKind::FSub(x0, x1), ft.clone())
+                    };
+                    let idx = self.iconst(func, 64, i128::from(lane));
+                    let addr = self.scaled_index_addr(func, frame, slot, idx, &fe::parse::Ty::LongLong, elem_size, ft.clone()).0;
+                    self.store(func, frame, addr, r, false);
+                }
+                let r = self.load(func, frame, slot, vec_ty, false);
+                self.convert(func, frame, r, &args[0].ty, fe_ty)
+            }
+            // `movshdup`/`movsldup`: the high or low lane of each
+            // adjacent pair duplicated.
+            fe::check::Ia32Op::MovDup { high } => {
+                let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let ft = mir::Ty::Float(mir::FloatKind::F32);
+                let vec_ty = lower_ty(fe_ty, self.sema, self.interner);
+                let slot = self.alloca(func, frame, vec_ty.clone());
+                for lane in 0..4u8 {
+                    let src_lane = (lane / 2) * 2 + u8::from(*high);
+                    let x = self.emit(func, frame, mir::InstKind::ExtractLane { vec: a, lane: src_lane }, ft.clone());
+                    let idx = self.iconst(func, 64, i128::from(lane));
+                    let addr = self.scaled_index_addr(func, frame, slot, idx, &fe::parse::Ty::LongLong, 4, ft.clone()).0;
+                    self.store(func, frame, addr, x, false);
+                }
+                let r = self.load(func, frame, slot, vec_ty, false);
+                self.convert(func, frame, r, &args[0].ty, fe_ty)
+            }
+            // `lddqu`: an unaligned load; MIR has no alignment hint,
+            // so the ordinary load serves.
+            fe::check::Ia32Op::Lddqu => {
+                let p = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                self.load(func, frame, p, lower_ty(fe_ty, self.sema, self.interner), false)
+            }
             // The sign bits of the four lanes packed into an int.
             fe::check::Ia32Op::MovmskPs => {
                 let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let vec_ty = lower_ty(&args[0].ty, self.sema, self.interner);
                 let slot = self.alloca(func, frame, vec_ty);
                 self.store(func, frame, slot, a, false);
-                let out = self.asm_result_in_rax(
+                let out = self.asm_result_in_rax_with_clobbers(
                     func,
                     frame,
                     "movups %1, %%xmm0\n\tmovmskps %%xmm0, %%eax",
@@ -1460,6 +1535,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         tie: None,
                         name: None,
                     }],
+                    &["xmm0"],
                 );
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, fe_ty)
             }
@@ -1861,7 +1937,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
                 self.store(func, frame, a_slot, a, false);
-                let out = self.asm_result_in_rax(
+                let out = self.asm_result_in_rax_with_clobbers(
                     func,
                     frame,
                     "movupd %1, %%xmm0\n\tcvtpd2pi %%xmm0, %%mm0\n\tmovq %%mm0, %0",
@@ -1873,6 +1949,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         tie: None,
                         name: None,
                     }],
+                    &["xmm0"],
                 );
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, &mmx_vec)
             }
@@ -1952,7 +2029,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
                 self.store(func, frame, a_slot, a, false);
                 let out_slot = self.alloca(func, frame, mir::Ty::int(128));
-                self.asm(
+                self.asm_with_clobbers(
                     func,
                     frame,
                     &format!("movups %1, %%xmm0\n\t{mnemonic} %%xmm0, %%xmm0\n\tmovups %%xmm0, %0"),
@@ -1973,6 +2050,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             name: None,
                         },
                     ],
+                    &["xmm0"],
                     true,
                 );
                 let r = self.load(func, frame, out_slot, lower_ty(fe_ty, self.sema, self.interner), false);
@@ -2372,7 +2450,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let vec_ty = lower_ty(&args[0].ty, self.sema, self.interner);
                 let slot = self.alloca(func, frame, vec_ty);
                 self.store(func, frame, slot, v, false);
-                let out = self.asm_result_in_rax(
+                let out = self.asm_result_in_rax_with_clobbers(
                     func,
                     frame,
                     "movdqu %1, %%xmm0\n\tpmovmskb %%xmm0, %%eax",
@@ -2384,6 +2462,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                         tie: None,
                         name: None,
                     }],
+                    &["xmm0"],
                 );
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, fe_ty)
             }
@@ -2438,7 +2517,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.store(func, frame, a_slot, a, false);
                 let m_slot = self.alloca(func, frame, lower_ty(&args[1].ty, self.sema, self.interner));
                 self.store(func, frame, m_slot, m, false);
-                self.asm(
+                self.asm_with_clobbers(
                     func,
                     frame,
                     &format!("{mov} %0, %%xmm0\n\t{mov} %1, %%xmm1\n\tmovq %2, %%rdi\n\t{insn} %%xmm1, %%xmm0"),
@@ -2466,6 +2545,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                             name: None,
                         },
                     ],
+                    &["xmm0", "xmm1"],
                     true,
                 );
                 let undef = func.values.push(mir::ValueData {
@@ -2937,12 +3017,19 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Emit one inline-asm block with `outputs` output operands
     /// followed by input operands.
     fn asm(&self, func: &mut mir::Function, frame: &mut Frame, template: &str, outputs: u32, operands: Vec<mir::AsmOperand>, volatile: bool) {
+        self.asm_with_clobbers(func, frame, template, outputs, operands, &[], volatile);
+    }
+
+    /// [`Self::asm`] with a clobber list: registers named here are
+    /// reserved with the register allocator, so a literal `%%xmmN`
+    /// scratch in the template cannot hold a live value.
+    fn asm_with_clobbers(&self, func: &mut mir::Function, frame: &mut Frame, template: &str, outputs: u32, operands: Vec<mir::AsmOperand>, clobbers: &[&str], volatile: bool) {
         self.emit_unit(func, frame, mir::InstKind::InlineAsm {
             block: Box::new(mir::AsmBlock {
                 template: template.into(),
                 operands,
                 outputs,
-                clobbers: vec![],
+                clobbers: clobbers.iter().map(|c| c.to_string()).collect(),
                 labels: vec![],
                 is_volatile: volatile,
                 is_basic: false,
@@ -3035,7 +3122,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let a_slot = self.alloca(func, frame, lower_ty(in_fe_ty, self.sema, self.interner));
         self.store(func, frame, a_slot, a, false);
         let out_slot = self.alloca(func, frame, mir::Ty::int(128));
-        self.asm(
+        self.asm_with_clobbers(
             func,
             frame,
             &format!("movups %1, %%xmm0\n\t{mnemonic} %%xmm0, %%xmm0\n\tmovups %%xmm0, %0"),
@@ -3056,6 +3143,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     name: None,
                 },
             ],
+            &["xmm0"],
             true,
         );
         let r = self.load(func, frame, out_slot, lower_ty(fe_ty, self.sema, self.interner), false);
@@ -3093,6 +3181,12 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     }
 
     fn asm_result_in_rax(&self, func: &mut mir::Function, frame: &mut Frame, template: &str, extra_outputs: Vec<mir::AsmOperand>, inputs: Vec<mir::AsmOperand>) -> mir::Value {
+        self.asm_result_in_rax_with_clobbers(func, frame, template, extra_outputs, inputs, &[])
+    }
+
+    /// [`Self::asm_result_in_rax`] with a clobber list (see
+    /// [`Self::asm_with_clobbers`]).
+    fn asm_result_in_rax_with_clobbers(&self, func: &mut mir::Function, frame: &mut Frame, template: &str, extra_outputs: Vec<mir::AsmOperand>, inputs: Vec<mir::AsmOperand>, clobbers: &[&str]) -> mir::Value {
         let slot = self.alloca(func, frame, mir::Ty::int(64));
         let outputs = 1 + extra_outputs.len() as u32;
         let mut operands = vec![mir::AsmOperand {
@@ -3104,7 +3198,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         }];
         operands.extend(extra_outputs);
         operands.extend(inputs);
-        self.asm(func, frame, template, outputs, operands, true);
+        self.asm_with_clobbers(func, frame, template, outputs, operands, clobbers, true);
         self.load(func, frame, slot, mir::Ty::int(64), false)
     }
 
@@ -3248,5 +3342,15 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let v = self.emit(func, frame, mir::InstKind::Select { cond: below, then_val: lo, else_val: v }, mir::Ty::int(64));
         let above = self.emit(func, frame, mir::InstKind::Icmp { pred: mir::IcmpPred::Sgt, lhs: v, rhs: hi }, mir::Ty::Bool);
         self.emit(func, frame, mir::InstKind::Select { cond: above, then_val: hi, else_val: v }, mir::Ty::int(64))
+    }
+}
+
+/// The MIR float lane type of an SSE packed shape: `ps` spellings
+/// carry `f32` lanes, `pd` spellings `f64`.
+fn packed_float_ty(ps: bool) -> mir::Ty {
+    if ps {
+        mir::Ty::Float(mir::FloatKind::F32)
+    } else {
+        mir::Ty::Float(mir::FloatKind::F64)
     }
 }

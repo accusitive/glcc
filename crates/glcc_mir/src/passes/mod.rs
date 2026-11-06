@@ -4134,6 +4134,21 @@ fn remap_simple_materialized(caller: &mut crate::ir::Function, snapshot: &crate:
             InstKind::InlineAsm { block }
         }
         InstKind::GetFramePointer => InstKind::GetFramePointer,
+        // The vector ops: scalars and whole vectors remap like any
+        // other operand; the lane index is an immediate.
+        InstKind::Splat(v) => {
+            let x = materialize_operand(caller, snapshot, map, *v);
+            InstKind::Splat(x)
+        }
+        InstKind::ExtractLane { vec, lane } => {
+            let x = materialize_operand(caller, snapshot, map, *vec);
+            InstKind::ExtractLane { vec: x, lane: *lane }
+        }
+        InstKind::Await { fut } => {
+            let x = materialize_operand(caller, snapshot, map, *fut);
+            InstKind::Await { fut: x }
+        }
+        InstKind::EhTypeId { typeinfo } => InstKind::EhTypeId { typeinfo: *typeinfo },
         other => panic!("inline of {other:?} needs operand mapping"),
     }
 }

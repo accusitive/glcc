@@ -49,6 +49,10 @@ pub struct Site {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Reg,
+    /// An xmm register (`"x"`/`"v"`): the operand value is a 16-byte
+    /// vector. Only the native path carries vector operands; the
+    /// wrapper's static register plan is GPR-only.
+    Vec,
     Mem,
     Imm,
 }
@@ -825,6 +829,9 @@ pub(crate) struct Constraint {
 enum LetterClass {
     /// An allocatable register, possibly pinned to one (`"a"` is rax).
     Reg(Option<&'static str>),
+    /// An xmm register (x86-64 `"x"`/`"v"`): the operand value is a
+    /// 16-byte vector.
+    Vec,
     /// A register with a high-byte form (x86-64 `"Q"`).
     HighByte,
     /// A memory operand: its address reaches the template in a scratch
@@ -846,6 +853,7 @@ fn letter_class(arch: Arch, letter: &str) -> Option<LetterClass> {
     let class = match (arch, letter) {
         // Registers.
         (_, "r" | "q" | "g" | "X") => LetterClass::Reg(None),
+        (X86_64, "x" | "v") => LetterClass::Vec,
         (X86_64, "Q") => LetterClass::HighByte,
         (X86_64, "a" | "A") => LetterClass::Reg(Some("rax")),
         (X86_64, "b") => LetterClass::Reg(Some("rbx")),
@@ -927,6 +935,10 @@ pub(crate) fn try_parse_constraint(table: &Table, constraint: &str) -> Result<Co
             Some(LetterClass::Reg(named)) => {
                 reg_alt = true;
                 (Some(Kind::Reg), named)
+            }
+            Some(LetterClass::Vec) => {
+                reg_alt = true;
+                (Some(Kind::Vec), None)
             }
             Some(LetterClass::HighByte) => {
                 high = true;
@@ -1066,6 +1078,9 @@ pub fn build(block: &mir::AsmBlock, func: &mir::Function, target: Target) -> Sit
         }
         if i < outputs && constraint.kind == Kind::Imm {
             panic!("asm output cannot be an immediate");
+        }
+        if constraint.kind == Kind::Vec {
+            panic!("vector register operands are only supported by the native path");
         }
         let size = ty_size(&operand.ty);
         // An operand with several alternatives (`"Ir"`: immediate or
@@ -1254,6 +1269,7 @@ fn wrapper_name(block: &mir::AsmBlock, operands: &[Operand], arch: Arch) -> (Str
     for operand in operands {
         eat(&[match operand.kind {
             Kind::Reg => b'R',
+            Kind::Vec => b'V',
             Kind::Mem => b'M',
             Kind::Imm => b'I',
         }]);
@@ -1600,6 +1616,8 @@ fn substitute(template: &str, operands: &[Operand], table: &Table, arch: Arch, u
 
 fn expand(operand: &Operand, modifier: Option<char>, table: &Table, arch: Arch) -> String {
     match operand.kind {
+        // `build` rejects vector operands before one can reach here.
+        Kind::Vec => panic!("vector register operands are only supported by the native path"),
         Kind::Imm => {
             let value = operand.imm.expect("immediate operand without a value");
             // GCC prints `%N` with the target's immediate syntax (`$5`,

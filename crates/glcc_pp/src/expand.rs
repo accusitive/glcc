@@ -443,6 +443,15 @@ fn ia32_builtin(name: &str) -> bool {
             | "__builtin_ia32_readeflags_u64"
             | "__builtin_ia32_writeeflags_u32"
             | "__builtin_ia32_writeeflags_u64"
+            | "__builtin_ia32_addsubps"
+            | "__builtin_ia32_addsubpd"
+            | "__builtin_ia32_haddps"
+            | "__builtin_ia32_hsubps"
+            | "__builtin_ia32_haddpd"
+            | "__builtin_ia32_hsubpd"
+            | "__builtin_ia32_movshdup"
+            | "__builtin_ia32_movsldup"
+            | "__builtin_ia32_lddqu"
     )
 }
 

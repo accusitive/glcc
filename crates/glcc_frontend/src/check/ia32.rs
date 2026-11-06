@@ -293,6 +293,18 @@ pub enum Ia32Op {
     /// `__builtin_ia32_movss(__v4sf, __v4sf)`: lane 0 of the second
     /// operand over lane 0 of the first.
     MovSs,
+    /// The SSE3 `addsub` pairs: even lanes subtract, odd lanes add.
+    AddSub { ps: bool },
+    /// The SSE3 horizontal pairs (`haddps`/`hsubps`/`haddpd`/
+    /// `hsubpd`): each operand's adjacent lane pairs collapse into
+    /// the result's own half.
+    HBin { add: bool, ps: bool },
+    /// `__builtin_ia32_movshdup/movsldup`: the high or low lane of
+    /// each adjacent pair duplicated.
+    MovDup { high: bool },
+    /// `__m128i __builtin_ia32_lddqu(const char *)`: an unaligned
+    /// 128-bit load, an ordinary load in our lowering.
+    Lddqu,
     /// The MMX word/byte extras SSE1 adds (`pmaxsw`, `pminub`,
     /// `pavgb`, `psadbw`, `pextrw`, `pinsrw`, `pmovmskb`, `pshufw`):
     /// the pairs ride [`Ia32Op::MmxOp`]; the immediate and flag forms
@@ -771,6 +783,16 @@ impl<'a> Sema<'a> {
             "comige" | "ucomige" => (Ia32Op::Comi { pred: ComiPred::Ge, unordered: name.starts_with("ucomi") }, &[v4sf(), v4sf()], Ty::Int),
             "comineq" | "ucomineq" => (Ia32Op::Comi { pred: ComiPred::Neq, unordered: name.starts_with("ucomi") }, &[v4sf(), v4sf()], Ty::Int),
             "movss" => (Ia32Op::MovSs, &[v4sf(), v4sf()], v4sf()),
+            // ---- SSE3: the horizontal and add/sub pairs ----
+            "addsubps" => (Ia32Op::AddSub { ps: true }, &[v4sf(), v4sf()], v4sf()),
+            "addsubpd" => (Ia32Op::AddSub { ps: false }, &[v2df(), v2df()], v2df()),
+            "haddps" => (Ia32Op::HBin { add: true, ps: true }, &[v4sf(), v4sf()], v4sf()),
+            "hsubps" => (Ia32Op::HBin { add: false, ps: true }, &[v4sf(), v4sf()], v4sf()),
+            "haddpd" => (Ia32Op::HBin { add: true, ps: false }, &[v2df(), v2df()], v2df()),
+            "hsubpd" => (Ia32Op::HBin { add: false, ps: false }, &[v2df(), v2df()], v2df()),
+            "movshdup" => (Ia32Op::MovDup { high: true }, &[v4sf()], v4sf()),
+            "movsldup" => (Ia32Op::MovDup { high: false }, &[v4sf()], v4sf()),
+            "lddqu" => (Ia32Op::Lddqu, &[const_ptr_to(Ty::Char)], v16qi()),
             // ---- SSE2: the double-precision mirror of the SSE1 set ----
             "addsd" => (Ia32Op::SdBin { op: SsOp::Add }, &[v2df(), v2df()], v2df()),
             "subsd" => (Ia32Op::SdBin { op: SsOp::Sub }, &[v2df(), v2df()], v2df()),

@@ -50,6 +50,9 @@ struct NativeOperand {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NativeKind {
     Reg,
+    /// An xmm operand: the value is a 16-byte vector, passed and
+    /// received as a CLIF vector value (the register class rides it).
+    Vec,
     Mem,
     Imm,
 }
@@ -76,6 +79,21 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
                 }
             }
             _ => {
+                // Literal xmm scratch in a template must reach the fork's
+                // clobber set (the fork reserves it with regalloc); the
+                // wrapper path needs no action — the call ABI covers
+                // caller-saved xmm.
+                if let Some(suffix) = name.strip_prefix("xmm") {
+                    if let Ok(n) = suffix.parse::<u8>() {
+                        if n < 16 {
+                            let canonical = format!("xmm{n}");
+                            if !clobbers.iter().any(|c| c == &canonical) {
+                                clobbers.push(canonical);
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let Some(info) = find_reg(t, name) else { continue };
                 if info.q == "rsp" || info.q == "rbp" {
                     return Err(format!("clobbering {} is not native yet", info.q));
@@ -107,22 +125,37 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
                 }
             }
             Kind::Mem | Kind::Reg => {}
+            Kind::Vec => {
+                // The fork allocates the register class from the value's
+                // type: an integer value under "x" would ride a GPR and
+                // render wrong, so only vector values may take it.
+                if !matches!(op.ty, mir::Ty::Vector { .. }) {
+                    return Err("\"x\" operands must be vector-typed".into());
+                }
+            }
         }
-        if i < outputs && parsed.kind != Kind::Reg {
+        if i < outputs && !matches!(parsed.kind, Kind::Reg | Kind::Vec) {
             return Err("only register outputs are native yet".into());
         }
-        if parsed.inout && parsed.high {
+        if parsed.inout && (parsed.high || parsed.kind == Kind::Vec) {
             // The fork ties inout pairs via a Reuse def (whose allocation
-            // is primary) or fixed use+def; a constrained CLASS like "Q"
-            // can be neither. The wrapper's static registers handle it.
-            return Err("inout \"Q\" operands are not native yet".into());
+            // is primary) or fixed use+def; a constrained CLASS like "Q",
+            // and any xmm pair, can be neither. The wrapper's static
+            // registers handle "Q"; vector inouts have no wrapper either.
+            return Err("inout \"Q\"/\"x\" operands are not native yet".into());
         }
-        if op.ty.is_aggregate() && parsed.kind != Kind::Mem {
+        if op.ty.is_aggregate() && parsed.kind != Kind::Mem && parsed.kind != Kind::Vec {
             return Err("aggregate operands are not native yet".into());
         }
         let width = ty_size(&op.ty);
-        if width > 8 && parsed.kind == Kind::Reg {
-            return Err("register operands wider than a register are not native yet".into());
+        match parsed.kind {
+            Kind::Vec if width != 16 => {
+                return Err("vector register operands must be 16 bytes".into())
+            }
+            Kind::Reg if width > 8 => {
+                return Err("register operands wider than a register are not native yet".into())
+            }
+            _ => {}
         }
         constraints.push(fork_constraint(&op.constraint, &parsed)?);
         operands.push(NativeOperand {
@@ -131,6 +164,7 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
             high: parsed.high,
             kind: match parsed.kind {
                 Kind::Reg => NativeKind::Reg,
+                Kind::Vec => NativeKind::Vec,
                 Kind::Mem => NativeKind::Mem,
                 Kind::Imm => NativeKind::Imm,
             },
@@ -155,6 +189,14 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
     while let Some(c) = chars.next() {
         if c != '%' {
             probe.push(c);
+            continue;
+        }
+        if chars.peek() == Some(&'%') {
+            // GCC's literal-percent escape (`%%mm0` names register
+            // mm0); the fork's expander makes the same rewrite before
+            // encoding, so the probe must see the expanded shape.
+            chars.next();
+            probe.push('%');
             continue;
         }
         if chars.peek() == Some(&'=') {
@@ -196,10 +238,26 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
         }
         match chars.peek() {
             Some(d) if d.is_ascii_digit() => {
-                while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
-                    chars.next();
+                let index = take_operand_index(&mut chars)?;
+                // Mirror the fork's runtime rendering per operand kind:
+                // memory operands print as `(%reg)` from the address
+                // register, immediates as `$const`; only then does the
+                // probe check the encoding shape the emitter will see.
+                match operands.get(index).map(|op| op.kind) {
+                    Some(NativeKind::Mem) => probe.push_str("(%r11)"),
+                    Some(NativeKind::Vec) => probe.push_str("%xmm5"),
+                    Some(NativeKind::Imm) => {
+                        // The real constant, so magnitude-sensitive
+                        // encodings (imm8 vs imm32) are probed with the
+                        // value that will actually encode.
+                        let value = match &func.values[block.operands[index].value].def {
+                            mir::Def::Const(mir::Const::Int { value, .. }) => *value,
+                            _ => 1,
+                        };
+                        probe.push_str(&format!("${value}"));
+                    }
+                    _ => probe.push_str("%r11"),
                 }
-                probe.push_str("%r11");
             }
             _ => probe.push('%'),
         }
@@ -232,6 +290,7 @@ fn fork_constraint(constraint: &str, parsed: &crate::asm::Constraint) -> Result<
     for letter in rest.chars() {
         let fork = match letter {
             'r' | 'q' | 'g' | 'X' => 'r',
+            'x' | 'v' => 'x',
             'a' | 'A' => 'a',
             'b' => 'b',
             'c' => 'c',
@@ -283,6 +342,9 @@ fn translate_template(template: &str, operands: &[NativeOperand]) -> Result<Stri
                 chars.next();
                 let index = take_operand_index(&mut chars)?;
                 let op = operand_at(operands, index)?;
+                if op.kind == NativeKind::Vec {
+                    return Err("modifiers on SSE operands are not native yet".into());
+                }
                 if op.high {
                     // A "Q" operand is allocated within rax/rcx/rdx/rbx by
                     // the register allocator; the fork renders the
@@ -465,13 +527,76 @@ mod tests {
     }
 
     #[test]
+    fn literal_percent_escape_probes_native() {
+        // `%%` is GCC's literal percent (register names in GCC-style
+        // templates): the probe must mirror the fork expander's rewrite
+        // or every such template falsely fails with "expected register
+        // name after `%'. The `movmskps` stub is the working example.
+        let native = Block::new("movups %1, %%xmm0\n\tmovmskps %%xmm0, %%eax", 1, &["=a", "m"])
+            .plan(&[I64, I64])
+            .expect("%% escapes probe natively");
+        assert_eq!(native.template, "movups %1, %%xmm0\n\tmovmskps %%xmm0, %%eax");
+        assert_eq!(native.constraints, ["=a", "m"]);
+    }
+
+    #[test]
+    fn memory_operand_probes_as_memory() {
+        // The probe renders `m` operands the way the fork prints them
+        // at run time — `(%reg)`, not a bare register — so templates
+        // like the `movmskps` stub encode instead of falsely failing.
+        let native = Block::new("movq %1, %0", 1, &["=r", "m"]).plan(&[I64, I64]).expect("m input is native");
+        assert_eq!(native.constraints, ["=r", "m"]);
+    }
+
+    #[test]
     fn clobbers_are_canonicalized() {
         let native = Block::new("nop", 0, &[]).clobbers(&["memory", "cc", "%rbx"]).plan(&[]).expect("native");
         assert_eq!(native.clobbers, ["memory", "cc", "rbx"]);
-        // Non-GPR names need no action, as in the wrapper (glcc's table
-        // matches canonical 64-bit names only).
+        // xmm clobbers survive: literal %%xmmN scratch in a native
+        // template must be reserved with regalloc. Other non-GPR names
+        // need no action, as in the wrapper (glcc's table matches
+        // canonical 64-bit names only).
         let native = Block::new("nop", 0, &[]).clobbers(&["xmm0", "eax"]).plan(&[]).expect("native");
-        assert!(native.clobbers.is_empty());
+        assert_eq!(native.clobbers, ["xmm0"]);
+    }
+
+    fn v4f() -> mir::Ty {
+        mir::Ty::Vector {
+            elem: Box::new(mir::Ty::Float(mir::FloatKind::F32)),
+            lanes: 4,
+        }
+    }
+
+    fn v2f() -> mir::Ty {
+        mir::Ty::Vector {
+            elem: Box::new(mir::Ty::Float(mir::FloatKind::F32)),
+            lanes: 2,
+        }
+    }
+
+    #[test]
+    fn vector_operands_are_native() {
+        // The rcpss shape: register operands over a v4sf.
+        let native = Block::new("rcpss %1, %0", 1, &["=x", "x"]).plan(&[v4f(), v4f()]).expect("x is native");
+        assert_eq!(native.template, "rcpss %1, %0");
+        assert_eq!(native.constraints, ["=x", "x"]);
+        assert_eq!(native.operand_kinds, [NativeKind::Vec, NativeKind::Vec]);
+        // "v" names the same class; the fork grammar only knows "x".
+        let native = Block::new("rcpps %1, %0", 1, &["=v", "v"]).plan(&[v4f(), v4f()]).expect("v is native");
+        assert_eq!(native.constraints, ["=x", "x"]);
+    }
+
+    #[test]
+    fn vector_operand_shapes_fall_back() {
+        // An integer value under "x" would ride a GPR and render wrong.
+        assert!(Block::new("rcpss %1, %0", 1, &["=x", "x"]).plan(&[I64, I64]).unwrap_err().contains("vector-typed"));
+        // Anything but 16 bytes cannot sit in an xmm.
+        assert!(Block::new("rcpss %1, %0", 1, &["=x", "x"]).plan(&[v2f(), v2f()]).unwrap_err().contains("16 bytes"));
+        // The fork cannot tie an xmm inout pair.
+        assert!(Block::new("rcpss %1, %0", 1, &["+x", "x"]).plan(&[v4f(), v4f()]).unwrap_err().contains("inout"));
+        // Modifiers render from the allocated register; the fork renders
+        // GPR widths only.
+        assert!(Block::new("rcpss %k1, %0", 1, &["=x", "x"]).plan(&[v4f(), v4f()]).unwrap_err().contains("modifiers on SSE"));
     }
 
     #[test]

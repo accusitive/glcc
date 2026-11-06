@@ -781,6 +781,40 @@ fn windows_msvc_extern_inline_definitions_become_imports() {
     assert!(module.funcs.iter().any(|f| f.name == "wrap"));
 }
 
+/// `static inline` bodies (clang's intrinsics headers) drop at
+/// declaration; a referenced one revives as a TU-local copy, an
+/// unreferenced one never lowers — an included-but-unused header
+/// must not emit anything.
+#[test]
+fn static_inline_definitions_emit_only_when_referenced() {
+    let module = lower_module("static __inline int f(void) { return 7; } int main(void) { return f(); }");
+    let f = module.funcs.iter().find(|f| f.name == "f").expect("referenced body revived");
+    assert!(f.local, "the revived copy is TU-local");
+    assert!(module.funcs.iter().any(|f| f.name == "main"));
+    assert_eq!(jit_run_main(lower_module("static __inline int f(void) { return 7; } int main(void) { return f(); }")), 7);
+
+    let module = lower_module("static __inline int f(void) { return 7; } int main(void) { return 0; }");
+    assert!(!module.funcs.iter().any(|f| f.name == "f"));
+}
+
+/// `extern __inline` + `__attribute__((gnu_inline))` (GCC's intrinsic
+/// headers) provides no external definition: unreferenced bodies stay
+/// dropped, referenced ones revive as TU-local copies, and taking the
+/// function's address revives it too.
+#[test]
+fn gnu_inline_extern_inline_definitions_stay_local() {
+    let module = lower_module("extern __inline __attribute__((__gnu_inline__)) int f(void) { return 7; } int main(void) { return f(); }");
+    let f = module.funcs.iter().find(|f| f.name == "f").expect("referenced body revived");
+    assert!(f.local, "the revived copy is TU-local");
+    assert_eq!(jit_run_main(lower_module("extern __inline __attribute__((__gnu_inline__)) int f(void) { return 7; } int main(void) { return f(); }")), 7);
+
+    let module = lower_module("extern __inline __attribute__((__gnu_inline__)) int f(void) { return 7; } int main(void) { return 0; }");
+    assert!(!module.funcs.iter().any(|f| f.name == "f"));
+
+    let module = lower_module("extern __inline __attribute__((__gnu_inline__)) int f(void) { return 7; } int (*p)(void) = f; int main(void) { return 0; }");
+    assert!(module.funcs.iter().any(|f| f.name == "f"), "address-taken body revived");
+}
+
 /// `(MIR module, assembler text)` for `src`.
 fn lower_with_asm(src: &str) -> (mir::Module, String) {
     let mut interner = fe::lexer::Interner::new();
@@ -2908,6 +2942,77 @@ fn ia32_integer_builtins() {
             "int main(){unsigned int s; unsigned long long q; int ok = 0;            ok += __builtin_ia32_addcarryx_u32(0, 0xFFFFFFFF, 1, &s) == 1 && s == 0;            ok += __builtin_ia32_sbb_u32(0, 5, 3, &s) == 0 && s == 2;            ok += __builtin_ia32_sbb_u64(0, 0, 1, &q) == 1 && q == 0xFFFFFFFFFFFFFFFFull;            return ok;}"
         ),
         3
+    );
+}
+
+#[test]
+fn ia32_sse3_lane_builtins() {
+    // The SSE3 horizontal and add/sub pairs and the dup loads: pure
+    // lane compositions. Every lane value is exact in binary, so the
+    // comparisons need no tolerance.
+    assert_eq!(
+        run_main(
+            "typedef float v4sf __attribute__((vector_size(16)));\n\
+             typedef double v2df __attribute__((vector_size(16)));\n\
+             int main(void) {\n\
+                 v4sf a = {1.0f, 2.0f, 3.0f, 4.0f};\n\
+                 v4sf b = {10.0f, 20.0f, 30.0f, 40.0f};\n\
+                 v4sf as = __builtin_ia32_addsubps(a, b);\n\
+                 if (as[0] != -9.0f || as[1] != 22.0f || as[2] != -27.0f || as[3] != 44.0f) return 1;\n\
+                 v4sf ha = __builtin_ia32_haddps(a, b);\n\
+                 if (ha[0] != 3.0f || ha[1] != 7.0f || ha[2] != 30.0f || ha[3] != 70.0f) return 2;\n\
+                 v4sf hs = __builtin_ia32_hsubps(a, b);\n\
+                 if (hs[0] != -1.0f || hs[1] != -1.0f || hs[2] != -10.0f || hs[3] != -10.0f) return 3;\n\
+                 v4sf sh = __builtin_ia32_movshdup(a);\n\
+                 if (sh[0] != 2.0f || sh[1] != 2.0f || sh[2] != 4.0f || sh[3] != 4.0f) return 4;\n\
+                 v4sf sl = __builtin_ia32_movsldup(a);\n\
+                 if (sl[0] != 1.0f || sl[1] != 1.0f || sl[2] != 3.0f || sl[3] != 3.0f) return 5;\n\
+                 v2df da = {1.0, 2.0};\n\
+                 v2df db = {10.0, 20.0};\n\
+                 v2df das = __builtin_ia32_addsubpd(da, db);\n\
+                 if (das[0] != -9.0 || das[1] != 22.0) return 6;\n\
+                 v2df dha = __builtin_ia32_haddpd(da, db);\n\
+                 if (dha[0] != 3.0 || dha[1] != 30.0) return 7;\n\
+                 v2df dhs = __builtin_ia32_hsubpd(da, db);\n\
+                 if (dhs[0] != -1.0 || dhs[1] != -10.0) return 8;\n\
+                 const char *p = (const char *)&a;\n\
+                 v4sf l = __builtin_ia32_lddqu(p);\n\
+                 if (l[0] != 1.0f || l[1] != 2.0f || l[2] != 3.0f || l[3] != 4.0f) return 9;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+fn ia32_rcp_builtins_run_native() {
+    // The approximate reciprocals lower to native `rcpss`/`rcpps`/
+    // `rsqrtss`/`rsqrtps` over xmm register operands (no out-of-line
+    // wrapper; the `plan` unit tests pin the constraint mapping). The
+    // instructions carry ~11 bits of mantissa, so the products are
+    // checked with a loose tolerance.
+    assert_eq!(
+        run_main(
+            "typedef float v4sf __attribute__((vector_size(16)));\n\
+             int main(void) {\n\
+                 v4sf a = {1.0f, 2.0f, 4.0f, 10.0f};\n\
+                 v4sf r = __builtin_ia32_rcpps(a);\n\
+                 if (__builtin_fabsf(r[0] - 1.0f) > 0.001f) return 1;\n\
+                 if (__builtin_fabsf(r[1] * 2.0f - 1.0f) > 0.001f) return 2;\n\
+                 if (__builtin_fabsf(r[2] * 4.0f - 1.0f) > 0.001f) return 3;\n\
+                 if (__builtin_fabsf(r[3] * 10.0f - 1.0f) > 0.001f) return 4;\n\
+                 v4sf s = __builtin_ia32_rcpss(a);\n\
+                 if (__builtin_fabsf(s[0] - 1.0f) > 0.001f) return 5;\n\
+                 v4sf q = __builtin_ia32_rsqrtps(a);\n\
+                 if (__builtin_fabsf(q[0] - 1.0f) > 0.01f) return 6;\n\
+                 if (__builtin_fabsf(q[2] * 2.0f - 1.0f) > 0.01f) return 7;\n\
+                 v4sf t = __builtin_ia32_rsqrtss(a);\n\
+                 if (__builtin_fabsf(t[0] - 1.0f) > 0.01f) return 8;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
     );
 }
 
