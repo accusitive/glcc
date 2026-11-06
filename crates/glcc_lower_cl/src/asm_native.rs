@@ -157,6 +157,13 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
             probe.push(c);
             continue;
         }
+        if chars.peek() == Some(&'=') {
+            // %= expands to a per-instantiation number fork-side; probe
+            // with a concrete one so the numeric-label shape is checked.
+            chars.next();
+            probe.push('9');
+            continue;
+        }
         if chars.peek() == Some(&'[') {
             for x in chars.by_ref() {
                 probe.push(x);
@@ -167,9 +174,31 @@ pub fn plan(block: &mir::AsmBlock, arch: Arch, func: &mir::Function) -> Result<N
             probe.push_str("%r11");
             continue;
         }
+        if let Some(m) = chars
+            .peek()
+            .copied()
+            .filter(|m| matches!(m, 'b' | 'w' | 'k' | 'q' | 'h'))
+        {
+            // %<mod>N on a high ("Q") operand renders fork-side from the
+            // allocated register; stand in a width-matched register.
+            chars.next();
+            while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                chars.next();
+            }
+            probe.push_str(match m {
+                'b' => "%al",
+                'w' => "%ax",
+                'k' => "%r11d",
+                'q' => "%r11",
+                _ => "%ah",
+            });
+            continue;
+        }
         match chars.peek() {
             Some(d) if d.is_ascii_digit() => {
-                chars.next();
+                while matches!(chars.peek(), Some(d) if d.is_ascii_digit()) {
+                    chars.next();
+                }
                 probe.push_str("%r11");
             }
             _ => probe.push('%'),
