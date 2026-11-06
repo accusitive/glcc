@@ -2987,6 +2987,37 @@ fn ia32_sse3_lane_builtins() {
 
 #[test]
 #[cfg(target_arch = "x86_64")]
+fn ia32_mmx_builtins_run_native() {
+    // The MMX family lowers to native asm whose 64-bit values stage in
+    // and out of the `mm` file through 32-bit halves (the fork's
+    // encoder has no 64-bit GPR<->mm move): vec_init_v2si packs its
+    // inputs purely in MIR, the pairs take %k-width halves, pmovmskb
+    // reads a GPR-staged vector.
+    assert_eq!(
+        run_main(
+            "typedef int v2si __attribute__((vector_size(8)));\n\
+             typedef char v8qi __attribute__((vector_size(8)));\n\
+             typedef short v4hi __attribute__((vector_size(8)));\n\
+             int main(void) {\n\
+                 v2si v = __builtin_ia32_vec_init_v2si(10, 20);\n\
+                 if (v[0] != 10 || v[1] != 20) return 1;\n\
+                 v8qi b = {0, -1, -1, 0, 0, -1, 0, 0};\n\
+                 if (__builtin_ia32_pmovmskb(b) != 0b0100110) return 2;\n\
+                 v8qi p = __builtin_ia32_paddb(b, b);\n\
+                 if (p[1] != -2 || p[0] != 0) return 3;\n\
+                 v4hi s = __builtin_ia32_psllwi((v4hi){1, 2, 3, 4}, 2);\n\
+                 if (s[0] != 4 || s[3] != 16) return 4;\n\
+                 v4hi c = __builtin_ia32_psllw((v4hi){1, 1, 1, 1}, (v4hi){2, 0, 0, 0});\n\
+                 if (c[0] != 4) return 5;\n\
+                 return 0;\n\
+             }"
+        ),
+        0
+    );
+}
+
+#[test]
+#[cfg(target_arch = "x86_64")]
 fn ia32_rcp_builtins_run_native() {
     // The approximate reciprocals lower to native `rcpss`/`rcpps`/
     // `rsqrtss`/`rsqrtps` over xmm register operands (no out-of-line

@@ -776,69 +776,161 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 );
                 self.iconst(func, 32, 0)
             }
-            // The MMX pairs stage both operands into fixed `mm`
-            // registers through general ones; `emms` would leave the
-            // FPU state clean but callers issue it themselves.
+            // The MMX pairs stage both operands into `mm` registers
+            // through 32-bit moves (the encoder has no 64-bit GPR↔mm
+            // move): halves in via `%k`, halves out through `eax`/`edx`.
+            // `emms` would leave the FPU state clean but callers issue
+            // it themselves.
             fe::check::Ia32Op::MmxOp { mnemonic } => {
                 let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let b = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let out = self.asm_result_in_rax(
+                let (a_lo, a_hi) = (self.half(func, frame, a, false), self.half(func, frame, a, true));
+                let (b_lo, b_hi) = (self.half(func, frame, b, false), self.half(func, frame, b, true));
+                let lo_slot = self.alloca(func, frame, mir::Ty::int(32));
+                let hi_slot = self.alloca(func, frame, mir::Ty::int(32));
+                self.asm_with_clobbers(
                     func,
                     frame,
-                    &format!("movq %1, %%mm0\n\tmovq %2, %%mm1\n\t{mnemonic} %%mm1, %%mm0\n\tmovq %%mm0, %0"),
-                    vec![],
+                    &format!("movd %k2, %%mm0\n\tmovd %k3, %%mm1\n\tpunpckldq %%mm1, %%mm0\n\tmovd %k4, %%mm2\n\tmovd %k5, %%mm3\n\tpunpckldq %%mm3, %%mm2\n\t{mnemonic} %%mm2, %%mm0\n\tmovd %%mm0, %k0\n\tpunpckhdq %%mm0, %%mm0\n\tmovd %%mm0, %k1"),
+                    2,
                     vec![
                         mir::AsmOperand {
-                            value: a,
-                            constraint: "r".into(),
-                            ty: mir::Ty::int(64),
+                            value: lo_slot,
+                            constraint: "=a".into(),
+                            ty: mir::Ty::int(32),
                             tie: None,
                             name: None,
                         },
                         mir::AsmOperand {
-                            value: b,
+                            value: hi_slot,
+                            constraint: "=d".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: a_lo,
                             constraint: "r".into(),
-                            ty: mir::Ty::int(64),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: a_hi,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: b_lo,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: b_hi,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
                             tie: None,
                             name: None,
                         },
                     ],
+                    &[],
+                    true,
                 );
+                let lo = self.load(func, frame, lo_slot, mir::Ty::int(32), false);
+                let hi = self.load(func, frame, hi_slot, mir::Ty::int(32), false);
+                let out = self.join_halves(func, frame, lo, hi);
                 self.convert(func, frame, out, &args[0].ty, fe_ty)
             }
-            // The count forms shift exactly like the binary pairs;
-            // the immediate forms take the count as an `"e"` operand.
+            // The count forms shift exactly like the binary pairs; the
+            // immediate forms take the count as an `"e"` operand. The
+            // vector halves stage in and out through 32-bit moves, as
+            // in [`Ia32Op::MmxOp`].
             fe::check::Ia32Op::MmxShift { mnemonic, imm } => {
                 let v = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let count = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let (count_constraint, count_op) = if *imm { ("e", count) } else { ("r", count) };
-                let template = if *imm {
-                    format!("movq %1, %%mm0\n\t{mnemonic} %2, %%mm0\n\tmovq %%mm0, %0")
+                let (v_lo, v_hi) = (self.half(func, frame, v, false), self.half(func, frame, v, true));
+                let (count_lo, count_hi) = (self.half(func, frame, count, false), self.half(func, frame, count, true));
+                let lo_slot = self.alloca(func, frame, mir::Ty::int(32));
+                let hi_slot = self.alloca(func, frame, mir::Ty::int(32));
+                let stage_in = "movd %k2, %%mm0\n\tmovd %k3, %%mm1\n\tpunpckldq %%mm1, %%mm0";
+                let stage_out = "movd %%mm0, %k0\n\tpunpckhdq %%mm0, %%mm0\n\tmovd %%mm0, %k1";
+                let (template, count_operands) = if *imm {
+                    (format!("{stage_in}\n\t{mnemonic} %4, %%mm0\n\t{stage_out}"), vec![mir::AsmOperand {
+                        value: count,
+                        constraint: "e".into(),
+                        ty: mir::Ty::int(64),
+                        tie: None,
+                        name: None,
+                    }])
                 } else {
-                    format!("movq %1, %%mm0\n\tmovq %2, %%mm1\n\t{mnemonic} %%mm1, %%mm0\n\tmovq %%mm0, %0")
+                    (
+                        format!("{stage_in}\n\tmovd %k4, %%mm2\n\tmovd %k5, %%mm3\n\tpunpckldq %%mm3, %%mm2\n\t{mnemonic} %%mm2, %%mm0\n\t{stage_out}"),
+                        vec![
+                            mir::AsmOperand {
+                                value: count_lo,
+                                constraint: "r".into(),
+                                ty: mir::Ty::int(32),
+                                tie: None,
+                                name: None,
+                            },
+                            mir::AsmOperand {
+                                value: count_hi,
+                                constraint: "r".into(),
+                                ty: mir::Ty::int(32),
+                                tie: None,
+                                name: None,
+                            },
+                        ],
+                    )
                 };
-                let out = self.asm_result_in_rax(
+                self.asm_with_clobbers(
                     func,
                     frame,
                     &template,
-                    vec![],
+                    2,
                     vec![
                         mir::AsmOperand {
-                            value: v,
-                            constraint: "r".into(),
-                            ty: mir::Ty::int(64),
+                            value: lo_slot,
+                            constraint: "=a".into(),
+                            ty: mir::Ty::int(32),
                             tie: None,
                             name: None,
                         },
                         mir::AsmOperand {
-                            value: count_op,
-                            constraint: count_constraint.into(),
-                            ty: mir::Ty::int(64),
+                            value: hi_slot,
+                            constraint: "=d".into(),
+                            ty: mir::Ty::int(32),
                             tie: None,
                             name: None,
                         },
-                    ],
+                        mir::AsmOperand {
+                            value: v_lo,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: v_hi,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                    ]
+                    .into_iter()
+                    .chain(count_operands)
+                    .collect(),
+                    &[],
+                    true,
                 );
+                let lo = self.load(func, frame, lo_slot, mir::Ty::int(32), false);
+                let hi = self.load(func, frame, hi_slot, mir::Ty::int(32), false);
+                let out = self.join_halves(func, frame, lo, hi);
                 self.convert(func, frame, out, &args[0].ty, fe_ty)
             }
             // Lane composition over the 8-byte integer: each lane
@@ -867,28 +959,9 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::Ia32Op::VecInitV2Si => {
                 let a = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let b = self.expr_value(module, func, frame, funcs, externs, globals, &args[1]);
-                let out = self.asm_result_in_rax(
-                    func,
-                    frame,
-                    "movd %1, %%mm0\n\tmovd %2, %%mm1\n\tpunpckldq %%mm1, %%mm0\n\tmovq %%mm0, %0",
-                    vec![],
-                    vec![
-                        mir::AsmOperand {
-                            value: a,
-                            constraint: "r".into(),
-                            ty: mir::Ty::int(32),
-                            tie: None,
-                            name: None,
-                        },
-                        mir::AsmOperand {
-                            value: b,
-                            constraint: "r".into(),
-                            ty: mir::Ty::int(32),
-                            tie: None,
-                            name: None,
-                        },
-                    ],
-                );
+                // {a, b} as dwords: pack the 64-bit image (the stub's
+                // movd/punpckldq pair, without the asm) and bitcast.
+                let out = self.join_halves(func, frame, a, b);
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, fe_ty)
             }
             // Lane `idx` of an 8-byte vector: the low or high dword.
@@ -1285,20 +1358,42 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
                 self.store(func, frame, a_slot, a, false);
-                let out = self.asm_result_in_rax_with_clobbers(
+                let lo_slot = self.alloca(func, frame, mir::Ty::int(32));
+                let hi_slot = self.alloca(func, frame, mir::Ty::int(32));
+                self.asm_with_clobbers(
                     func,
                     frame,
-                    "movups %1, %%xmm0\n\tcvtps2pi %%xmm0, %%mm0\n\tmovq %%mm0, %0",
-                    vec![],
-                    vec![mir::AsmOperand {
-                        value: a_slot,
-                        constraint: "m".into(),
-                        ty: mir::Ty::int(128),
-                        tie: None,
-                        name: None,
-                    }],
+                    "movups %2, %%xmm0\n\tcvtps2pi %%xmm0, %%mm0\n\tmovd %%mm0, %k0\n\tpunpckhdq %%mm0, %%mm0\n\tmovd %%mm0, %k1",
+                    2,
+                    vec![
+                        mir::AsmOperand {
+                            value: lo_slot,
+                            constraint: "=a".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: hi_slot,
+                            constraint: "=d".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: a_slot,
+                            constraint: "m".into(),
+                            ty: mir::Ty::int(128),
+                            tie: None,
+                            name: None,
+                        },
+                    ],
                     &["xmm0"],
+                    true,
                 );
+                let lo = self.load(func, frame, lo_slot, mir::Ty::int(32), false);
+                let hi = self.load(func, frame, hi_slot, mir::Ty::int(32), false);
+                let out = self.join_halves(func, frame, lo, hi);
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, &mmx_vec)
             }
             // `__m128` from an MMX pair of ints (lanes 0-1 float) over
@@ -1610,22 +1705,33 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 let r = self.load(func, frame, slot, vec_ty, false);
                 self.convert(func, frame, r, &args[0].ty, fe_ty)
             }
-            // The byte sign mask (`pmovmskb`), one bit per lane.
+            // The byte sign mask (`pmovmskb`), one bit per lane. The
+            // vector stages into `mm0` through 32-bit moves, as in
+            // [`Ia32Op::MmxOp`].
             fe::check::Ia32Op::Pmovmskb => {
                 let v = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                let (v_lo, v_hi) = (self.half(func, frame, v, false), self.half(func, frame, v, true));
                 let out = self.asm_result_in_rax(
                     func,
                     frame,
-                    "movq %1, %%mm0
-\tpmovmskb %%mm0, %%eax",
+                    "movd %k1, %%mm0\n\tmovd %k2, %%mm1\n\tpunpckldq %%mm1, %%mm0\n\tpmovmskb %%mm0, %%eax",
                     vec![],
-                    vec![mir::AsmOperand {
-                        value: v,
-                        constraint: "r".into(),
-                        ty: mir::Ty::int(64),
-                        tie: None,
-                        name: None,
-                    }],
+                    vec![
+                        mir::AsmOperand {
+                            value: v_lo,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: v_hi,
+                            constraint: "r".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                    ],
                 );
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, fe_ty)
             }
@@ -1937,20 +2043,42 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 }
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
                 self.store(func, frame, a_slot, a, false);
-                let out = self.asm_result_in_rax_with_clobbers(
+                let lo_slot = self.alloca(func, frame, mir::Ty::int(32));
+                let hi_slot = self.alloca(func, frame, mir::Ty::int(32));
+                self.asm_with_clobbers(
                     func,
                     frame,
-                    "movupd %1, %%xmm0\n\tcvtpd2pi %%xmm0, %%mm0\n\tmovq %%mm0, %0",
-                    vec![],
-                    vec![mir::AsmOperand {
-                        value: a_slot,
-                        constraint: "m".into(),
-                        ty: mir::Ty::int(128),
-                        tie: None,
-                        name: None,
-                    }],
+                    "movupd %1, %%xmm0\n\tcvtpd2pi %%xmm0, %%mm0\n\tmovd %%mm0, %k0\n\tpunpckhdq %%mm0, %%mm0\n\tmovd %%mm0, %k1",
+                    2,
+                    vec![
+                        mir::AsmOperand {
+                            value: lo_slot,
+                            constraint: "=a".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: hi_slot,
+                            constraint: "=d".into(),
+                            ty: mir::Ty::int(32),
+                            tie: None,
+                            name: None,
+                        },
+                        mir::AsmOperand {
+                            value: a_slot,
+                            constraint: "m".into(),
+                            ty: mir::Ty::int(128),
+                            tie: None,
+                            name: None,
+                        },
+                    ],
                     &["xmm0"],
+                    true,
                 );
+                let lo = self.load(func, frame, lo_slot, mir::Ty::int(32), false);
+                let hi = self.load(func, frame, hi_slot, mir::Ty::int(32), false);
+                let out = self.join_halves(func, frame, lo, hi);
                 self.convert(func, frame, out, &fe::parse::Ty::LongLong, &mmx_vec)
             }
             // `cvtpi2pd`: the two integer lanes of the 8-byte vector
@@ -3211,6 +3339,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let shift = self.iconst(func, 64, 32);
         let hi = self.emit(func, frame, mir::InstKind::LShr(v, shift), mir::Ty::int(64));
         self.emit(func, frame, mir::InstKind::Trunc(hi), mir::Ty::int(32))
+    }
+
+    /// Reassemble two 32-bit halves into a 64-bit MIR value (the
+    /// inverse of [`Self::half`]).
+    fn join_halves(&self, func: &mut mir::Function, frame: &mut Frame, lo: mir::Value, hi: mir::Value) -> mir::Value {
+        let image = mir::Ty::int(64);
+        let wide_lo = self.emit(func, frame, mir::InstKind::Zext(lo), image.clone());
+        let wide_hi = self.emit(func, frame, mir::InstKind::Zext(hi), image.clone());
+        let shift = self.iconst(func, 64, 32);
+        let shifted = self.emit(func, frame, mir::InstKind::Shl(wide_hi, shift), image.clone());
+        self.emit(func, frame, mir::InstKind::Or(wide_lo, shifted), image)
     }
 
     /// The FE type matching a u32/u64 builtin width: the `eflags` and

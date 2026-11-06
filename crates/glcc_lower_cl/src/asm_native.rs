@@ -299,7 +299,7 @@ fn fork_constraint(constraint: &str, parsed: &crate::asm::Constraint) -> Result<
             'D' => 'D',
             'Q' => 'Q',
             'R' => 'R',
-            'i' | 'n' => 'i',
+            'i' | 'n' | 'e' => 'i',
             'm' | 'o' | 'V' => 'm',
             _ => {
                 return Err(format!(
@@ -349,6 +349,20 @@ fn translate_template(template: &str, operands: &[NativeOperand]) -> Result<Stri
                     // A "Q" operand is allocated within rax/rcx/rdx/rbx by
                     // the register allocator; the fork renders the
                     // modifier from the allocated register itself.
+                    out.push_str(&format!("%{modifier}{index}"));
+                    continue;
+                }
+                if op.fixed.is_none()
+                    && matches!(modifier, 'k' | 'q' | 'w')
+                    && op.kind == NativeKind::Reg
+                    && op.width <= 8
+                {
+                    // The fork renders the width-selected name of the
+                    // allocated register, correct for any GPR (a 32-bit
+                    // value in r11 is r11d). Fixed operands keep the
+                    // static substitution below (the probe then sees the
+                    // concrete name). %b/%h stay fixed-only: the high
+                    // byte exists only on a/b/c/d.
                     out.push_str(&format!("%{modifier}{index}"));
                     continue;
                 }
@@ -572,6 +586,21 @@ mod tests {
             elem: Box::new(mir::Ty::Float(mir::FloatKind::F32)),
             lanes: 2,
         }
+    }
+
+    #[test]
+    fn width_modifiers_pass_through_on_variable_gprs() {
+        // %k/%q/%w render the width-selected name of the allocated
+        // register fork-side, correct for any width-8 GPR — no fixed
+        // register needed. %b/%h stay fixed-only (high byte lives on
+        // a/b/c/d).
+        let native = Block::new("movl %k1, %k0", 1, &["=r", "r"]).plan(&[I32, I32]).expect("%k is native");
+        assert_eq!(native.template, "movl %k1, %k0");
+        let native = Block::new("movq %q1, %0", 1, &["=r", "r"]).plan(&[I64, I64]).expect("%q is native");
+        assert_eq!(native.template, "movq %q1, %0");
+        assert!(Block::new("movb %b1, %b0", 1, &["=r", "r"]).plan(&[I32, I32]).unwrap_err().contains("fixed-register"));
+        // Modifiers do not rescue narrower operands from needing one.
+        assert!(Block::new("movl %1, %0", 1, &["=r", "r"]).plan(&[I32, I32]).unwrap_err().contains("narrower than 8 bytes"));
     }
 
     #[test]
