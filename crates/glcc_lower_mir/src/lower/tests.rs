@@ -2986,6 +2986,7 @@ fn ia32_sse3_lane_builtins() {
 }
 
 #[test]
+#[cfg(target_arch = "x86_64")]
 fn ia32_rcp_builtins_run_native() {
     // The approximate reciprocals lower to native `rcpss`/`rcpps`/
     // `rsqrtss`/`rsqrtps` over xmm register operands (no out-of-line
