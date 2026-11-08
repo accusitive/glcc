@@ -5,12 +5,7 @@ use object::read::{Object, ObjectSymbol};
 use std::process::Command;
 
 fn assemble(src: &str, obj: &std::path::Path) -> Result<(), String> {
-    let bytes = glasm::gas::assemble_to_elf64(src).map_err(|errs| {
-        errs.iter()
-            .map(|e| format!("line {}: {}", e.line, e.msg))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })?;
+    let bytes = glasm::gas::assemble_to_elf(src, glasm::Arch::X86_64).map_err(|errs| errs.iter().map(|e| format!("line {}: {}", e.line, e.msg)).collect::<Vec<_>>().join("\n"))?;
     std::fs::write(obj, bytes).map_err(|e| e.to_string())
 }
 
@@ -140,6 +135,7 @@ marker: .quad 1234
 extra:  ret
         .popsection
     "#,
+        glasm::Arch::X86_64,
     )
     .expect("parse");
     assert!(stmts.iter().any(|s| matches!(s, glasm::Stmt::Label(n, _) if n == "marker")));
@@ -164,7 +160,7 @@ caller:
         call __glcc_asm_add
         ret
     "#;
-    let bytes = glasm::gas::assemble_to_elf64(src).expect("assemble");
+    let bytes = glasm::gas::assemble_to_elf(src, glasm::Arch::X86_64).expect("assemble");
     let obj = object::File::parse(&*bytes).expect("parse object");
     let mut saw_weak = false;
     for sym in obj.symbols() {
@@ -180,12 +176,9 @@ caller:
 #[test]
 fn multi_digit_numeric_labels() {
     // GNU as allows numeric local labels of any digit count.
-    let bytes = glasm::gas::assemble_to_elf64("jmp 42f\n nop\n42: nop").unwrap();
+    let bytes = glasm::gas::assemble_to_elf("jmp 42f\n nop\n42: nop", glasm::Arch::X86_64).unwrap();
     let obj = object::File::parse(&*bytes).unwrap();
     use object::read::{Object, ObjectSection};
-    let text = obj
-        .sections()
-        .find(|s| s.name().unwrap() == ".text")
-        .unwrap();
+    let text = obj.sections().find(|s| s.name().unwrap() == ".text").unwrap();
     assert_eq!(text.data().unwrap(), &[0xeb, 0x01, 0x90, 0x90][..]);
 }

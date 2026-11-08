@@ -1,6 +1,6 @@
 //! Register name lookup over the generated nasm register table.
 
-use crate::insns_gen::{RegInfo, REGS};
+use crate::insns_gen::{REGS, RegInfo};
 
 /// Index into `REGS`.
 pub type RegId = usize;
@@ -28,4 +28,3 @@ pub const RIP: &str = "rip";
 
 #[cfg(test)]
 mod tests;
-

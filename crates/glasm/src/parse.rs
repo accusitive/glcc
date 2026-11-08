@@ -3,8 +3,8 @@
 //! supports).
 
 use crate::expr::Expr;
-use crate::insn::*;
 use crate::insn::op;
+use crate::insn::*;
 use crate::regs;
 
 #[derive(Debug)]
@@ -147,14 +147,10 @@ impl<'a> Lexer<'a> {
             (10, 0)
         };
         let mut i = digits_start;
-        while i < rest.len()
-            && ((rest[i] as char).is_ascii_alphanumeric() || rest[i] == b'_')
-        {
+        while i < rest.len() && ((rest[i] as char).is_ascii_alphanumeric() || rest[i] == b'_') {
             i += 1;
         }
-        let mut text: String = std::str::from_utf8(&rest[digits_start..i])
-            .unwrap()
-            .replace('_', "");
+        let mut text: String = std::str::from_utf8(&rest[digits_start..i]).unwrap().replace('_', "");
         if radix == 10 && !text.is_empty() {
             match text.as_bytes()[text.len() - 1] {
                 b'h' | b'H' => {
@@ -306,18 +302,10 @@ pub fn parse_module(src: &str) -> Result<Vec<Stmt>, Vec<ParseError>> {
             Err(msg) => errors.push(ParseError { line: line_no, msg }),
         }
     }
-    if errors.is_empty() {
-        Ok(stmts)
-    } else {
-        Err(errors)
-    }
+    if errors.is_empty() { Ok(stmts) } else { Err(errors) }
 }
 
-fn parse_line(
-    line: &str,
-    line_no: u32,
-    last_global: &mut Option<String>,
-) -> Result<Vec<Stmt>, String> {
+fn parse_line(line: &str, line_no: u32, last_global: &mut Option<String>) -> Result<Vec<Stmt>, String> {
     let mut lx = Lexer::new(line);
     let mut toks = Vec::new();
     while let Some(t) = lx.next() {
@@ -350,9 +338,7 @@ fn parse_line(
             let local = name.starts_with('.');
             let name = match name.strip_prefix('.') {
                 Some(local_name) => {
-                    let parent = last_global.as_ref().ok_or_else(|| {
-                        format!("local label `.{local_name}' before any non-local label")
-                    })?;
+                    let parent = last_global.as_ref().ok_or_else(|| format!("local label `.{local_name}' before any non-local label"))?;
                     format!("{parent}.{local_name}")
                 }
                 None => name,
@@ -391,15 +377,7 @@ fn expand_stmt_locals(stmt: &mut Stmt, parent: &str) {
             Expr::Sym(s) if s.starts_with('.') && !s.starts_with("..") => {
                 *s = format!("{parent}{s}");
             }
-            Expr::Add(a, b)
-            | Expr::Sub(a, b)
-            | Expr::Mul(a, b)
-            | Expr::Div(a, b)
-            | Expr::Shl(a, b)
-            | Expr::Shr(a, b)
-            | Expr::And(a, b)
-            | Expr::Or(a, b)
-            | Expr::Xor(a, b) => {
+            Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Shl(a, b) | Expr::Shr(a, b) | Expr::And(a, b) | Expr::Or(a, b) | Expr::Xor(a, b) => {
                 expand_expr(a, parent);
                 expand_expr(b, parent);
             }
@@ -417,8 +395,10 @@ fn expand_stmt_locals(stmt: &mut Stmt, parent: &str) {
     }
     match stmt {
         Stmt::Insn(insn) => {
-            for op in &mut insn.operands {
-                expand_operand(op, parent);
+            if let crate::arch::Insn::X86(insn) = insn {
+                for op in &mut insn.operands {
+                    expand_operand(op, parent);
+                }
             }
         }
         Stmt::Data { items, .. } => {
@@ -494,9 +474,7 @@ fn parse_directive_named(word: &str, t: &mut Toks, line_no: u32) -> Result<Stmt,
                             *exec = true;
                         }
                     }
-                    Some(Tok::Ident(n))
-                        if n.eq_ignore_ascii_case("nobits") || n.eq_ignore_ascii_case("nobytes") =>
-                    {
+                    Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("nobits") || n.eq_ignore_ascii_case("nobytes") => {
                         if let SectionFlags::Custom { nobits, .. } = &mut flags {
                             *nobits = true;
                         }
@@ -525,11 +503,7 @@ fn parse_directive_named(word: &str, t: &mut Toks, line_no: u32) -> Result<Stmt,
                     break;
                 }
             }
-            Ok(if word == "global" {
-                Stmt::Global(names, line_no)
-            } else {
-                Stmt::Extern(names, line_no)
-            })
+            Ok(if word == "global" { Stmt::Global(names, line_no) } else { Stmt::Extern(names, line_no) })
         }
         "bits" => match t.bump() {
             Some(Tok::Int(n)) => Ok(Stmt::Bits(n as u8, line_no)),
@@ -542,7 +516,11 @@ fn parse_directive_named(word: &str, t: &mut Toks, line_no: u32) -> Result<Stmt,
         "times" => {
             let count = parse_expr(t, 0)?;
             let inner = parse_stmt(t, line_no)?;
-            Ok(Stmt::Times { count, inner: Box::new(inner), line: line_no })
+            Ok(Stmt::Times {
+                count,
+                inner: Box::new(inner),
+                line: line_no,
+            })
         }
         d if DATA_DIRS.contains(&d) => {
             let (size, reserve) = match d {
@@ -609,10 +587,7 @@ pub fn opcode_index(mnemonic: &str) -> Option<usize> {
     crate::insns_gen::MNEMONICS.iter().position(|m| *m == mnemonic)
 }
 
-const PREFIXES: [&str; 11] = [
-    "lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack", "xacquire", "xrelease",
-    "hint_nop",
-];
+const PREFIXES: [&str; 11] = ["lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack", "xacquire", "xrelease", "hint_nop"];
 
 fn parse_instruction(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
     let mut prefixes = Vec::new();
@@ -639,7 +614,12 @@ fn parse_instruction(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
             }
         }
     }
-    Ok(Stmt::Insn(Insn { opcode, prefixes, operands, line: line_no }))
+    Ok(Stmt::Insn(crate::arch::Insn::X86(X86Insn {
+        opcode,
+        prefixes,
+        operands,
+        line: line_no,
+    })))
 }
 
 fn parse_operand(t: &mut Toks) -> Result<Operand, String> {
@@ -699,11 +679,7 @@ fn mem_operand(mem: MemParts, size_bits: Option<u64>) -> Operand {
     }
     // `[rel expr]` (or a bare rip base) is rip-relative: no base
     // register, the flag tells process_ea to encode rip-relative.
-    let (basereg, eaflags) = if mem.rel {
-        (-1, crate::insn::eaf::REL)
-    } else {
-        (mem.base.unwrap_or(-1), 0)
-    };
+    let (basereg, eaflags) = if mem.rel { (-1, crate::insn::eaf::REL) } else { (mem.base.unwrap_or(-1), 0) };
     let mut operand = Operand {
         ty,
         basereg,
@@ -717,11 +693,7 @@ fn mem_operand(mem: MemParts, size_bits: Option<u64>) -> Operand {
     if basereg != -1 {
         operand.ty &= regs::flags(basereg as usize) | !op::RN_L16;
     } else if operand.indexreg == -1 {
-        operand.ty |= if eaflags & crate::insn::eaf::REL != 0 {
-            op::IP_REL
-        } else {
-            op::MEM_OFFS
-        };
+        operand.ty |= if eaflags & crate::insn::eaf::REL != 0 { op::IP_REL } else { op::MEM_OFFS };
     }
     if operand.indexreg != -1 {
         operand.ty &= regs::flags(operand.indexreg as usize) | !op::RN_L16;
@@ -739,16 +711,12 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
     let mut rel = false;
     let mut terms: Vec<(bool, Expr)> = Vec::new();
     // `[rel expr]` is rip-relative.
-    if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("rel"))
-        && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_)))
-    {
+    if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("rel")) && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_))) {
         t.bump();
         rel = true;
     }
     // `[abs expr]` forces absolute addressing.
-    if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("abs"))
-        && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_)))
-    {
+    if matches!(t.peek(), Some(Tok::Ident(n)) if n.eq_ignore_ascii_case("abs")) && matches!(t.toks.get(t.pos + 1), Some(Tok::Ident(_))) {
         t.bump();
     }
     loop {
@@ -796,8 +764,7 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
                 };
                 match scaled {
                     Some((rn, k)) => {
-                        let r = regs::lookup(&rn)
-                            .ok_or_else(|| format!("unknown register `{rn}'"))?;
+                        let r = regs::lookup(&rn).ok_or_else(|| format!("unknown register `{rn}'"))?;
                         if !matches!(k, 1 | 2 | 4 | 8) {
                             return Err(format!("invalid scale {k}"));
                         }

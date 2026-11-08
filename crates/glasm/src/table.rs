@@ -4,8 +4,8 @@
 
 use crate::encoding::{Encoded, FixupReq};
 use crate::expr::{EvalCtx, Expr, RValue};
-use crate::insn::{eaf, op, Insn, Operand};
-use crate::insns_gen::{self, if_, Template};
+use crate::insn::{Operand, X86Insn, eaf, op};
+use crate::insns_gen::{self, Template, if_};
 use std::cell::Cell;
 
 // REX bits (nasm.h).
@@ -175,13 +175,21 @@ pub struct Val {
 impl Val {
     fn from_rvalue(rv: &RValue) -> Val {
         match rv {
-            RValue::Const(v) => Val { value: *v, known: true, ..Default::default() },
-            RValue::SectVal { sect, off } => {
-                Val { value: *off, segment: Some(*sect), ..Default::default() }
-            }
-            RValue::ExternRef { sym, off } => {
-                Val { value: *off, extern_sym: Some(*sym), ..Default::default() }
-            }
+            RValue::Const(v) => Val {
+                value: *v,
+                known: true,
+                ..Default::default()
+            },
+            RValue::SectVal { sect, off, .. } => Val {
+                value: *off,
+                segment: Some(*sect),
+                ..Default::default()
+            },
+            RValue::ExternRef { sym, off } => Val {
+                value: *off,
+                extern_sym: Some(*sym),
+                ..Default::default()
+            },
         }
     }
 
@@ -189,7 +197,7 @@ impl Val {
         if let Some(sym) = self.extern_sym {
             RValue::ExternRef { sym, off: self.value }
         } else if let Some(sect) = self.segment {
-            RValue::SectVal { sect, off: self.value }
+            RValue::SectVal { sect, off: self.value, sym: None }
         } else {
             RValue::Const(self.value)
         }
@@ -399,12 +407,7 @@ fn eval_operand(o: &Operand, ctx: &EvalCtx) -> Result<NOperand, String> {
 // Effective address computation (port of process_ea)
 // ---------------------------------------------------------------------
 
-fn process_ea(
-    input: &mut NOperand,
-    rfield: i32,
-    rflags: u64,
-    ins: &mut InsState,
-) -> Result<(), String> {
+fn process_ea(input: &mut NOperand, rfield: i32, rflags: u64, ins: &mut InsState) -> Result<(), String> {
     ins.ea = Ea::default();
     let ea = &mut ins.ea;
     ea.rex |= rexflags(rfield, rflags, REX_rR);
@@ -426,11 +429,7 @@ fn process_ea(
 
     if input.basereg == -1 && (input.indexreg == -1 || input.scale == 0) {
         // Pure offset: RIP-relative or absolute.
-        if ins.bits == 64
-            && input.ty & op::IMMEDIATE != 0
-            && input.eaflags & eaf::ABS == 0
-            && input.eaflags & eaf::REL != 0
-        {
+        if ins.bits == 64 && input.ty & op::IMMEDIATE != 0 && input.eaflags & eaf::ABS == 0 && input.eaflags & eaf::REL != 0 {
             input.ty |= op::IP_REL;
         }
         if input.eaflags & eaf::SIB != 0 || (ins.bits == 64 && input.ty & op::IP_REL == 0) {
@@ -464,10 +463,7 @@ fn process_ea(
         (-1, 0u64)
     };
     let (mut bt, mut bx) = if is_register(input.basereg) {
-        (
-            insns_gen::REGS[input.basereg as usize].val,
-            insns_gen::REGS[input.basereg as usize].flags,
-        )
+        (insns_gen::REGS[input.basereg as usize].val, insns_gen::REGS[input.basereg as usize].flags)
     } else {
         (-1, 0u64)
     };
@@ -551,11 +547,7 @@ fn memory_mod(eaflags: u32, o: i64, known: bool, zerook: bool, ea: &mut Ea) -> u
     if o == 0 && zerook {
         return 0;
     }
-    if ea.disp8_ok {
-        1
-    } else {
-        2
-    }
+    if ea.disp8_ok { 1 } else { 2 }
 }
 
 // ---------------------------------------------------------------------
@@ -575,13 +567,18 @@ impl Encoder {
         self.bytes.push(b);
     }
     fn field(&mut self, val: &Val, size: u8, pcrel: bool) {
-        let tail = (self.inslen - self.bytes.len() as i64 - size as i64).max(0) as u32;
+        // x86 PC-relative displacements are relative to max(field end,
+        // estimated instruction end); `inslen` is only an estimate and
+        // can come out shorter than the emitted bytes, hence the max
+        // (nasm clamps its tail adjustment at zero the same way).
+        let rel_base = (self.bytes.len() as i64 + size as i64).max(self.inslen).max(0) as u32;
         self.fixups.push(FixupReq {
             at: self.bytes.len(),
             size,
             val: val.to_rvalue(),
             pcrel,
-            tail,
+            rel_base,
+            layout: crate::encoding::FieldLayout::Flat,
         });
         self.bytes.extend(std::iter::repeat_n(0, size as usize));
     }
@@ -634,11 +631,7 @@ fn emit_rex(enc: &mut Encoder, ins: &InsState) {
 /// One interpreter pass; `enc == None` sizes (calcsize), `Some` emits
 /// (gencode). Returns the instruction length. Bytecode values are the
 /// octal codes from `x86/bytecode.txt`.
-fn walk(
-    ins: &mut InsState,
-    temp: &Template,
-    mut enc: Option<&mut Encoder>,
-) -> Result<i64, String> {
+fn walk(ins: &mut InsState, temp: &Template, mut enc: Option<&mut Encoder>) -> Result<i64, String> {
     let codes = &insns_gen::BYTECODES[temp.code_off as usize..];
     let mut length: i64 = 0;
     let mut pos = 0usize;
@@ -715,11 +708,7 @@ fn walk(
             28..=31 => {
                 let o = opof!(op1);
                 let size = if o.ty & (op::BITS16 | op::BITS32 | op::BITS64) != 0 {
-                    if o.ty & op::BITS16 != 0 {
-                        2
-                    } else {
-                        4
-                    }
+                    if o.ty & op::BITS16 != 0 { 2 } else { 4 }
                 } else if ins.op_size == 16 {
                     2
                 } else {
@@ -781,11 +770,7 @@ fn walk(
             52..=55 => {
                 let o = opof!(op1);
                 let size = if o.ty & (op::BITS16 | op::BITS32 | op::BITS64) != 0 {
-                    if o.ty & op::BITS16 != 0 {
-                        2
-                    } else {
-                        4
-                    }
+                    if o.ty & op::BITS16 != 0 { 2 } else { 4 }
                 } else if ins.op_size == 16 {
                     2
                 } else {
@@ -1079,9 +1064,7 @@ fn walk(
                 }
                 process_ea(&mut o, rfield, rflags, ins)?;
                 ins.rex |= ins.ea.rex;
-                length += 1
-                    + i64::from(ins.ea.sib_present)
-                    + ins.ea.bytes as i64;
+                length += 1 + i64::from(ins.ea.sib_present) + ins.ea.bytes as i64;
                 if let Some(e) = &mut enc {
                     emit_rex(e, ins);
                     e.raw(ins.ea.modrm);
@@ -1105,10 +1088,7 @@ fn walk(
                 }
             }
             _ => {
-                return Err(format!(
-                    "unsupported bytecode \\{:o} in instruction encoding",
-                    c
-                ));
+                return Err(format!("unsupported bytecode \\{:o} in instruction encoding", c));
             }
         }
     }
@@ -1262,9 +1242,7 @@ fn matches(temp: &Template, ins: &InsState) -> i32 {
             if itype[i] & (op::FAR | op::SHORT) == 0 {
                 itype[i] |= ttype & op::NEAR;
             }
-            if ttype & (op::NEAR | op::SHORT) == (op::NEAR | op::SHORT)
-                && itype[i] & (op::FAR | op::ABS) == 0
-            {
+            if ttype & (op::NEAR | op::SHORT) == (op::NEAR | op::SHORT) && itype[i] & (op::FAR | op::ABS) == 0 {
                 itype[i] |= op::NEAR | op::SHORT;
             }
         }
@@ -1286,11 +1264,7 @@ fn matches(temp: &Template, ins: &InsState) -> i32 {
             return MERR_INVALOP;
         }
         if !ttype & itype[i] & op::REGSET_MASK != 0 {
-            return if ttype & op::REGSET_MASK != 0 {
-                MERR_REGSETSIZE
-            } else {
-                MERR_REGSET
-            };
+            return if ttype & op::REGSET_MASK != 0 { MERR_REGSETSIZE } else { MERR_REGSET };
         }
     }
 
@@ -1402,11 +1376,7 @@ fn find_match(ins: &InsState, opcode: usize) -> Option<&'static Template> {
         }
     }
     let (i, m) = best?;
-    if m >= MOK_FIRST {
-        Some(&list[i])
-    } else {
-        None
-    }
+    if m >= MOK_FIRST { Some(&list[i]) } else { None }
 }
 
 // ---------------------------------------------------------------------
@@ -1414,7 +1384,7 @@ fn find_match(ins: &InsState, opcode: usize) -> Option<&'static Template> {
 // ---------------------------------------------------------------------
 
 /// Encode one instruction via the nasm tables.
-pub fn encode(insn: &Insn, ctx: &EvalCtx) -> Result<Encoded, String> {
+pub fn encode(insn: &X86Insn, ctx: &EvalCtx) -> Result<Encoded, String> {
     let mut ops = Vec::with_capacity(insn.operands.len());
     for o in &insn.operands {
         ops.push(eval_operand(o, ctx)?);
@@ -1447,10 +1417,7 @@ pub fn encode(insn: &Insn, ctx: &EvalCtx) -> Result<Encoded, String> {
     };
 
     let Some(temp) = find_match(&ins, insn.opcode) else {
-        return Err(format!(
-            "no valid encoding for `{}` with these operands",
-            insns_gen::MNEMONICS[insn.opcode]
-        ));
+        return Err(format!("no valid encoding for `{}` with these operands", insns_gen::MNEMONICS[insn.opcode]));
     };
 
     // Size the instruction first (computes rex, prefixes, EA).
@@ -1458,10 +1425,17 @@ pub fn encode(insn: &Insn, ctx: &EvalCtx) -> Result<Encoded, String> {
     let inslen = walk(&mut sized, temp, None)?;
 
     // Emit.
-    let mut enc = Encoder { bytes: Vec::new(), fixups: Vec::new(), inslen, rex_done: false };
+    let mut enc = Encoder {
+        bytes: Vec::new(),
+        fixups: Vec::new(),
+        inslen,
+        rex_done: false,
+    };
     emit_prefixes(&mut enc.bytes, &sized);
     walk(&mut sized, temp, Some(&mut enc))?;
 
-    Ok(Encoded { bytes: enc.bytes, fixups: enc.fixups })
+    Ok(Encoded {
+        bytes: enc.bytes,
+        fixups: enc.fixups,
+    })
 }
-

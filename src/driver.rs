@@ -1595,7 +1595,7 @@ fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, 
 fn assemble_in_process(input: &OsStr, output: &Path) -> Result<(), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read '{}': {e}", Path::new(input).display()))?;
-    let bytes = glasm::gas::assemble_to_elf64(&src).map_err(|errs| {
+    let bytes = glasm::gas::assemble_to_elf(&src, glasm::Arch::X86_64).map_err(|errs| {
         errs.iter()
             .map(|e| format!("line {}: {}", e.line, e.msg))
             .collect::<Vec<_>>()

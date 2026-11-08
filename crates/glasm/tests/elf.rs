@@ -1,14 +1,12 @@
 //! Object-file level checks: sections, symbols, relocations, and a full
 //! link-and-run through the system linker.
 
-use glasm::parse::parse_module;
-use glasm::{assemble, elf};
 use object::read::{Object, ObjectSection, ObjectSymbol};
 
 fn build(src: &str) -> Vec<u8> {
-    let stmts = parse_module(src).expect("parse");
-    let module = assemble::assemble(&stmts).expect("assemble");
-    elf::write_elf64(&module).expect("elf")
+    let stmts = glasm::parse::parse_module(src).expect("parse");
+    let module = glasm::assemble::assemble(&stmts, glasm::Arch::X86_64).expect("assemble");
+    glasm::elf::write_module_elf(&module, glasm::Arch::X86_64).expect("elf")
 }
 
 #[test]
@@ -35,18 +33,12 @@ buf:    resq 4
     let obj = object::File::parse(&*bytes).expect("parse object");
     assert_eq!(obj.architecture(), object::Architecture::X86_64);
 
-    let names: Vec<_> = obj
-        .sections()
-        .map(|s| s.name().ok().unwrap_or_default().to_string())
-        .collect();
+    let names: Vec<_> = obj.sections().map(|s| s.name().ok().unwrap_or_default().to_string()).collect();
     assert!(names.iter().any(|n| n == ".text"));
     assert!(names.iter().any(|n| n == ".data"));
     assert!(names.iter().any(|n| n == ".bss"));
 
-    let symbols: Vec<_> = obj
-        .symbols()
-        .map(|s| (s.name().unwrap_or("").to_string(), s.is_definition(), s.is_global()))
-        .collect();
+    let symbols: Vec<_> = obj.symbols().map(|s| (s.name().unwrap_or("").to_string(), s.is_definition(), s.is_global())).collect();
     let start = symbols.iter().find(|(n, ..)| n == "start").expect("start symbol");
     assert!(start.1 && start.2);
     let helper = symbols.iter().find(|(n, ..)| n == "helper").expect("helper symbol");
@@ -97,12 +89,7 @@ _start: mov rax, 60
     let opath = dir.join(format!("glasm-link-{}.o", std::process::id()));
     let epath = dir.join(format!("glasm-link-{}", std::process::id()));
     std::fs::write(&opath, bytes).expect("write object");
-    let linked = std::process::Command::new("ld")
-        .arg(&opath)
-        .arg("-o")
-        .arg(&epath)
-        .output()
-        .expect("run ld");
+    let linked = std::process::Command::new("ld").arg(&opath).arg("-o").arg(&epath).output().expect("run ld");
     assert!(linked.status.success(), "ld failed: {}", String::from_utf8_lossy(&linked.stderr));
     let run = std::process::Command::new(&epath).status().expect("run program");
     std::fs::remove_file(&opath).ok();

@@ -11,18 +11,8 @@ fn main() {
     let root = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .parent()
-                .unwrap()
-                .join("nasm")
-        });
-    let out = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("glasm_data/src/insns_gen.rs");
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap().join("nasm"));
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("glasm_data/src/insns_gen.rs");
     let src = Tables::read(&root);
     std::fs::write(&out, emit(&src)).expect("write insns_gen.rs");
     println!(
@@ -65,7 +55,12 @@ impl Tables {
         let regs = read_regs(root, &defines);
         let (templates, mnemonics) = read_insnsa(root, &defines);
 
-        Tables { bytecodes, templates, mnemonics, regs }
+        Tables {
+            bytecodes,
+            templates,
+            mnemonics,
+            regs,
+        }
     }
 }
 
@@ -96,8 +91,7 @@ impl Defines {
                 if name.ends_with('(') {
                     continue;
                 }
-                map.entry(name.to_string())
-                    .or_insert_with(|| strip_comments(value).trim().to_string());
+                map.entry(name.to_string()).or_insert_with(|| strip_comments(value).trim().to_string());
             }
         }
         Defines { map }
@@ -357,9 +351,7 @@ fn strip_comments(text: &str) -> String {
 }
 
 fn read_bytecodes(root: &Path) -> Vec<u8> {
-    let text = strip_comments(
-        &std::fs::read_to_string(root.join("x86/insnsb.c")).expect("x86/insnsb.c"),
-    );
+    let text = strip_comments(&std::fs::read_to_string(root.join("x86/insnsb.c")).expect("x86/insnsb.c"));
     let start = text.find('{').expect("bytecodes {");
     let end = text.rfind('}').expect("bytecodes }");
     let body = &text[start + 1..end];
@@ -430,10 +422,8 @@ fn read_if_bits(root: &Path) -> HashMap<String, u32> {
 }
 
 fn read_regs(root: &Path, d: &Defines) -> Vec<RegInfo> {
-    let vals_text =
-        std::fs::read_to_string(root.join("x86/regvals.c")).expect("x86/regvals.c");
-    let flags_text =
-        std::fs::read_to_string(root.join("x86/regflags.c")).expect("x86/regflags.c");
+    let vals_text = std::fs::read_to_string(root.join("x86/regvals.c")).expect("x86/regvals.c");
+    let flags_text = std::fs::read_to_string(root.join("x86/regflags.c")).expect("x86/regflags.c");
 
     let mut vals: Vec<(String, i32)> = Vec::new();
     let mut lines = vals_text.lines().peekable();
@@ -443,11 +433,7 @@ fn read_regs(root: &Path, d: &Defines) -> Vec<RegInfo> {
         let name = line[idx + 2..idx + end].trim().to_string();
         // The value is on this line or the next.
         let code = line[..idx].trim();
-        let code = if code.is_empty() {
-            lines.next().map(|l| l.trim()).unwrap_or("")
-        } else {
-            code
-        };
+        let code = if code.is_empty() { lines.next().map(|l| l.trim()).unwrap_or("") } else { code };
         let Some(num) = code.trim_end_matches(',').parse::<i32>().ok() else {
             continue;
         };
@@ -479,15 +465,12 @@ fn read_regs(root: &Path, d: &Defines) -> Vec<RegInfo> {
 }
 
 fn read_insnsa(root: &Path, d: &Defines) -> (Vec<Vec<Template>>, Vec<String>) {
-    let text = strip_comments(
-        &std::fs::read_to_string(root.join("x86/insnsa.c")).expect("x86/insnsa.c"),
-    );
+    let text = strip_comments(&std::fs::read_to_string(root.join("x86/insnsa.c")).expect("x86/insnsa.c"));
 
     // Opcode enum from insnsi.h gives mnemonic names in nasm_instructions
     // order; nasm_instructions entries carry the same via comments, but the
     // instrux_<NAME> groups are keyed by name anyway.
-    let enum_text =
-        std::fs::read_to_string(root.join("x86/insnsi.h")).expect("x86/insnsi.h");
+    let enum_text = std::fs::read_to_string(root.join("x86/insnsi.h")).expect("x86/insnsi.h");
     let mut mnemonics: Vec<String> = Vec::new();
     for line in enum_text.lines() {
         let Some(rest) = line.trim().strip_prefix("I_") else {
@@ -503,10 +486,7 @@ fn read_insnsa(root: &Path, d: &Defines) -> (Vec<Vec<Template>>, Vec<String>) {
     while let Some(pos) = rest.find("static const struct itemplate instrux_") {
         rest = &rest[pos..];
         let name_start = rest.find("instrux_").unwrap() + 8;
-        let name_end = rest[name_start..]
-            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .unwrap()
-            + name_start;
+        let name_end = rest[name_start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap() + name_start;
         let name = &rest[name_start..name_end];
         let body_start = rest.find('{').unwrap();
         let body_end = rest[body_start..].find("\n};").map(|p| body_start + p);
@@ -542,9 +522,7 @@ fn read_insnsa(root: &Path, d: &Defines) -> (Vec<Vec<Template>>, Vec<String>) {
             // deco: the token after the opd closing brace
             let after = entry[opd_end + 1..].trim_start_matches(',');
             let after = after.trim_start();
-            let deco_end = after
-                .find(|c: char| c == ',')
-                .unwrap_or(after.len());
+            let deco_end = after.find(|c: char| c == ',').unwrap_or(after.len());
             let deco_str = after[..deco_end].trim();
             let mut deco = [0u64; 5];
             if deco_str != "NO_DECORATOR" && !deco_str.is_empty() {
@@ -557,9 +535,7 @@ fn read_insnsa(root: &Path, d: &Defines) -> (Vec<Vec<Template>>, Vec<String>) {
                 continue;
             };
             let code_str = &entry[code_pos + 15..];
-            let code_end = code_str
-                .find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(code_str.len());
+            let code_end = code_str.find(|c: char| !c.is_ascii_digit()).unwrap_or(code_str.len());
             let code_off: u32 = code_str[..code_end].parse().expect("bytecode offset");
             // iflag index: the number after the code offset
             let after_code = &code_str[code_end..];
@@ -634,7 +610,9 @@ fn emit(src: &Tables) -> String {
     }
     s.push_str("}\n\n");
 
-    s.push_str("pub struct Template {\n    pub opcode: u16,\n    pub operands: u8,\n    pub opd: [u64; 5],\n    pub deco: [u64; 5],\n    pub code_off: u32,\n    pub f: [u32; 7],\n}\n\n");
+    s.push_str(
+        "pub struct Template {\n    pub opcode: u16,\n    pub operands: u8,\n    pub opd: [u64; 5],\n    pub deco: [u64; 5],\n    pub code_off: u32,\n    pub f: [u32; 7],\n}\n\n",
+    );
 
     s.push_str("pub static MNEMONICS: &[&str] = &[\n");
     for m in &src.mnemonics {
@@ -672,10 +650,7 @@ fn emit(src: &Tables) -> String {
     s.push_str("pub struct RegInfo {\n    pub name: &'static str,\n    pub flags: u64,\n    pub val: i32,\n}\n\n");
     s.push_str("pub static REGS: &[RegInfo] = &[\n");
     for r in &src.regs {
-        s.push_str(&format!(
-            "    RegInfo {{ name: {:?}, flags: {:#x}, val: {} }},\n",
-            r.name, r.flags, r.val
-        ));
+        s.push_str(&format!("    RegInfo {{ name: {:?}, flags: {:#x}, val: {} }},\n", r.name, r.flags, r.val));
     }
     s.push_str("];\n");
     s
@@ -691,10 +666,7 @@ fn nasm_root_for_iflag() -> String {
 
 impl Template {
     fn mnemonic_idx(&self, src: &Tables) -> u16 {
-        src.mnemonics
-            .iter()
-            .position(|m| *m == self.mnemonic)
-            .expect("mnemonic known") as u16
+        src.mnemonics.iter().position(|m| *m == self.mnemonic).expect("mnemonic known") as u16
     }
 }
 
@@ -706,11 +678,7 @@ fn macro_call(name: &str, args: &[u64], d: &Defines) -> Result<u64, String> {
         "RN_FLAGS" => {
             let n = a(0)?;
             let l16 = 1u64 << (10 + 18);
-            let mut v = if n == 0 {
-                l16 | 1u64 << (11 + 18)
-            } else {
-                l16 | 1u64 << (12 + 18)
-            };
+            let mut v = if n == 0 { l16 | 1u64 << (11 + 18) } else { l16 | 1u64 << (12 + 18) };
             if n < 16 {
                 v |= l16;
             }
@@ -731,4 +699,3 @@ fn macro_call(name: &str, args: &[u64], d: &Defines) -> Result<u64, String> {
         }
     }
 }
-

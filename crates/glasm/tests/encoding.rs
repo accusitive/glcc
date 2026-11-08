@@ -3,14 +3,8 @@
 
 fn text_bytes(src: &str) -> Vec<u8> {
     let stmts = glasm::parse::parse_module(src).expect("parse");
-    let module = glasm::assemble::assemble(&stmts).expect("assemble");
-    module
-        .sections
-        .iter()
-        .find(|s| s.name == ".text")
-        .expect(".text")
-        .data
-        .clone()
+    let module = glasm::assemble::assemble(&stmts, glasm::Arch::X86_64).expect("assemble");
+    module.sections.iter().find(|s| s.name == ".text").expect(".text").data.clone()
 }
 
 fn check(src: &str, expected_hex: &str) {
@@ -159,12 +153,9 @@ tbl:    dw 0x1234, 5
     ",
     )
     .expect("parse");
-    let module = glasm::assemble::assemble(&stmts).expect("assemble");
+    let module = glasm::assemble::assemble(&stmts, glasm::Arch::X86_64).expect("assemble");
     let data = &module.sections.iter().find(|s| s.name == ".data").unwrap().data;
-    assert_eq!(
-        data,
-        &[b'h', b'i', 10, 0, 0x34, 0x12, 5, 0, 0xef, 0xbe, 0xad, 0xde, 7, 0, 0, 0, 0, 0, 0, 0]
-    );
+    assert_eq!(data, &[b'h', b'i', 10, 0, 0x34, 0x12, 5, 0, 0xef, 0xbe, 0xad, 0xde, 7, 0, 0, 0, 0, 0, 0, 0]);
 }
 
 #[test]

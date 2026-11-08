@@ -1,7 +1,9 @@
-//! Instruction-level AST shared by the syntax frontends, modeled on
-//! nasm's `struct operand` (opflags-driven) so the generated instruction
-//! tables match against it directly.
+//! Statement-level AST shared by the syntax frontends, plus the x86
+//! operand model (`X86Insn`/`Operand`), which mirrors nasm's
+//! `struct operand` (opflags-driven) so the generated instruction tables
+//! match against it directly.
 
+use crate::arch::Insn;
 use crate::expr::Expr;
 
 /// opflags_t constants (values from nasm's `include/opflags.h`).
@@ -39,8 +41,7 @@ pub mod op {
     pub const REG_CLASS_OPMASK: u64 = 1 << (7 + 8);
     pub const REG_CLASS_BND: u64 = 1 << (7 + 9);
     pub const REG_CLASS_RM_TMM: u64 = 1 << (7 + 10);
-    pub const REG_CLASS_VECTOR: u64 =
-        REG_CLASS_RM_XMM | REG_CLASS_RM_YMM | REG_CLASS_RM_ZMM | REG_CLASS_RM_TMM;
+    pub const REG_CLASS_VECTOR: u64 = REG_CLASS_RM_XMM | REG_CLASS_RM_YMM | REG_CLASS_RM_ZMM | REG_CLASS_RM_TMM;
 
     pub const RN_L16: u64 = 1 << (10 + 18);
     pub const RN_ZERO: u64 = (1 << (11 + 18)) | RN_L16;
@@ -70,9 +71,7 @@ pub mod op {
     pub const RM_ZERO: u64 = RN_ZERO | REGMEM;
     pub const RM_NZERO: u64 = RN_NZERO | REGMEM;
     /// All r/m classes a memory operand can match (nasm MEMORY_ANY).
-    pub const MEMORY_ANY: u64 =
-        MEMORY | RM_GPR | RM_MMX | RM_XMM | RM_YMM | RM_ZMM | RM_L16 | RM_ZERO
-            | RM_NZERO;
+    pub const MEMORY_ANY: u64 = MEMORY | RM_GPR | RM_MMX | RM_XMM | RM_YMM | RM_ZMM | RM_L16 | RM_ZERO | RM_NZERO;
     /// RM_SEL: valid segment selector class (added to unsized r/m).
     pub const RM_SEL: u64 = (1 << (18 + 13)) | REGMEM;
 
@@ -148,8 +147,9 @@ impl Operand {
     }
 }
 
+/// One x86 instruction (AT&T- or Intel-syntax source).
 #[derive(Clone, Debug)]
-pub struct Insn {
+pub struct X86Insn {
     /// Index into `insns_gen::MNEMONICS`.
     pub opcode: usize,
     /// Instruction prefixes (lock/rep/...), lowercased.
@@ -186,8 +186,16 @@ pub struct SectionSpec {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Label(String, u32),
-    Data { size: u8, items: Vec<DataItem>, line: u32 },
-    Reserve { size: u8, count: Expr, line: u32 },
+    Data {
+        size: u8,
+        items: Vec<DataItem>,
+        line: u32,
+    },
+    Reserve {
+        size: u8,
+        count: Expr,
+        line: u32,
+    },
     Align(Expr, u32),
     Insn(Insn),
     Global(Vec<String>, u32),
@@ -198,9 +206,19 @@ pub enum Stmt {
     /// Default operand size (`bits 16/32/64`); only 64 is supported.
     Bits(u8, u32),
     /// `times N <inner>`; N must eventually be constant.
-    Times { count: Expr, inner: Box<Stmt>, line: u32 },
+    Times {
+        count: Expr,
+        inner: Box<Stmt>,
+        line: u32,
+    },
     /// GAS `.comm`/`.lcomm`: tentative definition carved out of .bss.
-    Comm { name: String, size: Expr, align: Option<u64>, global: bool, line: u32 },
+    Comm {
+        name: String,
+        size: Expr,
+        align: Option<u64>,
+        global: bool,
+        line: u32,
+    },
 }
 
 impl Stmt {
@@ -216,7 +234,7 @@ impl Stmt {
             | Stmt::Bits(_, l)
             | Stmt::Times { line: l, .. }
             | Stmt::Comm { line: l, .. } => *l,
-            Stmt::Insn(i) => i.line,
+            Stmt::Insn(i) => i.line(),
             Stmt::Section(_) => 0,
         }
     }

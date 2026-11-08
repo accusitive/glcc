@@ -1,6 +1,17 @@
 //! Expression AST and evaluator, modeled on nasm's `eval.c` semantics:
 //! a value is a constant, or (section, offset) with a constant addend.
 
+/// RISC-V relocation modifiers, `%hi(sym)`-style: the encoder decides
+/// the fixup layout from the modifier; the evaluator never sees one
+/// (backends unwrap before evaluating).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModKind {
+    Hi,
+    Lo,
+    PcrelHi,
+    PcrelLo,
+}
+
 #[derive(Clone, Debug)]
 pub enum Expr {
     Int(i64),
@@ -8,6 +19,11 @@ pub enum Expr {
     Sym(String),
     Here,
     SectStart,
+    /// `%hi(sym)`-style relocation modifier.
+    Mod {
+        kind: ModKind,
+        inner: Box<Expr>,
+    },
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
@@ -26,9 +42,19 @@ pub enum Expr {
 pub enum RValue {
     Const(i64),
     /// Offset into a section of this module (a local or global label).
-    SectVal { sect: usize, off: i64 },
+    /// `sym` is the module symbol table index of the label the
+    /// expression referenced, when the value came straight from one
+    /// (relocations target the named symbol, not the section).
+    SectVal {
+        sect: usize,
+        off: i64,
+        sym: Option<usize>,
+    },
     /// Reference to an external symbol plus addend; needs a relocation.
-    ExternRef { sym: usize, off: i64 },
+    ExternRef {
+        sym: usize,
+        off: i64,
+    },
 }
 
 /// What symbol lookup feeds the evaluator.
@@ -65,32 +91,57 @@ pub struct EvalCtx<'a> {
 }
 
 impl Expr {
+    /// Evaluates, unwrapping a single top-level relocation modifier
+    /// (returned alongside the value so encoders can pick the layout).
+    pub fn eval_mod(&self, ctx: &EvalCtx) -> Result<(Option<ModKind>, RValue), String> {
+        match self {
+            Expr::Mod { kind, inner } => Ok((Some(*kind), inner.eval(ctx)?)),
+            other => Ok((None, other.eval(ctx)?)),
+        }
+    }
+
     pub fn eval(&self, ctx: &EvalCtx) -> Result<RValue, String> {
         match self {
             Expr::Int(i) => Ok(RValue::Const(*i)),
-            Expr::Here => Ok(RValue::SectVal { sect: ctx.cur_sect, off: ctx.cur_off }),
-            Expr::SectStart => Ok(RValue::SectVal { sect: ctx.cur_sect, off: 0 }),
+            Expr::Mod { .. } => Err("relocation modifier is only valid in an instruction operand".into()),
+            Expr::Here => Ok(RValue::SectVal {
+                sect: ctx.cur_sect,
+                off: ctx.cur_off,
+                sym: None,
+            }),
+            Expr::SectStart => Ok(RValue::SectVal {
+                sect: ctx.cur_sect,
+                off: 0,
+                sym: None,
+            }),
             Expr::Sym(name) => {
-                let sym = ctx
-                    .syms
-                    .lookup(name)
-                    .ok_or_else(|| format!("undefined symbol `{name}'"))?;
+                let sym = ctx.syms.lookup(name).ok_or_else(|| format!("undefined symbol `{name}'"))?;
                 if sym.extern_ {
                     Ok(RValue::ExternRef { sym: sym.index, off: sym.value })
                 } else if sym.defined {
                     match sym.sect {
-                        Some(sect) => Ok(RValue::SectVal { sect, off: sym.value }),
+                        Some(sect) => Ok(RValue::SectVal {
+                            sect,
+                            off: sym.value,
+                            sym: Some(sym.index),
+                        }),
                         None => Ok(RValue::Const(sym.value)),
                     }
                 } else if ctx.optimistic {
                     // Forward reference: fall back to the previous pass's
                     // value as an estimate; the pass loop re-encodes until
                     // estimates and real values agree.
-                    if !sym.seen && let Some(flag) = ctx.unknown_hit {
+                    if !sym.seen
+                        && let Some(flag) = ctx.unknown_hit
+                    {
                         flag.set(true);
                     }
                     match sym.sect {
-                        Some(sect) => Ok(RValue::SectVal { sect, off: sym.value }),
+                        Some(sect) => Ok(RValue::SectVal {
+                            sect,
+                            off: sym.value,
+                            sym: Some(sym.index),
+                        }),
                         None => Ok(RValue::Const(sym.value)),
                     }
                 } else {
@@ -109,16 +160,9 @@ impl Expr {
                 match (a, b) {
                     (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(x - y)),
                     (a, RValue::Const(y)) => Ok(add_const(a, -y)),
-                    (
-                        RValue::SectVal { sect: s1, off: o1 },
-                        RValue::SectVal { sect: s2, off: o2 },
-                    ) if s1 == s2 => Ok(RValue::Const(o1 - o2)),
-                    (RValue::Const(x), RValue::SectVal { sect, off }) => {
-                        Ok(RValue::SectVal { sect, off: x - off })
-                    }
-                    (RValue::Const(x), RValue::ExternRef { sym, off }) => {
-                        Ok(RValue::ExternRef { sym, off: x - off })
-                    }
+                    (RValue::SectVal { sect: s1, off: o1, .. }, RValue::SectVal { sect: s2, off: o2, .. }) if s1 == s2 => Ok(RValue::Const(o1 - o2)),
+                    (RValue::Const(x), RValue::SectVal { sect, off, sym }) => Ok(RValue::SectVal { sect, off: x - off, sym }),
+                    (RValue::Const(x), RValue::ExternRef { sym, off }) => Ok(RValue::ExternRef { sym, off: x - off }),
                     _ => Err("cannot subtract these values".into()),
                 }
             }
@@ -131,7 +175,7 @@ impl Expr {
             Expr::Xor(a, b) => binary(ctx, a, b, |x, y| x ^ y),
             Expr::Neg(a) => match a.eval(ctx)? {
                 RValue::Const(x) => Ok(RValue::Const(-x)),
-                RValue::SectVal { sect, off } => Ok(RValue::SectVal { sect, off: -off }),
+                RValue::SectVal { sect, off, sym } => Ok(RValue::SectVal { sect, off: -off, sym }),
                 RValue::ExternRef { sym, off } => Ok(RValue::ExternRef { sym, off: -off }),
             },
             Expr::BitNot(a) => match a.eval(ctx)? {
@@ -158,17 +202,12 @@ impl RValue {
 fn add_const(v: RValue, c: i64) -> RValue {
     match v {
         RValue::Const(x) => RValue::Const(x + c),
-        RValue::SectVal { sect, off } => RValue::SectVal { sect, off: off + c },
+        RValue::SectVal { sect, off, sym } => RValue::SectVal { sect, off: off + c, sym },
         RValue::ExternRef { sym, off } => RValue::ExternRef { sym, off: off + c },
     }
 }
 
-fn binary(
-    ctx: &EvalCtx,
-    a: &Expr,
-    b: &Expr,
-    f: impl Fn(i64, i64) -> i64,
-) -> Result<RValue, String> {
+fn binary(ctx: &EvalCtx, a: &Expr, b: &Expr, f: impl Fn(i64, i64) -> i64) -> Result<RValue, String> {
     match (a.eval(ctx)?, b.eval(ctx)?) {
         (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(f(x, y))),
         _ => Err("operation needs constant operands".into()),

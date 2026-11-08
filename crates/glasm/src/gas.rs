@@ -1,23 +1,51 @@
 //! GAS/AT&T syntax frontend (the `.s` dialect GNU `as` and glcc's own
-//! generated asm use), translated onto the same statement model as the
-//! Intel frontend: `src, dst` operand order, `%reg`/`$imm`/
-//! `disp(base,index,scale)` operand syntax, and the directives compilers
-//! actually emit.
+//! generated asm use), translated onto the shared statement model.
+//! x86_64 uses AT&T operand syntax (`%reg`/`$imm`/`disp(base,index,
+//! scale)`); RISC-V and AArch64 have their own operand syntaxes with the
+//! same lexer and directive handling.
 
+use crate::arch::Arch;
 use crate::assemble::{self, AsmError};
 use crate::expr::Expr;
-use crate::insn::{eaf, op, DataItem, Insn, Operand, Stmt};
+use crate::insn::{DataItem, Operand, Stmt, X86Insn, eaf, op};
 use crate::parse::{self, ParseError, Tok, Toks};
 use crate::regs;
 
-pub fn assemble_to_elf64(src: &str) -> Result<Vec<u8>, Vec<AsmError>> {
-    let stmts = parse_module(src).map_err(|errs| {
-        errs.into_iter()
-            .map(|e| AsmError { line: e.line, msg: e.msg })
-            .collect::<Vec<_>>()
-    })?;
-    let module = assemble::assemble(&stmts)?;
-    crate::elf::write_elf64(&module).map_err(|e| vec![AsmError { line: 0, msg: e }])
+/// Lexing quirks per architecture: comment/immediate/register markers.
+#[derive(Clone, Copy, PartialEq)]
+pub enum LexMode {
+    /// x86: `#` and `;` comments, `$` immediates, `%` registers.
+    X86,
+    /// RISC-V: `#` comments, `%hi(...)`-style modifiers (lexed as
+    /// register tokens by the shared lexer).
+    Riscv,
+    /// AArch64: `//` comments, `#` immediates.
+    A64,
+}
+
+/// Assembles GAS-syntax source (any arch) into an ELF64 object.
+pub fn assemble_to_elf(src: &str, arch: Arch) -> Result<Vec<u8>, Vec<AsmError>> {
+    let stmts = parse_module(src, arch).map_err(|errs| errs.into_iter().map(|e| AsmError { line: e.line, msg: e.msg }).collect::<Vec<_>>())?;
+    let module = assemble::assemble(&stmts, arch)?;
+    crate::elf::write_module_elf(&module, arch).map_err(|e| vec![AsmError { line: 0, msg: e }])
+}
+
+pub fn parse_module(src: &str, arch: Arch) -> Result<Vec<Stmt>, Vec<ParseError>> {
+    let lines: Vec<&str> = src.lines().collect();
+    let numlabels = NumLabels::scan(&lines);
+    let mut stmts = Vec::new();
+    let mut errors = Vec::new();
+    for (lineno, line) in lines.iter().enumerate() {
+        // GAS `;` separates statements on a line.
+        for part in split_statements(line) {
+            let line_no = (lineno + 1) as u32;
+            match parse_line(&part, line_no, lineno, &numlabels, arch) {
+                Ok(ss) => stmts.extend(ss),
+                Err(msg) => errors.push(ParseError { line: line_no, msg }),
+            }
+        }
+    }
+    if errors.is_empty() { Ok(stmts) } else { Err(errors) }
 }
 
 // ---------------------------------------------------------------------
@@ -25,7 +53,7 @@ pub fn assemble_to_elf64(src: &str) -> Result<Vec<u8>, Vec<AsmError>> {
 // ---------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
-enum GTok {
+pub enum GTok {
     Ident(String),
     Int(i64),
     /// Numeric local label reference: `1b` / `1f`.
@@ -38,7 +66,7 @@ enum GTok {
     Star,
 }
 
-fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
+fn lex_line(line: &str, mode: LexMode) -> Result<Vec<GTok>, String> {
     let b = line.as_bytes();
     let mut i = 0;
     let mut out = Vec::new();
@@ -49,12 +77,26 @@ fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
             continue;
         }
         match c {
-            b'#' | b';' => break, // comment
+            b';' => break, // statement separator (already split, but be safe)
+            b'#' => match mode {
+                LexMode::A64 => {
+                    out.push(GTok::Imm);
+                    i += 1;
+                }
+                _ => break, // comment
+            },
+            b'/' if mode == LexMode::A64 && b.get(i + 1) == Some(&b'/') => break,
             b'$' => {
+                if mode != LexMode::X86 {
+                    return Err(format!("unexpected character `$'"));
+                }
                 out.push(GTok::Imm);
                 i += 1;
             }
             b'%' => {
+                if mode == LexMode::A64 {
+                    return Err(format!("unexpected character `%'"));
+                }
                 i += 1;
                 let start = i;
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
@@ -100,8 +142,7 @@ fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
                         }
                     }
                 }
-                let v = gas_parse_number(text)
-                    .ok_or_else(|| format!("invalid number `{text}'"))?;
+                let v = gas_parse_number(text).ok_or_else(|| format!("invalid number `{text}'"))?;
                 out.push(GTok::Int(v));
             }
             b'(' => {
@@ -120,8 +161,7 @@ fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
                 out.push(GTok::Star);
                 i += 1;
             }
-            b'+' | b'-' | b'/' | b'|' | b'&' | b'^' | b'~' | b'!' | b'<' | b'>'
-            | b':' | b'=' => {
+            b'+' | b'-' | b'/' | b'|' | b'&' | b'^' | b'~' | b'!' | b'<' | b'>' | b':' | b'=' => {
                 if c == b'<' && i + 1 < b.len() && b[i + 1] == b'<' {
                     out.push(GTok::Punct("<<"));
                     i += 2;
@@ -159,8 +199,7 @@ fn lex_line(line: &str) -> Result<Vec<GTok>, String> {
             _ if is_ident_start(c) || c == b'@' => {
                 let start = i;
                 i += 1;
-                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.')
-                {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_' || b[i] == b'.') {
                     i += 1;
                 }
                 out.push(GTok::Ident(line[start..i].to_string()));
@@ -187,7 +226,8 @@ fn gas_parse_number(text: &str) -> Option<i64> {
     } else {
         (10, text)
     };
-    i64::from_str_radix(digits, radix).ok()
+    // Wrap like GNU as: 0xfffffffffffff7ff is -2049.
+    u64::from_str_radix(digits, radix).ok().map(|v| v as i64)
 }
 
 /// Lexes a quoted string starting at `at`, handling GAS backslash
@@ -216,10 +256,7 @@ fn lex_string(line: &str, at: usize) -> Result<(Vec<u8>, usize), String> {
                 b'x' => {
                     let mut v = 0u32;
                     let mut n = 0;
-                    while n < 2
-                        && i + 1 + n < b.len()
-                        && (b[i + 1 + n] as char).is_ascii_hexdigit()
-                    {
+                    while n < 2 && i + 1 + n < b.len() && (b[i + 1 + n] as char).is_ascii_hexdigit() {
                         v = v * 16 + (b[i + 1 + n] as char).to_digit(16).unwrap();
                         n += 1;
                     }
@@ -248,11 +285,13 @@ fn lex_string(line: &str, at: usize) -> Result<(Vec<u8>, usize), String> {
 // ---------------------------------------------------------------------
 
 fn numeric_label_name(digit: u32, seq: usize) -> String {
-    format!("..glasm{digit}_{seq}")
+    // GNU as's internal numeric-label names: instance counts are
+    // 1-based per digit, and relocations against them use this name.
+    format!(".L{digit}\u{2}{}", seq + 1)
 }
 
 /// Maps (line index, direction) to the numeric label's unique name.
-struct NumLabels {
+pub struct NumLabels {
     /// Per line: names of `N:` definitions made on that line.
     defs: Vec<Vec<(u32, String)>>,
 }
@@ -297,16 +336,12 @@ impl NumLabels {
         NumLabels { defs }
     }
 
-    fn def_on_line(&self, line: usize, digit: u32) -> Option<&str> {
-        self.defs
-            .get(line)?
-            .iter()
-            .find(|(d, _)| *d == digit)
-            .map(|(_, n)| n.as_str())
+    pub(crate) fn def_on_line(&self, line: usize, digit: u32) -> Option<&str> {
+        self.defs.get(line)?.iter().find(|(d, _)| *d == digit).map(|(_, n)| n.as_str())
     }
 
     /// Most recent definition strictly before `line`.
-    fn last_before(&self, line: usize, digit: u32) -> Option<String> {
+    pub(crate) fn last_before(&self, line: usize, digit: u32) -> Option<String> {
         for (l, defs) in self.defs.iter().enumerate().rev() {
             if l >= line {
                 continue;
@@ -319,7 +354,7 @@ impl NumLabels {
     }
 
     /// First definition at or after `line`.
-    fn next_at(&self, line: usize, digit: u32) -> Option<String> {
+    pub(crate) fn next_at(&self, line: usize, digit: u32) -> Option<String> {
         for (_l, defs) in self.defs.iter().enumerate().skip(line) {
             if let Some((_, n)) = defs.iter().find(|(d, _)| *d == digit) {
                 return Some(n.clone());
@@ -334,43 +369,38 @@ impl NumLabels {
 // ---------------------------------------------------------------------
 
 const IGNORED_DIRECTIVES: &[&str] = &[
-    "file", "ident", "size", "type", "local", "extern", "previous", "end", "appfile",
+    "file",
+    "ident",
+    "size",
+    "type",
+    "local",
+    "extern",
+    "previous",
+    "end",
+    "appfile",
     "popsection",
-    "appline", "line", "loc", "eject", "psize", "noformat", "nolist", "list", "title", "sbttl",
-    "version", "warn", "err", "print", "popsection", "pushsection_nop", "stabn", "stabs", "stabd",
+    "appline",
+    "line",
+    "loc",
+    "eject",
+    "psize",
+    "noformat",
+    "nolist",
+    "list",
+    "title",
+    "sbttl",
+    "version",
+    "warn",
+    "err",
+    "print",
+    "popsection",
+    "pushsection_nop",
+    "stabn",
+    "stabs",
+    "stabd",
 ];
 
-const DATA_DIRECTIVES: &[(&str, u8)] = &[
-    ("byte", 1),
-    ("word", 2),
-    ("short", 2),
-    ("value", 2),
-    ("long", 4),
-    ("int", 4),
-    ("quad", 8),
-];
-
-pub fn parse_module(src: &str) -> Result<Vec<Stmt>, Vec<ParseError>> {
-    let lines: Vec<&str> = src.lines().collect();
-    let numlabels = NumLabels::scan(&lines);
-    let mut stmts = Vec::new();
-    let mut errors = Vec::new();
-    for (lineno, line) in lines.iter().enumerate() {
-        // GAS `;` separates statements on a line.
-        for part in split_statements(line) {
-            let line_no = (lineno + 1) as u32;
-            match parse_line(&part, line_no, lineno, &numlabels) {
-                Ok(ss) => stmts.extend(ss),
-                Err(msg) => errors.push(ParseError { line: line_no, msg }),
-            }
-        }
-    }
-    if errors.is_empty() {
-        Ok(stmts)
-    } else {
-        Err(errors)
-    }
-}
+const DATA_DIRECTIVES: &[(&str, u8)] = &[("byte", 1), ("half", 2), ("word", 2), ("short", 2), ("value", 2), ("long", 4), ("int", 4), ("quad", 8)];
 
 /// Splits on `;` outside string literals.
 fn split_statements(line: &str) -> Vec<&str> {
@@ -401,13 +431,13 @@ fn split_statements(line: &str) -> Vec<&str> {
     parts
 }
 
-fn parse_line(
-    line: &str,
-    line_no: u32,
-    lineno: usize,
-    numlabels: &NumLabels,
-) -> Result<Vec<Stmt>, String> {
-    let g = lex_line(line)?;
+fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, arch: Arch) -> Result<Vec<Stmt>, String> {
+    let mode = match arch {
+        Arch::X86_64 => LexMode::X86,
+        Arch::Riscv32 | Arch::Riscv64 => LexMode::Riscv,
+        Arch::Aarch64 => LexMode::A64,
+    };
+    let g = lex_line(line, mode)?;
     let mut i = 0;
     let mut out = Vec::new();
 
@@ -418,15 +448,8 @@ fn parse_line(
                 out.push(Stmt::Label(name.clone(), line_no));
                 i += 2;
             }
-            Some(GTok::Int(digit))
-                if *digit >= 0
-                    && u32::try_from(*digit).is_ok()
-                    && g.get(i + 1) == Some(&GTok::Punct(":")) =>
-            {
-                let name = numlabels
-                    .def_on_line(lineno, *digit as u32)
-                    .ok_or("internal: numeric label not scanned")?
-                    .to_string();
+            Some(GTok::Int(digit)) if *digit >= 0 && u32::try_from(*digit).is_ok() && g.get(i + 1) == Some(&GTok::Punct(":")) => {
+                let name = numlabels.def_on_line(lineno, *digit as u32).ok_or("internal: numeric label not scanned")?.to_string();
                 out.push(Stmt::Label(name, line_no));
                 i += 2;
             }
@@ -443,7 +466,7 @@ fn parse_line(
             out.push(parse_directive(&g[i..], line_no, lineno, numlabels)?);
         }
         _ => {
-            out.push(parse_instruction(&g[i..], line_no, lineno, numlabels)?);
+            out.push(crate::arch::parse_gas_insn(arch, &g[i..], line_no, lineno, numlabels)?);
         }
     }
     Ok(out)
@@ -453,12 +476,7 @@ fn directive_name(word: &str) -> &str {
     word.trim_start_matches('.')
 }
 
-fn parse_directive(
-    g: &[GTok],
-    line_no: u32,
-    lineno: usize,
-    numlabels: &NumLabels,
-) -> Result<Stmt, String> {
+fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels) -> Result<Stmt, String> {
     let GTok::Ident(word) = &g[0] else {
         return Err("expected directive".into());
     };
@@ -472,7 +490,7 @@ fn parse_directive(
         // .pushsection behaves like .section for the common single-level
         // case; a matching .popsection is a no-op (no section stack).
         "section" | "pushsection" => parse_section(&mut t),
-        "globl" | "global" | "weak" => {
+        "globl" | "global" | "weak" | "extern" => {
             let mut names = Vec::new();
             while let Some(GTok::Ident(n)) = t.bump() {
                 names.push(n.clone());
@@ -483,6 +501,8 @@ fn parse_directive(
             }
             if name == "weak" {
                 Ok(Stmt::Weak(names, line_no))
+            } else if name == "extern" {
+                Ok(Stmt::Extern(names, line_no))
             } else {
                 Ok(Stmt::Global(names, line_no))
             }
@@ -508,7 +528,13 @@ fn parse_directive(
             } else {
                 None
             };
-            Ok(Stmt::Comm { name: sym, size, align, global, line: line_no })
+            Ok(Stmt::Comm {
+                name: sym,
+                size,
+                align,
+                global,
+                line: line_no,
+            })
         }
         "align" => {
             let Some(GTok::Int(v)) = t.bump() else {
@@ -592,7 +618,11 @@ fn section_stmt(name: &str, kind: SectionKind, align: Option<u64>) -> Stmt {
         SectionKind::Bss => crate::insn::SectionFlags::Bss,
         SectionKind::Rodata => crate::insn::SectionFlags::Rodata,
     };
-    Stmt::Section(crate::insn::SectionSpec { name: name.to_string(), flags, align })
+    Stmt::Section(crate::insn::SectionSpec {
+        name: name.to_string(),
+        flags,
+        align,
+    })
 }
 
 fn parse_section(t: &mut GToks) -> Result<Stmt, String> {
@@ -730,12 +760,8 @@ impl GToks<'_> {
                 GTok::Ident(n) => toks.push(Tok::Ident(n.clone())),
                 GTok::Int(v) => toks.push(Tok::Int(*v)),
                 GTok::NumRef(d, fwd) => {
-                    let name = if *fwd {
-                        numlabels.next_at(lineno + 1, *d)
-                    } else {
-                        numlabels.last_before(lineno, *d)
-                    }
-                    .ok_or_else(|| format!("no `{d}' label defined in that direction"))?;
+                    let name = if *fwd { numlabels.next_at(lineno + 1, *d) } else { numlabels.last_before(lineno, *d) }
+                        .ok_or_else(|| format!("no `{d}' label defined in that direction"))?;
                     toks.push(Tok::Ident(name));
                     let _ = &mut sub;
                 }
@@ -767,7 +793,12 @@ struct GasInsn {
 
 fn translate_mnemonic(mn: &str) -> Option<GasInsn> {
     fn insn(intel: &'static str, mem_size: Option<u64>, src_size: Option<u64>, keep_order: bool) -> Option<GasInsn> {
-        Some(GasInsn { intel, mem_size, src_size, keep_order })
+        Some(GasInsn {
+            intel,
+            mem_size,
+            src_size,
+            keep_order,
+        })
     }
     // Two-part forms: movzXY / movsXY (movzbl, movswq, ...). Single
     // suffixes (movsb/movsw/movsl/movsq string ops) fall through.
@@ -778,21 +809,12 @@ fn translate_mnemonic(mn: &str) -> Option<GasInsn> {
         }
     }
     if let Some(rest) = mn.strip_prefix("movs") {
-        if matches!(rest.as_bytes().first(), Some(b'b') | Some(b'w') | Some(b'l') | Some(b'q'))
-            && rest.len() >= 2
-        {
+        if matches!(rest.as_bytes().first(), Some(b'b') | Some(b'w') | Some(b'l') | Some(b'q')) && rest.len() >= 2 {
             let (src, dst) = parse_two_suffixes(rest);
             return insn("movsx", Some(dst), Some(src), false);
         }
     }
-    const SPECIAL: &[(&str, &str)] = &[
-        ("movslq", "movsxd"),
-        ("cltq", "cdqe"),
-        ("cltd", "cdq"),
-        ("cqto", "cqo"),
-        ("cwtl", "cwde"),
-        ("cbtw", "cbw"),
-    ];
+    const SPECIAL: &[(&str, &str)] = &[("movslq", "movsxd"), ("cltq", "cdqe"), ("cltd", "cdq"), ("cqto", "cqo"), ("cwtl", "cwde"), ("cbtw", "cbw")];
     for (gas, intel) in SPECIAL {
         if mn == *gas {
             return insn(intel, None, None, false);
@@ -846,24 +868,16 @@ fn is_branch_mnemonic(intel: &str) -> bool {
         return true;
     }
     // Conditional branches: jcc (jne, jb, ...) but not jmpq-style names.
-    intel.len() <= 3
-        && intel.starts_with('j')
-        && crate::parse::opcode_index(intel).is_some()
+    intel.len() <= 3 && intel.starts_with('j') && crate::parse::opcode_index(intel).is_some()
 }
 
-fn parse_instruction(
-    g: &[GTok],
-    line_no: u32,
-    lineno: usize,
-    numlabels: &NumLabels,
-) -> Result<Stmt, String> {
+pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels) -> Result<Stmt, String> {
     // Split off instruction prefixes (lock/rep/...).
     let mut idx = 0;
     let mut prefixes = Vec::new();
     while let Some(GTok::Ident(word)) = g.get(idx) {
         match word.as_str() {
-            "lock" | "rep" | "repe" | "repz" | "repne" | "repnz" | "bnd" | "xacquire"
-            | "xrelease" => {
+            "lock" | "rep" | "repe" | "repz" | "repne" | "repnz" | "bnd" | "xacquire" | "xrelease" => {
                 prefixes.push(word.clone());
                 idx += 1;
             }
@@ -877,9 +891,13 @@ fn parse_instruction(
     let Some(gas_insn) = translate_mnemonic(&mn) else {
         return Err(format!("unknown or unsupported instruction `{mn}'"));
     };
-    let GasInsn { intel, mem_size, src_size, keep_order } = gas_insn;
-    let opcode = crate::parse::opcode_index(intel)
-        .ok_or_else(|| format!("unknown instruction `{intel}'"))?;
+    let GasInsn {
+        intel,
+        mem_size,
+        src_size,
+        keep_order,
+    } = gas_insn;
+    let opcode = crate::parse::opcode_index(intel).ok_or_else(|| format!("unknown instruction `{intel}'"))?;
     let branch = is_branch_mnemonic(intel);
 
     let mut t = GToks { g: &g[idx + 1..], pos: 0 };
@@ -893,15 +911,11 @@ fn parse_instruction(
                 Operand::imm(t.expr(lineno, numlabels)?)
             } else if matches!(t.g.get(t.pos), Some(GTok::Reg(_))) {
                 let Some(GTok::Reg(name)) = t.bump() else { unreachable!() };
-                let r = regs::lookup(name)
-                    .ok_or_else(|| format!("unknown register `%{name}'"))?;
+                let r = regs::lookup(name).ok_or_else(|| format!("unknown register `%{name}'"))?;
                 Operand::reg(r as i32, regs::flags(r))
             } else {
                 // Memory: `expr(base,index,scale)` or a bare displacement.
-                let had_paren = matches!(
-                    (t.g.get(t.pos), find_paren(t.g, t.pos)),
-                    (_, Some(_))
-                );
+                let had_paren = matches!((t.g.get(t.pos), find_paren(t.g, t.pos)), (_, Some(_)));
                 let disp = t.expr(lineno, numlabels)?;
                 let mut base: Option<i32> = None;
                 let mut index: Option<i32> = None;
@@ -916,16 +930,14 @@ fn parse_instruction(
                         if bname == regs::RIP {
                             rel = true;
                         } else {
-                            let r = regs::lookup(bname)
-                                .ok_or_else(|| format!("unknown register `%{bname}'"))?;
+                            let r = regs::lookup(bname).ok_or_else(|| format!("unknown register `%{bname}'"))?;
                             base = Some(r as i32);
                         }
                     }
                     if t.eat_punct(",") {
                         if matches!(t.g.get(t.pos), Some(GTok::Reg(_))) {
                             let Some(GTok::Reg(iname)) = t.bump() else { unreachable!() };
-                            let r = regs::lookup(iname)
-                                .ok_or_else(|| format!("unknown register `%{iname}'"))?;
+                            let r = regs::lookup(iname).ok_or_else(|| format!("unknown register `%{iname}'"))?;
                             index = Some(r as i32);
                         }
                         if t.eat_punct(",") {
@@ -1002,7 +1014,12 @@ fn parse_instruction(
         operands.reverse();
     }
 
-    Ok(Stmt::Insn(Insn { opcode, prefixes, operands, line: line_no }))
+    Ok(Stmt::Insn(crate::arch::Insn::X86(X86Insn {
+        opcode,
+        prefixes,
+        operands,
+        line: line_no,
+    })))
 }
 
 /// Whether a `(` follows at or after `pos` before the operand ends.
