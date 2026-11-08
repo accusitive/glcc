@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/glcc_frontend", "crates/glcc_cxx", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/glasm", "crates/glasm_data", "crates/fern", "crates/fernc", "crates/fern_exec", "crates/fern_repl"]
+members = ["crates/glcc_frontend", "crates/glcc_cxx", "crates/edg-sys", "crates/glcc_mir", "crates/glcc_dwarf", "crates/glcc_lower_cl", "crates/glcc_lower_mir", "crates/glcc_codegen", "crates/abi_probe", "crates/glcc_explorer", "crates/glcc_pp", "crates/glcc_toolchain", "crates/glasm", "crates/glasm_data", "crates/fern", "crates/fernc", "crates/fern_exec", "crates/fern_repl"]
 
 [package]
 name = "glcc"
@@ -14,6 +14,7 @@ glcc_pp = { path = "crates/glcc_pp" }
 glcc_mir = { path = "crates/glcc_mir" }
 glcc_lower_mir = { path = "crates/glcc_lower_mir" }
 glcc_lower_cl = { path = "crates/glcc_lower_cl" }
+glcc_codegen = { path = "crates/glcc_codegen" }
 glcc_dwarf = { path = "crates/glcc_dwarf" }
 cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64"] }
 cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }

@@ -408,6 +408,7 @@ dependencies = [
  "cranelift-object",
  "gimli",
  "glasm",
+ "glcc_codegen",
  "glcc_dwarf",
  "glcc_frontend",
  "glcc_lower_cl",
@@ -416,6 +417,18 @@ dependencies = [
  "glcc_pp",
  "glcc_toolchain",
  "object",
+]
+
+[[package]]
+name = "glcc_codegen"
+version = "0.1.0"
+dependencies = [
+ "glasm",
+ "glcc_mir",
+ "index_vec",
+ "object",
+ "regalloc2",
+ "smallvec",
 ]
 
 [[package]]

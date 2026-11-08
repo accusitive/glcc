@@ -411,6 +411,9 @@ pub struct Job {
     /// generated asm text with the built-in glasm assembler instead of
     /// spawning `as` (x86-64 ELF targets only). Default off like gcc.
     pub integrated_as: bool,
+    /// Code generator: cranelift by default; `-fbackend=native` selects
+    /// the in-repo machine-code backend (x86-64 Linux ELF only, so far).
+    pub backend: Backend,
     /// Keep intermediate files (`-save-temps[=cwd|=obj]`): `<stem>.i`
     /// preprocessed C for every C input, plus `<stem>.int.c` raw
     /// EDG-lowered C for C++ inputs.
@@ -531,6 +534,7 @@ impl Default for Job {
             opt_level: OptLevel::None,
             pic: true,
             integrated_as: false,
+            backend: Backend::Cranelift,
             save_temps: SaveTemps::Off,
             target: Target::native(),
             lang_std: None,
@@ -998,6 +1002,12 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                     job.integrated_as = true;
                 } else if matches!(s.as_ref(), "-fno-integrated-as" | "-fno-asm") {
                     job.integrated_as = false;
+                } else if let Some(rest) = s.strip_prefix("-fbackend=") {
+                    job.backend = match rest {
+                        "cranelift" => Backend::Cranelift,
+                        "native" => Backend::Native,
+                        other => return Err(format!("unknown backend '{other}' (cranelift|native)")),
+                    };
                 } else if s.starts_with("-f") {
                     // Spelling and machine-independent codegen flags:
                     // nothing to configure.
@@ -1330,10 +1340,11 @@ fn compile_source(
     async_enabled: bool,
     lang: LangOpts,
     error_format: ErrorFormat,
+    backend: Backend,
 ) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (mir_module, asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
-        emit_object(mir_module, asm_text, target, debug, pic, opt_level)
+        emit_object(mir_module, asm_text, target, debug, pic, opt_level, backend)
     }));
     match outcome {
         Ok(Ok(compiled)) => Ok(compiled),
@@ -1346,6 +1357,13 @@ fn compile_source(
 /// narrow-reloc and DWARF patchup. Shared by the C path (frontend-lowered
 /// MIR) and the EDG C++ path (MIR parsed from cpfe's emitter output);
 /// `asm_text` collects per-TU assembly appended by lowering.
+/// Which code generator lowers MIR to machine code.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Backend {
+    Cranelift,
+    Native,
+}
+
 fn emit_object(
     mir_module: glcc_mir::Module,
     mut asm_text: String,
@@ -1353,7 +1371,11 @@ fn emit_object(
     debug: bool,
     pic: bool,
     opt_level: OptLevel,
+    backend: Backend,
 ) -> std::result::Result<(Vec<u8>, String), ()> {
+    if backend == Backend::Native {
+        return emit_object_native(&mir_module, target);
+    }
     let cl_target = match target.arch {
         glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
         glcc_frontend::target::Arch::Aarch64 => glcc_lower_cl::Arch::Aarch64,
@@ -1432,6 +1454,36 @@ fn emit_object(
         product.emit().expect("object emit")
     };
     Ok((bytes, asm_text))
+}
+
+/// The in-repo machine-code backend: MIR → machine IR → regalloc2 →
+/// encoded ELF, without cranelift. Supported targets error cleanly.
+fn emit_object_native(mir_module: &glcc_mir::Module, target: Target) -> std::result::Result<(Vec<u8>, String), ()> {
+    let arch = match target.arch {
+        glcc_frontend::target::Arch::X86_64 => glcc_codegen::Arch::X86_64,
+        _ => {
+            eprintln!("glcc: error: the native backend does not yet support this target");
+            return Err(());
+        }
+    };
+    if !mir_module.funcs.iter().all(|f| f.personality.is_none()) {
+        eprintln!("glcc: error: the native backend does not yet support exception handling");
+        return Err(());
+    }
+    match glcc_codegen::emit_module(mir_module, arch) {
+        // The printer dump is debug output, not linkable GAS text;
+        // per-TU assembly (naked asm) is not yet lowered natively.
+        Ok(out) => {
+            if !out.asm.is_empty() && std::env::var_os("GLCC_NATIVE_DUMP").is_some() {
+                eprintln!("{}", out.asm);
+            }
+            Ok((out.object, String::new()))
+        }
+        Err(e) => {
+            eprintln!("glcc: error: native backend: {e}");
+            Err(())
+        }
+    }
 }
 
 /// Append our own `.eh_frame` + `.gcc_except_table` for EH modules (the
@@ -2213,6 +2265,7 @@ fn compile_edg_input(ctx: &Ctx, job: &Job, input: &Input, idx: usize, out: &Path
         job.async_enabled,
         language(job),
         job.error_format,
+        job.backend,
     )
     .map_err(|()| {
         take_diagnostic_emitted();
@@ -2263,7 +2316,7 @@ fn compile_mir_source(mir_text: &str, job: &Job) -> std::result::Result<(Vec<u8>
             }
             panic!("mir verification failed");
         }
-        emit_object(mir_module, String::new(), job.target, job.debug, job.pic, job.opt_level)
+        emit_object(mir_module, String::new(), job.target, job.debug, job.pic, job.opt_level, job.backend)
     }));
     match outcome {
         Ok(Ok(compiled)) => Ok(compiled),
@@ -2422,6 +2475,7 @@ fn compile_input_to_bytes(ctx: &Ctx, job: &Job, input: &Input, obj_out: Option<&
         job.async_enabled,
         language(job),
         job.error_format,
+        job.backend,
     )
     .map_err(|()| {
         // Drain the flag so a caught diagnostic never silences a
@@ -3299,7 +3353,7 @@ mod tests {
     fn debug_flag_controls_debug_sections() {
         let src = "int add(int a, int b) { return a + b; }\nint main() { return add(2, 3); }\n";
         let compile = |debug| {
-            compile_source(src, Flavor::C, Target::LP64, debug, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+            compile_source(src, Flavor::C, Target::LP64, debug, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
                 .expect("compiles")
                 .0
         };
@@ -3317,7 +3371,7 @@ mod tests {
         assert!(has_section(&without, b".eh_frame"), "missing .eh_frame with -g0");
         // Optimized builds still carry debug info through the MIR
         // passes (locations ride on instructions).
-        let optimized = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
+        let optimized = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&optimized, b".debug_info"), "missing .debug_info at -O2 -g");
@@ -3329,7 +3383,7 @@ mod tests {
         // A function with no statements still gets a subprogram and an
         // (empty) line sequence rather than failing emission.
         let src = "void e() {}\nint main() { e(); return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b".debug_info"));
@@ -3343,7 +3397,7 @@ mod tests {
     #[test]
     fn debug_extern_declaration_has_no_location() {
         let src = "extern int x;\nint main() { return 0; }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         let (dies, _) = read_dies(&bytes);
@@ -3375,7 +3429,7 @@ mod tests {
     fn ptr32_global_initializer_emits_a_32_bit_relocation() {
         let src = "int x;\nint *__ptr32 g = &x;\nint main(void) { return 0; }\n";
         let lang = LangOpts { ms: true, ..LangOpts::default() };
-        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, lang, ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, lang, ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -3409,7 +3463,7 @@ mod tests {
                        return t * 2;\n\
                    }\n\
                    int main(void) { return f(3); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         let (dies, _) = read_dies(&bytes);
@@ -3444,6 +3498,7 @@ mod tests {
             false,
             LangOpts::default(),
             ErrorFormat::Human,
+            Backend::Cranelift,
         )
         .expect("compiles")
         .0;
@@ -3506,7 +3561,7 @@ mod tests {
         }
 
         // Other targets must not grow the sections.
-        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::AARCH64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -3659,7 +3714,7 @@ mod tests {
                  return total + p.x + bs.a + col + g;\n\
              }\n\
              int main() { g = 1; return add(2, 3); }\n";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"orig.c"), "line program lost the original file name");
@@ -3743,7 +3798,7 @@ mod tests {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
         let src = "int main(void) { char *p = \"abc\"; char *e = \"\"; return p[0] + e[0]; }";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -3765,7 +3820,7 @@ mod tests {
         let reloc_kinds = |pic| {
             use object::{Object as _, ObjectSection as _};
             let src = "int x; int get(void) { return x; }";
-            let bytes = compile_source(src, Flavor::C, Target::LP64, false, pic, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+            let bytes = compile_source(src, Flavor::C, Target::LP64, false, pic, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
                 .expect("compiles")
                 .0;
             let obj = object::File::parse(&bytes[..]).expect("object parses");
@@ -4170,7 +4225,7 @@ mod tests {
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { add1(1); return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"add1$resume"), "resume symbol");
@@ -4185,7 +4240,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, true, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -4201,7 +4256,7 @@ __attribute__((async)) int add1(int x) { return x + 1; }
 __attribute__((async)) int twice(int x) { return __builtin_await(add1(x)) * 2; }
 int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, true, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::Speed, true, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(has_section(&bytes, b"twice$resume"), "resume symbol");
@@ -4215,7 +4270,7 @@ int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 __attribute__((async)) int add1(int x) { return x + 1; }
 int main(void) { return add1(1); }
 ";
-        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human)
+        let bytes = compile_source(src, Flavor::C, Target::LP64, true, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift)
             .expect("compiles")
             .0;
         assert!(!has_section(&bytes, b"$resume"), "no split without the flag");

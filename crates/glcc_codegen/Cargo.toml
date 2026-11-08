@@ -1,0 +1,17 @@
+[package]
+name = "glcc_codegen"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }
+glasm = { path = "../glasm" }
+# The register allocator. Cranelift itself runs on this allocator, so the
+# behavior (spilling, move elision, reuse constraints) is the battle-tested
+# one; the coupling to our machine IR is the thin adapter in `ra.rs`.
+regalloc2 = "0.15"
+index_vec = "0.1.4"
+smallvec = { version = "1.16.3", features = ["union"] }
+# Relocation type constants for object emission (same writer glasm uses).
+object = { version = "0.40.0", default-features = false, features = ["write", "std"] }
