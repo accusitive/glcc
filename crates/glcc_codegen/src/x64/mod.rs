@@ -518,6 +518,28 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
         }
         InstKind::GetFramePointer => panic!("glcc native backend: GetFramePointer is not yet supported"),
         InstKind::EhTypeId { .. } => panic!("glcc native backend: EH is not yet supported"),
+        InstKind::Ceil(_) | InstKind::Floor(_) => {
+            // Baseline x86-64 has no rounding instruction (SSE4.1's
+            // roundss is not assumed), so these go through libm.
+            let src = single_value(mir, inst);
+            let dst = result_vreg(sel, mir, inst);
+            let arg = sel.value_vreg(mir, src);
+            let name = match (kind, is_f64(mir, src)) {
+                (InstKind::Ceil(_), true) => "ceil",
+                (InstKind::Ceil(_), false) => "ceilf",
+                (InstKind::Floor(_), true) => "floor",
+                (InstKind::Floor(_), false) => "floorf",
+                _ => unreachable!(),
+            };
+            let mut ops = smallvec::SmallVec::new();
+            ops.push(Operand::FixedReg(Reg::V(dst), sel.isa.abi().vec_ret_reg()));
+            ops.push(Operand::Sym(SymOperand { target: SymTarget::Named(name), reloc: crate::machine::RelocKind::Plt32, addend: 0 }));
+            ops.push(Operand::Reg(Reg::V(arg)));
+            let mut call = MInst::new(op_id(Op::Call), Width::W64, ops);
+            call.call_args = Some(smallvec::smallvec![sel.isa.abi().vec_arg_regs()[0]]);
+            sel.emit(call);
+            true
+        }
         InstKind::FAdd(..) | InstKind::FSub(..) | InstKind::FMul(..) | InstKind::FDiv(..) | InstKind::FNeg(_) => {
             let (op, a, b) = match kind {
                 InstKind::FAdd(a, b) => (Op::AddSS, *a, *b),
