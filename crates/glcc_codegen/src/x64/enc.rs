@@ -41,6 +41,8 @@ pub enum Enc {
     ShiftI { digit: u8, rm_slot: u8, imm_slot: u8 },
     /// `opcode +r`: register number in the low opcode bits (push/pop).
     PlusR { opc: u8, reg_slot: u8 },
+    /// Two-byte `0F opcode +r` (bswap).
+    PlusR2 { opc: u8, reg_slot: u8 },
     /// `opcode +r` followed by an immediate (mov reg, imm64).
     PlusRI { opc: u8, reg_slot: u8, imm_slot: u8 },
     /// Conditional branch: 0F 80+cc rel32, cc from the imm slot,
@@ -127,6 +129,12 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             // `opcode + r` forms take the register from the low opcode
             // bits extended by REX.B, not the reg field.
             emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), force8);
+            out.bytes.push(opc + (hw & 7));
+        }
+        Enc::PlusR2 { opc, reg_slot } => {
+            let hw = ops_reg(inst, reg_slot);
+            emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), false);
+            out.bytes.push(0x0F);
             out.bytes.push(opc + (hw & 7));
         }
         Enc::PlusRI { opc, reg_slot, imm_slot } => {

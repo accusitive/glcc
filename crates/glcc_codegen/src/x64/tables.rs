@@ -60,6 +60,7 @@ pub enum Op {
     Pop,
     Ud2,
     Mfence,
+    Bswap,
     DivQU,
     DivQS,
     RemQU,
@@ -221,6 +222,7 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("pop", vec![reg(true, Constraint::Reg)]),                                            // Pop
         no_slots("ud2"),                                                                        // Ud2
         no_slots("mfence"),                                                                     // Mfence
+        plain("bswap", vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg)]),        // Bswap
         // Divide: the setup instruction (Cqo/XorRdx) defines the
         // high-half scratch in RDX and pins the dividend in RAX; the
         // divide holds both with an early fixed use while writing the
@@ -374,6 +376,13 @@ pub static PATTERNS: LazyLock<PatternTable> = LazyLock::new(|| {
         emit: vec![Emit { op: op_id(Op::Neg), width: EmitWidth::Result, slots: vec![SlotSel::Result, SlotSel::Opnd(0)] }],
     });
     p.push(Pattern {
+        kind: InstKind::Bswap(dummy()),
+        res_max: Some(64),
+        lhs: Shape::Any,
+        rhs: Shape::Any,
+        emit: vec![Emit { op: op_id(Op::Bswap), width: EmitWidth::Result, slots: vec![SlotSel::Result, SlotSel::Opnd(0)] }],
+    });
+    p.push(Pattern {
         kind: InstKind::Not(dummy()),
         res_max: Some(64),
         lhs: Shape::Any,
@@ -430,6 +439,7 @@ pub static ENCODINGS: LazyLock<Vec<Enc>> = LazyLock::new(|| {
         Enc::PlusR { opc: 0x58, reg_slot: 0 },                                               // Pop
         Enc::Fixed(&[0x0F, 0x0B]),                                                           // Ud2
         Enc::Fixed(&[0x0F, 0xAE, 0xF0]),                                                     // Mfence
+        Enc::PlusR2 { opc: 0xC8, reg_slot: 0 },                                              // Bswap
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 6, rm_slot: 3 },                           // DivQU
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 7, rm_slot: 3 },                           // DivQS
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 6, rm_slot: 3 },                           // RemQU
