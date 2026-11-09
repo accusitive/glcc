@@ -50,7 +50,14 @@ pub(crate) fn write_elf(module: &Module, backend: &dyn Backend) -> Result<Vec<u8
             }
             // Local relocation target: internal label (STB_LOCAL).
         }
-        let scope = if sym.extern_ { SymbolScope::Unknown } else { SymbolScope::Linkage };
+        let is_local = !(sym.global || sym.extern_);
+        let scope = if sym.extern_ {
+            SymbolScope::Unknown
+        } else if is_local {
+            SymbolScope::Compilation
+        } else {
+            SymbolScope::Linkage
+        };
         let section = match (sym.extern_, sym.sect) {
             (true, _) | (_, None) => SymbolSection::Undefined,
             (false, Some(si)) => SymbolSection::Section(section_ids[si]),
@@ -64,7 +71,13 @@ pub(crate) fn write_elf(module: &Module, backend: &dyn Backend) -> Result<Vec<u8
         // STV_HIDDEN (its Cranelift heritage), but GNU as emits
         // STV_DEFAULT for plain globals, and NOTYPE types unless a
         // .type directive says otherwise.
-        let bind = if sym.weak { STB_WEAK } else { STB_GLOBAL };
+        let bind = if is_local {
+            object::elf::STB_LOCAL
+        } else if sym.weak {
+            STB_WEAK
+        } else {
+            STB_GLOBAL
+        };
         let id = obj.add_symbol(Symbol {
             name: sym.name.as_bytes().to_vec(),
             value: sym.value as u64,
