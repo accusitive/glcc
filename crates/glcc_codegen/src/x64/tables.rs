@@ -59,6 +59,7 @@ pub enum Op {
     Push,
     Pop,
     Ud2,
+    Mfence,
     DivQU,
     DivQS,
     RemQU,
@@ -219,6 +220,7 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("push", vec![reg(false, Constraint::Reg)]),                                          // Push
         plain("pop", vec![reg(true, Constraint::Reg)]),                                            // Pop
         no_slots("ud2"),                                                                        // Ud2
+        no_slots("mfence"),                                                                     // Mfence
         // Divide: the setup instruction (Cqo/XorRdx) defines the
         // high-half scratch in RDX and pins the dividend in RAX; the
         // divide holds both with an early fixed use while writing the
@@ -427,6 +429,7 @@ pub static ENCODINGS: LazyLock<Vec<Enc>> = LazyLock::new(|| {
         Enc::PlusR { opc: 0x50, reg_slot: 0 },                                               // Push
         Enc::PlusR { opc: 0x58, reg_slot: 0 },                                               // Pop
         Enc::Fixed(&[0x0F, 0x0B]),                                                           // Ud2
+        Enc::Fixed(&[0x0F, 0xAE, 0xF0]),                                                     // Mfence
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 6, rm_slot: 3 },                           // DivQU
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 7, rm_slot: 3 },                           // DivQS
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 6, rm_slot: 3 },                           // RemQU

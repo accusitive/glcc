@@ -94,6 +94,9 @@ pub struct FuncSel<'a> {
     next_vreg: u32,
     vreg_class: Vec<crate::machine::RegClass>,
     cur: BlockId,
+    /// The MIR entry block: materializations there dominate the whole
+    /// function, so their vregs may be cached globally (see value_loc).
+    mir_entry: BlockId,
     /// Constants already materialized in the current block, by value.
     block_consts: HashMap<Value, VReg>,
     /// Variadic definitions: frame slot of the 176-byte register save
@@ -138,6 +141,7 @@ impl<'a> FuncSel<'a> {
             next_vreg: 0,
             vreg_class: Vec::new(),
             cur: 0,
+            mir_entry: mir.entry.index() as BlockId,
             block_consts: HashMap::new(),
             va_save_slot: None,
             va_overflow_disp: 0,
@@ -198,9 +202,6 @@ impl<'a> FuncSel<'a> {
         let data = &mir.values[v];
         match data.def {
             Def::Const(_) => {
-                if let Some(&ValLoc::Reg(vr)) = self.locs.get(&v) {
-                    return ValLoc::Reg(vr);
-                }
                 if let Some(vr) = self.block_consts.get(&v) {
                     return ValLoc::Reg(*vr);
                 }
@@ -210,7 +211,12 @@ impl<'a> FuncSel<'a> {
                 }
                 self.materialize_const(mir, v, vr);
                 self.block_consts.insert(v, vr);
-                self.locs.insert(v, ValLoc::Reg(vr));
+                // Only an entry-block materialization dominates the
+                // whole function; elsewhere the vreg is valid within
+                // this block alone (block_consts clears per block).
+                if self.cur == self.mir_entry {
+                    self.locs.insert(v, ValLoc::Reg(vr));
+                }
                 ValLoc::Reg(vr)
             }
             Def::Inst(_) | Def::Param(..) => {
@@ -565,29 +571,30 @@ fn split_critical_edges(f: &mut MFunction) {
             if npreds[succ as usize] <= 1 {
                 continue;
             }
-            let succ_params = f.blocks[succ as usize].params.clone();
-            let fresh: Vec<VReg> = (0..succ_params.len())
-                .map(|_| {
-                    let v = VReg(f.num_vregs);
-                    f.num_vregs += 1;
-                    v
-                })
-                .collect();
+            // Thread the edge's original argument vregs through the
+            // forwarding block unchanged: they are defined in bi and
+            // feed succ's block params. Fresh vregs here would have no
+            // definition at all (the split edge would carry them into
+            // their own defining block), and regalloc2 then reports
+            // them as live-in to the entry.
+            let args = f.blocks[bi].insts.last().and_then(|i| i.branch.as_ref()).map(|br| br.args[edge].clone()).unwrap_or_default();
             let new: BlockId = f.blocks.len() as u32;
             let mut jmp = MInst::new(OpId::JMP, crate::machine::Width::W64, smallvec![]);
             jmp.branch = Some(crate::machine::BranchInfo {
                 targets: smallvec![succ],
-                args: vec![succ_params.into()],
+                args: vec![args],
             });
             f.blocks.push(MBlock {
-                params: fresh.clone(),
+                params: Vec::new(),
                 insts: vec![jmp],
                 succs: smallvec![succ],
             });
             let last = f.blocks[bi].insts.last_mut().expect("multi-succ block ends in a branch");
             let br = last.branch.as_mut().expect("multi-succ block ends in a branch");
             br.targets[edge] = new;
-            br.args[edge] = fresh.into();
+            // The forwarding block has no params: the original args
+            // move to its jump.
+            br.args[edge] = smallvec::smallvec![];
             f.blocks[bi].succs[edge] = new;
         }
     }

@@ -437,8 +437,34 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
             mem_intrinsic(sel, mir, inst, "memset", &[*dst], Some((*len as i64, *byte as i64)));
             true
         }
-        InstKind::AtomicLoad { .. } | InstKind::AtomicStore { .. } | InstKind::AtomicRmw { .. } | InstKind::AtomicCas { .. } | InstKind::AtomicFence => {
-            panic!("glcc native backend: atomics are not yet supported")
+        // Relaxed/seqcst scalar load and store are plain moves on
+        // x86-64; a full fence is mfence.
+        InstKind::AtomicLoad { addr } => {
+            let res = mir.insts[inst].result.expect("atomic load has a result");
+            if matches!(mir.values[res].ty, glcc_mir::Ty::Float(_)) {
+                panic!("glcc native backend: atomic float load is not yet supported");
+            }
+            let dst = result_vreg(sel, mir, inst);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(op_id(Op::Load), result_width(sel, mir, inst), smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
+            true
+        }
+        InstKind::AtomicStore { addr, val } => {
+            let ty = mir.values[*val].ty.clone();
+            if matches!(ty, glcc_mir::Ty::Float(_)) {
+                panic!("glcc native backend: atomic float store is not yet supported");
+            }
+            let src = sel.value_vreg(mir, *val);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(op_id(Op::Store), value_width(&ty), smallvec::smallvec![Operand::Reg(Reg::V(src)), Operand::Mem(mem)]));
+            true
+        }
+        InstKind::AtomicFence => {
+            sel.emit(MInst::new(op_id(Op::Mfence), Width::W64, smallvec::smallvec![]));
+            true
+        }
+        InstKind::AtomicRmw { .. } | InstKind::AtomicCas { .. } => {
+            panic!("glcc native backend: atomic read-modify-write is not yet supported")
         }
         InstKind::InlineAsm { .. } => panic!("glcc native backend: inline asm is not yet supported"),
         InstKind::VaStart { ap } => {
