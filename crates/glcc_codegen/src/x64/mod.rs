@@ -570,7 +570,22 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                         sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(zx))]));
                         true
                     } else {
-                        panic!("glcc native backend: unsigned 64-bit to float conversion is not yet supported")
+                        // No unsigned 64-bit cvt on x86-64: convert
+                        // (x>>1), double it, and add the low bit — the
+                        // standard gcc/llvm sequence.
+                        let cvt = if to_f64 { Op::CvtSi2sd } else { Op::CvtSi2ss };
+                        let add = if to_f64 { Op::AddSD } else { Op::AddSS };
+                        let hi = sel.alloc_vreg();
+                        sel.emit(MInst::new(op_id(Op::ShrI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(hi)), Operand::Reg(Reg::V(src)), Operand::Imm(1)]));
+                        let dhi = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
+                        sel.emit(MInst::new(op_id(cvt), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(hi))]));
+                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dhi))]));
+                        let lo = sel.alloc_vreg();
+                        sel.emit(MInst::new(op_id(Op::AndI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(lo)), Operand::Reg(Reg::V(src)), Operand::Imm(1)]));
+                        let dlo = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
+                        sel.emit(MInst::new(op_id(cvt), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dlo)), Operand::Reg(Reg::V(lo))]));
+                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dlo))]));
+                        true
                     }
                 }
                 _ => unreachable!(),
