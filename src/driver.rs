@@ -84,7 +84,15 @@ fn link_driver(target: &Target) -> OsString {
 /// its name already selects the target, and GCC has no `--target=`
 /// flag to forward, so command lines skip [`Job::target_args`].
 fn link_driver_implies_target(target: &Target) -> bool {
-    matches!(target.os, Os::Windows) && target.env == Env::Gnu
+    if matches!(target.os, Os::Windows) && target.env == Env::Gnu {
+        return true;
+    }
+    // A GLCC_CC prefixed with the target triple names the same kind of
+    // cross driver (`GLCC_CC=x86_64-linux-gnu-gcc` for `--target=x86_64`):
+    // its name selects the target, and GCC has no `--target=` flag.
+    std::env::var_os("GLCC_CC").is_some_and(|cc| {
+        cc.to_string_lossy().starts_with(&format!("{}-", target.triple()))
+    })
 }
 
 /// Whether the final link drives MSVC's `link.exe`: an MSVC-flavor

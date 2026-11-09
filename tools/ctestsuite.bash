@@ -105,7 +105,28 @@ ACTIVE_TARGETS=()
 for t in ${TARGETS_OPT//,/ }; do
   case "$t" in
     x86_64)
-      ACTIVE_TARGETS+=("$t")
+      # Native on an x86-64 host; cross through the binutils cross gcc
+      # and qemu-user elsewhere (no zig needed: glibc links dynamic).
+      if [[ "$(uname -m)" == x86_64 ]]; then
+        ACTIVE_TARGETS+=("$t")
+      else
+        qemu="qemu-$t-static"
+        command -v "$qemu" >/dev/null 2>&1 || qemu="qemu-$t"
+        if ! command -v "$qemu" >/dev/null 2>&1; then
+          echo "skip $t: $qemu not found"
+          continue
+        fi
+        if ! command -v x86_64-linux-gnu-gcc >/dev/null 2>&1; then
+          echo "skip $t: x86_64-linux-gnu-gcc not found"
+          continue
+        fi
+        if ! x86_64-linux-gnu-gcc -c "$ROOT/rt/glccrt.c" -o "$TMP/glccrt-$t.o" 2>"$TMP/glccrt-$t.err"; then
+          echo "skip $t: cannot compile the runtime:"
+          sed -n '1,3p' "$TMP/glccrt-$t.err"
+          continue
+        fi
+        ACTIVE_TARGETS+=("$t")
+      fi
       ;;
     aarch64|riscv64)
       qemu="qemu-$t-static"
@@ -149,7 +170,7 @@ run_one() {
   res="$RES/$t-$name.result"
   expected="$src.expected"
   label="$t/$base"
-  local flag="" extra="" qemu="" cc_env=()
+  local flag="" extra="" qemu="" qemu_flags=() cc_env=()
   local cc_status run_status
 
   if [[ "$t" != x86_64 ]]; then
@@ -158,6 +179,13 @@ run_one() {
     flag="--target=$t"
     extra="-static"
     cc_env=("GLCC_CC=$ZIG_CC" "GLCC_RT=$TMP/glccrt-$t.o")
+  elif [[ "$(uname -m)" != x86_64 ]]; then
+    qemu="qemu-$t-static"
+    command -v "$qemu" >/dev/null 2>&1 || qemu="qemu-$t"
+    # Dynamic glibc binaries need the cross sysroot for their loader.
+    [[ "$qemu" == *-static ]] || qemu_flags=(-L "/usr/$t-linux-gnu")
+    flag="--target=$t"
+    cc_env=("GLCC_CC=x86_64-linux-gnu-gcc" "GLCC_RT=$TMP/glccrt-$t.o")
   fi
 
   # shellcheck disable=SC2086
@@ -174,7 +202,7 @@ run_one() {
   fi
 
   if [[ -n "$qemu" ]]; then
-    timeout "$RTIMEOUT" "$qemu" "$bin" >"$log.run" 2>&1
+    timeout "$RTIMEOUT" "$qemu" "${qemu_flags[@]}" "$bin" >"$log.run" 2>&1
   else
     timeout "$RTIMEOUT" "$bin" >"$log.run" 2>&1
   fi

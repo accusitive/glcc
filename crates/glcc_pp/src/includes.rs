@@ -57,6 +57,11 @@ pub fn include_paths(target: &Target) -> Vec<PathBuf> {
         if multiarch.is_dir() {
             out.push(multiarch);
         }
+        // Cross hosts keep the target libc under the binutils sysroot
+        // (`/usr/<triple>/include`, e.g. `gcc-x86-64-linux-gnu` on an
+        // aarch64 box); it must beat the host's `/usr/include`, whose
+        // arch-specific `bits/` does not match the target.
+        out.push(PathBuf::from(format!("/usr/{}/include", target.triple())));
         out.push(PathBuf::from("/usr/include"));
     }
     out.retain(|d| d.is_dir());
