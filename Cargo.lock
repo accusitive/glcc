@@ -426,6 +426,7 @@ dependencies = [
  "glasm",
  "glcc_mir",
  "index_vec",
+ "log",
  "object",
  "regalloc2",
  "smallvec",

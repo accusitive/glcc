@@ -216,12 +216,16 @@ pub struct MInst {
     pub op: OpId,
     pub width: Width,
     pub ops: SmallVec<[Operand; 4]>,
+    /// For call instructions: the ABI register of each register-class
+    /// argument, in operand order. The argument moves themselves are
+    /// inserted post-RA (see `ra::allocate`).
+    pub call_args: Option<SmallVec<[PReg; 8]>>,
     pub branch: Option<BranchInfo>,
 }
 
 impl MInst {
     pub fn new(op: OpId, width: Width, ops: impl Into<SmallVec<[Operand; 4]>>) -> Self {
-        MInst { op, width, ops: ops.into(), branch: None }
+        MInst { op, width, ops: ops.into(), branch: None, call_args: None }
     }
 }
 
@@ -254,6 +258,8 @@ pub struct FrameInfo {
     /// Index in `slots` where the allocator's spill slots begin (they
     /// are appended after the user's allocas).
     pub spill_start: u32,
+    /// Callee-saved registers the prologue pushes (set by the ABI).
+    pub saved_callee: u32,
 }
 
 /// A machine function: blocks of instructions with virtual registers.
@@ -268,4 +274,6 @@ pub struct MFunction {
     pub frame: FrameInfo,
     /// Total virtual registers allocated for this function.
     pub num_vregs: u32,
+    /// Register class of each vreg (parallel to the vreg numbering).
+    pub vreg_class: Vec<RegClass>,
 }

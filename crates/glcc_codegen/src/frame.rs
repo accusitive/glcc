@@ -13,7 +13,9 @@ use crate::machine::{MFunction, PReg, Reg};
 /// stack downward and never overlap. The target's encoder turns
 /// offsets into `-offset` displacements.
 pub fn layout(f: &mut MFunction) {
-    let mut cursor: u32 = 8;
+    // Slots start below the callee-saved registers the prologue pushes
+    // directly under the frame pointer.
+    let mut cursor: u32 = 8 + 8 * f.frame.saved_callee;
     for slot in &mut f.frame.slots {
         let base = align_up(cursor, slot.align.max(1));
         slot.offset = base + slot.size;
@@ -43,6 +45,7 @@ fn resolve_frame_refs(f: &mut MFunction, isa: &'static dyn TargetIsa) {
 
 /// Insert the target's prologue and epilogues.
 pub fn expand(f: &mut MFunction, isa: &'static dyn TargetIsa) {
+    f.frame.saved_callee = used_callee_saved(f, isa);
     layout(f);
     resolve_frame_refs(f, isa);
     isa.abi().emit_prologue(f);
@@ -51,4 +54,36 @@ pub fn expand(f: &mut MFunction, isa: &'static dyn TargetIsa) {
 
 fn align_up(v: u32, align: u32) -> u32 {
     v.div_ceil(align) * align
+}
+
+/// How many callee-saved registers this (post-RA) function references:
+/// the prologue pushes exactly those under the frame pointer, and the
+/// slot layout must start below them.
+pub fn used_callee_saved(f: &MFunction, isa: &'static dyn TargetIsa) -> u32 {
+    let reginfo = isa.reginfo();
+    let mut used = std::collections::HashSet::<(u8, u8)>::new();
+    for b in &f.blocks {
+        for inst in &b.insts {
+            for op in &inst.ops {
+                match op {
+                    crate::machine::Operand::Reg(Reg::P(p)) | crate::machine::Operand::FixedReg(Reg::P(p), _) => {
+                        if reginfo.info(*p).callee_saved {
+                            used.insert((p.hw, p.class as u8));
+                        }
+                    }
+                    crate::machine::Operand::Mem(m) => {
+                        for r in [m.base, m.index] {
+                            if let Some(Reg::P(p)) = r {
+                                if reginfo.info(p).callee_saved {
+                                    used.insert((p.hw, p.class as u8));
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    used.len() as u32
 }

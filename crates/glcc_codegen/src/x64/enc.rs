@@ -52,6 +52,10 @@ pub enum Enc {
     Cmov { rm_slot: u8, cc_slot: u8 },
     /// E8 (call) / E9 (jmp) rel32 against a symbol.
     Rel32 { call: bool },
+    /// SSE scalar form: legacy `prefix` (0 = none), then REX, then
+    /// `0F opc /r`. The REX.W bit follows the instruction width (set
+    /// only by the gpr/xmm bit moves and 64-bit int conversions).
+    Sse { prefix: u8, opc: u8, dir: Dir, reg_slot: u8, rm_slot: u8 },
     /// FF /2 through the register callee. Call operands are dynamic
     /// (result/argument pins around the target), so the callee cannot
     /// live at a fixed slot: it is the one plain `Reg` operand.
@@ -120,12 +124,14 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         Enc::PlusR { opc, reg_slot } => {
             let hw = ops_reg(inst, reg_slot);
             let force8 = inst.width == Width::W8 && hw >= 4;
-            emit_rex_f(out, inst.width == Width::W64, rex_bit(hw), false, false, force8);
+            // `opcode + r` forms take the register from the low opcode
+            // bits extended by REX.B, not the reg field.
+            emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), force8);
             out.bytes.push(opc + (hw & 7));
         }
         Enc::PlusRI { opc, reg_slot, imm_slot } => {
             let hw = ops_reg(inst, reg_slot);
-            emit_rex(out, inst.width, rex_bit(hw), false, false);
+            emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), false);
             out.bytes.push(opc + (hw & 7));
             let size = match inst.width {
                 Width::W64 => 8,
@@ -163,6 +169,16 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         Enc::Cmov { rm_slot, cc_slot } => {
             let cc = ops_imm(inst, cc_slot) as u8;
             emit_rm(f, inst, out, &[0x0F, 0x40 + cc], ops_reg(inst, 0), rm_slot);
+        }
+        Enc::Sse { prefix, opc, dir, reg_slot, rm_slot } => {
+            if prefix != 0 {
+                out.bytes.push(prefix);
+            }
+            let reg_field = match dir {
+                Dir::Digit(d) => d,
+                _ => ops_reg(inst, reg_slot),
+            };
+            emit_rm(f, inst, out, &[0x0F, opc], reg_field, rm_slot);
         }
         Enc::Rel32 { call } => {
             out.bytes.push(if call { 0xE8 } else { 0xE9 });
@@ -349,6 +365,13 @@ fn emit_mem(f: &MFunction, inst: &MInst, out: &mut EncOut, opcode: &[u8], reg: u
                     out.bytes.push(modrm(reg, mode, 0b100));
                     out.bytes.push((m.scale.min(3) << 6) | ((index & 7) << 3) | (base & 7));
                 }
+                None if (base & 7) == 4 => {
+                    // RSP/R12 as base require a SIB byte (rm=100 means
+                    // "SIB follows"); the SIB names the real base with
+                    // no index.
+                    out.bytes.push(modrm(reg, mode, 0b100));
+                    out.bytes.push((base & 7) | (0b100 << 3));
+                }
                 None => {
                     out.bytes.push(modrm(reg, mode, base));
                 }
@@ -392,6 +415,34 @@ fn move_encoded(f: &MFunction, inst: &MInst, out: &mut EncOut) {
     };
     match (dst, src) {
         (Reg::P(d), Reg::P(s)) if d == s => {}
+        // Vector-class moves (floats): movss/movsd, register or
+        // spill-slot forms. A spill of a float moves the full 8-byte
+        // spill unit; consumers only ever read the active low lane.
+        (Reg::P(d), Reg::P(s)) if d.class == crate::machine::RegClass::Vec => {
+            let prefix = if inst.width == Width::W32 { 0xF3 } else { 0xF2 };
+            out.bytes.push(prefix);
+            emit_rex_f(out, false, rex_bit(d.hw), false, rex_bit(s.hw), false);
+            out.bytes.extend_from_slice(&[0x0F, 0x10]);
+            // Unlike the integer move (0x89: reg = source), SSE moves
+            // take the destination in the reg field.
+            out.bytes.push(modrm(d.hw & 7, 0b11, s.hw & 7));
+        }
+        (Reg::P(d), Reg::Spill(s)) if d.class == crate::machine::RegClass::Vec => {
+            let off = spill_disp(f, s);
+            out.bytes.push(if inst.width == Width::W32 { 0xF3 } else { 0xF2 });
+            emit_rex_f(out, false, false, false, false, false);
+            out.bytes.extend_from_slice(&[0x0F, 0x10]);
+            out.bytes.push(modrm(d.hw & 7, 0b10, regs::RBP & 7));
+            out.bytes.extend_from_slice(&off.to_le_bytes()[..4]);
+        }
+        (Reg::Spill(s), Reg::P(src)) if src.class == crate::machine::RegClass::Vec => {
+            let off = spill_disp(f, s);
+            out.bytes.push(if inst.width == Width::W32 { 0xF3 } else { 0xF2 });
+            emit_rex_f(out, false, false, false, rex_bit(src.hw), false);
+            out.bytes.extend_from_slice(&[0x0F, 0x11]);
+            out.bytes.push(modrm(src.hw & 7, 0b10, regs::RBP & 7));
+            out.bytes.extend_from_slice(&off.to_le_bytes()[..4]);
+        }
         (Reg::P(d), Reg::P(s)) => {
             let force8 = inst.width == Width::W8 && (s.hw >= 4 || d.hw >= 4);
             emit_rex_f(out, inst.width == Width::W64, rex_bit(s.hw), false, rex_bit(d.hw), force8);

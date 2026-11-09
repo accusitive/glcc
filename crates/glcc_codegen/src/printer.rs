@@ -52,7 +52,9 @@ impl Printer {
 fn operand_text(o: &Operand, reginfo: &crate::isa::RegInfo) -> String {
     match o {
         Operand::Reg(Reg::P(p)) | Operand::FixedReg(Reg::P(p), _) => reginfo.info(*p).name.to_string(),
-        Operand::Reg(Reg::P(_) | Reg::V(_)) | Operand::Reg(_) | Operand::FixedReg(_, _) => "?vreg".into(),
+        Operand::FixedReg(Reg::V(v), preg) => format!("?v{}>{}", v.0, reginfo.info(*preg).name),
+        Operand::Reg(Reg::V(v)) => format!("?v{}", v.0),
+        Operand::Reg(Reg::P(_)) | Operand::FixedReg(_, _) | Operand::Reg(_) => "?vreg".into(),
         Operand::Imm(i) => format!("${i}"),
         Operand::FrameIndex(i) => format!("%slot{i}"),
         Operand::Mem(m) => {

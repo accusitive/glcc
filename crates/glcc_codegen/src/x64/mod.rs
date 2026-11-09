@@ -81,6 +81,10 @@ impl TargetIsa for X64 {
         }
     }
 
+    fn gpr_to_vec_op(&self) -> OpId {
+        op_id(Op::MovqG2X)
+    }
+
     fn lea_op(&self) -> OpId {
         op_id(Op::Lea)
     }
@@ -99,12 +103,36 @@ impl TargetIsa for X64 {
 }
 
 fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
+    // SysV variadic definitions spill every register-passed named
+    // argument into a 176-byte save area (GP at +0, stride 8; FP at
+    // +48, stride 16) and point the overflow cursor past the stack-
+    // passed named arguments. va_list is {i32 gp_off, i32 fp_off, ptr
+    // overflow, ptr reg_save_area}.
+    let mut save_slot = 0u32;
+    let mut gp_off = 0i64;
+    let mut fp_off = 48i64;
+    let mut gp_save: Vec<(i64, crate::machine::VReg, bool)> = Vec::new();
+    let mut fp_save: Vec<(i64, crate::machine::VReg)> = Vec::new();
     if mir.sig.variadic {
-        panic!("glcc native backend: defining variadic functions is not yet supported");
+        save_slot = sel.slot(176, 16);
+        sel.va_save_slot = Some(save_slot);
+        sel.va_overflow_disp = 16;
     }
     let entry_params: Vec<Value> = mir.blocks[mir.entry].params.clone();
-    for (idx, &p) in entry_params.iter().enumerate() {
-        match sel.isa.abi().param_loc(idx, &mir.values[p].ty) {
+    let mut gp = 0;
+    let mut fp = 0;
+    let mut stack_off = 0i64;
+    // Memory-class aggregate returns take a hidden out-pointer in the
+    // first integer argument register.
+    if matches!(sel.isa.abi().ret_loc(&mir.sig.ret), RetLoc::Memory) {
+        let vr = sel.alloc_vreg();
+        sel.emit(MInst::new(OpId::MOVE, Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::P(PReg::gpr(regs::RDI)))]));
+        sel.sret_loc = Some(vr);
+        gp = 1;
+    }
+    for &p in entry_params.iter() {
+        let ty = mir.values[p].ty.clone();
+        match sel.isa.abi().param_loc(gp, fp, &ty) {
             ParamLoc::Reg(preg) => {
                 let vr = sel.value_vreg(mir, p);
                 sel.emit(MInst::new(
@@ -112,11 +140,151 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
                     Width::W64,
                     smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::P(preg))],
                 ));
+                match preg.class {
+                    crate::machine::RegClass::Gpr => {
+                        if mir.sig.variadic {
+                            gp_save.push((gp as i64, vr, false));
+                        }
+                        gp_off += 8;
+                        gp += 1;
+                    }
+                    crate::machine::RegClass::Vec => {
+                        if mir.sig.variadic {
+                            fp_save.push((fp_off, vr));
+                        }
+                        fp_off += 16;
+                        fp += 1;
+                    }
+                }
             }
-            ParamLoc::Stack => panic!("glcc native backend: stack parameters are not yet supported"),
+            ParamLoc::Regs(pregs, n) => {
+                // Store each piece into a fresh home slot; its address
+                // is the parameter value.
+                let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+                sel.set_slot(p, slot);
+                for (i, preg) in pregs.iter().take(n as usize).enumerate() {
+                    let piece_bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
+                    let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: (i as i64) * 8, sym: None };
+                    match preg.class {
+                        crate::machine::RegClass::Vec => {
+                            let op = if piece_bytes >= 8 { Op::MovsdS } else { Op::MovssS };
+                            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::P(*preg)), Operand::Mem(dst)]));
+                        }
+                        _ => {
+                            let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
+                            sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::P(*preg)), Operand::Mem(dst)]));
+                        }
+                    }
+                    match preg.class {
+                        crate::machine::RegClass::Gpr => gp += 1,
+                        crate::machine::RegClass::Vec => fp += 1,
+                    }
+                }
+            }
+            ParamLoc::Stack => {
+                // The caller stored this argument at rbp+16+off (after
+                // its return address and saved frame pointer). Copy it
+                // into the parameter's home here.
+                let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
+                stack_off = (stack_off + align - 1) / align * align;
+                if mir.sig.variadic {
+                    sel.va_overflow_disp = 16 + stack_off + ty.size_bytes().next_multiple_of(8) as i64;
+                }
+                if ty.is_aggregate() {
+                    let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+                    sel.set_slot(p, slot);
+                    let src = crate::machine::MemOperand {
+                        base: Some(Reg::P(PReg::gpr(regs::RBP))),
+                        index: None,
+                        scale: 0,
+                        disp: 16 + stack_off,
+                        sym: None,
+                    };
+                    let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+                    copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1).max(8) as u64);
+                } else {
+                    let vr = sel.value_vreg(mir, p);
+                    let is_float = matches!(ty, glcc_mir::Ty::Float(_));
+                    let (op, width) = if is_float {
+                        (if is_f64(mir, p) { Op::MovsdL } else { Op::MovssL }, Width::W64)
+                    } else {
+                        (Op::Load, value_width(&ty))
+                    };
+                    sel.emit(MInst::new(
+                        op_id(op),
+                        width,
+                        smallvec::smallvec![
+                            Operand::Reg(Reg::V(vr)),
+                            Operand::Mem(crate::machine::MemOperand {
+                                base: Some(Reg::P(PReg::gpr(regs::RBP))),
+                                index: None,
+                                scale: 0,
+                                disp: 16 + stack_off,
+                                sym: None,
+                            }),
+                        ],
+                    ));
+                }
+                stack_off += ty.size_bytes().next_multiple_of(8) as i64;
+            }
         }
     }
+    if mir.sig.variadic {
+        // The variadic tail may arrive in any of the argument
+        // registers: pin the whole register file (named arguments plus
+        // anonymous pads) so the entry moves resolve as one parallel
+        // set, then spill every register's value into the save area.
+        // Slots for registers the caller did not use hold garbage;
+        // va_arg never reads past the offsets it tracks.
+        let mut tail_gp: Vec<(usize, crate::machine::VReg)> = Vec::new();
+        for k in (gp_off / 8) as usize..regs::ARG_REGS.len() {
+            let vr = sel.alloc_vreg();
+            sel.emit(MInst::new(
+                OpId::MOVE,
+                Width::W64,
+                smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::P(regs::ARG_REGS[k]))],
+            ));
+            tail_gp.push((k, vr));
+        }
+        let mut tail_fp: Vec<(usize, crate::machine::VReg)> = Vec::new();
+        for k in ((fp_off - 48) / 16) as usize..regs::VEC_ARG_REGS.len() {
+            let vr = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
+            sel.emit(MInst::new(
+                OpId::MOVE,
+                Width::W64,
+                smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::P(regs::VEC_ARG_REGS[k]))],
+            ));
+            tail_fp.push((k, vr));
+        }
+        for (k, vr, float) in gp_save.iter() {
+            spill_save_area(sel, save_slot, k * 8, *vr, *float);
+        }
+        for (k, vr) in tail_gp.iter() {
+            spill_save_area(sel, save_slot, (*k * 8) as i64, *vr, false);
+        }
+        for (disp, vr) in fp_save.iter() {
+            spill_save_area(sel, save_slot, *disp, *vr, true);
+        }
+        for (k, vr) in tail_fp.iter() {
+            spill_save_area(sel, save_slot, 48 + (*k as i64) * 16, *vr, true);
+        }
+        sel.va_gp_off = gp_off.min(48);
+        sel.va_fp_off = fp_off.min(176);
+    }
     true
+}
+
+/// Spill one entry parameter into the va register save area.
+fn spill_save_area(sel: &mut FuncSel, save_slot: u32, disp: i64, vr: crate::machine::VReg, float: bool) {
+    let (op, width) = if float { (Op::MovsdS, Width::W64) } else { (Op::Store, Width::W64) };
+    sel.emit(MInst::new(
+        op_id(op),
+        width,
+        smallvec::smallvec![
+            Operand::Reg(Reg::V(vr)),
+            Operand::Mem(crate::machine::MemOperand { base: Some(Reg::FI(save_slot)), index: None, scale: 0, disp, sym: None }),
+        ],
+    ));
 }
 
 fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
@@ -224,8 +392,22 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
         }
         InstKind::PtrToInt(_) | InstKind::IntToPtr(_) | InstKind::Bitcast(_) => {
             let dst = result_vreg(sel, mir, inst);
+            let src_v = single_value(mir, inst);
             let src = single_operand(sel, mir, inst);
-            sel.emit(MInst::new(op_id(Op::MovRR), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+            // Float<->integer bitcasts ride the GPR/XMM bit moves.
+            let src_float = matches!(mir.values[src_v].ty, glcc_mir::Ty::Float(_));
+            let dst_float = matches!(mir.values[mir.insts[inst].result.expect("cast has a result")].ty, glcc_mir::Ty::Float(_));
+            let op = match (src_float, dst_float) {
+                (false, false) => Op::MovRR,
+                (true, false) => Op::MovqX2G,
+                (false, true) => Op::MovqG2X,
+                (true, true) => {
+                    let op = if is_f64(mir, src_v) { Op::MovsdL } else { Op::MovssL };
+                    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+                    return true;
+                }
+            };
+            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
             true
         }
         InstKind::Memcpy { dst, src, len } => {
@@ -240,16 +422,206 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
             panic!("glcc native backend: atomics are not yet supported")
         }
         InstKind::InlineAsm { .. } => panic!("glcc native backend: inline asm is not yet supported"),
-        InstKind::VaStart { .. } | InstKind::VaArg { .. } | InstKind::VaEnd { .. } | InstKind::VaCopy { .. } => {
-            panic!("glcc native backend: variadic helpers are not yet supported")
+        InstKind::VaStart { ap } => {
+            va_start(sel, mir, inst, *ap);
+            true
+        }
+        InstKind::VaArg { .. } => {
+            va_arg(sel, mir, inst);
+            true
+        }
+        InstKind::VaEnd { .. } => true,
+        InstKind::VaCopy { dst, src } => {
+            // The 24-byte tag: three 8-byte words.
+            for k in 0..3i64 {
+                let tmp = sel.alloc_vreg();
+                let mut sm = sel.mem_of(mir, *src);
+                sm.disp += k * 8;
+                sel.emit(MInst::new(
+                    op_id(Op::Load),
+                    Width::W64,
+                    smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(sm)],
+                ));
+                let mut dm = sel.mem_of(mir, *dst);
+                dm.disp += k * 8;
+                sel.emit(MInst::new(
+                    op_id(Op::Store),
+                    Width::W64,
+                    smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(dm)],
+                ));
+            }
+            true
         }
         InstKind::GetFramePointer => panic!("glcc native backend: GetFramePointer is not yet supported"),
         InstKind::EhTypeId { .. } => panic!("glcc native backend: EH is not yet supported"),
-        InstKind::Fcmp { .. } | InstKind::FAdd(..) | InstKind::FSub(..) | InstKind::FMul(..) | InstKind::FDiv(..) | InstKind::FNeg(_)
-        | InstKind::Ceil(_) | InstKind::Floor(_) | InstKind::Sqrt(_) | InstKind::SItoF(_) | InstKind::UItoF(_) | InstKind::SFtoI(_)
-        | InstKind::UFtoI(_) | InstKind::Fptrunc(_) | InstKind::Fpext(_) | InstKind::Splat(_) | InstKind::ExtractLane { .. }
-        | InstKind::ExtractValue { .. } | InstKind::InsertValue { .. } | InstKind::Await { .. } => {
-            panic!("glcc native backend: floating point/vectors/aggregates are not yet supported")
+        InstKind::FAdd(..) | InstKind::FSub(..) | InstKind::FMul(..) | InstKind::FDiv(..) | InstKind::FNeg(_) => {
+            let (op, a, b) = match kind {
+                InstKind::FAdd(a, b) => (Op::AddSS, *a, *b),
+                InstKind::FSub(a, b) => (Op::SubSS, *a, *b),
+                InstKind::FMul(a, b) => (Op::MulSS, *a, *b),
+                InstKind::FDiv(a, b) => (Op::DivSS, *a, *b),
+                InstKind::FNeg(_) => return fneg(sel, mir, inst),
+                _ => unreachable!(),
+            };
+            let op = widen_sse(op, is_f64(mir, a));
+            let dst = result_vreg(sel, mir, inst);
+            let a = sel.value_vreg(mir, a);
+            let b = sel.value_vreg(mir, b);
+            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(a)), Operand::Reg(Reg::V(b))]));
+            true
+        }
+        InstKind::Sqrt(_) => {
+            let src_v = single_value(mir, inst);
+            let src = single_operand(sel, mir, inst);
+            let op = if is_f64(mir, src_v) { Op::SqrtSD } else { Op::SqrtSS };
+            let dst = result_vreg(sel, mir, inst);
+            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+            true
+        }
+        InstKind::Fcmp { .. } => {
+            fcmp(sel, mir, inst);
+            true
+        }
+        InstKind::SItoF(_) | InstKind::UItoF(_) => {
+            let (dst, src) = (result_vreg(sel, mir, inst), single_operand(sel, mir, inst));
+            let to_f64 = matches!(mir.values[mir.insts[inst].result.expect("cast has a result")].ty, glcc_mir::Ty::Float(glcc_mir::FloatKind::F64));
+            let bits = scalar_bits_of(mir, single_value(mir, inst));
+            match kind {
+                InstKind::SItoF(_) => {
+                    // cvtsi2ss/sd sign-interpret the source; width
+                    // carries the source size (32- or 64-bit).
+                    let op = if to_f64 { Op::CvtSi2sd } else { Op::CvtSi2ss };
+                    let w = if bits <= 32 { Width::W32 } else { Width::W64 };
+                    sel.emit(MInst::new(op_id(op), w, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+                    true
+                }
+                InstKind::UItoF(_) => {
+                    if bits <= 32 {
+                        // Zero-extend into a 64-bit register (a 32-bit
+                        // move clears the upper half), then treat as
+                        // signed 64-bit.
+                        let zx = sel.alloc_vreg();
+                        sel.emit(MInst::new(op_id(Op::MovRR), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(zx)), Operand::Reg(Reg::V(src))]));
+                        let op = if to_f64 { Op::CvtSi2sd } else { Op::CvtSi2ss };
+                        sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(zx))]));
+                        true
+                    } else {
+                        panic!("glcc native backend: unsigned 64-bit to float conversion is not yet supported")
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        InstKind::SFtoI(_) | InstKind::UFtoI(_) => {
+            let (dst, src) = (result_vreg(sel, mir, inst), single_operand(sel, mir, inst));
+            let op = if is_f64(mir, single_value(mir, inst)) { Op::CvtSD2si } else { Op::CvtSS2si };
+            let dst_bits = scalar_bits_of(mir, mir.insts[inst].result.expect("cast has a result"));
+            let w = if dst_bits <= 32 { Width::W32 } else { Width::W64 };
+            sel.emit(MInst::new(op_id(op), w, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+            true
+        }
+        InstKind::Fptrunc(_) | InstKind::Fpext(_) => {
+            let (dst, src) = (result_vreg(sel, mir, inst), single_operand(sel, mir, inst));
+            let op = match kind {
+                InstKind::Fptrunc(_) => Op::CvtSD2ss, // f64 -> f32
+                _ => Op::CvtSS2sd,                    // f32 -> f64
+            };
+            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
+            true
+        }
+        InstKind::Load { addr, .. } => {
+            let res = mir.insts[inst].result.expect("load has a result");
+            if matches!(mir.values[res].ty, glcc_mir::Ty::Float(_)) {
+                load_float(sel, mir, inst);
+                return true;
+            }
+            let ty = mir.values[res].ty.clone();
+            if ty.is_aggregate() {
+                // Aggregate values are addresses: load into a fresh
+                // scratch slot; its address is the value.
+                let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+                sel.set_slot(res, slot);
+                let src = sel.mem_of(mir, *addr);
+                let dstm = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+                copy_bytes(sel, &dstm, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
+                return true;
+            }
+            false
+        }
+        InstKind::Store { addr, val, .. } => {
+            let ty = mir.values[*val].ty.clone();
+            if matches!(ty, glcc_mir::Ty::Float(_)) {
+                store_float(sel, mir, inst, *addr, *val);
+                return true;
+            }
+            if ty.is_aggregate() {
+                let src = sel.mem_of(mir, *val);
+                let dst = sel.mem_of(mir, *addr);
+                copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
+                return true;
+            }
+            false
+        }
+        InstKind::ExtractValue { agg, index } => {
+            let res = mir.insts[inst].result.expect("extractvalue has a result");
+            let agg_ty = mir.values[*agg].ty.clone();
+            let Ty::Struct { fields, offsets, .. } = &agg_ty else {
+                panic!("glcc native backend: extractvalue through {:?}", agg_ty);
+            };
+            let off = *offsets.get(*index as usize).expect("extractvalue index in range");
+            let field_ty = fields[*index as usize].clone();
+            if field_ty.is_aggregate() {
+                let slot = sel.slot(field_ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&field_ty).max(1) as u32);
+                sel.set_slot(res, slot);
+                let src = sel.mem_of(mir, *agg);
+                let dstm = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+                copy_bytes(sel, &dstm, &src, field_ty.size_bytes(), glcc_mir::ty::ty_align(&field_ty).max(1) as u64);
+            } else {
+                // Scalar field: load from agg_addr + offset.
+                let dst = result_vreg(sel, mir, inst);
+                let base = sel.mem_of(mir, *agg);
+                let (op, width) = if matches!(field_ty, glcc_mir::Ty::Float(_)) {
+                    (if matches!(field_ty, glcc_mir::Ty::Float(glcc_mir::FloatKind::F64)) { Op::MovsdL } else { Op::MovssL }, Width::W64)
+                } else {
+                    (Op::Load, value_width(&field_ty))
+                };
+                sel.emit(MInst::new(
+                    op_id(op),
+                    width,
+                    smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(crate::machine::MemOperand { disp: base.disp + off as i64, ..base })],
+                ));
+            }
+            true
+        }
+        InstKind::InsertValue { agg, elem, index } => {
+            let res = mir.insts[inst].result.expect("insertvalue has a result");
+            let agg_ty = mir.values[*agg].ty.clone();
+            let Ty::Struct { fields, offsets, .. } = &agg_ty else {
+                panic!("glcc native backend: insertvalue through {:?}", agg_ty);
+            };
+            let off = *offsets.get(*index as usize).expect("insertvalue index in range");
+            let field_ty = fields[*index as usize].clone();
+            let slot = sel.slot(agg_ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&agg_ty).max(1) as u32);
+            sel.set_slot(res, slot);
+            let src = sel.mem_of(mir, *agg);
+            let dstm = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+            if !matches!(mir.values[*agg].def, Def::Const(Const::Undef) | Def::Const(Const::Zero)) {
+                copy_bytes(sel, &dstm, &src, agg_ty.size_bytes(), glcc_mir::ty::ty_align(&agg_ty).max(1) as u64);
+            }
+            let field_src = sel.mem_of(mir, *elem);
+            let field_dst = crate::machine::MemOperand { disp: off as i64, ..dstm };
+            if field_ty.is_aggregate() {
+                copy_bytes(sel, &field_dst, &field_src, field_ty.size_bytes(), glcc_mir::ty::ty_align(&field_ty).max(1) as u64);
+            } else {
+                let v = sel.value_vreg(mir, *elem);
+                let (op, width) = if matches!(field_ty, glcc_mir::Ty::Float(_)) {
+                    (if matches!(field_ty, glcc_mir::Ty::Float(glcc_mir::FloatKind::F64)) { Op::MovsdS } else { Op::MovssS }, Width::W64)
+                } else {
+                    (Op::Store, value_width(&field_ty))
+                };
+                sel.emit(MInst::new(op_id(op), width, smallvec::smallvec![Operand::Reg(Reg::V(v)), Operand::Mem(field_dst)]));
+            }
+            true
         }
         // Everything else (ALU, load, store, shifts, ...) goes through
         // the pattern table.
@@ -263,8 +635,44 @@ fn term_hook(sel: &mut FuncSel, mir: &Function, block: Block) -> bool {
         Terminator::Return { val } => {
             match val {
                 Some(v) => {
-                    let vr = sel.value_vreg(mir, v);
-                    sel.emit(MInst::new(OpId::RET, Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(vr))]));
+                    let ty = mir.values[v].ty.clone();
+                    if ty.is_aggregate() {
+                        // Pieces of a small aggregate return in the
+                        // piece registers (rax/rdx or xmm0/xmm1).
+                        match sel.isa.abi().ret_loc(&ty) {
+                            RetLoc::Regs(pregs, n) => {
+                                let addr = sel.mem_of(mir, v);
+                                let mut ops = smallvec::SmallVec::new();
+                                for (i, preg) in pregs.iter().take(n as usize).enumerate() {
+                                    let bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
+                                    let tmp = sel.alloc_vreg_class(if preg.class == crate::machine::RegClass::Vec { crate::machine::RegClass::Vec } else { crate::machine::RegClass::Gpr });
+                                    match preg.class {
+                                        crate::machine::RegClass::Vec => {
+                                            let op = if bytes >= 8 { Op::MovsdL } else { Op::MovssL };
+                                            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                                        }
+                                        _ => {
+                                            let width = if bytes >= 8 { Width::W64 } else { Width::W32 };
+                                            sel.emit(MInst::new(op_id(Op::Load), width, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                                        }
+                                    }
+                                    ops.push(Operand::FixedReg(Reg::V(tmp), *preg));
+                                }
+                                sel.emit(MInst::new(OpId::RET, Width::W64, ops));
+                            }
+                            RetLoc::Memory => {
+                                let sret = sel.sret_loc.expect("sret return without the entry prelude");
+                                let src = sel.mem_of(mir, v);
+                                let dst = crate::machine::MemOperand { base: Some(Reg::V(sret)), index: None, scale: 0, disp: 0, sym: None };
+                                copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1).max(8) as u64);
+                                sel.emit(MInst::new(OpId::RET, Width::W64, smallvec::smallvec![]));
+                            }
+                            other => panic!("glcc native backend: aggregate return {other:?}"),
+                        }
+                    } else {
+                        let vr = sel.value_vreg(mir, v);
+                        sel.emit(MInst::new(OpId::RET, Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(vr))]));
+                    }
                 }
                 None => sel.emit(MInst::new(OpId::RET, Width::W64, smallvec::smallvec![])),
             }
@@ -391,6 +799,26 @@ fn icmp_width(mir: &Function, inst: Inst) -> Width {
     value_width(&mir.values[lhs].ty)
 }
 
+/// Condition code for a select-style branch: fuse a compare feeding
+/// the condition, else test the boolean itself.
+fn select_cc(sel: &mut FuncSel, mir: &Function, cond: Value) -> u8 {
+    match cond_icc(sel, mir, cond) {
+        Some((pred, a, b, width)) => {
+            sel.emit(MInst::new(op_id(Op::CmpRR), width, smallvec::smallvec![Operand::Reg(Reg::V(a)), Operand::Reg(Reg::V(b))]));
+            icc(pred)
+        }
+        None => {
+            let vr = sel.value_vreg(mir, cond);
+            sel.emit(MInst::new(
+                op_id(Op::TestRR),
+                value_width(&mir.values[cond].ty),
+                smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::V(vr))],
+            ));
+            0xF
+        }
+    }
+}
+
 /// Compare operands for `cmp a, b` (flags describe a - b). A constant
 /// on the left swaps sides and mirrors the predicate.
 fn cmp_operands(sel: &mut FuncSel, mir: &Function, inst: Inst, pred: glcc_mir::IcmpPred) -> (glcc_mir::IcmpPred, crate::machine::VReg, crate::machine::VReg) {
@@ -435,9 +863,39 @@ enum CallTarget {
 /// argument registers can clobber an argument not yet moved).
 fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, target: CallTarget, args: &[Value], sig: &glcc_mir::Signature) {
     let mut ops: smallvec::SmallVec<[Operand; 4]> = smallvec::SmallVec::new();
+    // Aggregate returns: piece temps defined by the call, unpacked
+    // into a fresh home slot afterwards.
+    let mut ret_pieces: Option<(smallvec::SmallVec<[crate::machine::VReg; 2]>, u64)> = None;
+    // Every argument rides a fresh single-use pin vreg: a MIR value
+    // reused across calls would otherwise carry fixed constraints to
+    // several different registers, which the allocator resolves
+    // poorly. Results are the same: the call defines a fresh vreg that
+    // becomes the result value's register.
     if let Some(res) = result {
-        if !matches!(sel.isa.abi().ret_loc(&sig.ret), RetLoc::Void) {
-            ops.push(Operand::FixedReg(Reg::V(sel.value_vreg(mir, res)), sel.isa.abi().ret_reg()));
+        match sel.isa.abi().ret_loc(&sig.ret) {
+            RetLoc::Void => {}
+            RetLoc::Reg(preg) => {
+                // The call defines a fresh vreg which BECOMES the result
+                // value's register (single fixed def per vreg — no
+                // unpacking copy needed).
+                let pin = sel.alloc_vreg_class(match preg.class {
+                    crate::machine::RegClass::Vec => crate::machine::RegClass::Vec,
+                    _ => crate::machine::RegClass::Gpr,
+                });
+                sel.set_reg(res, pin);
+                ops.push(Operand::FixedReg(Reg::V(pin), preg));
+            }
+            RetLoc::Regs(pregs, n) => {
+                let mut temps = smallvec::SmallVec::<[crate::machine::VReg; 2]>::new();
+                for preg in pregs.iter().take(n as usize) {
+                    let tmp = sel.alloc_vreg_class(if preg.class == crate::machine::RegClass::Vec { crate::machine::RegClass::Vec } else { crate::machine::RegClass::Gpr });
+                    ops.push(Operand::FixedReg(Reg::V(tmp), *preg));
+                    temps.push(tmp);
+                }
+                ret_pieces = Some((temps, n as u64));
+            }
+            // Memory-class returns were handled by the sret slot above.
+            RetLoc::Memory => {}
         }
     }
     match target {
@@ -448,32 +906,184 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
             ops.push(Operand::Reg(Reg::V(sel.value_vreg(mir, v))));
         }
     }
+    let mut gp = 0;
+    let mut fp = 0;
+    let mut reg_args: smallvec::SmallVec<[PReg; 8]> = smallvec::SmallVec::new();
+    // (value, byte offset in the outgoing area, type)
+    let mut stack: Vec<(Value, i64, glcc_mir::Ty)> = Vec::new();
+    let mut stack_off = 0i64;
+    // Memory-class returns: the caller's result slot address rides as
+    // the hidden first argument (pushed after the target so the
+    // allocator sees a use, not a def).
+    let mut sret_slot: Option<u32> = None;
+    if let Some(res) = result {
+        if matches!(sel.isa.abi().ret_loc(&sig.ret), RetLoc::Memory) {
+            let ty = mir.values[res].ty.clone();
+            let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+            let addr = sel.alloc_vreg();
+            sel.emit(MInst::new(
+                op_id(Op::Lea),
+                Width::W64,
+                smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Mem(crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None })],
+            ));
+            ops.push(Operand::FixedReg(Reg::V(addr), PReg::gpr(regs::RDI)));
+            sel.set_slot(res, slot);
+            sret_slot = Some(slot);
+            gp = 1;
+        }
+    }
+    for arg in args.iter() {
+        // Every argument consumes exactly one slot of its class, so
+        // the argument index is the sum of the two counters (the
+        // hidden sret pointer included).
+        let ty = sig.params.get(gp + fp).unwrap_or(&mir.values[*arg].ty).clone();
+        match sel.isa.abi().param_loc(gp, fp, &ty) {
+            ParamLoc::Reg(preg) => {
+                match preg.class {
+                    crate::machine::RegClass::Gpr => gp += 1,
+                    crate::machine::RegClass::Vec => fp += 1,
+                }
+                reg_args.push(preg);
+                ops.push(Operand::Reg(Reg::V(sel.value_vreg(mir, *arg))));
+            }
+            ParamLoc::Regs(pregs, n) => {
+                // Load each eightbyte piece from the aggregate's
+                // address into a temp, pinned to its piece register.
+                let addr = sel.mem_of(mir, *arg);
+                for (i, preg) in pregs.iter().take(n as usize).enumerate() {
+                    let piece_bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
+                    let tmp = sel.alloc_vreg_class(if preg.class == crate::machine::RegClass::Vec {
+                        crate::machine::RegClass::Vec
+                    } else {
+                        crate::machine::RegClass::Gpr
+                    });
+                    match preg.class {
+                        crate::machine::RegClass::Vec => {
+                            let op = if piece_bytes >= 8 { Op::MovsdL } else { Op::MovssL };
+                            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                        }
+                        _ => {
+                            let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
+                            sel.emit(MInst::new(op_id(Op::Load), width, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                        }
+                    }
+                    match preg.class {
+                        crate::machine::RegClass::Gpr => gp += 1,
+                        crate::machine::RegClass::Vec => fp += 1,
+                    }
+                    ops.push(Operand::FixedReg(Reg::V(tmp), *preg));
+                }
+            }
+            ParamLoc::Stack => {
+                gp += 1; // stack args consume no registers but advance the index
+                let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
+                stack_off = (stack_off + align - 1) / align * align;
+                let slot = stack_off;
+                stack_off += ty.size_bytes().next_multiple_of(8) as i64;
+                stack.push((*arg, slot, ty.clone()));
+            }
+        }
+    }
+    // Stack arguments: reserve (16-aligned) scratch below rsp, store
+    // each argument at [rsp + off] (first stack argument lowest), and
+    // pop it all after the call. The callee reads them at rbp+16+.
+    let stack_bytes = if stack.is_empty() {
+        0
+    } else {
+        let total = (stack_off as u64).next_multiple_of(16) as i64;
+        sel.emit(MInst::new(
+            op_id(Op::SubI),
+            Width::W64,
+            smallvec::smallvec![Operand::Reg(Reg::P(PReg::gpr(regs::RSP))), Operand::Reg(Reg::P(PReg::gpr(regs::RSP))), Operand::Imm(total)],
+        ));
+        for (arg, off, ty) in stack.iter() {
+            if ty.is_aggregate() {
+                // By-value aggregate: copy the bytes into the slot.
+                let src = sel.mem_of(mir, *arg);
+                let dst = crate::machine::MemOperand {
+                    base: Some(Reg::P(PReg::gpr(regs::RSP))),
+                    index: None,
+                    scale: 0,
+                    disp: *off,
+                    sym: None,
+                };
+                copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(ty).max(1).max(8) as u64);
+                continue;
+            }
+            let v = sel.value_vreg(mir, *arg);
+            let (store_op, width) = if matches!(ty, glcc_mir::Ty::Float(_)) {
+                (if matches!(ty, glcc_mir::Ty::Float(glcc_mir::FloatKind::F64)) { Op::MovsdS } else { Op::MovssS }, Width::W64)
+            } else {
+                (Op::Store, value_width(ty))
+            };
+            sel.emit(MInst::new(
+                op_id(store_op),
+                width,
+                smallvec::smallvec![
+                    Operand::Reg(Reg::V(v)),
+                    Operand::Mem(crate::machine::MemOperand {
+                        base: Some(Reg::P(PReg::gpr(regs::RSP))),
+                        index: None,
+                        scale: 0,
+                        disp: *off,
+                        sym: None,
+                    }),
+                ],
+            ));
+        }
+        total
+    };
     if sig.variadic {
-        // SysV: %al holds the number of vector registers used (zero
-        // while floats are unsupported). The zero is pinned in %rax
-        // for the call; a fixed early use under a fixed late def of
-        // the same register is the combination regalloc2 supports.
+        // SysV: %al holds the number of vector registers used. The
+        // count is pinned in %rax for the call; a fixed early use
+        // under a fixed late def of the same register is the
+        // combination regalloc2 supports.
         let zero = sel.alloc_vreg();
         sel.emit(MInst::new(
-            sel.isa.const_move_op(0),
+            sel.isa.const_move_op(fp as i64),
             Width::W32,
-            smallvec::smallvec![Operand::Reg(Reg::V(zero)), Operand::Imm(0)],
+            smallvec::smallvec![Operand::Reg(Reg::V(zero)), Operand::Imm(fp as i64)],
         ));
         ops.push(Operand::FixedReg(Reg::V(zero), PReg::gpr(regs::RAX)));
-    }
-    for (i, arg) in args.iter().enumerate() {
-        let ty = sig.params.get(i).unwrap_or(&mir.values[*arg].ty);
-        let preg = match sel.isa.abi().param_loc(i, ty) {
-            ParamLoc::Reg(p) => p,
-            ParamLoc::Stack => panic!("glcc native backend: stack call arguments are not yet supported"),
-        };
-        ops.push(Operand::FixedReg(Reg::V(sel.value_vreg(mir, *arg)), preg));
     }
     let op = match target {
         CallTarget::Direct(_) => Op::Call,
         CallTarget::Indirect(_) => Op::CallRm,
     };
-    sel.emit(MInst::new(op_id(op), Width::W64, ops));
+    let mut call_inst = MInst::new(op_id(op), Width::W64, ops);
+    call_inst.call_args = Some(reg_args);
+    sel.emit(call_inst);
+    if let (Some(res), Some((temps, n))) = (result, ret_pieces) {
+        // Unpack the returned pieces into the result's home slot.
+        let ty = mir.values[res].ty.clone();
+        let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+        sel.set_slot(res, slot);
+        let pregs = match sel.isa.abi().ret_loc(&sig.ret) {
+            RetLoc::Regs(p, _) => p,
+            _ => unreachable!(),
+        };
+        for (i, tmp) in temps.iter().enumerate().take(n as usize) {
+            let bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
+            let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: (i as i64) * 8, sym: None };
+            match pregs[i].class {
+                crate::machine::RegClass::Vec => {
+                    let op = if bytes >= 8 { Op::MovsdS } else { Op::MovssS };
+                    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(*tmp)), Operand::Mem(dst)]));
+                }
+                _ => {
+                    let width = if bytes >= 8 { Width::W64 } else { Width::W32 };
+                    sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::V(*tmp)), Operand::Mem(dst)]));
+                }
+            }
+        }
+    }
+    if stack_bytes > 0 {
+        sel.emit(MInst::new(
+            op_id(Op::AddI),
+            Width::W64,
+            smallvec::smallvec![Operand::Reg(Reg::P(PReg::gpr(regs::RSP))), Operand::Reg(Reg::P(PReg::gpr(regs::RSP))), Operand::Imm(stack_bytes)],
+        ));
+    }
 }
 
 fn call(sel: &mut FuncSel, mir: &Function, inst: Inst, callee: glcc_mir::InvokeCallee, args: &[Value], sig: Option<glcc_mir::Signature>) {
@@ -496,31 +1106,27 @@ fn select(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     let dst = result_vreg(sel, mir, inst);
     let then_vr = sel.value_vreg(mir, then_val);
     let else_vr = sel.value_vreg(mir, else_val);
-    // Materialize the false value first, then overwrite when taken.
-    sel.emit(MInst::new(
-        OpId::MOVE,
-        result_width(sel, mir, inst),
-        smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(else_vr))],
-    ));
-    let cc = match cond_icc(sel, mir, cond) {
-        Some((pred, a, b, width)) => {
-            sel.emit(MInst::new(op_id(Op::CmpRR), width, smallvec::smallvec![Operand::Reg(Reg::V(a)), Operand::Reg(Reg::V(b))]));
-            icc(pred)
-        }
-        None => {
-            let vr = sel.value_vreg(mir, cond);
-            sel.emit(MInst::new(
-                op_id(Op::TestRR),
-                value_width(&mir.values[cond].ty),
-                smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Reg(Reg::V(vr))],
-            ));
-            0xF
-        }
-    };
+    if matches!(mir.values[mir.insts[inst].result.expect("select has a result")].ty, glcc_mir::Ty::Float(_)) {
+        // CMOV is integer-only: move both values through GPRs, cmov,
+        // and move the winner back. The upper bits are don't-care for
+        // the losing lane.
+        let g_else = sel.alloc_vreg();
+        let g_then = sel.alloc_vreg();
+        sel.emit(MInst::new(op_id(Op::MovqX2G), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(g_else)), Operand::Reg(Reg::V(else_vr))]));
+        sel.emit(MInst::new(op_id(Op::MovqX2G), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(g_then)), Operand::Reg(Reg::V(then_vr))]));
+        let cc = select_cc(sel, mir, cond);
+        let g_res = sel.alloc_vreg();
+        sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(g_res)), Operand::Reg(Reg::V(g_else)), Operand::Reg(Reg::V(g_then)), Operand::Imm(cc as i64)]));
+        sel.emit(MInst::new(op_id(Op::MovqG2X), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(g_res))]));
+        return;
+    }
+    let cc = select_cc(sel, mir, cond);
+    // dst is defined once, tied to the false path's register: the
+    // cmov overwrites it only when the condition holds.
     sel.emit(MInst::new(
         op_id(Op::Cmov),
         result_width(sel, mir, inst),
-        smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(then_vr)), Operand::Imm(cc as i64)],
+        smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(else_vr)), Operand::Reg(Reg::V(then_vr)), Operand::Imm(cc as i64)],
     ));
 }
 
@@ -664,7 +1270,9 @@ fn mem_intrinsic(sel: &mut FuncSel, mir: &Function, inst: Inst, name: &'static s
     }
     ops.push(Operand::Sym(SymOperand { target: SymTarget::Named(name), reloc: crate::machine::RelocKind::Plt32, addend: 0 }));
 
-    // (slot, source) moves, emitted last-first.
+    // (slot, source) moves, emitted last-first. Post-RA these become
+    // register-to-register MOVE runs, which the parallel-move resolver
+    // orders correctly.
     let mut moves: Vec<(usize, Operand)> = Vec::new();
     for (i, arg) in args.iter().enumerate() {
         moves.push((i, Operand::Reg(Reg::V(sel.value_vreg(mir, *arg)))));
@@ -688,4 +1296,326 @@ fn mem_intrinsic(sel: &mut FuncSel, mir: &Function, inst: Inst, name: &'static s
         ));
     }
     sel.emit(MInst::new(op_id(Op::Call), Width::W64, ops));
+}
+
+/// Copy `len` bytes between two memory operands, chunked to the
+/// narrower of the two sides' natural alignment (packed aggregates
+/// force byte chunks).
+fn copy_bytes(sel: &mut FuncSel, dst: &crate::machine::MemOperand, src: &crate::machine::MemOperand, len: u64, align: u64) {
+    let unit = align.min(8).max(1);
+    let mut off = 0i64;
+    while (off as u64) < len {
+        let (op, width): (Op, Width) = match unit {
+            8 => (Op::Load, Width::W64),
+            4 => (Op::Load, Width::W32),
+            2 => (Op::Load, Width::W16),
+            _ => (Op::Load, Width::W8),
+        };
+        let tmp = sel.alloc_vreg();
+        sel.emit(MInst::new(
+            op_id(op),
+            width,
+            smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: src.disp + off, ..src.clone() })],
+        ));
+        let (sop, swidth): (Op, Width) = match unit {
+            8 => (Op::Store, Width::W64),
+            4 => (Op::Store, Width::W32),
+            2 => (Op::Store, Width::W16),
+            _ => (Op::Store, Width::W8),
+        };
+        sel.emit(MInst::new(
+            op_id(sop),
+            swidth,
+            smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: dst.disp + off, ..dst.clone() })],
+        ));
+        off += unit as i64;
+    }
+}
+
+// -- float helpers ---------------------------------------------------------
+
+fn is_f64(mir: &Function, v: Value) -> bool {
+    matches!(mir.values[v].ty, glcc_mir::Ty::Float(glcc_mir::FloatKind::F64))
+}
+
+fn widen_sse(op: Op, double: bool) -> Op {
+    match (op, double) {
+        (Op::AddSS, true) => Op::AddSD,
+        (Op::SubSS, true) => Op::SubSD,
+        (Op::MulSS, true) => Op::MulSD,
+        (Op::DivSS, true) => Op::DivSD,
+        (o, _) => o,
+    }
+}
+
+/// Negation: subtract the operand from -0.0 (no xorps constant pool
+/// yet, so the sign bit comes from a materialized constant).
+fn fneg(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
+    let src_v = single_value(mir, inst);
+    let dst = result_vreg(sel, mir, inst);
+    let src = single_operand(sel, mir, inst);
+    let double = is_f64(mir, src_v);
+    let bits: i64 = if double { 0x8000_0000_0000_0000u64 as i64 } else { 0x8000_0000u64 as i64 };
+    let gpr = sel.alloc_vreg();
+    sel.emit(MInst::new(sel.isa.const_move_op(bits), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(gpr)), Operand::Imm(bits)]));
+    let neg0 = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
+    sel.emit(MInst::new(op_id(Op::MovqG2X), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(neg0)), Operand::Reg(Reg::V(gpr))]));
+    let op = if double { Op::SubSD } else { Op::SubSS };
+    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(neg0)), Operand::Reg(Reg::V(src))]));
+    true
+}
+
+/// Floating compare: ucomis sets ZF/PF/CF (all three on unordered), so
+/// the ordered predicates AND with setnp and Ne ORs with setp.
+fn fcmp(sel: &mut FuncSel, mir: &Function, inst: Inst) {
+    let InstKind::Fcmp { pred, .. } = mir.insts[inst].kind else { unreachable!() };
+    let mut ops: Vec<Value> = Vec::new();
+    mir.insts[inst].kind.for_each_operand(&mut |v| ops.push(v));
+    let (a, b) = (ops[0], ops[1]);
+    let op = if is_f64(mir, a) { Op::UcomisD } else { Op::UcomisS };
+    let a = sel.value_vreg(mir, a);
+    let b = sel.value_vreg(mir, b);
+    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(a)), Operand::Reg(Reg::V(b))]));
+    let dst = result_vreg(sel, mir, inst);
+    let (cc1, cc2): (u8, u8) = match pred {
+        glcc_mir::FcmpPred::Eq => (0x4, 0xB),  // e & np
+        glcc_mir::FcmpPred::Ne => (0x5, 0xA),  // ne | p
+        glcc_mir::FcmpPred::Lt => (0x2, 0xB),  // b & np
+        glcc_mir::FcmpPred::Le => (0x6, 0xB),  // be & np
+        glcc_mir::FcmpPred::Gt => (0x7, 0xB),  // a & np
+        glcc_mir::FcmpPred::Ge => (0x3, 0xB),  // ae & np
+        glcc_mir::FcmpPred::Uno => (0xA, u8::MAX), // p
+        glcc_mir::FcmpPred::Ord => (0xB, u8::MAX), // np
+    };
+    if cc2 == u8::MAX {
+        sel.emit(MInst::new(op_id(Op::Setcc), Width::W8, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Imm(cc1 as i64)]));
+        return;
+    }
+    let t1 = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::Setcc), Width::W8, smallvec::smallvec![Operand::Reg(Reg::V(t1)), Operand::Imm(cc1 as i64)]));
+    let t2 = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::Setcc), Width::W8, smallvec::smallvec![Operand::Reg(Reg::V(t2)), Operand::Imm(cc2 as i64)]));
+    let logic = if cc1 == 0x5 { Op::OrRR } else { Op::AndRR };
+    sel.emit(MInst::new(op_id(logic), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(t1)), Operand::Reg(Reg::V(t2))]));
+}
+
+fn load_float(sel: &mut FuncSel, mir: &Function, inst: Inst) {
+    let InstKind::Load { addr, .. } = mir.insts[inst].kind else { unreachable!() };
+    let dst = result_vreg(sel, mir, inst);
+    let op = if is_f64(mir, mir.insts[inst].result.expect("load has a result")) { Op::MovsdL } else { Op::MovssL };
+    let mem = sel.mem_of(mir, addr);
+    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
+}
+
+fn store_float(sel: &mut FuncSel, mir: &Function, inst: Inst, addr: Value, val: Value) {
+    let _ = inst;
+    let op = if is_f64(mir, val) { Op::MovsdS } else { Op::MovssS };
+    let v = sel.value_vreg(mir, val);
+    let mem = sel.mem_of(mir, addr);
+    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(v)), Operand::Mem(mem)]));
+}
+
+/// va_arg of a small aggregate: INTEGER-class pieces are fetched
+/// whole from the register save area when the cursor plus the argument
+/// size still fits (48-byte GP area), else from the overflow area;
+/// memory-class aggregates always come from the overflow area. The
+/// result value is the fresh home slot's address.
+fn va_arg_aggregate(sel: &mut FuncSel, mir: &Function, inst: Inst, ap: Value) -> bool {
+    let InstKind::VaArg { ap: ap_val } = mir.insts[inst].kind else { unreachable!() };
+    let res = mir.insts[inst].result.expect("va_arg has a result");
+    let ty = mir.values[res].ty.clone();
+    let size = ty.size_bytes();
+    if size > 16 {
+        panic!("glcc native backend: va_arg of {ty:?} is not yet supported");
+    }
+    let Some(pieces) = abi::struct_pieces(&ty) else {
+        panic!("glcc native backend: va_arg of {ty:?} is not yet supported");
+    };
+    if pieces.iter().any(|(c, _)| *c != crate::machine::RegClass::Gpr) {
+        panic!("glcc native backend: va_arg of {ty:?} with float pieces is not yet supported");
+    }
+    let ap_addr = sel.value_vreg(mir, ap_val);
+    let _ = ap;
+    let mut mem = |sel: &mut FuncSel, base: crate::machine::Reg, disp: i64, dst: crate::machine::VReg| {
+        sel.emit(MInst::new(
+            op_id(Op::Load),
+            Width::W64,
+            smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(crate::machine::MemOperand { base: Some(base), index: None, scale: 0, disp, sym: None })],
+        ));
+    };
+    let off = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), 0, off);
+    let save = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), 16, save);
+    let off64 = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::MovRR), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off64)), Operand::Reg(Reg::V(off))]));
+    let reg_addr = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddRR), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(reg_addr)), Operand::Reg(Reg::V(save)), Operand::Reg(Reg::V(off64))]));
+    let ovf = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), 8, ovf);
+    // Fits when gp_offset + size <= 48.
+    sel.emit(MInst::new(op_id(Op::CmpI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off)), Operand::Imm(48 - size as i64)]));
+    let addr = sel.alloc_vreg();
+    sel.emit(MInst::new(OpId::MOVE, Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf))]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(reg_addr)), Operand::Imm(0x2)]));
+    // Home the bytes.
+    let slot = sel.slot(size.max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+    sel.set_slot(res, slot);
+    let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+    let src = crate::machine::MemOperand { base: Some(Reg::V(addr)), index: None, scale: 0, disp: 0, sym: None };
+    copy_bytes(sel, &dst, &src, size, glcc_mir::ty::ty_align(&ty).max(1) as u64);
+    // Advance: the GP cursor moves a full slot (8) when the register
+    // path was taken; the overflow area always absorbs the whole
+    // aligned argument otherwise.
+    let step = size.next_multiple_of(8) as i64;
+    let new_off = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Reg(Reg::V(off)), Operand::Imm(step)]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(off)), Operand::Imm(0x2)]));
+    let mut off_m = sel.mem_of(mir, ap_val);
+    sel.emit(MInst::new(
+        op_id(Op::Store),
+        Width::W32,
+        smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Mem(off_m)],
+    ));
+    // Overflow cursor only moves when the register path was not taken.
+    let plus = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(plus)), Operand::Reg(Reg::V(ovf)), Operand::Imm(step)]));
+    let bumped = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(plus)), Operand::Reg(Reg::V(ovf)), Operand::Imm(0x2)]));
+    let mut ovf_m = sel.mem_of(mir, ap_val);
+    ovf_m.disp += 8;
+    sel.emit(MInst::new(
+        op_id(Op::Store),
+        Width::W64,
+        smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Mem(ovf_m)],
+    ));
+    true
+}
+
+/// Seed the va_list tag: {gp_offset, fp_offset, overflow_arg_area,
+/// reg_save_area}. The offsets come from the Entry prelude's counts.
+fn va_start(sel: &mut FuncSel, mir: &Function, inst: Inst, ap: Value) {
+    let save_slot = sel.va_save_slot.expect("va_start without a variadic prelude");
+    let _ = inst;
+    let mut field = |sel: &mut FuncSel, val: Operand, disp: i64, width: Width| {
+        let v = match &val {
+            Operand::Reg(Reg::V(v)) => *v,
+            other => panic!("glcc native backend: va_start field {other:?}"),
+        };
+        let mut m = sel.mem_of(mir, ap);
+        m.disp += disp;
+        sel.emit(MInst::new(
+            op_id(Op::Store),
+            width,
+            smallvec::smallvec![Operand::Reg(Reg::V(v)), Operand::Mem(m)],
+        ));
+    };
+    let gp = sel.alloc_vreg();
+    sel.emit(MInst::new(sel.isa.const_move_op(sel.va_gp_off), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(gp)), Operand::Imm(sel.va_gp_off)]));
+    field(sel, Operand::Reg(Reg::V(gp)), 0, Width::W32);
+    let fp = sel.alloc_vreg();
+    sel.emit(MInst::new(sel.isa.const_move_op(sel.va_fp_off), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(fp)), Operand::Imm(sel.va_fp_off)]));
+    field(sel, Operand::Reg(Reg::V(fp)), 4, Width::W32);
+    let ovf = sel.alloc_vreg();
+    sel.emit(MInst::new(
+        op_id(Op::Lea),
+        Width::W64,
+        smallvec::smallvec![
+            Operand::Reg(Reg::V(ovf)),
+            Operand::Mem(crate::machine::MemOperand { base: Some(Reg::P(PReg::gpr(regs::RBP))), index: None, scale: 0, disp: sel.va_overflow_disp, sym: None }),
+        ],
+    ));
+    field(sel, Operand::Reg(Reg::V(ovf)), 8, Width::W64);
+    let save = sel.alloc_vreg();
+    sel.emit(MInst::new(
+        op_id(Op::Lea),
+        Width::W64,
+        smallvec::smallvec![
+            Operand::Reg(Reg::V(save)),
+            Operand::Mem(crate::machine::MemOperand { base: Some(Reg::FI(save_slot)), index: None, scale: 0, disp: 0, sym: None }),
+        ],
+    ));
+    field(sel, Operand::Reg(Reg::V(save)), 16, Width::W64);
+}
+
+/// Read the next variadic argument of the result type. Scalars only:
+/// pick the register-save-area cursor or the overflow area, load the
+/// value, and advance the cursor (16 bytes per FP slot, 8 per GP).
+fn va_arg(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
+    let InstKind::VaArg { ap } = mir.insts[inst].kind else { unreachable!() };
+    let res = mir.insts[inst].result.expect("va_arg has a result");
+    let res_ty = mir.values[res].ty.clone();
+    let is_float = matches!(res_ty, glcc_mir::Ty::Float(_));
+    if res_ty.is_aggregate() {
+        return va_arg_aggregate(sel, mir, inst, ap);
+    }
+    if matches!(res_ty, glcc_mir::Ty::WideInt { .. }) {
+        panic!("glcc native backend: va_arg of {res_ty:?} is not yet supported");
+    }
+    let is_f64 = is_f64(mir, res);
+
+    // cursor field: +0 for GP, +4 for FP; limits 48 / 176.
+    let (field_disp, limit, step): (i64, i64, i64) = if is_float { (4, 176, 16) } else { (0, 48, 8) };
+    let ap_addr = sel.value_vreg(mir, ap);
+
+    let mut mem = |sel: &mut FuncSel, base: crate::machine::Reg, disp: i64, op: Op, width: Width, dst: crate::machine::VReg| {
+        sel.emit(MInst::new(
+            op_id(op),
+            width,
+            smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(crate::machine::MemOperand { base: Some(base), index: None, scale: 0, disp, sym: None })],
+        ));
+    };
+
+    let off = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), field_disp, Op::Load, Width::W32, off);
+    // reg_save_area + offset
+    let save = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), 16, Op::Load, Width::W64, save);
+    let off64 = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::MovRR), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off64)), Operand::Reg(Reg::V(off))]));
+    let reg_addr = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddRR), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(reg_addr)), Operand::Reg(Reg::V(save)), Operand::Reg(Reg::V(off64))]));
+    let ovf = sel.alloc_vreg();
+    mem(sel, Reg::V(ap_addr), 8, Op::Load, Width::W64, ovf);
+    // addr = cursor < limit ? reg_path : overflow
+    sel.emit(MInst::new(op_id(Op::CmpI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off)), Operand::Imm(limit)]));
+    // addr = cursor < limit ? reg_path : overflow: defined once, tied
+    // to the overflow (false) path.
+    let addr = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(reg_addr)), Operand::Imm(0x2)]));
+
+    // the value itself
+    let dst = result_vreg(sel, mir, inst);
+    let (load_op, width) = if is_float {
+        (if is_f64 { Op::MovsdL } else { Op::MovssL }, Width::W64)
+    } else {
+        (Op::Load, value_width(&res_ty))
+    };
+    mem(sel, Reg::V(addr), 0, load_op, width, dst);
+
+    // advance: cursor += step; bump the overflow area only when the
+    // register path was not taken.
+    let new_off = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Reg(Reg::V(off)), Operand::Imm(step)]));
+    let mut off_m = sel.mem_of(mir, ap);
+    off_m.disp += field_disp;
+    sel.emit(MInst::new(
+        op_id(Op::Store),
+        Width::W32,
+        smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Mem(off_m)],
+    ));
+    // overflow cursor bumps only when the register path was taken:
+    // bumped = cursor < limit ? ovf : ovf + 8.
+    let bumped = sel.alloc_vreg();
+    let plus8 = sel.alloc_vreg();
+    sel.emit(MInst::new(op_id(Op::AddI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(plus8)), Operand::Reg(Reg::V(ovf)), Operand::Imm(8)]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(plus8)), Operand::Reg(Reg::V(ovf)), Operand::Imm(0x2)]));
+    let mut ovf_m = sel.mem_of(mir, ap);
+    ovf_m.disp += 8;
+    sel.emit(MInst::new(
+        op_id(Op::Store),
+        Width::W64,
+        smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Mem(ovf_m)],
+    ));
+    true
 }

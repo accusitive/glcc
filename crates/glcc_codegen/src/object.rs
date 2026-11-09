@@ -70,8 +70,48 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
         sym_index(&mut asm, &mut extern_syms, ei.index(), false, &e.name, false, e.weak, true);
     }
 
+    // GLCC_NATIVE_CENSUS=1: diagnostic mode — lower every function even
+    // when unsupported features panic, emit an int3 stub for the
+    // failures, and tally the panic messages. Used to survey which
+    // feature gaps a large input hits.
+    let census = std::env::var_os("GLCC_NATIVE_CENSUS").is_some();
+    let mut census_tally: Vec<(String, u32)> = Vec::new();
+
     for (fi, f) in mir.funcs.iter_enumerated() {
-        let mf = lower_function(isa, mir, f);
+        let lowered = if census {
+            let prev = std::panic::take_hook();
+            std::panic::set_hook(Box::new(|_| {}));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower_function(isa, mir, f)));
+            std::panic::set_hook(prev);
+            match r {
+                Ok(mf) => Some(mf),
+                Err(p) => {
+                    let msg = p
+                        .downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                        .unwrap_or_else(|| "unknown panic".into());
+                    if let Some(e) = census_tally.iter_mut().find(|(m, _)| *m == msg) {
+                        e.1 += 1;
+                    } else {
+                        census_tally.push((msg, 1));
+                    }
+                    None
+                }
+            }
+        } else {
+            Some(lower_function(isa, mir, f))
+        };
+        let Some(mf) = lowered else {
+            let sym = func_syms[fi.index()].expect("function symbol");
+            let start = asm.sections[0].data.len() as u32;
+            func_text_offset[fi.index()] = Some(start);
+            asm.sections[0].data.extend_from_slice(&[0xCC]); // int3 stub
+            asm.symbols[sym].defined = true;
+            asm.symbols[sym].sect = Some(0);
+            asm.symbols[sym].value = start as i64;
+            continue;
+        };
         printer.function(&mf, isa);
         let sym = func_syms[fi.index()].expect("function symbol");
         let start = asm.sections[0].data.len() as u32;
@@ -108,12 +148,27 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
 
     emit_init_array(&mut asm, mir, &func_syms);
 
+    if census {
+        let lowered = mir.funcs.len() as u32 - census_tally.iter().map(|(_, n)| *n).sum::<u32>();
+        eprintln!("=== GLCC_NATIVE_CENSUS: {lowered} of {} functions lowered; panic tally:", mir.funcs.len());
+        for (msg, n) in &census_tally {
+            eprintln!("  [{n:5}x] {msg}");
+        }
+    }
+
     let object = write_module_elf(&asm, AsmArch::X86_64)?;
     Ok(Emitted { object, asm: printer.finish() })
 }
 
 fn lower_function(isa: &'static dyn TargetIsa, mir: &glcc_mir::Module, f: &glcc_mir::Function) -> MFunction {
+    let trace = std::env::var_os("GLCC_NATIVE_TRACE").is_some();
+    if trace {
+        eprintln!("TRACE: select {}", f.name);
+    }
     let mut mf = sel::select_function(isa, mir, f);
+    if trace {
+        eprintln!("TRACE: ra {}", f.name);
+    }
     if std::env::var_os("GLCC_NATIVE_DUMP").is_some() {
         let mut p = crate::printer::Printer::new();
         p.function(&mf, isa);
@@ -122,7 +177,13 @@ fn lower_function(isa: &'static dyn TargetIsa, mir: &glcc_mir::Module, f: &glcc_
     if isa.needs_ra() {
         ra::allocate(&mut mf, isa);
     }
+    if trace {
+        eprintln!("TRACE: frame {}", f.name);
+    }
     frame::expand(&mut mf, isa);
+    if trace {
+        eprintln!("TRACE: done {}", f.name);
+    }
     if std::env::var_os("GLCC_NATIVE_DUMP").is_some() {
         let mut p = crate::printer::Printer::new();
         p.function(&mf, isa);

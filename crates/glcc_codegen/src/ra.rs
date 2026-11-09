@@ -18,22 +18,38 @@ use crate::machine::{BlockId, MBlock, MFunction, MInst, OpId, Operand, PReg, Reg
 /// allocator's moves are interleaved, and its spill slots are appended
 /// to the frame. User frame slots keep their indices.
 pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
+    if std::env::var_os("GLCC_RA_VERBOSE").is_some() {
+        unsafe {
+            let _ = log::set_logger_racy(&VERBOSE_LOGGER);
+        }
+        log::set_max_level(log::LevelFilter::Trace);
+    }
     let env = machine_env(isa.reginfo());
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: regalloc2::run {}", f.name);
+    }
     let out = {
         let ra = Adapter::new(f, isa);
         let mut options = RegallocOptions::default();
-        options.verbose_log = false;
+        options.verbose_log = std::env::var_os("GLCC_RA_VERBOSE").is_some();
         options.validate_ssa = cfg!(debug_assertions);
         regalloc2::run(&ra, &env, &options).expect("regalloc2")
     };
 
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: regalloc2 done {}", f.name);
+    }
     let reginfo = isa.reginfo();
     let resolve = |alloc: Allocation| -> Reg {
         match alloc.kind() {
             regalloc2::AllocationKind::None => panic!("glcc native backend: unresolved allocation"),
             regalloc2::AllocationKind::Reg => {
                 let preg = alloc.as_reg().expect("reg allocation");
-                Reg::P(reginfo.pregs[preg.index()].preg)
+                let class = match preg.class() {
+                    regalloc2::RegClass::Int => crate::machine::RegClass::Gpr,
+                    _ => crate::machine::RegClass::Vec,
+                };
+                Reg::P(crate::machine::PReg { hw: preg.hw_enc() as u8, class })
             }
             regalloc2::AllocationKind::Stack => Reg::Spill(alloc.as_stack().expect("stack allocation").index() as u32),
         }
@@ -70,7 +86,17 @@ pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
             .map(|(bi, _)| {
                 ends_in_branch.push(f.blocks[bi].insts.last().is_some_and(|i| i.branch.is_some()));
                 let mut insts = Vec::with_capacity(f.blocks[bi].insts.len());
+                let seq_debug = std::env::var_os("GLCC_RA_SEQ").is_some();
                 for item in out.block_insts_and_edits(&ra, regalloc2::Block::new(bi)) {
+                    if seq_debug {
+                        match item {
+                            regalloc2::InstOrEdit::Inst(i) => eprintln!("RA SEQ b{bi}: inst {}", i.index()),
+                            regalloc2::InstOrEdit::Edit(Edit::Move { from, to }) => {
+                                eprintln!("RA SEQ b{bi}: edit {:?} -> {:?}", from, to)
+                            }
+                            _ => eprintln!("RA SEQ b{bi}: other edit"),
+                        }
+                    }
                     match item {
                         regalloc2::InstOrEdit::Inst(i) => {
                             let (mb, mi) = ra.inst_loc[i.index()];
@@ -91,6 +117,94 @@ pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
             })
             .collect()
     };
+    // Insert call-argument moves: each call's register arguments go
+    // into their ABI registers immediately before the call, as one
+    // parallel-move set (a pin's destination may be another pin's
+    // source). The moves' sources and targets are physical post-RA.
+    let reginfo = isa.reginfo();
+    let resolve_run = |pending: &mut Vec<(Reg, Reg)>| -> Vec<(Reg, Reg)> {
+        let mut moves: Vec<(Reg, Reg)> = Vec::with_capacity(pending.len());
+        while let Some(i) = (0..pending.len()).find(|&i| {
+            let (dst, _) = pending[i];
+            !pending.iter().enumerate().any(|(j, (_, src))| j != i && *src == dst)
+        }) {
+            moves.push(pending.remove(i));
+        }
+        let mut guard = 0usize;
+        while !pending.is_empty() {
+            guard += 1;
+            if guard > 100 {
+                eprintln!("ARGMOVE HANG: pending={:?} moves={:?}", pending, moves);
+                panic!("resolve_run spin");
+            }
+            let (dst, src) = pending[0];
+            let scratch = match reginfo.scratch[match src {
+                Reg::P(p) => p.class as usize,
+                _ => RegClass::Gpr as usize,
+            }] {
+                Some(p) => p,
+                None => panic!("glcc native backend: no scratch register for call-arg move cycle"),
+            };
+            moves.push((Reg::P(scratch), src));
+            pending[0] = (dst, Reg::P(scratch));
+            while let Some(i) = (0..pending.len()).find(|&i| {
+                let (dst, _) = pending[i];
+                !pending.iter().enumerate().any(|(j, (_, src))| j != i && *src == dst)
+            }) {
+                moves.push(pending.remove(i));
+            }
+        }
+        moves
+    };
+    let mut plans = plans;
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: inserting argmoves {}", f.name);
+    }
+    if std::env::var_os("GLCC_NO_ARGMOVES").is_none() {
+    for plan in &mut plans {
+        let mut out: Vec<MInst> = Vec::with_capacity(plan.len() + 8);
+        for inst in plan.drain(..) {
+            if let Some(pregs) = &inst.call_args {
+                let regs: Vec<Reg> = inst
+                    .ops
+                    .iter()
+                    .filter_map(|o| match o {
+                        Operand::Reg(r @ Reg::P(_)) => Some(*r),
+                        _ => None,
+                    })
+                    .collect();
+                let args = &regs[regs.len() - pregs.len()..];
+                let mut pending: Vec<(Reg, Reg)> = Vec::new();
+                for (arg, preg) in args.iter().zip(pregs.iter()) {
+                    if *arg != Reg::P(*preg) {
+                        pending.push((Reg::P(*preg), *arg));
+                    }
+                }
+                if pending.len() == 1 {
+                    out.push(MInst::new(
+                        OpId::MOVE,
+                        crate::machine::Width::W64,
+                        smallvec::smallvec![Operand::Reg(pending[0].0), Operand::Reg(pending[0].1)],
+                    ));
+                } else if pending.len() > 1 {
+                    for (dst, src) in resolve_run(&mut pending) {
+                        out.push(MInst::new(
+                            OpId::MOVE,
+                            crate::machine::Width::W64,
+                            smallvec::smallvec![Operand::Reg(dst), Operand::Reg(src)],
+                        ));
+                    }
+                }
+            }
+            out.push(inst);
+        }
+        *plan = out;
+    }
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: argmoves done {}", f.name);
+    }
+    }
+
     for (bi, plan) in plans.into_iter().enumerate() {
         let block = &mut f.blocks[bi];
         if ends_in_branch[bi] {
@@ -108,32 +222,74 @@ pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
         }
     }
 
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: spillslots {} = {}", f.name, out.num_spillslots);
+    }
     f.frame.spill_start = f.frame.slots.len() as u32;
     for _ in 0..out.num_spillslots {
         f.frame.slots.push(crate::machine::Slot { size: 8, align: 8, offset: 0 });
     }
 
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: writeback done {}", f.name);
+    }
     resolve_entry_pins(f, isa);
 }
 
 /// The entry block's leading register-to-register MOVEs are the ABI
-/// parameter pins. regalloc2 assigns each pin's destination vreg
-/// freely, so one pin's destination may be another pin's source; run
-/// sequentially the moves would clobber a value before it is read.
-/// Reorder them as the parallel move they semantically are, breaking
-/// cycles through the scratch register.
+/// parameter pins: one pin's destination may be another pin's source,
+/// so they must execute as the parallel move they semantically are.
+/// (Call-argument moves are inserted separately, one resolved set per
+/// call.)
 fn resolve_entry_pins(f: &mut MFunction, isa: &'static dyn TargetIsa) {
-    let scratch = match isa.reginfo().scratch[RegClass::Gpr as usize] {
-        Some(p) => p,
-        None => return,
-    };
-    let mut pending: Vec<(Reg, Reg)> = Vec::new(); // (dst, src)
-    let mut run_end = 0;
-    for inst in &f.blocks[0].insts {
-        if inst.op != OpId::MOVE {
-            break;
+    if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {
+        eprintln!("TRACE: entry pins {}", f.name);
+    }
+    let reginfo = isa.reginfo();
+    let resolve_run = |pending: &mut Vec<(Reg, Reg)>| -> Vec<(Reg, Reg)> {
+        let mut moves: Vec<(Reg, Reg)> = Vec::with_capacity(pending.len());
+        let mut guard0 = 0usize;
+        while let Some(i) = (0..pending.len()).find(|&i| {
+            let (dst, _) = pending[i];
+            matches!(dst, Reg::Spill(_)) || !pending.iter().enumerate().any(|(j, (_, src))| j != i && *src == dst)
+        }) {
+            guard0 += 1;
+            if guard0 > 1000 {
+                panic!("first find spin: {:?}", pending);
+            }
+            moves.push(pending.remove(i));
         }
-        match (&inst.ops[0], &inst.ops[1]) {
+        while !pending.is_empty() {
+            // Cycle: stash one source in the scratch register of its
+            // class and continue with the copy retargeted at it.
+            let (dst, src) = pending[0];
+            let scratch = match reginfo.scratch[match src {
+                Reg::P(p) => p.class as usize,
+                _ => RegClass::Gpr as usize,
+            }] {
+                Some(p) => p,
+                None => panic!("glcc native backend: no scratch register for move cycle"),
+            };
+            moves.push((Reg::P(scratch), src));
+            pending[0] = (dst, Reg::P(scratch));
+            while let Some(i) = (0..pending.len()).find(|&i| {
+                let (dst, _) = pending[i];
+                matches!(dst, Reg::Spill(_)) || !pending.iter().enumerate().any(|(j, (_, src))| j != i && *src == dst)
+            }) {
+                moves.push(pending.remove(i));
+            }
+        }
+        moves
+    };
+
+    let block = &mut f.blocks[0];
+    // The pins are the entry block's LEADING run of reg-to-reg MOVEs;
+    // later MOVEs (call-argument moves) belong to other parallel sets
+    // and must not be merged into this one.
+    let mut pending: Vec<(Reg, Reg)> = Vec::new();
+    let mut run_end = 0usize;
+    while run_end < block.insts.len() && block.insts[run_end].op == OpId::MOVE {
+        match (&block.insts[run_end].ops[0], &block.insts[run_end].ops[1]) {
             (Operand::Reg(dst), Operand::Reg(Reg::P(src))) => {
                 if *dst != Reg::P(*src) {
                     pending.push((*dst, Reg::P(*src)));
@@ -143,44 +299,23 @@ fn resolve_entry_pins(f: &mut MFunction, isa: &'static dyn TargetIsa) {
             _ => break,
         }
     }
-    if pending.len() < 2 {
-        return;
+    if pending.len() >= 2 {
+        let encoded: Vec<MInst> = resolve_run(&mut pending)
+            .into_iter()
+            .filter(|(dst, src)| dst != src)
+            .map(|(dst, src)| {
+                MInst::new(
+                    OpId::MOVE,
+                    crate::machine::Width::W64,
+                    smallvec::smallvec![Operand::Reg(dst), Operand::Reg(src)],
+                )
+            })
+            .collect();
+        let tail = block.insts.split_off(run_end);
+        block.insts.truncate(0);
+        block.insts.extend(encoded);
+        block.insts.extend(tail);
     }
-    let mut moves: Vec<(Reg, Reg)> = Vec::with_capacity(pending.len());
-    while let Some(i) = (0..pending.len()).find(|&i| {
-        let (dst, _) = pending[i];
-        matches!(dst, Reg::Spill(_)) || !pending.iter().any(|(_, src)| *src == dst)
-    }) {
-        moves.push(pending.remove(i));
-    }
-    while !pending.is_empty() {
-        // Cycle: stash one source in the scratch register and continue
-        // with the copy retargeted at it.
-        let (dst, src) = pending[0];
-        moves.push((Reg::P(scratch), src));
-        pending[0] = (dst, Reg::P(scratch));
-        while let Some(i) = (0..pending.len()).find(|&i| {
-            let (dst, _) = pending[i];
-            matches!(dst, Reg::Spill(_)) || !pending.iter().any(|(_, src)| *src == dst)
-        }) {
-            moves.push(pending.remove(i));
-        }
-    }
-    let encoded: Vec<MInst> = moves
-        .into_iter()
-        .filter(|(dst, src)| dst != src)
-        .map(|(dst, src)| {
-            MInst::new(
-                OpId::MOVE,
-                crate::machine::Width::W64,
-                smallvec::smallvec![Operand::Reg(dst), Operand::Reg(src)],
-            )
-        })
-        .collect();
-    let block = &mut f.blocks[0];
-    let rest = block.insts.split_off(run_end);
-    block.insts = encoded;
-    block.insts.extend(rest);
 }
 
 /// Operand count regalloc2 saw for flattened inst `i` (debug aid).
@@ -257,14 +392,14 @@ fn machine_env(reginfo: &RegInfo) -> MachineEnv {
     let set = |regs: &[PReg]| -> PRegSet {
         let mut s = PRegSet::empty();
         for &p in regs {
-            s.add(RaPReg::new(reginfo.preg_index(p), ra_class(p.class)));
+            s.add(RaPReg::new(p.hw as usize, ra_class(p.class)));
         }
         s
     };
     MachineEnv {
         preferred_regs_by_class: [set(&reginfo.preferred[0]), set(&reginfo.preferred[1]), PRegSet::empty()],
         non_preferred_regs_by_class: [set(&reginfo.non_preferred[0]), set(&reginfo.non_preferred[1]), PRegSet::empty()],
-        scratch_by_class: reginfo.scratch.map(|p| p.map(|p| RaPReg::new(reginfo.preg_index(p), ra_class(p.class)))),
+        scratch_by_class: reginfo.scratch.map(|p| p.map(|p| RaPReg::new(p.hw as usize, ra_class(p.class)))),
         fixed_stack_slots: Vec::new(),
     }
 }
@@ -272,7 +407,9 @@ fn machine_env(reginfo: &RegInfo) -> MachineEnv {
 fn ra_class(c: RegClass) -> RaRegClass {
     match c {
         RegClass::Gpr => RaRegClass::Int,
-        RegClass::Vec => RaRegClass::Vector,
+        // Scalar floats ride regalloc2's Float class (index 1, matching
+        // the MachineEnv's per-class arrays).
+        RegClass::Vec => RaRegClass::Float,
     }
 }
 
@@ -281,6 +418,7 @@ struct Adapter<'a> {
     ops: &'static OpcodeTable,
     reginfo: &'static RegInfo,
     ret_preg: PReg,
+    vec_ret_preg: PReg,
     /// regalloc2 instruction id → (block, index within block).
     inst_loc: Vec<(BlockId, usize)>,
     block_start: Vec<usize>,
@@ -296,6 +434,12 @@ struct Adapter<'a> {
 }
 
 impl<'a> Adapter<'a> {
+    /// Register class the selection assigned to `v` (floats live in
+    /// the Vec class; everything else is Gpr).
+    fn vclass(&self, v: VReg) -> RaRegClass {
+        ra_class(self.f.vreg_class[v.0 as usize])
+    }
+
     fn new(f: &'a MFunction, isa: &'static dyn TargetIsa) -> Self {
         let ops = isa.opcodes();
         let reginfo = isa.reginfo();
@@ -304,6 +448,7 @@ impl<'a> Adapter<'a> {
             ops,
             reginfo,
             ret_preg: isa.abi().ret_reg(),
+            vec_ret_preg: isa.abi().vec_ret_reg(),
             inst_loc: Vec::new(),
             block_start: Vec::new(),
             operands: Vec::new(),
@@ -312,8 +457,13 @@ impl<'a> Adapter<'a> {
             clobbers: Vec::new(),
             succs: f.blocks.iter().map(|b| b.succs.iter().map(|s| regalloc2::Block::new(*s as usize)).collect()).collect(),
             preds: vec![Vec::new(); f.blocks.len()],
-            block_params: f.blocks.iter().map(|b| b.params.iter().map(|v| RaVReg::new(v.0 as usize, RaRegClass::Int)).collect()).collect(),
+            block_params: Vec::new(),
         };
+        a.block_params = f
+            .blocks
+            .iter()
+            .map(|b| b.params.iter().map(|v| RaVReg::new(v.0 as usize, a.vclass(*v))).collect())
+            .collect();
         for (bi, block) in f.blocks.iter().enumerate() {
             for &s in &block.succs {
                 a.preds[s as usize].push(regalloc2::Block::new(bi));
@@ -348,12 +498,12 @@ impl<'a> Adapter<'a> {
                         if reserved.contains(&p) {
                             continue;
                         }
-                        clob.add(RaPReg::new(reginfo.preg_index(p), ra_class(p.class)));
+                        clob.add(RaPReg::new(p.hw as usize, ra_class(p.class)));
                     }
                 }
                 a.clobbers.push(clob);
                 a.branch_args.push(inst.branch.as_ref().map(|br| {
-                    br.args.iter().map(|edge| edge.iter().map(|v| RaVReg::new(v.0 as usize, RaRegClass::Int)).collect()).collect()
+                    br.args.iter().map(|edge| edge.iter().map(|v| RaVReg::new(v.0 as usize, a.vclass(*v))).collect()).collect()
                 }).unwrap_or_default());
             }
         }
@@ -372,6 +522,7 @@ impl<'a> Adapter<'a> {
             }
         }
         if std::env::var_os("GLCC_RA_DEBUG").is_some() {
+            eprintln!("RA DEBUG: vreg_class = {:?}", f.vreg_class);
             let mut refs = vec![0usize; f.num_vregs as usize];
             for op in a.operands.iter() {
                 refs[op.vreg().vreg()] += 1;
@@ -415,7 +566,7 @@ impl<'a> Adapter<'a> {
                     // the source use is tracked.
                     if let Operand::Reg(Reg::V(v)) = &inst.ops[1] {
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(v.0 as usize, RaRegClass::Int),
+                            RaVReg::new(v.0 as usize, self.vclass(*v)),
                             OperandConstraint::Any,
                             OperandKind::Use,
                             OperandPos::Early,
@@ -428,20 +579,23 @@ impl<'a> Adapter<'a> {
                     // call result): the move itself defines the value,
                     // so the destination is unconstrained.
                     Reg::P(_) => self.operands.push(RaOperand::new(
-                        RaVReg::new(dst.0 as usize, RaRegClass::Int),
+                        RaVReg::new(dst.0 as usize, self.vclass(dst)),
                         OperandConstraint::Any,
                         OperandKind::Def,
                         OperandPos::Early,
                     )),
                     Reg::V(src) => {
+                        // A plain copy: dst unconstrained, src read as
+                        // is. (A Reuse-tied def here would assert in
+                        // regalloc2 when the copy feeds a fixed use.)
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(dst.0 as usize, RaRegClass::Int),
-                            OperandConstraint::Reuse(1),
+                            RaVReg::new(dst.0 as usize, self.vclass(dst)),
+                            OperandConstraint::Any,
                             OperandKind::Def,
                             OperandPos::Early,
                         ));
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(src.0 as usize, RaRegClass::Int),
+                            RaVReg::new(src.0 as usize, self.vclass(*src)),
                             OperandConstraint::Any,
                             OperandKind::Use,
                             OperandPos::Early,
@@ -450,7 +604,7 @@ impl<'a> Adapter<'a> {
                     // Allocator-emitted move out of a spill slot: the
                     // destination is unconstrained.
                     Reg::Spill(_) => self.operands.push(RaOperand::new(
-                        RaVReg::new(dst.0 as usize, RaRegClass::Int),
+                        RaVReg::new(dst.0 as usize, self.vclass(dst)),
                         OperandConstraint::Any,
                         OperandKind::Def,
                         OperandPos::Early,
@@ -460,13 +614,30 @@ impl<'a> Adapter<'a> {
                 return;
             }
             OpId::RET => {
-                if let Some(Operand::Reg(Reg::V(v))) = inst.ops.first() {
-                    self.operands.push(RaOperand::new(
-                        RaVReg::new(v.0 as usize, RaRegClass::Int),
-                        OperandConstraint::FixedReg(RaPReg::new(self.reginfo.preg_index(self.ret_preg), RaRegClass::Int)),
-                        OperandKind::Use,
-                        OperandPos::Late,
-                    ));
+                // One return value pinned to the ABI return register;
+                // aggregate returns pin each piece register explicitly.
+                for op in inst.ops.iter() {
+                    match op {
+                        Operand::Reg(Reg::V(v)) => {
+                            let class = self.vclass(*v);
+                            let ret = if class == RaRegClass::Vector { self.vec_ret_preg } else { self.ret_preg };
+                            self.operands.push(RaOperand::new(
+                                RaVReg::new(v.0 as usize, class),
+                                OperandConstraint::FixedReg(RaPReg::new(ret.hw as usize, class)),
+                                OperandKind::Use,
+                                OperandPos::Late,
+                            ));
+                        }
+                        Operand::FixedReg(Reg::V(v), preg) => {
+                            self.operands.push(RaOperand::new(
+                                RaVReg::new(v.0 as usize, ra_class(preg.class)),
+                                OperandConstraint::FixedReg(RaPReg::new(preg.hw as usize, ra_class(preg.class))),
+                                OperandKind::Use,
+                                OperandPos::Late,
+                            ));
+                        }
+                        other => panic!("glcc native backend: ret operand {other:?}"),
+                    }
                 }
                 return;
             }
@@ -492,8 +663,8 @@ impl<'a> Adapter<'a> {
                             (OperandKind::Def, OperandPos::Late)
                         };
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(v.0 as usize, RaRegClass::Int),
-                            OperandConstraint::FixedReg(RaPReg::new(self.reginfo.preg_index(*preg), RaRegClass::Int)),
+                            RaVReg::new(v.0 as usize, ra_class(preg.class)),
+                            OperandConstraint::FixedReg(RaPReg::new(preg.hw as usize, ra_class(preg.class))),
                             kind,
                             pos,
                         ));
@@ -502,7 +673,7 @@ impl<'a> Adapter<'a> {
                     Operand::Reg(Reg::V(v)) => {
                         past_target = true;
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(v.0 as usize, RaRegClass::Int),
+                            RaVReg::new(v.0 as usize, self.vclass(*v)),
                             OperandConstraint::Reg,
                             OperandKind::Use,
                             OperandPos::Early,
@@ -520,7 +691,7 @@ impl<'a> Adapter<'a> {
                     let constraint = match slot.constraint {
                         Constraint::Any => OperandConstraint::Any,
                         Constraint::Reg => OperandConstraint::Reg,
-                        Constraint::Fixed(p) => OperandConstraint::FixedReg(RaPReg::new(self.reginfo.preg_index(p), RaRegClass::Int)),
+                        Constraint::Fixed(p) => OperandConstraint::FixedReg(RaPReg::new(p.hw as usize, ra_class(p.class))),
                         Constraint::Reuse(n) => OperandConstraint::Reuse(n as usize),
                         Constraint::ImmRange(..) => unreachable!("imm range on register slot"),
                     };
@@ -532,9 +703,13 @@ impl<'a> Adapter<'a> {
                     } else {
                         (OperandKind::Use, OperandPos::Early)
                     };
-                    self.operands.push(RaOperand::new(RaVReg::new(v.0 as usize, RaRegClass::Int), constraint, kind, pos));
+                    self.operands.push(RaOperand::new(RaVReg::new(v.0 as usize, self.vclass(*v)), constraint, kind, pos));
                 }
                 (SlotKind::Reg(_), Operand::Reg(_)) => {}
+                // Reg-or-memory x86 operand forms: the memory side
+                // contributes no operand of its own (its bases are
+                // collected below).
+                (SlotKind::Reg(_), Operand::Mem(_)) => {}
                 (SlotKind::Imm, Operand::Imm(_)) | (SlotKind::FrameIndex, Operand::FrameIndex(_)) | (SlotKind::Sym, Operand::Sym(_)) => {}
                 (SlotKind::Mem, Operand::Mem(_)) => {}
                 _ => panic!("glcc native backend: opcode {} slot {slot:?} got {op:?}", spec.name),
@@ -546,7 +721,7 @@ impl<'a> Adapter<'a> {
                 for r in [m.base, m.index] {
                     if let Some(Reg::V(v)) = r {
                         self.operands.push(RaOperand::new(
-                            RaVReg::new(v.0 as usize, RaRegClass::Int),
+                            RaVReg::new(v.0 as usize, self.vclass(v)),
                             OperandConstraint::Reg,
                             OperandKind::Use,
                             OperandPos::Early,
@@ -623,7 +798,7 @@ impl<'a> RaFunctionTrait for Adapter<'a> {
 
     fn spillslot_size(&self, class: RaRegClass) -> usize {
         match class {
-            RaRegClass::Vector => 2,
+            RaRegClass::Float | RaRegClass::Vector => 2,
             _ => 1,
         }
     }
@@ -634,4 +809,16 @@ impl<'a> Adapter<'a> {
         let (bi, ii) = self.inst_loc[insn.index()];
         &self.f.blocks[bi as usize].insts[ii]
     }
+}
+
+static VERBOSE_LOGGER: VerboseLogger = VerboseLogger;
+struct VerboseLogger;
+impl log::Log for VerboseLogger {
+    fn enabled(&self, meta: &log::Metadata) -> bool {
+        meta.level() <= log::Level::Trace
+    }
+    fn log(&self, record: &log::Record) {
+        eprintln!("RA: {}", record.args());
+    }
+    fn flush(&self) {}
 }

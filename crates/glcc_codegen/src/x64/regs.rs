@@ -36,3 +36,56 @@ pub const CALLER_SAVED: &[PReg] = &[
     PReg::gpr(R10),
     PReg::gpr(R11),
 ];
+
+/// SysV floating-point argument registers, in order.
+pub const VEC_ARG_REGS: &[PReg] =
+    &[PReg::vec(0), PReg::vec(1), PReg::vec(2), PReg::vec(3), PReg::vec(4), PReg::vec(5), PReg::vec(6), PReg::vec(7)];
+
+/// All XMM registers: caller-saved on SysV (no FP callee-saved set).
+pub const VEC_CALLER_SAVED: &[PReg] = &[
+    PReg::vec(0),
+    PReg::vec(1),
+    PReg::vec(2),
+    PReg::vec(3),
+    PReg::vec(4),
+    PReg::vec(5),
+    PReg::vec(6),
+    PReg::vec(7),
+    PReg::vec(8),
+    PReg::vec(9),
+    PReg::vec(10),
+    PReg::vec(11),
+    PReg::vec(12),
+    PReg::vec(13),
+    PReg::vec(14),
+    PReg::vec(15),
+];
+
+/// Every caller-saved register across classes: the call clobber set.
+pub const ALL_CALLER_SAVED: &[PReg] = &[
+    PReg::gpr(RAX),
+    PReg::gpr(RCX),
+    PReg::gpr(RDX),
+    PReg::gpr(RSI),
+    PReg::gpr(RDI),
+    PReg::gpr(R8),
+    PReg::gpr(R9),
+    PReg::gpr(R10),
+    PReg::gpr(R11),
+    PReg::vec(0),
+    PReg::vec(1),
+    PReg::vec(2),
+    PReg::vec(3),
+    PReg::vec(4),
+    PReg::vec(5),
+    PReg::vec(6),
+    PReg::vec(7),
+    PReg::vec(8),
+    PReg::vec(9),
+    PReg::vec(10),
+    PReg::vec(11),
+    PReg::vec(12),
+    PReg::vec(13),
+    PReg::vec(14),
+    PReg::vec(15),
+];

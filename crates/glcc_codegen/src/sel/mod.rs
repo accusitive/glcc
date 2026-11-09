@@ -92,9 +92,21 @@ pub struct FuncSel<'a> {
     pub f: MFunction,
     locs: HashMap<Value, ValLoc>,
     next_vreg: u32,
+    vreg_class: Vec<crate::machine::RegClass>,
     cur: BlockId,
     /// Constants already materialized in the current block, by value.
     block_consts: HashMap<Value, VReg>,
+    /// Variadic definitions: frame slot of the 176-byte register save
+    /// area (6*8 GP + 8*16 FP), set by the Entry hook.
+    pub va_save_slot: Option<u32>,
+    /// Byte offset of the overflow arguments relative to rbp.
+    pub va_overflow_disp: i64,
+    /// Initial gp_offset / fp_offset fields of the va_list tag.
+    pub va_gp_off: i64,
+    pub va_fp_off: i64,
+    /// For memory-class (sret) returns: the vreg holding the hidden
+    /// out-pointer, pinned at entry.
+    pub sret_loc: Option<VReg>,
     /// Values whose computation was folded into a consumer (compare +
     /// branch fusion).
     fused: std::collections::HashSet<Value>,
@@ -109,6 +121,7 @@ impl<'a> FuncSel<'a> {
             blocks: Vec::with_capacity(mir.blocks.len()),
             frame: Default::default(),
             num_vregs: 0,
+            vreg_class: Vec::new(),
         };
         for _ in mir.blocks.iter() {
             f.blocks.push(MBlock {
@@ -123,16 +136,34 @@ impl<'a> FuncSel<'a> {
             f,
             locs: HashMap::new(),
             next_vreg: 0,
+            vreg_class: Vec::new(),
             cur: 0,
             block_consts: HashMap::new(),
+            va_save_slot: None,
+            va_overflow_disp: 0,
+            va_gp_off: 0,
+            va_fp_off: 48,
+            sret_loc: None,
             fused: std::collections::HashSet::new(),
         }
     }
 
     pub fn alloc_vreg(&mut self) -> VReg {
+        self.alloc_vreg_class(crate::machine::RegClass::Gpr)
+    }
+
+    pub fn alloc_vreg_class(&mut self, class: crate::machine::RegClass) -> VReg {
         let v = VReg(self.next_vreg);
         self.next_vreg += 1;
+        self.vreg_class.push(class);
         v
+    }
+
+    fn value_class(ty: &glcc_mir::Ty) -> crate::machine::RegClass {
+        match ty {
+            glcc_mir::Ty::Float(_) => crate::machine::RegClass::Vec,
+            _ => crate::machine::RegClass::Gpr,
+        }
     }
 
 
@@ -173,7 +204,7 @@ impl<'a> FuncSel<'a> {
                 if let Some(vr) = self.block_consts.get(&v) {
                     return ValLoc::Reg(*vr);
                 }
-                let vr = self.alloc_vreg();
+                let vr = self.alloc_vreg_class(Self::value_class(&mir.values[v].ty));
                 if vr.0 == 9 && std::env::var_os("GLCC_RA_DEBUG").is_some() {
                     eprintln!("SEL DEBUG: MIR const {:?} (def {:?}) -> vreg 9 (materialize)", v, mir.values[v].def);
                 }
@@ -183,7 +214,7 @@ impl<'a> FuncSel<'a> {
                 ValLoc::Reg(vr)
             }
             Def::Inst(_) | Def::Param(..) => {
-                let vr = self.alloc_vreg();
+                let vr = self.alloc_vreg_class(Self::value_class(&mir.values[v].ty));
                 if vr.0 == 9 && std::env::var_os("GLCC_RA_DEBUG").is_some() {
                     eprintln!("SEL DEBUG: MIR value {:?} (def {:?}) -> vreg 9", v, mir.values[v].def);
                 }
@@ -204,6 +235,24 @@ impl<'a> FuncSel<'a> {
     }
 
     fn materialize_const(&mut self, mir: &Function, v: Value, dst: VReg) {
+        let ty = &mir.values[v].ty;
+        // Float constants ride a 64-bit integer immediate into a GPR,
+        // then a GPR→XMM bitcast move; there is no SSE immediate form.
+        if let Def::Const(Const::Float { bits, .. }) = &mir.values[v].def {
+            let bits = *bits as i64;
+            let gpr = self.alloc_vreg();
+            self.emit(MInst::new(
+                self.isa.const_move_op(bits),
+                crate::machine::Width::W64,
+                smallvec![Operand::Reg(Reg::V(gpr)), Operand::Imm(bits)],
+            ));
+            self.emit(MInst::new(
+                self.isa.gpr_to_vec_op(),
+                crate::machine::Width::W64,
+                smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(gpr))],
+            ));
+            return;
+        }
         let value = match &mir.values[v].def {
             Def::Const(Const::Int { value, .. }) => i64::try_from(*value).unwrap_or_else(|_| {
                 panic!("glcc native backend: 65+-bit constant not yet supported")
@@ -213,7 +262,6 @@ impl<'a> FuncSel<'a> {
             Def::Const(Const::Null) | Def::Const(Const::Undef) => 0,
             d => panic!("glcc native backend: unsupported constant {d:?}"),
         };
-        let ty = &mir.values[v].ty;
         let bits = match ty {
             glcc_mir::Ty::Int { bits } | glcc_mir::Ty::Ptr { bits, .. } => *bits,
             glcc_mir::Ty::Bool => 8,
@@ -315,7 +363,7 @@ pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Mo
             continue;
         }
         for &p in &data.params {
-            let vr = sel.alloc_vreg();
+            let vr = sel.alloc_vreg_class(FuncSel::value_class(&mir.values[p].ty));
             if vr.0 == 9 && std::env::var_os("GLCC_RA_DEBUG").is_some() {
                 eprintln!("SEL DEBUG: block param {p:?} of block {b:?} -> vreg 9");
             }
@@ -348,6 +396,7 @@ pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Mo
         }
     }
     sel.f.num_vregs = sel.next_vreg;
+    sel.f.vreg_class = std::mem::take(&mut sel.vreg_class);
     split_critical_edges(&mut sel.f);
     prune_dead_blocks(&mut sel.f);
     sel.f
@@ -476,6 +525,8 @@ pub fn scalar_bits(ty: &glcc_mir::Ty) -> u32 {
     match ty {
         glcc_mir::Ty::Int { bits } | glcc_mir::Ty::Ptr { bits, .. } => *bits,
         glcc_mir::Ty::Bool => 8,
+        glcc_mir::Ty::Float(glcc_mir::FloatKind::F32) => 32,
+        glcc_mir::Ty::Float(glcc_mir::FloatKind::F64) => 64,
         _ => 0,
     }
 }

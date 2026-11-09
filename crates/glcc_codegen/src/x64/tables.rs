@@ -65,9 +65,33 @@ pub enum Op {
     RemQS,
     Cqo,
     XorRdx,
+    MovssL,
+    MovssS,
+    MovsdL,
+    MovsdS,
+    AddSS,
+    AddSD,
+    SubSS,
+    SubSD,
+    MulSS,
+    MulSD,
+    DivSS,
+    DivSD,
+    UcomisS,
+    UcomisD,
+    SqrtSS,
+    SqrtSD,
+    CvtSi2ss,
+    CvtSi2sd,
+    CvtSS2si,
+    CvtSD2si,
+    CvtSS2sd,
+    CvtSD2ss,
+    MovqG2X,
+    MovqX2G,
 }
 
-pub const OP_COUNT: u32 = Op::XorRdx as u32 + 1;
+pub const OP_COUNT: u32 = Op::MovqX2G as u32 + 1;
 
 /// Translate a framework OpId into this table's opcode enum.
 pub fn op_of(id: OpId) -> Op {
@@ -89,6 +113,21 @@ const fn imm(constraint: Constraint) -> SlotSpec {
 }
 const fn mem_slot() -> SlotSpec {
     SlotSpec { kind: SlotKind::Mem, def: false, constraint: Constraint::Any }
+}
+
+const V: RegClass = RegClass::Vec;
+
+const fn vreg(def: bool, constraint: Constraint) -> SlotSpec {
+    SlotSpec { kind: SlotKind::Reg(V), def, constraint }
+}
+const fn vslot() -> SlotSpec {
+    SlotSpec { kind: SlotKind::Reg(V), def: false, constraint: Constraint::Reg }
+}
+
+/// SSE two-operand arithmetic: `op dst, src` with `src` forced into
+/// `dst`, same discipline as the integer ALU family.
+fn f2addr() -> Vec<SlotSpec> {
+    vec![vreg(true, Constraint::Reuse(1)), vreg(false, Constraint::Reg), vreg(false, Constraint::Reg)]
 }
 const fn sym() -> SlotSpec {
     SlotSpec { kind: SlotKind::Sym, def: false, constraint: Constraint::Any }
@@ -118,7 +157,7 @@ fn branchy(name: &'static str, slots: Vec<SlotSpec>) -> OpSpec {
 }
 
 fn call(name: &'static str, slots: Vec<SlotSpec>) -> OpSpec {
-    spec(name, slots, OpFlags { call: true, clobbers: regs::CALLER_SAVED, ..Default::default() })
+    spec(name, slots, OpFlags { call: true, clobbers: regs::ALL_CALLER_SAVED, ..Default::default() })
 }
 
 fn no_slots(name: &'static str) -> OpSpec {
@@ -156,7 +195,12 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         call("call", vec![sym()]),                                                                 // Call
         call("call.rm", vec![reg(false, Constraint::Reg)]),                                        // CallRm
         plain("setcc", vec![reg(true, Constraint::Reg), imm(Constraint::Any)]),                    // Setcc
-        plain("cmov", vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Cmov
+        // Conditional move: `cmovcc dst, then` executes in the false
+        // value's register, so the definition is tied (Reuse) to the
+        // false-path operand: dst = cond ? then : false_path. One
+        // definition, no pre-MOVE — a MOVE would define the same vreg
+        // twice, which regalloc2 rejects.
+        plain("cmov", vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Cmov
         plain("movzx8", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg)]),            // Movzx8
         plain("movzx16", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg)]),           // Movzx16
         plain("movsx8", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg)]),            // Movsx8
@@ -185,6 +229,32 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         spec("rem.s", vec![reg(true, Constraint::Fixed(PReg::gpr(regs::RDX))), reg(false, Constraint::Fixed(PReg::gpr(regs::RDX))), reg(false, Constraint::Fixed(PReg::gpr(regs::RAX))), reg(false, Constraint::Reg)], OpFlags::default()),   // RemQS
         spec("cqo", vec![reg(true, Constraint::Fixed(PReg::gpr(regs::RDX))), reg(false, Constraint::Fixed(PReg::gpr(regs::RAX)))], OpFlags::default()), // Cqo: scratch <- sext(rax)
         spec("xor.rdx", vec![reg(true, Constraint::Fixed(PReg::gpr(regs::RDX)))], OpFlags::default()),  // XorRdx: scratch <- 0
+        // SSE scalar float family. Load forms (F3/F2 0F 10) also cover
+        // register-to-register moves; store forms write memory.
+        plain("movss.l", vec![vreg(true, Constraint::Reg), vslot()]),   // MovssL
+        plain("movss.s", vec![vreg(false, Constraint::Reg), vslot()]),  // MovssS
+        plain("movsd.l", vec![vreg(true, Constraint::Reg), vslot()]),   // MovsdL
+        plain("movsd.s", vec![vreg(false, Constraint::Reg), vslot()]),  // MovsdS
+        plain("add.ss", f2addr()),                                      // AddSS
+        plain("add.sd", f2addr()),                                      // AddSD
+        plain("sub.ss", f2addr()),                                      // SubSS
+        plain("sub.sd", f2addr()),                                      // SubSD
+        plain("mul.ss", f2addr()),                                      // MulSS
+        plain("mul.sd", f2addr()),                                      // MulSD
+        plain("div.ss", f2addr()),                                      // DivSS
+        plain("div.sd", f2addr()),                                      // DivSD
+        plain("ucomis.s", vec![vreg(false, Constraint::Reg), vslot()]), // UcomisS
+        plain("ucomis.d", vec![vreg(false, Constraint::Reg), vslot()]), // UcomisD
+        plain("sqrt.ss", vec![vreg(true, Constraint::Reg), vslot()]),   // SqrtSS
+        plain("sqrt.sd", vec![vreg(true, Constraint::Reg), vslot()]),   // SqrtSD
+        plain("cvt.si2ss", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg)]), // CvtSi2ss
+        plain("cvt.si2sd", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg)]), // CvtSi2sd
+        plain("cvt.ss2si", vec![reg(true, Constraint::Reg), vslot()]),  // CvtSS2si
+        plain("cvt.sd2si", vec![reg(true, Constraint::Reg), vslot()]),  // CvtSD2si
+        plain("cvt.ss2sd", vec![vreg(true, Constraint::Reg), vslot()]), // CvtSS2sd
+        plain("cvt.sd2ss", vec![vreg(true, Constraint::Reg), vslot()]), // CvtSD2ss
+        plain("movq.g2x", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg)]),  // MovqG2X
+        plain("movq.x2g", vec![reg(true, Constraint::Reg), vslot()]),   // MovqX2G
     ]);
     assert_eq!(ops.len() as u32, 16 + OP_COUNT, "opcode table out of sync with the Op enum");
     OpcodeTable { ops }
@@ -192,28 +262,35 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
 
 pub static REGINFO: LazyLock<RegInfo> = LazyLock::new(|| {
     let names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"];
+    let xmm_names = ["xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"];
     let mut pregs: Vec<PRegInfo> = names
         .iter()
         .enumerate()
         .map(|(hw, name)| PRegInfo {
             preg: PReg::gpr(hw as u8),
             name,
-            // The frame builder saves callee-saved registers (a later
-            // milestone); until then only caller-saved registers are
-            // allocatable. R11 is reserved as the allocator's scratch.
-            allocatable: !matches!(hw, 3 | 4 | 5 | 11 | 12..=15),
+            // RSP/RBP are reserved; R11 is the allocator's scratch.
+            // Callee-saved registers are allocatable: the prologue
+            // saves exactly the ones a function uses.
+            allocatable: !matches!(hw, 4 | 5 | 11),
             callee_saved: matches!(hw, 3 | 12..=15),
         })
         .collect();
-    pregs.extend((0..16).map(|hw| PRegInfo { preg: PReg::vec(hw), name: "xmm", allocatable: false, callee_saved: false }));
-    let allocatable: Vec<PReg> = pregs.iter().filter(|p| p.allocatable).map(|p| p.preg).collect();
+    pregs.extend((0..16).map(|hw| PRegInfo {
+        preg: PReg::vec(hw),
+        name: xmm_names[hw as usize],
+        // xmm15 is reserved as the vector-class allocator scratch;
+        // SysV has no callee-saved XMM set.
+        allocatable: hw != 15,
+        callee_saved: false,
+    }));
+    let allocatable: Vec<PReg> = pregs.iter().filter(|p| p.allocatable && p.preg.class == RegClass::Gpr).map(|p| p.preg).collect();
+    let vec_allocatable: Vec<PReg> = (0..15u8).map(PReg::vec).collect();
     RegInfo {
         pregs,
-        preferred: [allocatable.clone(), Vec::new()],
+        preferred: [allocatable.clone(), vec_allocatable],
         non_preferred: [Vec::new(), Vec::new()],
-        // regalloc2 picks an arbitrary (possibly callee-saved) preg as
-        // its move-resolution scratch when none is given.
-        scratch: [Some(PReg::gpr(regs::R11)), None, None],
+        scratch: [Some(PReg::gpr(regs::R11)), Some(PReg::vec(15)), None],
         stack_ptr: PReg::gpr(regs::RSP),
         frame_ptr: PReg::gpr(regs::RBP),
     }
@@ -329,7 +406,7 @@ pub static ENCODINGS: LazyLock<Vec<Enc>> = LazyLock::new(|| {
         Enc::Rel32 { call: true },                                                           // Call
         Enc::CallRm,                                                                         // CallRm
         Enc::Setcc,                                                                          // Setcc
-        Enc::Cmov { rm_slot: 1, cc_slot: 2 },                                                // Cmov
+        Enc::Cmov { rm_slot: 2, cc_slot: 3 },                                                // Cmov
         Enc::Rm2 { opc: 0xB6, dir: Dir::ToReg, reg_slot: 0, rm_slot: 1 },                    // Movzx8
         Enc::Rm2 { opc: 0xB7, dir: Dir::ToReg, reg_slot: 0, rm_slot: 1 },                    // Movzx16
         Enc::Rm2 { opc: 0xBE, dir: Dir::ToReg, reg_slot: 0, rm_slot: 1 },                    // Movsx8
@@ -354,5 +431,29 @@ pub static ENCODINGS: LazyLock<Vec<Enc>> = LazyLock::new(|| {
         Enc::Grp0 { opc: 0xF7, opc8: 0xF6, digit: 7, rm_slot: 3 },                           // RemQS
         Enc::Fixed(&[0x48, 0x99]),                                                           // Cqo (cqo)
         Enc::Rm { opc: 0x31, opc8: 0x30, dir: Dir::ToRm, reg_slot: 0, rm_slot: 0 },          // XorRdx (rm = the rdx-resident scratch)
+        Enc::Sse { prefix: 0xF3, opc: 0x10, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovssL (reg-to-reg rides the load form)
+        Enc::Sse { prefix: 0xF3, opc: 0x11, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovssS
+        Enc::Sse { prefix: 0xF2, opc: 0x10, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovsdL
+        Enc::Sse { prefix: 0xF2, opc: 0x11, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovsdS
+        Enc::Sse { prefix: 0xF3, opc: 0x58, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // AddSS
+        Enc::Sse { prefix: 0xF2, opc: 0x58, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // AddSD
+        Enc::Sse { prefix: 0xF3, opc: 0x5C, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // SubSS
+        Enc::Sse { prefix: 0xF2, opc: 0x5C, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // SubSD
+        Enc::Sse { prefix: 0xF3, opc: 0x59, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // MulSS
+        Enc::Sse { prefix: 0xF2, opc: 0x59, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // MulSD
+        Enc::Sse { prefix: 0xF3, opc: 0x5E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // DivSS
+        Enc::Sse { prefix: 0xF2, opc: 0x5E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 2 },       // DivSD
+        Enc::Sse { prefix: 0x00, opc: 0x2E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // UcomisS
+        Enc::Sse { prefix: 0x66, opc: 0x2E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // UcomisD
+        Enc::Sse { prefix: 0xF3, opc: 0x51, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // SqrtSS
+        Enc::Sse { prefix: 0xF2, opc: 0x51, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // SqrtSD
+        Enc::Sse { prefix: 0xF3, opc: 0x2A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSi2ss
+        Enc::Sse { prefix: 0xF2, opc: 0x2A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSi2sd
+        Enc::Sse { prefix: 0xF3, opc: 0x2C, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSS2si
+        Enc::Sse { prefix: 0xF2, opc: 0x2C, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSD2si
+        Enc::Sse { prefix: 0xF3, opc: 0x5A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSS2sd
+        Enc::Sse { prefix: 0xF2, opc: 0x5A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSD2ss
+        Enc::Sse { prefix: 0x66, opc: 0x6E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovqG2X (REX.W via width)
+        Enc::Sse { prefix: 0x66, opc: 0x7E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovqX2G
     ]
 });

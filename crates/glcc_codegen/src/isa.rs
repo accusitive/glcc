@@ -175,6 +175,11 @@ pub trait TargetIsa: Sync {
     /// lets targets pick a narrower form when possible.
     fn const_move_op(&self, value: i64) -> OpId;
 
+    /// Move a GPR's low bits into a vector register (x86-64 `movq`):
+    /// float constants materialize their bit pattern in a GPR first,
+    /// since SSE has no immediate form.
+    fn gpr_to_vec_op(&self) -> OpId;
+
     /// Opcode that computes an address into a register from a memory
     /// operand (x86-64: `lea`).
     fn lea_op(&self) -> OpId;
@@ -204,14 +209,19 @@ pub trait AbiImpl: Sync {
     /// Where the return value goes. Memory means the caller passes a
     /// hidden out-pointer in the first argument register.
     fn ret_loc(&self, ty: &glcc_mir::Ty) -> RetLoc;
-    /// Where parameter `idx` of type `ty` goes (fixed argument
-    /// registers + stack in order).
-    fn param_loc(&self, idx: usize, ty: &glcc_mir::Ty) -> ParamLoc;
+    /// Where a parameter of type `ty` goes, given how many integer-
+    /// and floating-point-class argument registers earlier parameters
+    /// already consumed (SysV tracks the two budgets independently).
+    fn param_loc(&self, gp_used: usize, fp_used: usize, ty: &glcc_mir::Ty) -> ParamLoc;
     /// Registers the calling convention gives the callee (integer
     /// class, in argument order).
     fn arg_regs(&self) -> &'static [PReg];
+    /// Floating-point argument registers, in argument order.
+    fn vec_arg_regs(&self) -> &'static [PReg];
     fn ret_reg(&self) -> PReg;
-    /// Registers a call may destroy (caller-saved).
+    /// Floating-point return register.
+    fn vec_ret_reg(&self) -> PReg;
+    /// Registers a call may destroy (caller-saved, all classes).
     fn caller_saved(&self) -> &'static [PReg];
 
     /// Insert the function prologue into the entry block (post-RA:
@@ -225,6 +235,9 @@ pub trait AbiImpl: Sync {
 pub enum RetLoc {
     Void,
     Reg(PReg),
+    /// Small by-value aggregate returned in one or two piece registers
+    /// (rax/rdx, or xmm0/xmm1 for all-SSE layouts).
+    Regs([PReg; 2], u8),
     /// Returned through a hidden pointer; the pointer comes back in the
     /// first argument register.
     Memory,
@@ -233,5 +246,8 @@ pub enum RetLoc {
 #[derive(Clone, Copy, Debug)]
 pub enum ParamLoc {
     Reg(PReg),
+    /// By-value aggregate of one or two eightbytes, in argument order
+    /// (class per piece from the SysV classification).
+    Regs([PReg; 2], u8),
     Stack,
 }
