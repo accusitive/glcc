@@ -272,7 +272,9 @@ pub static REGINFO: LazyLock<RegInfo> = LazyLock::new(|| {
             // RSP/RBP are reserved; R11 is the allocator's scratch.
             // Callee-saved registers are allocatable: the prologue
             // saves exactly the ones a function uses.
-            allocatable: !matches!(hw, 4 | 5 | 11),
+            // r11 is the allocator's move-cycle scratch; r10 pins the
+            // indirect-call callee so argument moves cannot clobber it.
+            allocatable: !matches!(hw, 4 | 5 | 10 | 11),
             callee_saved: matches!(hw, 3 | 12..=15),
         })
         .collect();

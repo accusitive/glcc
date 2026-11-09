@@ -679,7 +679,11 @@ impl<'a> Adapter<'a> {
                             OperandPos::Early,
                         ));
                     }
-                    Operand::Reg(Reg::P(_)) | Operand::Imm(_) => {}
+                    // The indirect callee rides the dedicated pin
+                    // register as a physical operand; like Sym, it is
+                    // the def/use divide for the remaining pins.
+                    Operand::Reg(Reg::P(_)) => past_target = true,
+                    Operand::Imm(_) => {}
                     other => panic!("glcc native backend: call operand {other:?}"),
                 }
             }

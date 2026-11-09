@@ -130,6 +130,25 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
         sel.sret_loc = Some(vr);
         gp = 1;
     }
+    // Stack-argument homing copies bytes through scratch registers; a
+    // register-classed parameter still living in its ABI register must
+    // be pinned first, or the allocator may hand the scratch one of
+    // those registers. So: pin every register param, then home the
+    // stack ones (offsets computed in signature order either way).
+    let mut stack_params: Vec<(Value, glcc_mir::Ty, i64)> = Vec::new();
+    for &p in entry_params.iter() {
+        let ty = mir.values[p].ty.clone();
+        if matches!(sel.isa.abi().param_loc(gp, fp, &ty), ParamLoc::Stack) {
+            let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
+            stack_off = (stack_off + align - 1) / align * align;
+            if mir.sig.variadic {
+                sel.va_overflow_disp = 16 + stack_off + ty.size_bytes().next_multiple_of(8) as i64;
+            }
+            let rounded = ty.size_bytes().next_multiple_of(8) as i64;
+            stack_params.push((p, ty, stack_off));
+            stack_off += rounded;
+        }
+    }
     for &p in entry_params.iter() {
         let ty = mir.values[p].ty.clone();
         match sel.isa.abi().param_loc(gp, fp, &ty) {
@@ -182,51 +201,49 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
                 }
             }
             ParamLoc::Stack => {
-                // The caller stored this argument at rbp+16+off (after
-                // its return address and saved frame pointer). Copy it
-                // into the parameter's home here.
-                let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
-                stack_off = (stack_off + align - 1) / align * align;
-                if mir.sig.variadic {
-                    sel.va_overflow_disp = 16 + stack_off + ty.size_bytes().next_multiple_of(8) as i64;
-                }
-                if ty.is_aggregate() {
-                    let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
-                    sel.set_slot(p, slot);
-                    let src = crate::machine::MemOperand {
+                // Deferred to the homing pass below: its scratch must
+                // not run before the register pins are in place.
+            }
+        }
+    }
+    for (p, ty, off) in stack_params {
+        // The caller stored this argument at rbp+16+off (after its
+        // return address and saved frame pointer). Copy it into the
+        // parameter's home here.
+        if ty.is_aggregate() {
+            let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+            sel.set_slot(p, slot);
+            let src = crate::machine::MemOperand {
+                base: Some(Reg::P(PReg::gpr(regs::RBP))),
+                index: None,
+                scale: 0,
+                disp: 16 + off,
+                sym: None,
+            };
+            let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
+            copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1).max(8) as u64);
+        } else {
+            let vr = sel.value_vreg(mir, p);
+            let is_float = matches!(ty, glcc_mir::Ty::Float(_));
+            let (op, width) = if is_float {
+                (if is_f64(mir, p) { Op::MovsdL } else { Op::MovssL }, Width::W64)
+            } else {
+                (Op::Load, value_width(&ty))
+            };
+            sel.emit(MInst::new(
+                op_id(op),
+                width,
+                smallvec::smallvec![
+                    Operand::Reg(Reg::V(vr)),
+                    Operand::Mem(crate::machine::MemOperand {
                         base: Some(Reg::P(PReg::gpr(regs::RBP))),
                         index: None,
                         scale: 0,
-                        disp: 16 + stack_off,
+                        disp: 16 + off,
                         sym: None,
-                    };
-                    let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
-                    copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1).max(8) as u64);
-                } else {
-                    let vr = sel.value_vreg(mir, p);
-                    let is_float = matches!(ty, glcc_mir::Ty::Float(_));
-                    let (op, width) = if is_float {
-                        (if is_f64(mir, p) { Op::MovsdL } else { Op::MovssL }, Width::W64)
-                    } else {
-                        (Op::Load, value_width(&ty))
-                    };
-                    sel.emit(MInst::new(
-                        op_id(op),
-                        width,
-                        smallvec::smallvec![
-                            Operand::Reg(Reg::V(vr)),
-                            Operand::Mem(crate::machine::MemOperand {
-                                base: Some(Reg::P(PReg::gpr(regs::RBP))),
-                                index: None,
-                                scale: 0,
-                                disp: 16 + stack_off,
-                                sym: None,
-                            }),
-                        ],
-                    ));
-                }
-                stack_off += ty.size_bytes().next_multiple_of(8) as i64;
-            }
+                    }),
+                ],
+            ));
         }
     }
     if mir.sig.variadic {
@@ -415,7 +432,9 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
             true
         }
         InstKind::Memset { dst, byte, len } => {
-            mem_intrinsic(sel, mir, inst, "memset", &[*dst, Value::new(0)], Some((*len as i64, *byte as i64)));
+            // The byte is a constant, not a MIR value; it rides in
+            // `extra` and mem_intrinsic materializes it into slot 1.
+            mem_intrinsic(sel, mir, inst, "memset", &[*dst], Some((*len as i64, *byte as i64)));
             true
         }
         InstKind::AtomicLoad { .. } | InstKind::AtomicStore { .. } | InstKind::AtomicRmw { .. } | InstKind::AtomicCas { .. } | InstKind::AtomicFence => {
@@ -903,11 +922,25 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
             ops.push(Operand::Sym(SymOperand { target: sym, reloc: crate::machine::RelocKind::Plt32, addend: 0 }));
         }
         CallTarget::Indirect(v) => {
-            ops.push(Operand::Reg(Reg::V(sel.value_vreg(mir, v))));
+            // The callee pointer moves through the dedicated pin
+            // register (excluded from allocation): an ordinary call
+            // operand would let the allocator place it in an argument
+            // register, which this call's own argument moves clobber.
+            let vr = sel.value_vreg(mir, v);
+            sel.emit(MInst::new(
+                OpId::MOVE,
+                Width::W64,
+                smallvec::smallvec![Operand::Reg(Reg::P(PReg::gpr(regs::R10))), Operand::Reg(Reg::V(vr))],
+            ));
+            ops.push(Operand::Reg(Reg::P(PReg::gpr(regs::R10))));
         }
     }
     let mut gp = 0;
     let mut fp = 0;
+    // Parameter index for the signature lookup: distinct from the
+    // register counters, because a stack-passed argument consumes a
+    // parameter position but no register (SysV).
+    let mut idx = 0usize;
     let mut reg_args: smallvec::SmallVec<[PReg; 8]> = smallvec::SmallVec::new();
     // (value, byte offset in the outgoing area, type)
     let mut stack: Vec<(Value, i64, glcc_mir::Ty)> = Vec::new();
@@ -933,10 +966,9 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
         }
     }
     for arg in args.iter() {
-        // Every argument consumes exactly one slot of its class, so
-        // the argument index is the sum of the two counters (the
-        // hidden sret pointer included).
-        let ty = sig.params.get(gp + fp).unwrap_or(&mir.values[*arg].ty).clone();
+        // The hidden sret pointer occupies parameter position 0.
+        let ty = sig.params.get(idx).unwrap_or(&mir.values[*arg].ty).clone();
+        idx += 1;
         match sel.isa.abi().param_loc(gp, fp, &ty) {
             ParamLoc::Reg(preg) => {
                 match preg.class {
@@ -975,7 +1007,8 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
                 }
             }
             ParamLoc::Stack => {
-                gp += 1; // stack args consume no registers but advance the index
+                // Stack arguments consume no register slot; the
+                // parameter index advanced above.
                 let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
                 stack_off = (stack_off + align - 1) / align * align;
                 let slot = stack_off;
@@ -1259,9 +1292,10 @@ fn divide(sel: &mut FuncSel, mir: &Function, inst: Inst) {
 }
 
 /// memcpy/memset lowered as libcalls against the platform libc. The
-/// length (and memset byte) are constants here; their moves go in
-/// reverse slot order so an argument already living in a later
-/// argument register is consumed before that register is overwritten.
+/// length (and memset byte) are constants here, materialized into
+/// fresh vregs. Arguments ride the call's `call_args` pins: the
+/// post-RA move run resolves them as one parallel set (the constant
+/// vregs may land in the very argument registers they feed).
 fn mem_intrinsic(sel: &mut FuncSel, mir: &Function, inst: Inst, name: &'static str, args: &[Value], extra: Option<(i64, i64)>) {
     let arg_regs = sel.isa.abi().arg_regs();
     let mut ops: smallvec::SmallVec<[Operand; 4]> = smallvec::SmallVec::new();
@@ -1270,32 +1304,26 @@ fn mem_intrinsic(sel: &mut FuncSel, mir: &Function, inst: Inst, name: &'static s
     }
     ops.push(Operand::Sym(SymOperand { target: SymTarget::Named(name), reloc: crate::machine::RelocKind::Plt32, addend: 0 }));
 
-    // (slot, source) moves, emitted last-first. Post-RA these become
-    // register-to-register MOVE runs, which the parallel-move resolver
-    // orders correctly.
-    let mut moves: Vec<(usize, Operand)> = Vec::new();
+    let mut pregs: smallvec::SmallVec<[PReg; 8]> = smallvec::SmallVec::new();
     for (i, arg) in args.iter().enumerate() {
-        moves.push((i, Operand::Reg(Reg::V(sel.value_vreg(mir, *arg)))));
+        ops.push(Operand::Reg(Reg::V(sel.value_vreg(mir, *arg))));
+        pregs.push(arg_regs[i]);
     }
     if let Some((len, byte)) = extra {
-        let mut imm_move = |sel: &mut FuncSel, slot: usize, v: i64, width: Width| {
+        let mut imm_arg = |sel: &mut FuncSel, ops: &mut smallvec::SmallVec<[Operand; 4]>, pregs: &mut smallvec::SmallVec<[PReg; 8]>, slot: usize, v: i64, width: Width| {
             let vr = sel.alloc_vreg();
             sel.emit(MInst::new(sel.isa.const_move_op(v), width, smallvec::smallvec![Operand::Reg(Reg::V(vr)), Operand::Imm(v)]));
-            moves.push((slot, Operand::Reg(Reg::V(vr))));
+            ops.push(Operand::Reg(Reg::V(vr)));
+            pregs.push(arg_regs[slot]);
         };
         if name == "memset" {
-            imm_move(sel, 1, byte, Width::W32);
+            imm_arg(sel, &mut ops, &mut pregs, 1, byte, Width::W32);
         }
-        imm_move(sel, 2, len, Width::W64);
+        imm_arg(sel, &mut ops, &mut pregs, 2, len, Width::W64);
     }
-    for (slot, src) in moves.iter().rev() {
-        sel.emit(MInst::new(
-            OpId::MOVE,
-            Width::W64,
-            smallvec::smallvec![Operand::Reg(Reg::P(arg_regs[*slot])), src.clone()],
-        ));
-    }
-    sel.emit(MInst::new(op_id(Op::Call), Width::W64, ops));
+    let mut call = MInst::new(op_id(Op::Call), Width::W64, ops);
+    call.call_args = Some(pregs);
+    sel.emit(call);
 }
 
 /// Copy `len` bytes between two memory operands, chunked to the
