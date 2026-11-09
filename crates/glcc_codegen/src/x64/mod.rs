@@ -136,19 +136,38 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
     // those registers. So: pin every register param, then home the
     // stack ones (offsets computed in signature order either way).
     let mut stack_params: Vec<(Value, glcc_mir::Ty, i64)> = Vec::new();
+    let (gp_init, fp_init) = (gp, fp);
     for &p in entry_params.iter() {
         let ty = mir.values[p].ty.clone();
-        if matches!(sel.isa.abi().param_loc(gp, fp, &ty), ParamLoc::Stack) {
-            let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
-            stack_off = (stack_off + align - 1) / align * align;
-            if mir.sig.variadic {
-                sel.va_overflow_disp = 16 + stack_off + ty.size_bytes().next_multiple_of(8) as i64;
+        match sel.isa.abi().param_loc(gp, fp, &ty) {
+            ParamLoc::Stack => {
+                let align = glcc_mir::ty::ty_align(&ty).max(1).max(8) as i64;
+                stack_off = (stack_off + align - 1) / align * align;
+                if mir.sig.variadic {
+                    sel.va_overflow_disp = 16 + stack_off + ty.size_bytes().next_multiple_of(8) as i64;
+                }
+                let rounded = ty.size_bytes().next_multiple_of(8) as i64;
+                stack_params.push((p, ty, stack_off));
+                stack_off += rounded;
             }
-            let rounded = ty.size_bytes().next_multiple_of(8) as i64;
-            stack_params.push((p, ty, stack_off));
-            stack_off += rounded;
+            ParamLoc::Reg(preg) => match preg.class {
+                crate::machine::RegClass::Gpr => gp += 1,
+                crate::machine::RegClass::Vec => fp += 1,
+            },
+            ParamLoc::Regs(pregs, n) => {
+                for preg in pregs.iter().take(n as usize) {
+                    match preg.class {
+                        crate::machine::RegClass::Gpr => gp += 1,
+                        crate::machine::RegClass::Vec => fp += 1,
+                    }
+                }
+            }
         }
     }
+    // Restart the register counters for the pin pass: the pre-pass
+    // above left them at their final values.
+    gp = gp_init;
+    fp = fp_init;
     for &p in entry_params.iter() {
         let ty = mir.values[p].ty.clone();
         match sel.isa.abi().param_loc(gp, fp, &ty) {
