@@ -81,10 +81,14 @@ case "${CFLAGS_EXTRA:-}" in
     make -j"$JOBS" CC="$GLCC $CFLAGS_EXTRA -DSQLITE_DISABLE_INTRINSIC" testfixture
     # The ext/recover tests hang under the native backend (an as-yet
     # undiagnosed miscompile in the recover scan; see
-    # HANDOFF-native-x64.md). Set the directory aside for this run and
-    # restore it afterwards.
-    mv ext/recover ext/recover.skip-native
-    trap 'mv ext/recover.skip-native ext/recover 2>/dev/null' EXIT
+    # HANDOFF-native-x64.md). Move only their .test files aside for
+    # this run and restore them afterwards: the Makefile needs the
+    # .c sources for testfixture, and permutations.test globs
+    # ext/recover/*.test with -nocomplain, so missing files just
+    # skip the suite.
+    mkdir -p ext/recover.skip-native
+    mv ext/recover/*.test ext/recover.skip-native/
+    trap 'mv ext/recover.skip-native/*.test ext/recover/ 2>/dev/null; rmdir ext/recover.skip-native 2>/dev/null' EXIT
     ;;
   *)
     make -j"$JOBS" CC="$GLCC" testfixture testprogs
