@@ -475,6 +475,8 @@ pub static ENCODINGS: LazyLock<Vec<Enc>> = LazyLock::new(|| {
         Enc::Sse { prefix: 0xF3, opc: 0x5A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSS2sd
         Enc::Sse { prefix: 0xF2, opc: 0x5A, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // CvtSD2ss
         Enc::Sse { prefix: 0x66, opc: 0x6E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovqG2X (REX.W via width)
-        Enc::Sse { prefix: 0x66, opc: 0x7E, dir: Dir::ToRm, reg_slot: 0, rm_slot: 1 },       // MovqX2G
+        // 66 0F 7E /r: REG field is the XMM source, RM the GPR
+        // destination — the reverse of the 0x6E form above.
+        Enc::Sse { prefix: 0x66, opc: 0x7E, dir: Dir::ToRm, reg_slot: 1, rm_slot: 0 },       // MovqX2G
     ]
 });
