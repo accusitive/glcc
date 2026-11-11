@@ -1735,12 +1735,17 @@ fn va_arg(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
         Width::W32,
         smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Mem(off_m)],
     ));
-    // overflow cursor bumps only when the register path was taken:
-    // bumped = cursor < limit ? ovf : ovf + 8.
+    // overflow cursor bumps only when the register path was not
+    // taken: bumped = cursor < limit ? ovf : ovf + 8. The Cmov's dst
+    // is reuse-tied to ovf, so cmovAE brings in ovf + 8 exactly on the
+    // overflow path (cc 0x2/B would invert it). The compare is
+    // re-emitted: the first Cmov's flags were consumed and the
+    // intervening address-load/add clobber them.
     let bumped = sel.alloc_vreg();
     let plus8 = sel.alloc_vreg();
     sel.emit(MInst::new(op_id(Op::AddI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(plus8)), Operand::Reg(Reg::V(ovf)), Operand::Imm(8)]));
-    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(plus8)), Operand::Reg(Reg::V(ovf)), Operand::Imm(0x2)]));
+    sel.emit(MInst::new(op_id(Op::CmpI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off)), Operand::Imm(limit)]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(plus8)), Operand::Imm(0x3)]));
     let mut ovf_m = sel.mem_of(mir, ap);
     ovf_m.disp += 8;
     sel.emit(MInst::new(
