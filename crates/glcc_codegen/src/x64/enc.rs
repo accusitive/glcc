@@ -107,7 +107,10 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
                 _ => ops_reg(inst, reg_slot),
             };
             emit_rm(f, inst, out, &[opc], reg_field, rm_slot);
-            emit_imm(out, ops_imm(inst, imm_slot), 4);
+            // imul's immediate matches the operand size (imm16 under
+            // the 0x66 prefix, which emit_rm emits for W16).
+            let imm_size = if inst.width == Width::W16 { 2 } else { 4 };
+            emit_imm(out, ops_imm(inst, imm_slot), imm_size);
         }
         Enc::GrpI { opc, opc8, digit, rm_slot, imm_slot } => {
             encode_grp(f, inst, out, opc, opc8, digit, rm_slot, imm_slot);
@@ -128,17 +131,26 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             let force8 = inst.width == Width::W8 && hw >= 4;
             // `opcode + r` forms take the register from the low opcode
             // bits extended by REX.B, not the reg field.
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), force8);
             out.bytes.push(opc + (hw & 7));
         }
         Enc::PlusR2 { opc, reg_slot } => {
             let hw = ops_reg(inst, reg_slot);
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), false);
             out.bytes.push(0x0F);
             out.bytes.push(opc + (hw & 7));
         }
         Enc::PlusRI { opc, reg_slot, imm_slot } => {
             let hw = ops_reg(inst, reg_slot);
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex_f(out, inst.width == Width::W64, false, false, rex_bit(hw), false);
             out.bytes.push(opc + (hw & 7));
             let size = match inst.width {
@@ -299,6 +311,11 @@ fn emit_rex_f(out: &mut EncOut, w: bool, r: bool, x: bool, b: bool, force: bool)
 /// when the memory operand has no base. `opcode` is the full opcode
 /// sequence (one or two bytes), emitted after the REX prefix.
 fn emit_rm(f: &MFunction, inst: &MInst, out: &mut EncOut, opcode: &[u8], reg_field: u8, rm_slot: u8) {
+    // Operand-size prefix for 16-bit instructions (legacy prefixes
+    // precede REX; the default operand size in long mode is 32-bit).
+    if inst.width == Width::W16 {
+        out.bytes.push(0x66);
+    }
     match &inst.ops[rm_slot as usize] {
         Operand::Mem(m) => emit_mem(f, inst, out, opcode, reg_field, m),
         Operand::Reg(Reg::P(p)) | Operand::FixedReg(Reg::P(p), _) => {
@@ -323,9 +340,6 @@ fn modrm(reg: u8, mode: u8, rm: u8) -> u8 {
 
 fn emit_mem(f: &MFunction, inst: &MInst, out: &mut EncOut, opcode: &[u8], reg: u8, m: &crate::machine::MemOperand) {
     let _ = f;
-    if inst.width == Width::W16 {
-        out.bytes.push(0x66);
-    }
 
     // RIP-relative (no base, no index): mod=00 rm=101, disp32.
     if m.base.is_none() && m.index.is_none() {
@@ -453,6 +467,9 @@ fn move_encoded(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         }
         (Reg::P(d), Reg::P(s)) => {
             let force8 = inst.width == Width::W8 && (s.hw >= 4 || d.hw >= 4);
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex_f(out, inst.width == Width::W64, rex_bit(s.hw), false, rex_bit(d.hw), force8);
             out.bytes.push(pick(inst.width, 0x89, 0x88));
             out.bytes.push(modrm(s.hw, 0b11, d.hw & 7));
@@ -460,6 +477,9 @@ fn move_encoded(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         (Reg::P(d), Reg::Spill(s)) => {
             // Reload: mov d, [rbp - off]
             let off = spill_disp(f, s);
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex(out, inst.width, rex_bit(d.hw), false, false);
             out.bytes.push(pick(inst.width, 0x8B, 0x8A));
             out.bytes.push(modrm(d.hw, 0b10, regs::RBP & 7));
@@ -468,6 +488,9 @@ fn move_encoded(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         (Reg::Spill(s), Reg::P(src)) => {
             // Spill: mov [rbp - off], src
             let off = spill_disp(f, s);
+            if inst.width == Width::W16 {
+                out.bytes.push(0x66);
+            }
             emit_rex(out, inst.width, rex_bit(src.hw), false, false);
             out.bytes.push(pick(inst.width, 0x89, 0x88));
             out.bytes.push(modrm(src.hw, 0b10, regs::RBP & 7));

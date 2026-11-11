@@ -168,6 +168,14 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
     // above left them at their final values.
     gp = gp_init;
     fp = fp_init;
+    // Register-classed struct pieces: pinned below, stored into the
+    // parameter's home slot after every pin is emitted. The pin moves
+    // must form one contiguous leading run so the allocator's
+    // parallel-move resolution orders them before any of them may
+    // clobber a sibling's source register — a direct store from the
+    // ABI register would race with a later pin allocated into it
+    // (physical operands are invisible to the register allocator).
+    let mut piece_stores: Vec<(crate::machine::VReg, crate::machine::RegClass, u64, u32, i64)> = Vec::new();
     for &p in entry_params.iter() {
         let ty = mir.values[p].ty.clone();
         match sel.isa.abi().param_loc(gp, fp, &ty) {
@@ -196,23 +204,23 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
                 }
             }
             ParamLoc::Regs(pregs, n) => {
-                // Store each piece into a fresh home slot; its address
-                // is the parameter value.
+                // Pin each piece out of its ABI register; its address
+                // home slot is filled in after the pin run.
                 let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
                 sel.set_slot(p, slot);
                 for (i, preg) in pregs.iter().take(n as usize).enumerate() {
                     let piece_bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
-                    let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: (i as i64) * 8, sym: None };
-                    match preg.class {
-                        crate::machine::RegClass::Vec => {
-                            let op = if piece_bytes >= 8 { Op::MovsdS } else { Op::MovssS };
-                            sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::P(*preg)), Operand::Mem(dst)]));
-                        }
-                        _ => {
-                            let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
-                            sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::P(*preg)), Operand::Mem(dst)]));
-                        }
-                    }
+                    let pv = sel.alloc_vreg_class(if preg.class == crate::machine::RegClass::Vec {
+                        crate::machine::RegClass::Vec
+                    } else {
+                        crate::machine::RegClass::Gpr
+                    });
+                    sel.emit(MInst::new(
+                        OpId::MOVE,
+                        Width::W64,
+                        smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Reg(Reg::P(*preg))],
+                    ));
+                    piece_stores.push((pv, preg.class, piece_bytes, slot, i as i64));
                     match preg.class {
                         crate::machine::RegClass::Gpr => gp += 1,
                         crate::machine::RegClass::Vec => fp += 1,
@@ -222,6 +230,19 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
             ParamLoc::Stack => {
                 // Deferred to the homing pass below: its scratch must
                 // not run before the register pins are in place.
+            }
+        }
+    }
+    for (pv, class, piece_bytes, slot, i) in piece_stores {
+        let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: i * 8, sym: None };
+        match class {
+            crate::machine::RegClass::Vec => {
+                let op = if piece_bytes >= 8 { Op::MovsdS } else { Op::MovssS };
+                sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Mem(dst)]));
+            }
+            _ => {
+                let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
+                sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Mem(dst)]));
             }
         }
     }

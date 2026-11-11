@@ -141,6 +141,12 @@ fn alu_rr() -> Vec<SlotSpec> {
     vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg), reg(false, Constraint::Reg)]
 }
 
+/// Shift by %cl: the count operand must sit in RCX, which only the
+/// allocator can arrange — the encoder hardcodes the CL register.
+fn alu_cl() -> Vec<SlotSpec> {
+    vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg), reg(false, Constraint::Fixed(PReg::gpr(super::regs::RCX)))]
+}
+
 /// ALU immediate form: `op dst, imm`, same reuse discipline.
 fn alu_i() -> Vec<SlotSpec> {
     vec![reg(true, Constraint::Reuse(1)), reg(false, Constraint::Reg), imm(Constraint::ImmRange(i32::MIN as i64, i32::MAX as i64))]
@@ -215,9 +221,9 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("shl.i", alu_i()),                                                                // ShlI
         plain("shr.i", alu_i()),                                                                // ShrI
         plain("sar.i", alu_i()),                                                                // SarI
-        plain("shl.cl", alu_rr()),                                                              // ShlCl
-        plain("shr.cl", alu_rr()),                                                              // ShrCl
-        plain("sar.cl", alu_rr()),                                                              // SarCl
+        plain("shl.cl", alu_cl()),                                                              // ShlCl
+        plain("shr.cl", alu_cl()),                                                              // ShrCl
+        plain("sar.cl", alu_cl()),                                                              // SarCl
         plain("push", vec![reg(false, Constraint::Reg)]),                                          // Push
         plain("pop", vec![reg(true, Constraint::Reg)]),                                            // Pop
         no_slots("ud2"),                                                                        // Ud2
