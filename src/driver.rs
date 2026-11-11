@@ -3961,7 +3961,7 @@ mod tests {
     #[test]
     fn file_scope_asm_becomes_assembler_text() {
         let src = "asm(\".globl x\\nx:\\n  ret\\n\");\nint f(void){return 0;}\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("compiles");
         assert!(!bytes.is_empty());
         assert_eq!(asm_text, ".globl x\nx:\n  ret\n\n");
     }
@@ -3970,7 +3970,7 @@ mod tests {
     fn inline_asm_wrappers_become_assembler_text() {
         let src = "int f(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n\
                    int g(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("addl $1, %eax"), "{asm_text}");
         // Identical blocks share one content-addressed wrapper.
@@ -3980,7 +3980,7 @@ mod tests {
     #[test]
     fn asm_goto_wrapper_returns_a_selector() {
         let src = "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }\n";
-        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("compiles");
+        let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("compiles");
         assert!(!bytes.is_empty());
         assert!(asm_text.contains("jnz .Lasm"), "{asm_text}");
         assert!(asm_text.contains("movq $1,"), "{asm_text}");
