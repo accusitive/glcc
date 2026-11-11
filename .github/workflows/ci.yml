@@ -190,6 +190,32 @@ jobs:
       - name: SQLite veryquick suite
         run: tests/sqlite/download-sqlite.sh
 
+  # The same suite through the native machine-code backend. The fuzz
+  # binaries are skipped (their build pulls the rdtsc inline-asm timer,
+  # which this backend cannot lower yet — see download-sqlite.sh), and
+  # SQLITE_DISABLE_INTRINSIC keeps __uint128_t out of util.c.
+  sqlite-native:
+    name: sqlite (veryquick, native backend)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: sqlite
+          save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
+      - name: Install Tcl
+        run: sudo apt-get update && sudo apt-get install -y tcl tcl-dev
+      - name: Build glcc
+        run: cargo build --release --locked
+      - name: SQLite veryquick suite (native backend)
+        env:
+          CFLAGS_EXTRA: -fbackend=native
+        run: tests/sqlite/download-sqlite.sh
+
   # The Windows half of the SQLite check: run-windows.ps1 builds Tcl 8.6
   # and the MSVC testfixture itself, recompiles the amalgamation with glcc,
   # and runs veryquick. It is allowed to fail until the path is proven green

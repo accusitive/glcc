@@ -430,7 +430,10 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 b if b <= 16 => Op::Movzx16,
                 _ => Op::MovRR,
             };
-            let width = if src_bits <= 16 { Width::W32 } else { result_width(sel, mir, inst) };
+            // The width is the destination's: at W64 the encoder sets
+            // REX.W and the movzx fills the whole register, which a
+            // 64-bit consumer (shifts, div) relies on.
+            let width = result_width(sel, mir, inst);
             sel.emit(MInst::new(op_id(op), width, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
             true
         }
@@ -443,7 +446,7 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 b if b <= 16 => Op::Movsx16,
                 _ => Op::Movsxd,
             };
-            let width = if src_bits <= 16 { Width::W32 } else { Width::W64 };
+            let width = result_width(sel, mir, inst);
             sel.emit(MInst::new(op_id(op), width, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))]));
             true
         }
@@ -1350,6 +1353,11 @@ fn gep(sel: &mut FuncSel, mir: &Function, inst: Inst) {
 /// high-half scratch in RDX (sign-extend or zero) and pins the
 /// dividend into RAX; the divide's early fixed uses hold RDX/RAX
 /// across it while its late fixed def lands the result.
+///
+/// The divide always runs at 64 bits, so sub-64-bit operands are
+/// canonicalized first: register upper halves are undefined for narrow
+/// values (32-bit reloads zero-extend, movsx sign-extends), and cqo or
+/// the wide divisor would consume that garbage.
 fn divide(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     let (signed, want_rem) = match mir.insts[inst].kind {
         InstKind::Udiv(..) => (false, false),
@@ -1361,8 +1369,8 @@ fn divide(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     let mut ops: Vec<Value> = Vec::new();
     mir.insts[inst].kind.for_each_operand(&mut |v| ops.push(v));
     let (a, b) = (ops[0], ops[1]);
-    let a_vr = sel.value_vreg(mir, a);
-    let b_vr = sel.value_vreg(mir, b);
+    let a_vr = divide_operand(sel, mir, a, signed);
+    let b_vr = divide_operand(sel, mir, b, signed);
     let result = sel.value_vreg(mir, mir.insts[inst].result.expect("div has a result"));
     let scratch = sel.alloc_vreg();
 
@@ -1392,6 +1400,32 @@ fn divide(sel: &mut FuncSel, mir: &Function, inst: Inst) {
             Operand::Reg(Reg::V(b_vr)),
         ],
     ));
+}
+
+/// Widen a divide operand to a clean 64-bit vreg. Signed narrows get
+/// movsx (movsxd for i32), unsigned narrows a 32-bit register move,
+/// which zero-extends into the upper half.
+fn divide_operand(sel: &mut FuncSel, mir: &Function, v: Value, signed: bool) -> crate::machine::VReg {
+    let bits = scalar_bits_of(mir, v);
+    if bits >= 64 {
+        return sel.value_vreg(mir, v);
+    }
+    let dst = sel.alloc_vreg();
+    let src = sel.value_vreg(mir, v);
+    let (op, width) = match (signed, bits) {
+        (true, b) if b <= 8 => (Op::Movsx8, Width::W64),
+        (true, b) if b <= 16 => (Op::Movsx16, Width::W64),
+        (true, _) => (Op::Movsxd, Width::W64),
+        (false, b) if b <= 8 => (Op::Movzx8, Width::W64),
+        (false, b) if b <= 16 => (Op::Movzx16, Width::W64),
+        (false, _) => (Op::MovRR, Width::W32),
+    };
+    sel.emit(MInst::new(
+        op_id(op),
+        width,
+        smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(src))],
+    ));
+    dst
 }
 
 /// memcpy/memset lowered as libcalls against the platform libc. The

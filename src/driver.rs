@@ -3978,6 +3978,21 @@ mod tests {
     }
 
     #[test]
+    fn native_divide_sign_extends_narrow_operands() {
+        let src = "int d10(int x) { return x / 10; }\nlong ds(short x) { return (long)x / 3; }\n";
+        let (mir, _) = lower_source_to_mir(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("lower");
+        let out = glcc_codegen::emit_module(&mir, glcc_codegen::Arch::X86_64).expect("emit");
+        // The divide always runs at 64 bits, so a narrow dividend must
+        // be canonicalized first: without the movsxd, cqo consumes the
+        // zero-extended upper half and negative dividends come out huge
+        // and positive. Sub-32 dividends need the full 64-bit movsx too
+        // (a 32-bit sign-extend leaves the upper half zero).
+        assert!(out.asm.contains("movsxd"), "{}", out.asm);
+        assert!(out.asm.contains("movsx16"), "{}", out.asm);
+        assert!(out.asm.contains("div.s"), "{}", out.asm);
+    }
+
+    #[test]
     fn asm_goto_wrapper_returns_a_selector() {
         let src = "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }\n";
         let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("compiles");
