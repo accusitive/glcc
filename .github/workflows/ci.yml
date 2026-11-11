@@ -26,7 +26,7 @@ jobs:
       fail-fast: false # a Windows failure must not cancel Linux
       matrix:
         include:
-          - { name: linux-x86_64, os: ubuntu-24.04, timeout: 20 }
+          - { name: linux-x86_64, os: ubuntu-24.04, timeout: 30 }
           - { name: linux-aarch64, os: ubuntu-24.04-arm, timeout: 20 }
           - { name: windows-x86_64, os: windows-2025, timeout: 30 }
     runs-on: ${{ matrix.os }}
@@ -61,6 +61,22 @@ jobs:
           printf '#include <stdio.h>\nint main(void) { puts("smoke-ok"); return 0; }\n' > "$RUNNER_TEMP/smoke.c"
           cargo run -q --locked -- "$RUNNER_TEMP/smoke.c" -o "$RUNNER_TEMP/smoke"
           "$RUNNER_TEMP/smoke"
+      # The c-testsuite end to end (compile, link, run, diff output) on the
+      # default cranelift backend. x86_64 needs no cross tooling; the
+      # aarch64 runner would need zig + qemu for any cross target, so this
+      # step is x86_64-only.
+      - name: C test suite (cranelift)
+        if: matrix.name == 'linux-x86_64'
+        run: ./tools/ctestsuite.bash --targets=x86_64 --no-build
+      # Same suite through the native machine-code backend (ELF/x86_64
+      # only, so linux-x86_64 is the only runner that can link it).
+      # 00204 is the one known gap — va_arg of a float-containing struct
+      # panics; see HANDOFF-native-x64.md. Everything else must pass.
+      - name: C test suite (native backend)
+        if: matrix.name == 'linux-x86_64'
+        run: ./tools/ctestsuite.bash --targets=x86_64 --no-build --allow=00204
+        env:
+          CFLAGS_EXTRA: -fbackend=native
       # Windows link+run smoke: enable once proven green. It exercises
       # link.exe + the CRT end to end, which no test in the suite does.
       # - name: C driver smoke test

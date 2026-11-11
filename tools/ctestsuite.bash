@@ -27,9 +27,15 @@
 #   pattern filters by basename substring (e.g. ./tools/ctestsuite.bash 0003)
 #   --targets=LIST selects targets from x86_64,aarch64,riscv64
 #                  (default: all three)
+#   --allow=LIST   failures to expect, comma-separated (repeatable):
+#                  backend gaps that must not fail the run. Entries match
+#                  a test's number ("00204"), optionally target-qualified
+#                  ("x86_64/00204"). A suppressed failure is still listed,
+#                  and an allowlisted test that PASSES is reported so the
+#                  stale entry can be removed.
 #
 # Env overrides: GLCC (default target/debug/glcc), CFLAGS_EXTRA,
-# ZIG_CC (default tools/zig-cc).
+# ALLOW (same format as --allow), ZIG_CC (default tools/zig-cc).
 
 set -u
 shopt -s nullglob
@@ -38,6 +44,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUITE="$ROOT/tests/c-testsuite/tests/single-exec"
 GLCC="${GLCC:-$ROOT/target/debug/glcc}"
 ZIG_CC="${ZIG_CC:-$ROOT/tools/zig-cc}"
+# Capture the env allowlist before the array below shadows the name.
+ALLOW_ENV="${ALLOW:-}"
+ALLOW=()
+if [[ -n "$ALLOW_ENV" ]]; then ALLOW+=("$ALLOW_ENV"); fi
 
 JOBS="$(nproc 2>/dev/null || echo 8)"
 CTIMEOUT=30
@@ -56,6 +66,8 @@ while (($#)); do
     --timeout) RTIMEOUT="$2"; shift 2;;
     --no-build) BUILD=0; shift;;
     --targets=*) TARGETS_OPT="${1#--targets=}"; shift;;
+    --allow) ALLOW+=("$2"); shift;;
+    --allow=*) ALLOW+=("${1#--allow=}"); shift;;
     --keep-tmp) KEEP=1; shift;;
     -v|--verbose) VERBOSE=1; shift;;
     -h|--help) sed -n '2,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# //;s/^#//'; exit 0;;
@@ -63,6 +75,11 @@ while (($#)); do
     *) PATTERNS+=("$1"); shift;;
   esac
 done
+
+# Split comma-separated allowlist entries.
+norm=()
+for e in "${ALLOW[@]}"; do for w in ${e//,/ }; do norm+=("$w"); done; done
+ALLOW=("${norm[@]}")
 
 if ((BUILD)); then
   echo "building glcc..."
@@ -238,30 +255,43 @@ xargs -P "$JOBS" -n 2 bash -c 'run_one "$@"' _ < "$JOBS_FILE"
 
 # Aggregate, one line per target.
 FAIL_LIST="$TMP/failures.txt"; : > "$FAIL_LIST"
+KNOWN_LIST="$TMP/known-failures.txt"; : > "$KNOWN_LIST"
 grand_fail=0
+known_fail=0
 echo "----------------------------------------"
 for t in "${ACTIVE_TARGETS[@]}"; do
-  pass=0; cfail=0; ctimeout=0; rfail=0; rtimeout=0; ofail=0
+  pass=0; cfail=0; ctimeout=0; rfail=0; rtimeout=0; ofail=0; kfail=0
   for r in "$RES/$t-"*.result; do
     status=$(cut -d' ' -f1 "$r")
+    name="${r##*/}"; name="${name#"$t"-}"; name="${name%.result}"
+    allowed=""
+    for e in "${ALLOW[@]}"; do
+      if [[ "$e" == "$name" || "$e" == "$t/$name" ]]; then allowed=1; break; fi
+    done
     case "$status" in
-      PASS) pass=$((pass+1));;
-      COMPILE_FAIL) cfail=$((cfail+1)); cat "$r" >> "$FAIL_LIST";;
-      COMPILE_TIMEOUT) ctimeout=$((ctimeout+1)); cat "$r" >> "$FAIL_LIST";;
-      RUN_FAIL) rfail=$((rfail+1)); cat "$r" >> "$FAIL_LIST";;
-      RUN_TIMEOUT) rtimeout=$((rtimeout+1)); cat "$r" >> "$FAIL_LIST";;
-      OUTPUT_FAIL) ofail=$((ofail+1)); cat "$r" >> "$FAIL_LIST";;
+      PASS) pass=$((pass+1));
+        if [[ -n "$allowed" ]]; then echo "note: allowlisted test $t/$name PASSES now — remove it from the allowlist"; fi;;
+      COMPILE_FAIL) if [[ -n "$allowed" ]]; then kfail=$((kfail+1)); cat "$r" >> "$KNOWN_LIST"; else cfail=$((cfail+1)); cat "$r" >> "$FAIL_LIST"; fi;;
+      COMPILE_TIMEOUT) if [[ -n "$allowed" ]]; then kfail=$((kfail+1)); cat "$r" >> "$KNOWN_LIST"; else ctimeout=$((ctimeout+1)); cat "$r" >> "$FAIL_LIST"; fi;;
+      RUN_FAIL) if [[ -n "$allowed" ]]; then kfail=$((kfail+1)); cat "$r" >> "$KNOWN_LIST"; else rfail=$((rfail+1)); cat "$r" >> "$FAIL_LIST"; fi;;
+      RUN_TIMEOUT) if [[ -n "$allowed" ]]; then kfail=$((kfail+1)); cat "$r" >> "$KNOWN_LIST"; else rtimeout=$((rtimeout+1)); cat "$r" >> "$FAIL_LIST"; fi;;
+      OUTPUT_FAIL) if [[ -n "$allowed" ]]; then kfail=$((kfail+1)); cat "$r" >> "$KNOWN_LIST"; else ofail=$((ofail+1)); cat "$r" >> "$FAIL_LIST"; fi;;
     esac
   done
-  printf '%s: total: %d  pass: %d  compile-fail: %d  compile-timeout: %d  run-fail: %d  run-timeout: %d  output-fail: %d\n' \
-    "$t" "$TOTAL" "$pass" "$cfail" "$ctimeout" "$rfail" "$rtimeout" "$ofail"
+  printf '%s: total: %d  pass: %d  compile-fail: %d  compile-timeout: %d  run-fail: %d  run-timeout: %d  output-fail: %d  known-fail: %d\n' \
+    "$t" "$TOTAL" "$pass" "$cfail" "$ctimeout" "$rfail" "$rtimeout" "$ofail" "$kfail"
   grand_fail=$((grand_fail + cfail + ctimeout + rfail + rtimeout + ofail))
+  known_fail=$((known_fail + kfail))
 done
 if [[ -s "$FAIL_LIST" ]]; then
   echo "--- failures ---"
   sort "$FAIL_LIST"
   cp "$FAIL_LIST" "$ROOT/ctestsuite-failures.txt"
   echo "(full list also saved to $ROOT/ctestsuite-failures.txt)"
+fi
+if [[ -s "$KNOWN_LIST" ]]; then
+  echo "--- known failures (suppressed via allowlist) ---"
+  sort "$KNOWN_LIST"
 fi
 if [[ -n "$KEEP" ]]; then
   echo "logs kept in $LOG"
