@@ -43,7 +43,7 @@ cd "$SRC"
 # source tree additionally needs SQLITE_DISABLE_INTRINSIC to keep
 # __uint128_t arithmetic out of util.c unless the backend can lower
 # it.
-CC="$GLCC" CFLAGS="$CFLAGS_EXTRA -DSQLITE_DISABLE_INTRINSIC" ./configure --with-tclsh="$TCLSH"
+CC="$GLCC" CFLAGS="${CFLAGS_EXTRA:-} -DSQLITE_DISABLE_INTRINSIC" ./configure --with-tclsh="$TCLSH"
 LOG=veryquick.log
 JOBS=$(nproc 2>/dev/null || echo 4)
 
@@ -76,7 +76,7 @@ echo "Building testfixture and testprogs with $GLCC"
 # binaries additionally pull in the rdtsc inline-asm hardware timer,
 # which the native backend cannot lower yet — skip them when
 # CFLAGS_EXTRA selects it.
-case "$CFLAGS_EXTRA" in
+case "${CFLAGS_EXTRA:-}" in
   *fbackend=native*)
     make -j"$JOBS" CC="$GLCC $CFLAGS_EXTRA -DSQLITE_DISABLE_INTRINSIC" testfixture
     # The ext/recover tests hang under the native backend (an as-yet

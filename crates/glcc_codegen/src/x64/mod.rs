@@ -205,8 +205,12 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
             }
             ParamLoc::Regs(pregs, n) => {
                 // Pin each piece out of its ABI register; its address
-                // home slot is filled in after the pin run.
-                let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+                // home slot is filled in after the pin run. The slot is
+                // rounded to the full eightbyte: pieces move as whole
+                // 64-bit units, so partial-tail bytes (garbage in the
+                // register past the struct's size) must not spill into
+                // a neighboring slot.
+                let slot = sel.slot(ty.size_bytes().next_multiple_of(8).max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1).max(8) as u32);
                 sel.set_slot(p, slot);
                 for (i, preg) in pregs.iter().take(n as usize).enumerate() {
                     let piece_bytes = (ty.size_bytes() - (i as u64) * 8).min(8);
@@ -241,8 +245,10 @@ fn entry(sel: &mut FuncSel, mir: &Function) -> bool {
                 sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Mem(dst)]));
             }
             _ => {
-                let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
-                sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Mem(dst)]));
+                // Whole eightbyte: the pin holds the full register, and
+                // body reads of the parameter only touch the struct's
+                // own bytes.
+                sel.emit(MInst::new(op_id(Op::Store), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(pv)), Operand::Mem(dst)]));
             }
         }
     }
@@ -625,12 +631,16 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                         sel.emit(MInst::new(op_id(Op::ShrI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(hi)), Operand::Reg(Reg::V(src)), Operand::Imm(1)]));
                         let dhi = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
                         sel.emit(MInst::new(op_id(cvt), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(hi))]));
-                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dhi))]));
+                        // The add's destination is a reuse-def, so it
+                        // must be a fresh vreg (regalloc2 SSA): dhi
+                        // stays the untouched first conversion.
+                        let dhi2 = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
+                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dhi2)), Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dhi))]));
                         let lo = sel.alloc_vreg();
                         sel.emit(MInst::new(op_id(Op::AndI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(lo)), Operand::Reg(Reg::V(src)), Operand::Imm(1)]));
                         let dlo = sel.alloc_vreg_class(crate::machine::RegClass::Vec);
                         sel.emit(MInst::new(op_id(cvt), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dlo)), Operand::Reg(Reg::V(lo))]));
-                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(dhi)), Operand::Reg(Reg::V(dlo))]));
+                        sel.emit(MInst::new(op_id(add), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::V(dhi2)), Operand::Reg(Reg::V(dlo))]));
                         true
                     }
                 }
@@ -777,8 +787,11 @@ fn term_hook(sel: &mut FuncSel, mir: &Function, block: Block) -> bool {
                                             sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
                                         }
                                         _ => {
-                                            let width = if bytes >= 8 { Width::W64 } else { Width::W32 };
-                                            sel.emit(MInst::new(op_id(Op::Load), width, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                                            // Whole eightbyte, matching
+                                            // the entry-side store: the
+                                            // caller reads only the
+                                            // struct's own bytes.
+                                            sel.emit(MInst::new(op_id(Op::Load), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
                                         }
                                     }
                                     ops.push(Operand::FixedReg(Reg::V(tmp), *preg));
@@ -967,12 +980,20 @@ fn is_const(mir: &Function, v: Value) -> bool {
 
 fn addr(sel: &mut FuncSel, mir: &Function, inst: Inst, target: SymTarget) {
     let dst = result_vreg(sel, mir, inst);
+    // Function addresses use PLT32 like direct calls do: under PIE a
+    // plain PC32 against an undefined function symbol (the linker does
+    // not create a PLT entry for it) fails to link. The linker resolves
+    // PLT32 to a direct PC reference for locally defined functions.
+    let reloc = match target {
+        SymTarget::Func(_) | SymTarget::Extern(_) => crate::machine::RelocKind::Plt32,
+        SymTarget::Global(_) | SymTarget::Named(_) => crate::machine::RelocKind::PcRel32,
+    };
     let mem = crate::machine::MemOperand {
         base: None,
         index: None,
         scale: 0,
         disp: 0,
-        sym: Some(SymOperand { target, reloc: crate::machine::RelocKind::PcRel32, addend: 0 }),
+        sym: Some(SymOperand { target, reloc, addend: 0 }),
     };
     sel.emit(MInst::new(op_id(Op::Lea), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
 }
@@ -1101,8 +1122,10 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
                             sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
                         }
                         _ => {
-                            let width = if piece_bytes >= 8 { Width::W64 } else { Width::W32 };
-                            sel.emit(MInst::new(op_id(Op::Load), width, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
+                            // Whole eightbyte; bytes past the struct's
+                            // size are garbage on both sides and never
+                            // consumed.
+                            sel.emit(MInst::new(op_id(Op::Load), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(tmp)), Operand::Mem(crate::machine::MemOperand { disp: addr.disp + (i as i64) * 8, ..addr.clone() })]));
                         }
                     }
                     match preg.class {
@@ -1193,9 +1216,11 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
     call_inst.call_args = Some(reg_args);
     sel.emit(call_inst);
     if let (Some(res), Some((temps, n))) = (result, ret_pieces) {
-        // Unpack the returned pieces into the result's home slot.
+        // Unpack the returned pieces into the result's home slot,
+        // rounded to whole eightbytes: the pieces carry full registers
+        // (their tails are garbage past the struct's size, never read).
         let ty = mir.values[res].ty.clone();
-        let slot = sel.slot(ty.size_bytes().max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
+        let slot = sel.slot(ty.size_bytes().next_multiple_of(8).max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1).max(8) as u32);
         sel.set_slot(res, slot);
         let pregs = match sel.isa.abi().ret_loc(&sig.ret) {
             RetLoc::Regs(p, _) => p,
@@ -1210,8 +1235,7 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
                     sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(*tmp)), Operand::Mem(dst)]));
                 }
                 _ => {
-                    let width = if bytes >= 8 { Width::W64 } else { Width::W32 };
-                    sel.emit(MInst::new(op_id(Op::Store), width, smallvec::smallvec![Operand::Reg(Reg::V(*tmp)), Operand::Mem(dst)]));
+                    sel.emit(MInst::new(op_id(Op::Store), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(*tmp)), Operand::Mem(dst)]));
                 }
             }
         }
@@ -1618,35 +1642,43 @@ fn va_arg_aggregate(sel: &mut FuncSel, mir: &Function, inst: Inst, ap: Value) ->
     sel.emit(MInst::new(op_id(Op::AddRR), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(reg_addr)), Operand::Reg(Reg::V(save)), Operand::Reg(Reg::V(off64))]));
     let ovf = sel.alloc_vreg();
     mem(sel, Reg::V(ap_addr), 8, ovf);
-    // Fits when gp_offset + size <= 48.
+    // Fits when gp_offset + size <= 48. The cursor is slot-aligned, so
+    // the equality case matters: cc 0x6 (BE), where the scalar path's
+    // B (0x2) suffices only because its step is the full slot.
     sel.emit(MInst::new(op_id(Op::CmpI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off)), Operand::Imm(48 - size as i64)]));
+    // addr = fits ? reg_addr : ovf: defined once by the Cmov, whose
+    // dst is reuse-tied to the overflow (false) path. A preceding MOVE
+    // into the same vreg would be a second def and break SSA.
     let addr = sel.alloc_vreg();
-    sel.emit(MInst::new(OpId::MOVE, Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf))]));
-    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(reg_addr)), Operand::Imm(0x2)]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(addr)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(reg_addr)), Operand::Imm(0x6)]));
     // Home the bytes.
     let slot = sel.slot(size.max(1) as u32, glcc_mir::ty::ty_align(&ty).max(1) as u32);
     sel.set_slot(res, slot);
     let dst = crate::machine::MemOperand { base: Some(Reg::FI(slot)), index: None, scale: 0, disp: 0, sym: None };
     let src = crate::machine::MemOperand { base: Some(Reg::V(addr)), index: None, scale: 0, disp: 0, sym: None };
-    copy_bytes(sel, &dst, &src, size, glcc_mir::ty::ty_align(&ty).max(1) as u64);
+    copy_bytes(sel, &dst, &src, size, glcc_mir::ty::ty_align(&ty).max(1).max(8) as u64);
     // Advance: the GP cursor moves a full slot (8) when the register
     // path was taken; the overflow area always absorbs the whole
     // aligned argument otherwise.
     let step = size.next_multiple_of(8) as i64;
     let new_off = sel.alloc_vreg();
     sel.emit(MInst::new(op_id(Op::AddI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Reg(Reg::V(off)), Operand::Imm(step)]));
-    sel.emit(MInst::new(op_id(Op::Cmov), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(off)), Operand::Imm(0x2)]));
     let mut off_m = sel.mem_of(mir, ap_val);
     sel.emit(MInst::new(
         op_id(Op::Store),
         Width::W32,
         smallvec::smallvec![Operand::Reg(Reg::V(new_off)), Operand::Mem(off_m)],
     ));
-    // Overflow cursor only moves when the register path was not taken.
+    // Overflow cursor only moves when the register path was not taken:
+    // bumped = fits ? ovf : ovf + step. The compare is re-emitted —
+    // copy_bytes and the cursor store clobbered the flags — and the
+    // Cmov's dst is reuse-tied to ovf, so cc 0x7 (strictly above,
+    // equality stays on the register path) brings in ovf + step.
     let plus = sel.alloc_vreg();
     sel.emit(MInst::new(op_id(Op::AddI), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(plus)), Operand::Reg(Reg::V(ovf)), Operand::Imm(step)]));
+    sel.emit(MInst::new(op_id(Op::CmpI), Width::W32, smallvec::smallvec![Operand::Reg(Reg::V(off)), Operand::Imm(48 - size as i64)]));
     let bumped = sel.alloc_vreg();
-    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(plus)), Operand::Reg(Reg::V(ovf)), Operand::Imm(0x2)]));
+    sel.emit(MInst::new(op_id(Op::Cmov), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(bumped)), Operand::Reg(Reg::V(ovf)), Operand::Reg(Reg::V(plus)), Operand::Imm(0x7)]));
     let mut ovf_m = sel.mem_of(mir, ap_val);
     ovf_m.disp += 8;
     sel.emit(MInst::new(
