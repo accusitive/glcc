@@ -188,6 +188,27 @@ pub trait TargetIsa: Sync {
     /// object layer: block label offsets are resolved there.
     fn encode_inst(&self, f: &MFunction, inst: &crate::machine::MInst, out: &mut EncOut);
 
+    /// Patch an intra-function branch/call field after the block
+    /// offsets are known. `delta` is `target_off - field_off - 4`: the
+    /// value a rel32 field at `at` measures from its own end (targets
+    /// recording a whole-instruction field — aarch64 imm26 — divide by
+    /// 4 and shift into place).
+    fn patch_branch_field(&self, text: &mut [u8], at: u32, delta: i64) {
+        let at = at as usize;
+        text[at..at + 4].copy_from_slice(&(delta as i32).to_le_bytes());
+    }
+
+    /// ELF relocation parameters for a symbol field of `kind`:
+    /// (r_type, pcrel, field size in bytes).
+    fn elf_reloc(&self, kind: crate::machine::RelocKind) -> (u32, bool, u8);
+
+    /// ELF relocation types for data images: (64-bit pointer, 32-bit
+    /// pointer).
+    fn elf_data_relocs(&self) -> (u32, u32);
+
+    /// The glasm backend that writes this target's ELF.
+    fn asm_arch(&self) -> glasm::Arch;
+
     /// Whether this ISA runs register allocation. Stack machines and
     /// VMs return false: their ISel output is already final.
     fn needs_ra(&self) -> bool {

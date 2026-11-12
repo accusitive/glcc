@@ -142,6 +142,15 @@ pub enum RelocKind {
     PcRel32,
     /// 32-bit RIP-relative call/branch to a possibly-interposed symbol.
     Plt32,
+    /// AArch64 `adrp` field: page-of(S+A) minus page-of(field), written
+    /// into the split immhi:immlo bits.
+    PagePc,
+    /// AArch64 low-12 addend: (S+A) & 0xFFF, ORed into the instruction's
+    /// imm12 field (the `add` of an adrp/add pair).
+    Lo12,
+    /// AArch64 26-bit PC-relative call/branch field (b/bl), in units of
+    /// instructions.
+    Call26,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

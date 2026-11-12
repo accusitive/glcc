@@ -6,7 +6,6 @@
 use glasm::assemble::{Module as AsmModule, Reloc, Section, Symbol, Target as RelocTarget};
 use glasm::insn::SectionFlags;
 use glasm::elf::write_module_elf;
-use glasm::Arch as AsmArch;
 
 use crate::frame;
 use crate::isa::{EncOut, RelocReq, TargetIsa};
@@ -119,6 +118,7 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
         let mut tb = TextBuilder::new();
         encode_function(isa, &mf, &mut tb);
         resolve_function_refs(
+            isa,
             &mut tb,
             &mut asm,
             start,
@@ -137,16 +137,17 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
         asm.symbols[sym].value = start as i64;
     }
 
+    let (data_reloc64, data_reloc32) = isa.elf_data_relocs();
     for (gi, g) in mir.globals.iter_enumerated() {
         if g.external {
             // Declarations only: no storage, an undefined symbol.
             sym_index(&mut asm, &mut global_syms, gi.index(), false, &g.name, g.local, g.weak, true);
             continue;
         }
-        emit_global(&mut asm, &func_syms, &mut global_syms, &extern_syms, gi.index(), g)?;
+        emit_global(&mut asm, &func_syms, &mut global_syms, &extern_syms, gi.index(), g, data_reloc64, data_reloc32)?;
     }
 
-    emit_init_array(&mut asm, mir, &func_syms);
+    emit_init_array(&mut asm, mir, &func_syms, data_reloc64);
 
     if census {
         let lowered = mir.funcs.len() as u32 - census_tally.iter().map(|(_, n)| *n).sum::<u32>();
@@ -156,7 +157,7 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
         }
     }
 
-    let object = write_module_elf(&asm, AsmArch::X86_64)?;
+    let object = write_module_elf(&asm, isa.asm_arch())?;
     Ok(Emitted { object, asm: printer.finish() })
 }
 
@@ -214,6 +215,7 @@ fn encode_function(isa: &'static dyn TargetIsa, f: &MFunction, tb: &mut TextBuil
 /// queue relocations for everything else.
 #[allow(clippy::too_many_arguments)]
 fn resolve_function_refs(
+    isa: &'static dyn TargetIsa,
     tb: &mut TextBuilder,
     asm: &mut AsmModule,
     func_start: u32,
@@ -228,7 +230,7 @@ fn resolve_function_refs(
     for (field_off, target) in &tb.block_refs {
         let target_off = tb.block_offsets[*target as usize];
         let value = target_off as i64 - *field_off as i64 - 4;
-        patch32(&mut tb.text, *field_off, value);
+        isa.patch_branch_field(&mut tb.text, *field_off, value);
     }
     for (field_off, req) in &tb.relocs {
         let sym = match &req.sym.target {
@@ -251,7 +253,7 @@ fn resolve_function_refs(
                 let defined = !mir.funcs[*f].weak && !func_weak && func_text_offset[f.index()].is_some();
                 if defined {
                     let value = func_text_offset[f.index()].unwrap() as i64 - func_start as i64 - *field_off as i64 - 4;
-                    patch32(&mut tb.text, *field_off, value);
+                    isa.patch_branch_field(&mut tb.text, *field_off, value);
                     continue;
                 }
                 func_syms[f.index()].expect("referenced function symbol")
@@ -259,11 +261,7 @@ fn resolve_function_refs(
             SymTarget::Global(g) => global_syms[g.index()].expect("referenced global symbol"),
             SymTarget::Extern(e) => extern_syms[e.index()].expect("referenced extern symbol"),
         };
-        let (r_type, pcrel, size) = match req.sym.reloc {
-            RelocKind::PcRel32 => (object::elf::R_X86_64_PC32.0, true, 4),
-            RelocKind::Plt32 => (object::elf::R_X86_64_PLT32.0, true, 4),
-            RelocKind::Abs64 => (object::elf::R_X86_64_64.0, false, 8),
-        };
+        let (r_type, pcrel, size) = isa.elf_reloc(req.sym.reloc);
         tb.out_relocs.push(Reloc {
             section: 0,
             offset: (func_start + *field_off) as i64,
@@ -274,11 +272,6 @@ fn resolve_function_refs(
             r_type,
         });
     }
-}
-
-fn patch32(data: &mut [u8], at: u32, value: i64) {
-    let at = at as usize;
-    data[at..at + 4].copy_from_slice(&(value as i32).to_le_bytes());
 }
 
 fn sym_index(
@@ -315,6 +308,8 @@ fn emit_global(
     extern_syms: &[Option<usize>],
     index: usize,
     g: &glcc_mir::GlobalData,
+    r_type64: u32,
+    r_type32: u32,
 ) -> Result<(), String> {
     let size = g.ty.size_bytes() as usize;
     let (section, data) = match &g.init {
@@ -334,8 +329,8 @@ fn emit_global(
     let relocs = g
         .relocs
         .iter()
-        .map(|(off, r)| (*off, r, 8u8, object::elf::R_X86_64_64.0))
-        .chain(g.relocs32.iter().map(|(off, r)| (*off, r, 4u8, object::elf::R_X86_64_32.0)));
+        .map(|(off, r)| (*off, r, 8u8, r_type64))
+        .chain(g.relocs32.iter().map(|(off, r)| (*off, r, 4u8, r_type32)));
     for (off, reloc, rsize, r_type) in relocs {
         let (target, addend) = match reloc {
             DataReloc::Global { target, addend } => (RelocTarget::Symbol(table[target.index()].expect("reloc global symbol")), *addend),
@@ -394,7 +389,7 @@ fn const_bytes(c: &Const, size: usize) -> Vec<u8> {
     out
 }
 
-fn emit_init_array(asm: &mut AsmModule, mir: &glcc_mir::Module, func_syms: &[Option<usize>]) {
+fn emit_init_array(asm: &mut AsmModule, mir: &glcc_mir::Module, func_syms: &[Option<usize>], r_type: u32) {
     if mir.init_funcs.is_empty() {
         return;
     }
@@ -410,7 +405,7 @@ fn emit_init_array(asm: &mut AsmModule, mir: &glcc_mir::Module, func_syms: &[Opt
             pcrel: false,
             addend: 0,
             target: RelocTarget::Symbol(func_syms[f.index()].expect("init func symbol")),
-            r_type: object::elf::R_X86_64_64.0,
+            r_type,
         });
     }
 }

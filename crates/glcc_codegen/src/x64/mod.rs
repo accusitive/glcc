@@ -100,6 +100,24 @@ impl TargetIsa for X64 {
     fn encode_inst(&self, f: &MFunction, inst: &crate::machine::MInst, out: &mut EncOut) {
         enc::encode(f, inst, out);
     }
+
+    fn elf_reloc(&self, kind: crate::machine::RelocKind) -> (u32, bool, u8) {
+        use crate::machine::RelocKind as K;
+        match kind {
+            K::PcRel32 => (object::elf::R_X86_64_PC32.0, true, 4),
+            K::Plt32 => (object::elf::R_X86_64_PLT32.0, true, 4),
+            K::Abs64 => (object::elf::R_X86_64_64.0, false, 8),
+            _ => panic!("glcc native backend: x86-64 cannot emit {kind:?} relocation fields"),
+        }
+    }
+
+    fn elf_data_relocs(&self) -> (u32, u32) {
+        (object::elf::R_X86_64_64.0, object::elf::R_X86_64_32.0)
+    }
+
+    fn asm_arch(&self) -> glasm::Arch {
+        glasm::Arch::X86_64
+    }
 }
 
 fn entry(sel: &mut FuncSel, mir: &Function) -> bool {

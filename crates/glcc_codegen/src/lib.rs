@@ -8,6 +8,7 @@
 
 use isa::TargetIsa;
 
+pub mod aarch64;
 pub mod frame;
 pub mod isa;
 pub mod machine;
@@ -22,12 +23,14 @@ pub mod x64;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Arch {
     X86_64,
+    Aarch64,
 }
 
 impl Arch {
     pub fn isa(self) -> &'static dyn TargetIsa {
         match self {
             Arch::X86_64 => &x64::X64_ISA,
+            Arch::Aarch64 => &aarch64::A64_ISA,
         }
     }
 }

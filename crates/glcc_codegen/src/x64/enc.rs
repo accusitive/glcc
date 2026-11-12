@@ -423,6 +423,8 @@ fn emit_sym_disp(out: &mut EncOut, m: &crate::machine::MemOperand) {
         let pcrel = match sym.reloc {
             crate::machine::RelocKind::PcRel32 | crate::machine::RelocKind::Plt32 => true,
             crate::machine::RelocKind::Abs64 => panic!("glcc native backend: 64-bit absolute in a disp32 field"),
+            // AArch64-only field shapes never reach the x86-64 encoder.
+            _ => panic!("glcc native backend: {kind:?} field on x86-64", kind = sym.reloc),
         };
         out.relocs.push(RelocReq { at, size: 4, pcrel, addend: -4, sym: sym.clone() });
     }
