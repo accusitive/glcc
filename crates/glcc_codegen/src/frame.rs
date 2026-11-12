@@ -64,6 +64,13 @@ pub fn used_callee_saved(f: &MFunction, isa: &'static dyn TargetIsa) -> u32 {
     let mut used = std::collections::HashSet::<(u8, u8)>::new();
     for b in &f.blocks {
         for inst in &b.insts {
+            if let Some(blob) = &inst.asm {
+                for &p in &blob.clobbers {
+                    if reginfo.info(p).callee_saved {
+                        used.insert((p.hw, p.class as u8));
+                    }
+                }
+            }
             for op in &inst.ops {
                 match op {
                     crate::machine::Operand::Reg(Reg::P(p)) | crate::machine::Operand::FixedReg(Reg::P(p), _) => {

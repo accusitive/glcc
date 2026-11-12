@@ -79,6 +79,34 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
                 out.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 out.block_refs.push((at, inst.branch.as_ref().expect("JMP branch").targets[0]));
             }
+            crate::machine::OpId::ASM => {
+                // Render the template with the registers the allocator
+                // chose and splice the glasm-assembled bytes in. The
+                // selection-time probe validated this shape, so an
+                // error here is a render bug, not a user error.
+                let blob = inst.asm.as_ref().expect("ASM inst without a blob");
+                fn preg_of(blob: &crate::machine::AsmBlob, inst: &MInst, i: usize) -> crate::machine::PReg {
+                    if let Some(target) = blob.slots[i].rides {
+                        return preg_of(blob, inst, target);
+                    }
+                    let mut cursor = 0usize;
+                    for (j, slot) in blob.slots.iter().enumerate() {
+                        if j == i {
+                            break;
+                        }
+                        cursor += blob.ops_of(slot);
+                    }
+                    // A read-modify-write pair renders the output side.
+                    let last = cursor + blob.ops_of(&blob.slots[i]) - 1;
+                    match &inst.ops[last] {
+                        Operand::Reg(Reg::P(p)) | Operand::FixedReg(Reg::P(p), _) => *p,
+                        other => panic!("glcc native backend: asm operand {other:?} was not allocated"),
+                    }
+                }
+                let bytes = crate::asm::blob_x86_64(&blob.template, &blob.slots, &blob.labels, blob.is_basic, blob.is_goto, blob.unique, &|i: usize| preg_of(blob, inst, i))
+                    .unwrap_or_else(|reason| panic!("glcc native backend: inline asm encoding failed: {reason}"));
+                out.bytes.extend_from_slice(&bytes);
+            }
             other => panic!("glcc native backend: cannot encode pseudo op {other:?}"),
         };
     }

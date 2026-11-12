@@ -34,6 +34,10 @@ impl OpId {
     pub const JMP: OpId = OpId(4);
     /// Trap (unreachable); ends a block like [`OpId::RET`].
     pub const UNREACHABLE: OpId = OpId(5);
+    /// Inline asm block; the template and operand protocol live in
+    /// [`MInst::asm`]. Targets render it post-RA with the assigned
+    /// physical registers and splice the assembled bytes into `.text`.
+    pub const ASM: OpId = OpId(6);
 
     pub fn is_pseudo(self) -> bool {
         self.0 < 16
@@ -235,12 +239,85 @@ pub struct MInst {
     /// argument, in operand order. The argument moves themselves are
     /// inserted post-RA (see `ra::allocate`).
     pub call_args: Option<SmallVec<[PReg; 8]>>,
+    /// For [`OpId::ASM`]: the template and its operand protocol.
+    pub asm: Option<Box<AsmBlob>>,
     pub branch: Option<BranchInfo>,
+}
+
+/// One inline-asm operand slot, in GCC numbering order (`%0`, `%1`, ...).
+/// RA operands for the slot live in `MInst.ops` at the same index for
+/// Reg/Mem/Sel slots (Imm slots carry no RA operand).
+#[derive(Clone, Debug)]
+pub struct AsmSlot {
+    pub kind: AsmSlotKind,
+    pub width: Width,
+    /// Reads the operand register before the template (inputs, ties,
+    /// `+` outputs).
+    pub is_use: bool,
+    /// Written by the template (outputs, the goto selector).
+    pub is_def: bool,
+    /// An output written before the inputs are consumed (`&`); the
+    /// allocator must not overlap it with an input register.
+    pub early: bool,
+    /// A named-constraint pin (`"a"` is rax).
+    pub pin: Option<PReg>,
+    /// A tied input: no RA operand of its own; it renders the target
+    /// slot's register, whose def carries the `Reuse`/`Fixed` tie.
+    pub rides: Option<usize>,
+    /// The `[name]` spelling, for `%[name]` template references.
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum AsmSlotKind {
+    /// A register operand rendered as the width-named AT&T register
+    /// (`%al`, `%ax`, `%eax`, `%rax` per `width`/`modifier`).
+    Reg,
+    /// A memory operand: the RA operand holds the address; rendered
+    /// as `(%reg)`.
+    Mem,
+    /// An immediate rendered with target syntax (`$N` on x86-64).
+    Imm(i64),
+    /// The `asm goto` selector, referenced via `%l[name]` stubs.
+    Sel,
+}
+
+#[derive(Clone, Debug)]
+pub struct AsmBlob {
+    /// The decoded template (frontend escapes already processed).
+    pub template: String,
+    pub slots: Vec<AsmSlot>,
+    /// Registers the template may clobber beyond its operand defs:
+    /// named clobbers plus literal register mentions detected in the
+    /// template. Canonical (width-max) pregs.
+    pub clobbers: Vec<PReg>,
+    /// `asm goto` label names, in selector order.
+    pub labels: Vec<String>,
+    /// Per-site number substituted for `%=`.
+    pub unique: u32,
+    pub is_basic: bool,
+    pub is_goto: bool,
+}
+
+impl AsmBlob {
+    /// How many RA operand entries a slot contributes to `MInst.ops`:
+    /// a read-modify-write slot (use+def) has two — the value read
+    /// before the template and the output it defines (tied by `Reuse`
+    /// or a shared pin); other Reg/Mem/Sel slots have one; Imm and
+    /// tied-input slots have none.
+    pub fn ops_of(&self, slot: &AsmSlot) -> usize {
+        match slot.kind {
+            AsmSlotKind::Imm(_) => 0,
+            _ if slot.rides.is_some() => 0,
+            _ if slot.is_use && slot.is_def => 2,
+            _ => 1,
+        }
+    }
 }
 
 impl MInst {
     pub fn new(op: OpId, width: Width, ops: impl Into<SmallVec<[Operand; 4]>>) -> Self {
-        MInst { op, width, ops: ops.into(), branch: None, call_args: None }
+        MInst { op, width, ops: ops.into(), branch: None, call_args: None, asm: None }
     }
 }
 

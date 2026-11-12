@@ -9,6 +9,7 @@
 use isa::TargetIsa;
 
 pub mod aarch64;
+pub mod asm;
 pub mod frame;
 pub mod isa;
 pub mod machine;

@@ -122,6 +122,9 @@ glcc_lower_mir: CheckedExpr/Sema → glcc_mir (SSA IR with aggregate types)
        (sel/, declarative Pattern tables) → regalloc2 register allocation
        (ra.rs) → frame layout (frame.rs) → x86-64 encoding (x64/)
        → ELF via glasm. No Cranelift involved; F80/F128 unsupported here.
+       Inline asm lowers in place (asm/ planner + OpId::ASM pseudo-inst,
+       template rendered post-RA and assembled by glasm; see
+       docs/inline-asm.md).
   ▼
 driver (src/driver.rs): object bytes + per-TU asm text (file-scope/naked
   asm, assembled in-process by glasm with -fintegrated-as) + Win64

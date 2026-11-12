@@ -13,6 +13,29 @@ aarch64/riscv64 — still uses the out-of-line wrapper below, with a
 one-line stderr note per fallback reason. The wrapper stays the
 reference design for the other targets.
 
+**Update (native backend):** `-fbackend=native` now lowers inline asm
+**in place** — Design C, made feasible by glasm being an in-process
+assembler. Every block becomes one `OpId::ASM` machine instruction
+(`glcc_codegen::asm::plan_x86_64` plans it, `x64::select_asm` wires the
+operands, `x64/enc.rs` renders the template post-RA with the allocated
+registers and splices the glasm-assembled bytes into `.text`). No call,
+no wrapper: `%rsp` reads see the real frame. The regalloc2 protocol:
+inputs are uses @Early, outputs defs @Late (so non-`&` outputs may
+reuse a dying input's register, `&` outputs are defs @Early), read-
+modify-write slots (`+`, ties) pair the read value's use with an output
+def tied by `Reuse` (or a shared `Fixed` pin), named constraints pin
+via `FixedReg`, and declared clobbers plus literal register mentions
+scanned out of the template go into the instruction's clobber set
+(callee-saved ones are pushed by the prologue). `asm goto` keeps the
+selector protocol: blob-local stubs write the selector register and the
+MIR `Switch` dispatches. A selection-time probe renders the template
+with stand-in registers and hands it to glasm, so unsupported shapes
+(x87, `"Q"`, vectors, symbol references in templates, aggregates)
+fail loudly before any emission. x86-64 only; the planner is
+table-shaped so aarch64/riscv64 grow `plan_*`/`blob_*` functions.
+Tests: `tests/native_asm/run.sh` (diffed against gcc), plus unit tests
+in `glcc_codegen/src/asm/mod.rs`.
+
 ## Goal
 
 Not "the tests pass". The target is C that can do:

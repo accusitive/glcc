@@ -368,6 +368,153 @@ fn spill_save_area(sel: &mut FuncSel, save_slot: u32, disp: i64, vr: crate::mach
     ));
 }
 
+/// Inline asm: plan the block, emit operand setup, one `OpId::ASM`
+/// pseudo-instruction (rendered with the allocated registers and
+/// assembled by the encoder post-RA), and the output stores. An `asm
+/// goto`'s selector rides the MIR result; the following `Switch`
+/// dispatches on it.
+fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
+    let InstKind::InlineAsm { block } = &mir.insts[inst].kind else { unreachable!() };
+    let outputs = block.outputs as usize;
+    let is_goto = !block.labels.is_empty();
+    let unique = crate::asm::next_site();
+
+    let plan = crate::asm::plan_x86_64(block, mir);
+
+    // Probe: render the template with stand-in registers (real pregs
+    // where a constraint pins one) and let glasm reject anything it
+    // cannot encode — before any emission, with a diagnostic naming
+    // the failure. The post-RA render draws from the same registers
+    // the allocator may choose, so a passing probe guarantees the
+    // encode-time render assembles too.
+    let probe_of = |i: usize| plan.slots[i].pin.unwrap_or_else(|| PReg::gpr(regs::R11));
+    if let Err(reason) = crate::asm::blob_x86_64(&block.template, &plan.slots, &block.labels, block.is_basic, is_goto, unique, &probe_of) {
+        panic!("glcc native backend: inline asm cannot be lowered: {reason}");
+    }
+
+    let mut ops: smallvec::SmallVec<[Operand; 4]> = smallvec::smallvec![];
+    let mut slot_vregs: Vec<Option<crate::machine::VReg>> = vec![None; plan.slots.len()];
+    for (i, slot) in plan.slots.iter().enumerate() {
+        match &slot.kind {
+            crate::machine::AsmSlotKind::Imm(_) => {}
+            crate::machine::AsmSlotKind::Mem => {
+                let v = sel.value_vreg(mir, block.operands[i].value);
+                ops.push(Operand::Reg(Reg::V(v)));
+                slot_vregs[i] = Some(v);
+            }
+            crate::machine::AsmSlotKind::Sel => {
+                let v = sel.alloc_vreg();
+                ops.push(Operand::Reg(Reg::V(v)));
+                slot_vregs[i] = Some(v);
+            }
+            // A tied input has no RA operand; it renders the target
+            // output's register.
+            crate::machine::AsmSlotKind::Reg if slot.rides.is_some() => {}
+            crate::machine::AsmSlotKind::Reg if slot.is_use && slot.is_def => {
+                // A read-modify-write output (`+`, or a `=` tied to an
+                // input): the template reads the current value's
+                // register and writes the output to the same register
+                // (the def carries `Reuse` or the shared pin).
+                let read_side = if block.operands[i].constraint.starts_with('+') {
+                    let w = sel.alloc_vreg();
+                    let mem = sel.mem_of(mir, block.operands[i].value);
+                    sel.emit(MInst::new(
+                        op_id(Op::Load),
+                        value_width(&block.operands[i].ty),
+                        smallvec::smallvec![Operand::Reg(Reg::V(w)), Operand::Mem(mem)],
+                    ));
+                    w
+                } else {
+                    let tied = block
+                        .operands
+                        .iter()
+                        .skip(outputs)
+                        .find(|op| op.tie == Some(i as u32))
+                        .expect("read-modify-write output without `+` or a tied input");
+                    sel.value_vreg(mir, tied.value)
+                };
+                let d = sel.alloc_vreg();
+                ops.push(match slot.pin {
+                    Some(pin) => Operand::FixedReg(Reg::V(read_side), pin),
+                    None => Operand::Reg(Reg::V(read_side)),
+                });
+                ops.push(match slot.pin {
+                    Some(pin) => Operand::FixedReg(Reg::V(d), pin),
+                    None => Operand::Reg(Reg::V(d)),
+                });
+                slot_vregs[i] = Some(d);
+            }
+            crate::machine::AsmSlotKind::Reg if slot.is_def => {
+                // A plain `=` output.
+                let v = sel.alloc_vreg();
+                ops.push(match slot.pin {
+                    Some(pin) => Operand::FixedReg(Reg::V(v), pin),
+                    None => Operand::Reg(Reg::V(v)),
+                });
+                slot_vregs[i] = Some(v);
+            }
+            crate::machine::AsmSlotKind::Reg => {
+                // A plain input: its value's own vreg is the operand
+                // (pinned to the constraint's register when named).
+                let v = sel.value_vreg(mir, block.operands[i].value);
+                ops.push(match slot.pin {
+                    Some(pin) => Operand::FixedReg(Reg::V(v), pin),
+                    None => Operand::Reg(Reg::V(v)),
+                });
+            }
+        }
+    }
+
+    // A tied input whose target is a memory output: the input value
+    // is stored into the location the template reads.
+    for operand in block.operands.iter().skip(outputs) {
+        let Some(tie) = operand.tie else { continue };
+        let target = tie as usize;
+        if !matches!(plan.slots[target].kind, crate::machine::AsmSlotKind::Mem) {
+            continue;
+        }
+        let src = sel.value_vreg(mir, operand.value);
+        let mem = sel.mem_of(mir, block.operands[target].value);
+        sel.emit(MInst::new(
+            op_id(Op::Store),
+            value_width(&block.operands[target].ty),
+            smallvec::smallvec![Operand::Reg(Reg::V(src)), Operand::Mem(mem)],
+        ));
+    }
+
+    // Output stores land after the block; the goto selector (the last
+    // slot) feeds the MIR `Switch` instead.
+    let reg_outputs: Vec<usize> = (0..outputs).filter(|&i| matches!(plan.slots[i].kind, crate::machine::AsmSlotKind::Reg)).collect();
+
+    let mut asm_inst = MInst::new(OpId::ASM, Width::W64, ops);
+    asm_inst.asm = Some(Box::new(crate::machine::AsmBlob {
+        template: block.template.clone(),
+        slots: plan.slots,
+        clobbers: plan.clobbers,
+        labels: block.labels.clone(),
+        unique,
+        is_basic: block.is_basic,
+        is_goto,
+    }));
+    sel.emit(asm_inst);
+
+    for i in reg_outputs {
+        let v = slot_vregs[i].expect("register output has a vreg");
+        let mem = sel.mem_of(mir, block.operands[i].value);
+        sel.emit(MInst::new(
+            op_id(Op::Store),
+            value_width(&block.operands[i].ty),
+            smallvec::smallvec![Operand::Reg(Reg::V(v)), Operand::Mem(mem)],
+        ));
+    }
+
+    if is_goto {
+        let result = mir.insts[inst].result.expect("asm goto has a selector result");
+        let sel_vreg = (*slot_vregs.last().expect("goto block without a selector slot")).expect("selector vreg");
+        sel.set_reg(result, sel_vreg);
+    }
+}
+
 fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
     let kind = &mir.insts[inst].kind;
     match kind {
@@ -533,7 +680,10 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
         InstKind::AtomicRmw { .. } | InstKind::AtomicCas { .. } => {
             panic!("glcc native backend: atomic read-modify-write is not yet supported")
         }
-        InstKind::InlineAsm { .. } => panic!("glcc native backend: inline asm is not yet supported"),
+        InstKind::InlineAsm { .. } => {
+            select_asm(sel, mir, inst);
+            true
+        }
         InstKind::VaStart { ap } => {
             va_start(sel, mir, inst, *ap);
             true

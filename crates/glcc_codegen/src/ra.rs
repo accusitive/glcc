@@ -501,6 +501,14 @@ impl<'a> Adapter<'a> {
                         clob.add(RaPReg::new(p.hw as usize, ra_class(p.class)));
                     }
                 }
+                if inst.op == OpId::ASM {
+                    // The template destroys its declared clobbers and
+                    // any register it mentions literally.
+                    let blob = inst.asm.as_ref().expect("ASM inst without a blob");
+                    for &p in &blob.clobbers {
+                        clob.add(RaPReg::new(p.hw as usize, ra_class(p.class)));
+                    }
+                }
                 a.clobbers.push(clob);
                 a.branch_args.push(inst.branch.as_ref().map(|br| {
                     br.args.iter().map(|edge| edge.iter().map(|v| RaVReg::new(v.0 as usize, a.vclass(*v))).collect()).collect()
@@ -638,6 +646,48 @@ impl<'a> Adapter<'a> {
                         }
                         other => panic!("glcc native backend: ret operand {other:?}"),
                     }
+                }
+                return;
+            }
+            OpId::ASM => {
+                // One RA operand per ops entry, kinds from the slot
+                // table: uses land early, outputs late (so they may
+                // reuse a dying input's register) unless the template
+                // writes them before the inputs are consumed (`&`).
+                // A read-modify-write slot pairs an early use (the
+                // value read before the template) with a late def of
+                // the output vreg; an unpinned def ties to the use
+                // with `Reuse` so the template sees one register, the
+                // way two-address opcodes do.
+                let blob = inst.asm.as_ref().expect("ASM inst without a blob");
+                let mut next = 0usize;
+                let mut ra_index = 0usize;
+                for slot in &blob.slots {
+                    let count = blob.ops_of(slot);
+                    for k in 0..count {
+                        let (v, pin) = match &inst.ops[next + k] {
+                            Operand::Reg(Reg::V(v)) => (*v, None),
+                            Operand::FixedReg(Reg::V(v), preg) => (*v, Some(*preg)),
+                            other => panic!("glcc native backend: asm operand {other:?}"),
+                        };
+                        let constraint = match (pin, slot.is_use && slot.is_def && k == 1) {
+                            (Some(preg), _) => OperandConstraint::FixedReg(RaPReg::new(preg.hw as usize, ra_class(preg.class))),
+                            // The def side of a read-modify-write pair
+                            // reuses the pair's use operand (pushed
+                            // just before it).
+                            (None, true) => OperandConstraint::Reuse(ra_index - 1),
+                            (None, false) => OperandConstraint::Any,
+                        };
+                        let is_def = slot.is_def && (!slot.is_use || k == 1);
+                        let (kind, pos) = match (is_def, slot.early) {
+                            (true, true) => (OperandKind::Def, OperandPos::Early),
+                            (true, false) => (OperandKind::Def, OperandPos::Late),
+                            (false, _) => (OperandKind::Use, OperandPos::Early),
+                        };
+                        self.operands.push(RaOperand::new(RaVReg::new(v.0 as usize, self.vclass(v)), constraint, kind, pos));
+                        ra_index += 1;
+                    }
+                    next += count;
                 }
                 return;
             }

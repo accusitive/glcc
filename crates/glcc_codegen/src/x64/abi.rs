@@ -207,6 +207,13 @@ fn used_callee_saved(f: &MFunction) -> Vec<PReg> {
     };
     for b in &f.blocks {
         for inst in &b.insts {
+            if let Some(blob) = &inst.asm {
+                // Registers the template clobbers or mentions need the
+                // caller's value saved across the function.
+                for &p in &blob.clobbers {
+                    scan(&Reg::P(p));
+                }
+            }
             for op in &inst.ops {
                 match op {
                     Operand::Reg(r) | Operand::FixedReg(r, _) => scan(r),

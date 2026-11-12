@@ -29,6 +29,22 @@ impl Printer {
                         crate::machine::OpId::MOVE => "mov",
                         crate::machine::OpId::RET => "ret",
                         crate::machine::OpId::JMP => "jmp",
+                        crate::machine::OpId::ASM => {
+                            let ops: Vec<String> = inst.ops.iter().map(|o| operand_text(o, reginfo)).collect();
+                            match &inst.asm {
+                                Some(blob) => {
+                                    let clobbers = blob.clobbers.iter().map(|p| reginfo.info(*p).name).collect::<Vec<_>>().join(",");
+                                    self.out.push_str(&format!(
+                                        "    asm {:?} {}  ; clobbers {clobbers}, goto {}\n",
+                                        blob.template,
+                                        ops.join(", "),
+                                        blob.is_goto
+                                    ));
+                                }
+                                None => self.out.push_str("    asm\n"),
+                            }
+                            continue;
+                        }
                         _ => "pseudo",
                     }
                     .to_string()
