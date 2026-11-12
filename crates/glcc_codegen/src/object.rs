@@ -250,8 +250,12 @@ fn resolve_function_refs(
             SymTarget::Func(f) => {
                 // Direct call to a strong definition in this object;
                 // weak definitions stay preemptible for interposition.
+                // Only branch-style fields (rel32, imm26) patch in
+                // place: address-taking fields (aarch64's adrp/add
+                // pair) resolve through their own relocations below.
+                let branch_field = matches!(req.sym.reloc, RelocKind::PcRel32 | RelocKind::Plt32 | RelocKind::Call26);
                 let defined = !mir.funcs[*f].weak && !func_weak && func_text_offset[f.index()].is_some();
-                if defined {
+                if defined && branch_field {
                     let value = func_text_offset[f.index()].unwrap() as i64 - func_start as i64 - *field_off as i64 - 4;
                     isa.patch_branch_field(&mut tb.text, *field_off, value);
                     continue;

@@ -140,8 +140,9 @@ impl AbiImpl for Aapcs64 {
             vec![Operand::Reg(Reg::P(fp)), Operand::Reg(Reg::P(lr)), Operand::Mem(sp_mem(0))],
         ));
         pre.push(add_i(fp, sp, 0));
-        // Body frame below the pair: frame_size counts from x29 down.
-        let rest = f.frame.frame_size as i64 - 16;
+        // Body frame: frame_size counts from x29 down (the fp/link
+        // pair sits at [x29], above it in the caller's space).
+        let rest = f.frame.frame_size as i64;
         if rest > 0 {
             pre.push(sub_i(sp, sp, rest));
         }

@@ -1469,6 +1469,7 @@ fn emit_object(
 fn emit_object_native(mir_module: &glcc_mir::Module, target: Target) -> std::result::Result<(Vec<u8>, String), ()> {
     let arch = match target.arch {
         glcc_frontend::target::Arch::X86_64 => glcc_codegen::Arch::X86_64,
+        glcc_frontend::target::Arch::Aarch64 => glcc_codegen::Arch::Aarch64,
         _ => {
             eprintln!("glcc: error: the native backend does not yet support this target");
             return Err(());

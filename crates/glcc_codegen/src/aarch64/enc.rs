@@ -210,14 +210,32 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             }
         }
         Op::Bl => {
-            let Operand::Sym(sym) = &inst.ops[0] else { panic!("glcc native backend: bl without a symbol") };
+            // The target symbol sits among the pinned operands (result,
+            // arguments) — it is not at a fixed slot.
+            let sym = match inst.ops.iter().find_map(|o| match o {
+                Operand::Sym(s) => Some(s),
+                _ => None,
+            }) {
+                Some(s) => s.clone(),
+                other => panic!("glcc native backend: bl without a symbol {other:?}"),
+            };
             word(out, 0x94000000);
-            let mut s = sym.clone();
+            let mut s = sym;
             s.reloc = RelocKind::Call26;
             out.relocs.push(RelocReq { at: 0, size: 4, pcrel: true, addend: 0, sym: s });
         }
         Op::Blr => {
-            let n = ops_reg(inst, 0);
+            // Call operands are dynamic (result/argument pins around
+            // the target): the callee is the one plain register
+            // operand, pinned to the non-allocatable IP0 by selection.
+            let n = inst
+                .ops
+                .iter()
+                .find_map(|o| match o {
+                    Operand::Reg(Reg::P(p)) => Some(p.hw),
+                    _ => None,
+                })
+                .expect("blr without a register callee");
             word(out, 0xD63F0000 | (n as u32) << 5);
         }
         Op::Dmb => word(out, 0xD5033BBF),

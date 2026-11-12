@@ -669,7 +669,10 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 copy_bytes(sel, &dstm, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
                 return true;
             }
-            false
+            let dst = result_vreg(sel, mir, inst);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(op_id(Op::Load), result_width(sel, mir, inst), smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
+            true
         }
         InstKind::Store { addr, val, .. } => {
             let ty = mir.values[*val].ty.clone();
@@ -687,7 +690,10 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
                 return true;
             }
-            false
+            let src = sel.value_vreg(mir, *val);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(op_id(Op::Store), value_width(&ty), smallvec::smallvec![Operand::Reg(Reg::V(src)), Operand::Mem(mem)]));
+            true
         }
         InstKind::ExtractValue { agg, index } => {
             let res = mir.insts[inst].result.expect("extractvalue has a result");
