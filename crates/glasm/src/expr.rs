@@ -1,15 +1,22 @@
 //! Expression AST and evaluator, modeled on nasm's `eval.c` semantics:
 //! a value is a constant, or (section, offset) with a constant addend.
 
-/// RISC-V relocation modifiers, `%hi(sym)`-style: the encoder decides
-/// the fixup layout from the modifier; the evaluator never sees one
-/// (backends unwrap before evaluating).
+/// Relocation modifiers. RISC-V uses the `%name(expr)` form, AArch64
+/// the `:name:expr` form; the encoder decides the fixup layout from
+/// the modifier, the evaluator never sees one (backends unwrap before
+/// evaluating).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModKind {
     Hi,
     Lo,
     PcrelHi,
     PcrelLo,
+    /// `:lo12:sym` — low 12 bits of the absolute address.
+    Lo12,
+    /// `:got:sym` — GOT page (adrp).
+    Got,
+    /// `:got_lo12:sym` — GOT entry offset (ldr).
+    GotLo12,
 }
 
 #[derive(Clone, Debug)]

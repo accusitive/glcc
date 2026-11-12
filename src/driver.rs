@@ -1650,13 +1650,13 @@ fn check_source(src: &str, target: Target, async_enabled: bool, lang: LangOpts, 
 }
 
 /// Assembles GAS-syntax text with the built-in glasm assembler
-/// (`-fintegrated-as`). Only x86-64 ELF is supported; anything else
-/// returns an error so the caller can fall back to the external
-/// assembler.
-fn assemble_in_process(input: &OsStr, output: &Path) -> Result<(), String> {
+/// (`-fintegrated-as`). Only native ELF targets are supported;
+/// anything else returns an error so the caller can fall back to the
+/// external assembler.
+fn assemble_in_process(input: &OsStr, output: &Path, arch: glasm::Arch) -> Result<(), String> {
     let src = std::fs::read_to_string(input)
         .map_err(|e| format!("cannot read '{}': {e}", Path::new(input).display()))?;
-    let bytes = glasm::gas::assemble_to_elf(&src, glasm::Arch::X86_64).map_err(|errs| {
+    let bytes = glasm::gas::assemble_to_elf(&src, arch).map_err(|errs| {
         errs.iter()
             .map(|e| format!("line {}: {}", e.line, e.msg))
             .collect::<Vec<_>>()
@@ -1666,10 +1666,20 @@ fn assemble_in_process(input: &OsStr, output: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot write '{}': {e}", output.display()))
 }
 
-/// Whether `-fintegrated-as` can serve this job: glasm targets x86-64
+/// The glasm architecture for a target, if the integrated assembler
+/// supports it.
+fn integrated_as_arch(target: Target) -> Option<glasm::Arch> {
+    match target.arch {
+        Arch::X86_64 if cfg!(target_arch = "x86_64") => Some(glasm::Arch::X86_64),
+        Arch::Aarch64 if cfg!(target_arch = "aarch64") => Some(glasm::Arch::Aarch64),
+        _ => None,
+    }
+}
+
+/// Whether `-fintegrated-as` can serve this job: glasm targets native
 /// ELF64 only.
 fn integrated_as_ok(job: &Job) -> bool {
-    job.integrated_as && job.target.is_native() && cfg!(target_arch = "x86_64")
+    job.integrated_as && job.target.is_native() && integrated_as_arch(job.target).is_some()
 }
 
 /// Dedicated assembler for raw `.s` input and glcc's generated asm
@@ -1907,7 +1917,7 @@ fn assemble_asm_text(ctx: &Ctx, job: &Job, text: &str, stem: &str, dir: &Path) -
     let o_path = dir.join(format!("{stem}.o"));
     std::fs::write(&s_path, text).map_err(|e| fail(format!("cannot write '{}': {e}", s_path.display())))?;
     if integrated_as_ok(job) {
-        return assemble_in_process(s_path.as_os_str(), &o_path)
+        return assemble_in_process(s_path.as_os_str(), &o_path, integrated_as_arch(job.target).expect("checked by integrated_as_ok"))
             .map_err(|e| fail(format!("assembling '{}' failed:\n{e}", s_path.display())))
             .map(|_| o_path);
     }
@@ -2702,7 +2712,7 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
             match input.lang {
                 Lang::Assembler => {
                     if integrated_as_ok(job) {
-                        assemble_in_process(&input.path, &out).map_err(|e| {
+                        assemble_in_process(&input.path, &out, integrated_as_arch(job.target).expect("checked by integrated_as_ok")).map_err(|e| {
                             fail(format!(
                                 "assembling '{}' failed:\n{e}",
                                 Path::new(&input.path).display()
@@ -4322,7 +4332,7 @@ fn integrated_as_assembles_s_and_generated_text() {
     .unwrap();
     let obj = dir.join("ia.o");
     let job = parse(&["-fintegrated-as", "-c"]);
-    let out = assemble_in_process(s.as_os_str(), &obj);
+    let out = assemble_in_process(s.as_os_str(), &obj, glasm::Arch::X86_64);
     assert!(out.is_ok(), "{out:?}");
     let bytes = std::fs::read(&obj).unwrap();
     assert_eq!(&bytes[..4], &[

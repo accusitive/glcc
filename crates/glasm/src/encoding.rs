@@ -34,19 +34,34 @@ pub enum FieldLayout {
     /// R_RISCV_CALL_PLT covering both words of auipc+jalr.
     RvCall,
     // AArch64.
-    /// imm26 at bits 23..5 (b/bl), signed.
+    /// imm26 at bits 25..0 (b/bl), signed. b vs bl (JUMP26 vs CALL26)
+    /// and the other sub-forms are recovered from the instruction word
+    /// during finalization.
     A64Imm26,
-    /// imm21 spread for adr/adrp: imm[20] bits 30..29 (immlo),
-    /// imm[19:0] bits 23..5 (immhi).
+    /// imm19 at bits 23..5 (b.cond/cbz/cbnz), signed.
+    A64Imm19,
+    /// imm14 at bits 18..5 (tbz/tbnz), signed.
+    A64Imm14,
+    /// imm21 spread for adr: imm[1:0] bits 30..29 (immlo),
+    /// imm[20:2] bits 23..5 (immhi).
     A64Imm21,
-    /// imm12 at bits 21..10 (add/sub imm, scaled loads/stores).
+    /// Like A64Imm21 but the value is a page delta: the field holds
+    /// ((S+A) >> 12) - (PC >> 12) (adrp).
+    A64AdrpImm21,
+    /// imm12 at bits 21..10 (add/sub imm with :lo12:).
     A64Imm12,
     /// 12-bit unsigned load/store offset, scaled by access size before
-    /// the value lands at bits 21..10.
+    /// the value lands at bits 21..10 (:lo12: loads/stores).
     A64LdstImm12,
     /// imm16 at bits 20..5 (movz/movk/movn), with an explicit shift
     /// already encoded in the word.
     A64Imm16,
+    /// Like A64AdrpImm21 but relocating against the GOT entry
+    /// (`adrp x, :got:sym`).
+    A64GotPage,
+    /// Scaled load/store field relocating against a GOT entry
+    /// (`ldr x, [x, :got_lo12:sym]`).
+    A64GotLo12,
 }
 
 pub struct FixupReq {

@@ -564,15 +564,17 @@ fn pad_to(off: i64, align: i64) -> i64 {
     (-off).rem_euclid(align)
 }
 
-fn emit_fill(sections: &mut [Section], sect: usize, cur_off: &mut i64, mut pad: i64, fill: u8) {
-    let fill = match sections[sect].flags {
-        SectionFlags::Text | SectionFlags::Custom { exec: true, .. } => fill,
-        _ => 0,
+fn emit_fill(sections: &mut [Section], sect: usize, cur_off: &mut i64, mut pad: i64, pattern: &[u8]) {
+    let pattern: &[u8] = match sections[sect].flags {
+        SectionFlags::Text | SectionFlags::Custom { exec: true, .. } => pattern,
+        _ => &[0],
     };
+    let mut i = 0;
     while pad > 0 {
-        sections[sect].data.push(fill);
+        sections[sect].data.push(pattern[i % pattern.len()]);
         *cur_off += 1;
         pad -= 1;
+        i += 1;
     }
 }
 

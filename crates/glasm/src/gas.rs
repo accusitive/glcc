@@ -153,6 +153,10 @@ fn lex_line(line: &str, mode: LexMode) -> Result<Vec<GTok>, String> {
                 out.push(GTok::Punct(")"));
                 i += 1;
             }
+            b'[' | b']' if mode == LexMode::A64 => {
+                out.push(GTok::Punct(if c == b'[' { "[" } else { "]" }));
+                i += 1;
+            }
             b',' => {
                 out.push(GTok::Punct(","));
                 i += 1;
@@ -400,7 +404,17 @@ const IGNORED_DIRECTIVES: &[&str] = &[
     "stabd",
 ];
 
-const DATA_DIRECTIVES: &[(&str, u8)] = &[("byte", 1), ("half", 2), ("word", 2), ("short", 2), ("value", 2), ("long", 4), ("int", 4), ("quad", 8)];
+/// `.word` is 2 bytes on x86 and 4 bytes on the fixed-width ISAs, like
+/// GNU as.
+fn data_directives(arch: Arch) -> &'static [(&'static str, u8)] {
+    match arch {
+        Arch::X86_64 => &[("byte", 1), ("half", 2), ("word", 2), ("short", 2), ("value", 2), ("long", 4), ("int", 4), ("quad", 8)],
+        // GNU as calls the 2-byte directive `.hword` on AArch64 and
+        // `.half` on RISC-V.
+        Arch::Aarch64 => &[("byte", 1), ("hword", 2), ("half", 2), ("short", 2), ("value", 2), ("word", 4), ("long", 4), ("int", 4), ("quad", 8), ("xword", 8)],
+        _ => &[("byte", 1), ("half", 2), ("hword", 2), ("short", 2), ("value", 2), ("word", 4), ("long", 4), ("int", 4), ("quad", 8), ("xword", 8)],
+    }
+}
 
 /// Splits on `;` outside string literals.
 fn split_statements(line: &str) -> Vec<&str> {
@@ -463,7 +477,7 @@ fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, ar
 
     match &g[i] {
         GTok::Ident(word) if word.starts_with('.') => {
-            out.push(parse_directive(&g[i..], line_no, lineno, numlabels)?);
+            out.push(parse_directive(&g[i..], line_no, lineno, numlabels, arch)?);
         }
         _ => {
             out.push(crate::arch::parse_gas_insn(arch, &g[i..], line_no, lineno, numlabels)?);
@@ -476,7 +490,7 @@ fn directive_name(word: &str) -> &str {
     word.trim_start_matches('.')
 }
 
-fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels) -> Result<Stmt, String> {
+fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels, arch: Arch) -> Result<Stmt, String> {
     let GTok::Ident(word) = &g[0] else {
         return Err("expected directive".into());
     };
@@ -562,8 +576,8 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
             }
             Ok(Stmt::Data { size: 1, items, line: line_no })
         }
-        d if DATA_DIRECTIVES.iter().any(|(n, _)| *n == d) => {
-            let size = DATA_DIRECTIVES.iter().find(|(n, _)| *n == d).unwrap().1;
+        d if data_directives(arch).iter().any(|(n, _)| *n == d) => {
+            let size = data_directives(arch).iter().find(|(n, _)| *n == d).unwrap().1;
             let mut items = Vec::new();
             loop {
                 items.push(DataItem::Expr(t.expr(lineno, numlabels)?));

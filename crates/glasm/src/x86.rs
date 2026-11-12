@@ -49,8 +49,8 @@ impl Backend for X86Backend {
         Endianness::Little
     }
 
-    fn text_fill(&self) -> u8 {
-        0x90
+    fn text_fill(&self) -> &'static [u8] {
+        &[0x90]
     }
 }
 

@@ -89,8 +89,8 @@ pub(crate) trait Backend {
 
     fn object_arch(&self) -> Architecture;
     fn endianness(&self) -> Endianness;
-    /// Fill byte for padding in executable sections (a NOP).
-    fn text_fill(&self) -> u8;
+    /// Fill pattern for padding in executable sections (a NOP).
+    fn text_fill(&self) -> &'static [u8];
 }
 
 /// Parse a GAS-syntax instruction line for this arch; x86 goes through
