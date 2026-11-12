@@ -918,7 +918,13 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
     let mut gas_operands: Vec<Operand> = Vec::new();
     if t.pos < t.g.len() {
         loop {
-            let indirect = t.eat_punct("*");
+            // The lexer emits `*` as GTok::Star, not Punct.
+            let indirect = if matches!(t.g.get(t.pos), Some(GTok::Star)) {
+                t.bump();
+                true
+            } else {
+                t.eat_punct("*")
+            };
             let operand = if matches!(t.g.get(t.pos), Some(GTok::Imm)) {
                 // $immediate: size-agnostic (the suffix sizes memory).
                 t.bump();
@@ -982,10 +988,9 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
                     continue;
                 }
 
+                // All memory can match any r/m template (nasm mref_set_optype);
+                // `*` only distinguishes branch targets from labels.
                 let mut ty = op::MEMORY_ANY;
-                if indirect {
-                    ty = op::MEMORY;
-                }
                 let bits = src_size.or(mem_size);
                 if let Some(b) = bits {
                     ty = ty & !op::SIZE_MASK | b;

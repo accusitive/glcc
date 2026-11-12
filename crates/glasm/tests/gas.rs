@@ -182,3 +182,45 @@ fn multi_digit_numeric_labels() {
     let text = obj.sections().find(|s| s.name().unwrap() == ".text").unwrap();
     assert_eq!(text.data().unwrap(), &[0xeb, 0x01, 0x90, 0x90][..]);
 }
+
+// Links and runs a Linux ELF program; other hosts cannot.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn indirect_register_call_and_jump() {
+    // `call *%reg` / `jmp *%reg` encode as FF /2 and FF /4 (with REX.B
+    // for r8-r15); the register forms must not fall back to a rel32
+    // branch to the next instruction.
+    let code = run_exit(
+        r"
+        .globl _start
+_start:
+        leaq target(%rip), %rax
+        movq $5, %rdi
+        call *%rax
+        movq %rax, %rbx
+        leaq skip(%rip), %rax
+        jmp *%rax
+        movq $99, %rbx
+skip:
+        movq $6, %rdi
+        call *fp(%rip)
+        addq %rax, %rbx
+        movq $7, %rdi
+        leaq target(%rip), %r13
+        call *%r13
+        addq %rax, %rbx
+        movq %rbx, %rdi
+        movq $60, %rax
+        syscall
+target:
+        leaq (%rdi,%rdi,2), %rax
+        incq %rax
+        ret
+        .data
+fp:     .quad target
+    ",
+        "glasm-gas-indirect",
+    );
+    // 5*3+1 + 6*3+1 + 7*3+1 = 16+19+22; the skipped movq must not fire.
+    assert_eq!(code, Some(57));
+}

@@ -5,6 +5,8 @@ int main(void) {
     unsigned a1, d1, a2, d2;
     __asm__ volatile ("rdtsc" : "=a"(a1), "=d"(d1));
     __asm__ volatile ("rdtsc" : "=a"(a2), "=d"(d2));
-    printf("%u %d\n", lo & 0xff, a2 >= a1);
+    // cpuid leaf 0's ebx/edx are the vendor string: host-specific, so
+    // only assert that the pinned outputs carry nonzero data.
+    printf("%u %d\n", (lo != 0) | (hi != 0), a2 >= a1);
     return 0;
 }

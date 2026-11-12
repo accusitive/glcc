@@ -399,7 +399,10 @@ fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
             crate::machine::AsmSlotKind::Imm(_) => {}
             crate::machine::AsmSlotKind::Mem => {
                 let v = sel.value_vreg(mir, block.operands[i].value);
-                ops.push(Operand::Reg(Reg::V(v)));
+                ops.push(match slot.pin {
+                    Some(pin) => Operand::FixedReg(Reg::V(v), pin),
+                    None => Operand::Reg(Reg::V(v)),
+                });
                 slot_vregs[i] = Some(v);
             }
             crate::machine::AsmSlotKind::Sel => {

@@ -114,6 +114,8 @@ struct Constraint {
     early: bool,
     reg_alt: bool,
     mem_alt: bool,
+    /// The operand must be in a/b/c/d ("Q" / gcc's rh set).
+    abcd: bool,
 }
 
 fn parse_constraint(constraint: &str) -> Constraint {
@@ -138,12 +140,13 @@ fn parse_constraint_checked(constraint: &str) -> Result<Constraint, String> {
         }
     }
     if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
-        return Ok(Constraint { kind: Kind::Reg, named: None, tie: rest.parse().ok(), inout, early, reg_alt: true, mem_alt: false });
+        return Ok(Constraint { kind: Kind::Reg, named: None, tie: rest.parse().ok(), inout, early, reg_alt: true, mem_alt: false, abcd: false });
     }
     let mut named = None;
     let mut kind = None;
     let mut reg_alt = false;
     let mut mem_alt = false;
+    let mut abcd = false;
     while let Some(first) = rest.chars().next() {
         let (letter, tail) = rest.split_at(first.len_utf8());
         rest = tail;
@@ -178,7 +181,12 @@ fn parse_constraint_checked(constraint: &str) -> Result<Constraint, String> {
                 reg_alt = true;
                 (Some(Kind::Reg), Some(7))
             }
-            "Q" => return Err("asm constraint 'Q' (high-byte register) is not supported by the native backend yet".to_string()),
+            // "Q" is any high-byte-addressable register: a, b, c, d.
+            "Q" => {
+                reg_alt = true;
+                abcd = true;
+                (Some(Kind::Reg), None)
+            }
             "x" | "v" => return Err("vector register operands are not supported by the native backend yet".to_string()),
             "m" | "o" | "V" => {
                 mem_alt = true;
@@ -203,7 +211,7 @@ fn parse_constraint_checked(constraint: &str) -> Result<Constraint, String> {
     if named.is_some() {
         kind = Some(Kind::Reg);
     }
-    Ok(Constraint { kind: kind.ok_or_else(|| "empty asm constraint".to_string())?, named, tie: None, inout, early, reg_alt, mem_alt })
+    Ok(Constraint { kind: kind.ok_or_else(|| "empty asm constraint".to_string())?, named, tie: None, inout, early, reg_alt, mem_alt, abcd })
 }
 
 /// Size in bytes of an operand's type.
@@ -342,6 +350,90 @@ fn mentioned_regs(template: &str) -> Vec<&'static str> {
 // Planning
 // ---------------------------------------------------------------------------
 
+/// Operands the template reads through the high-byte modifier (`%hN`).
+/// Named operands can't carry a modifier in the render grammar, so the
+/// scan only needs the `%h<digit>` form.
+fn hi_byte_refs(template: &str) -> Vec<usize> {
+    let b = template.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        if i + 1 < b.len() && b[i + 1] == b'%' {
+            i += 2;
+            continue;
+        }
+        let mut j = i + 1;
+        let modified = j < b.len() && b[j].is_ascii_alphabetic();
+        if modified {
+            j += 1;
+        }
+        let start = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if modified && b[i + 1] == b'h' && j > start {
+            out.push(template[start..j].parse().unwrap());
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
+/// Operand references (`%N`, `%[name]`) in one template line, resolved
+/// through the slot names.
+fn operand_refs_in(line: &str, names: &[Option<String>]) -> Vec<usize> {
+    let b = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 1 < b.len() {
+        if b[i] != b'%' {
+            i += 1;
+            continue;
+        }
+        if b[i + 1] == b'%' {
+            i += 2;
+            continue;
+        }
+        let mut j = i + 1;
+        if b[j] == b'[' {
+            let start = j + 1;
+            while j < b.len() && b[j] != b']' {
+                j += 1;
+            }
+            let name = &line[start..j.min(b.len())];
+            j += 1;
+            let mut digits = String::new();
+            while j < b.len() && b[j].is_ascii_digit() {
+                digits.push(b[j] as char);
+                j += 1;
+            }
+            if !digits.is_empty() {
+                out.push(digits.parse().unwrap());
+            } else if let Some(idx) = names.iter().position(|n| n.as_deref() == Some(name)) {
+                out.push(idx);
+            }
+            i = j;
+            continue;
+        }
+        if b[j].is_ascii_alphabetic() {
+            j += 1;
+        }
+        let start = j;
+        while j < b.len() && b[j].is_ascii_digit() {
+            j += 1;
+        }
+        if j > start {
+            out.push(line[start..j].parse().unwrap());
+        }
+        i = j.max(i + 1);
+    }
+    out
+}
+
 /// The selection-side plan for one asm block.
 pub struct AsmPlan {
     pub slots: Vec<AsmSlot>,
@@ -356,6 +448,7 @@ pub struct AsmPlan {
 pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
     let outputs = block.outputs as usize;
     let mut slots: Vec<AsmSlot> = Vec::with_capacity(block.operands.len());
+    let mut abcd_ops: Vec<usize> = Vec::new();
 
     for (i, operand) in block.operands.iter().enumerate() {
         let constraint = parse_constraint(&operand.constraint);
@@ -428,6 +521,9 @@ pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
             Kind::Mem => (true, false),
             _ => (!is_output || constraint.inout || tied_by_input, is_output),
         };
+        if constraint.abcd && kind == Kind::Reg {
+            abcd_ops.push(i);
+        }
         slots.push(AsmSlot {
             kind: match kind {
                 Kind::Reg => AsmSlotKind::Reg,
@@ -466,6 +562,45 @@ pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
         if !clobbers.contains(&preg) && !pinned.contains(&preg) {
             clobbers.push(preg);
         }
+    }
+
+    // `%hN` and "Q" operands must land in a/b/c/d (gcc's rh set), and
+    // a high-byte register cannot share an instruction with a REX
+    // operand — so every operand referenced on a `%h` line joins the
+    // same set. Regalloc has no class subsets, so pin each such slot to
+    // a distinct register the rest of the plan leaves free.
+    let mut pinned: Vec<PReg> = slots.iter().filter_map(|slot| slot.pin).collect();
+    let mut used: Vec<u8> = pinned
+        .iter()
+        .map(|p| p.hw)
+        .chain(clobbers.iter().map(|p| p.hw))
+        .collect();
+    let names: Vec<Option<String>> = slots.iter().map(|s| s.name.clone()).collect();
+    let mut refs = abcd_ops;
+    if !hi_byte_refs(&block.template).is_empty() {
+        for line in block.template.lines() {
+            if !line.contains("%h") {
+                continue;
+            }
+            for idx in operand_refs_in(line, &names) {
+                if idx < slots.len() && !refs.contains(&idx) {
+                    refs.push(idx);
+                }
+            }
+        }
+    }
+    for op_idx in refs {
+        let target = slots[op_idx].rides.unwrap_or(op_idx);
+        if slots[target].pin.is_some() {
+            continue;
+        }
+        let Some(hw) = (0u8..4).find(|hw| !used.contains(hw)) else {
+            panic!("glcc native backend: no free a/b/c/d register for the asm's high-byte operands");
+        };
+        let preg = PReg::gpr(hw);
+        slots[target].pin = Some(preg);
+        pinned.push(preg);
+        used.push(hw);
     }
 
     // A declared clobber may not name a register an operand pins.
@@ -779,6 +914,36 @@ mod tests {
         let slots = vec![AsmSlot { kind: AsmSlotKind::Imm(-3), width: Width::W32, is_use: false, is_def: false, early: false, pin: None, rides: None, name: None }];
         let cx = RenderCx { slots: &slots, preg_of: &|_| PReg::gpr(11), labels: &[], unique: 4 };
         assert_eq!(render_x86_64("%0 %c0 %n0 %=", &cx), "$-3 -3 3 4");
+    }
+
+    #[test]
+    fn parses_q_as_the_high_byte_class() {
+        let c = parse_constraint("Q");
+        assert_eq!(c.kind, Kind::Reg);
+        assert!(c.abcd);
+        assert!(c.named.is_none());
+    }
+
+    #[test]
+    fn high_byte_operands_pin_to_a_b_c_d() {
+        let (f, _) = Function::new("t", Signature::new(vec![], mir::Ty::Void));
+        // Both operands of the %h line need a/b/c/d: the %h output and
+        // the other operand of the same instruction (a REX register
+        // cannot coexist with a high-byte register).
+        let plan = plan_x86_64(&block("movb %1, %h0", vec![reg_operand("=r"), reg_operand("r")], 1, &[]), &f);
+        let hw0 = plan.slots[0].pin.expect("%h output pins into a/b/c/d").hw;
+        let hw1 = plan.slots[1].pin.expect("same-line operand pins into a/b/c/d too").hw;
+        assert!(hw0 < 4 && hw1 < 4);
+        assert_ne!(hw0, hw1, "the two operands get distinct a/b/c/d registers");
+    }
+
+    #[test]
+    fn q_constraint_pins_outside_the_high_byte_lines() {
+        let (f, _) = Function::new("t", Signature::new(vec![], mir::Ty::Void));
+        // A "Q" operand on a %h-free line still needs a/b/c/d.
+        let plan = plan_x86_64(&block("movb %1, %0", vec![reg_operand("=Q"), reg_operand("r")], 1, &[]), &f);
+        assert_eq!(plan.slots[0].pin, Some(PReg::gpr(0)));
+        assert_eq!(plan.slots[1].pin, None, "plain r operands stay free");
     }
 
     #[test]
