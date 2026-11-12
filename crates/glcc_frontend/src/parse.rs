@@ -3184,6 +3184,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                         || self.peek_c23_keyword("bool")
                         || self.peek_c23_keyword("constexpr")
                         || self.peek_c23_keyword("_BitInt")
+                        || self.peek_c23_keyword("nullptr_t")
+                        || self.peek_c23_keyword("char8_t")
                         || self.peek_alternate_inline()
                         || self.peek_gnu_qualifier().is_some()
                         // MSVC declaration prefixes (`__declspec(noreturn)
@@ -3250,7 +3252,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                                 || self.is_ms_unaligned_sym(*sym)
                                 || matches!(
                                     self.intern.resolve(*sym),
-                                    Some("typeof_unqual" | "bool" | "constexpr" | "_BitInt" | "_Thread_local" | "__thread" | "thread_local")
+                                    Some("typeof_unqual" | "bool" | "constexpr" | "_BitInt" | "nullptr_t" | "char8_t" | "_Thread_local" | "__thread" | "thread_local")
                                 )
                                 || self.is_future_specifier(*sym)
                         }
@@ -5382,6 +5384,26 @@ impl<'a, 'b> Parser<'a, 'b> {
                         ds.type_specifier.push(TypeSpecifier::_Bool);
                         continue;
                     }
+                    // C23 spellings that are identifiers to the lexer but
+                    // name a whole type by themselves. `char8_t` maps onto
+                    // `unsigned char`, matching the type `u8"..."` strings
+                    // already carry (C23 makes it distinct; this compiler
+                    // keeps one UTF-8 code unit type).
+                    if self.sema.lang.standard_includes(Std::C23) {
+                        match self.intern.resolve(sym) {
+                            Some("nullptr_t") => {
+                                self.tokens.advance();
+                                ds.type_specifier.push(TypeSpecifier::Builtin(Ty::Nullptr));
+                                continue;
+                            }
+                            Some("char8_t") => {
+                                self.tokens.advance();
+                                ds.type_specifier.push(TypeSpecifier::Builtin(Ty::UnsignedChar));
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                     if self.is_future_specifier(sym) {
                         ds.type_specifier.push(self.parse_future_specifier());
                         continue;
@@ -6946,6 +6968,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                     || self.is_c23_keyword(*sym, "typeof_unqual")
                     || self.is_c23_keyword(*sym, "bool")
                     || self.is_c23_keyword(*sym, "_BitInt")
+                    || self.is_c23_keyword(*sym, "nullptr_t")
+                    || self.is_c23_keyword(*sym, "char8_t")
             }
             _ => false,
         }
