@@ -26,14 +26,14 @@ impl AbiImpl for Aapcs64 {
             Ty::Float(_) => RetLoc::Reg(PReg::vec(0)),
             Ty::Struct { .. } if ty.size_bytes() <= 16 => {
                 if let Some(pieces) = hfa_pieces(ty) {
-                    let mut pregs = [PReg::vec(0); 2];
+                    let mut pregs = [PReg::vec(0); 4];
                     for (i, _) in pieces.iter().enumerate() {
                         pregs[i] = PReg::vec(i as u8);
                     }
                     return RetLoc::Regs(pregs, pieces.len() as u8);
                 }
                 let n = ty.size_bytes().div_ceil(8) as usize;
-                let mut pregs = [PReg::gpr(0); 2];
+                let mut pregs = [PReg::gpr(0); 4];
                 for i in 0..n {
                     pregs[i] = PReg::gpr(i as u8);
                 }
@@ -75,7 +75,7 @@ impl AbiImpl for Aapcs64 {
                     if fp_used + pieces.len() > regs::VEC_ARG_REGS.len() {
                         return ParamLoc::Stack;
                     }
-                    let mut pregs = [regs::VEC_ARG_REGS[0]; 2];
+                    let mut pregs = [regs::VEC_ARG_REGS[0]; 4];
                     for i in 0..pieces.len() {
                         pregs[i] = regs::VEC_ARG_REGS[fp_used + i];
                     }
@@ -85,7 +85,7 @@ impl AbiImpl for Aapcs64 {
                 if gp_used + chunks > regs::ARG_REGS.len() {
                     return ParamLoc::Stack;
                 }
-                let mut pregs = [regs::ARG_REGS[0]; 2];
+                let mut pregs = [regs::ARG_REGS[0]; 4];
                 for i in 0..chunks {
                     pregs[i] = regs::ARG_REGS[gp_used + i];
                 }
@@ -142,10 +142,8 @@ impl AbiImpl for Aapcs64 {
         pre.push(add_i(fp, sp, 0));
         // Body frame: frame_size counts from x29 down (the fp/link
         // pair sits at [x29], above it in the caller's space).
-        let rest = f.frame.frame_size as i64;
-        if rest > 0 {
-            pre.push(sub_i(sp, sp, rest));
-        }
+        // The frame grows downward: the adjustment is negative.
+        sp_adjust(&mut pre, sp, sp, -(f.frame.frame_size as i64));
         // Callee-saved registers sit at [x29 - 8*(i+1)], inside the
         // space frame.rs reserved (slots start below x29-8-8n).
         for (i, preg) in saved.iter().enumerate() {
@@ -203,6 +201,32 @@ impl AbiImpl for Aapcs64 {
                 break;
             }
         }
+    }
+}
+
+/// Stack adjustment below the frame pointer, split into the shifted
+/// and low imm12 parts when the value exceeds one imm12.
+pub(crate) fn sp_adjust(insts: &mut Vec<MInst>, d: PReg, a: PReg, imm: i64) {
+    if imm == 0 {
+        return;
+    }
+    // Decompose the magnitude into a 4096-multiple (encoded with the
+    // imm12<<12 shift form) plus a low imm12 remainder.
+    let (add, amount) = if imm > 0 { (true, imm) } else { (false, -imm) };
+    let hi = (amount / 4096) * 4096;
+    let lo = amount % 4096;
+    let mut adj = |d2: PReg, base: PReg, v: i64| {
+        if add {
+            add_i(d2, base, v)
+        } else {
+            sub_i(d2, base, v)
+        }
+    };
+    if lo == 0 {
+        insts.push(adj(d, a, hi));
+    } else {
+        insts.push(adj(d, a, hi));
+        insts.push(adj(d, d, lo));
     }
 }
 

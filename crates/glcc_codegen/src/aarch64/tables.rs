@@ -24,6 +24,9 @@ pub enum Op {
     /// Address computation: `add dst, base, ...` (possibly several
     /// instructions), or adrp+add for symbol operands. Slots: [def, mem].
     Lea,
+    /// Address of a possibly-interposed symbol through the GOT:
+    /// `adrp dst, :got:sym; ldr dst, [dst, :got_lo12:sym]`.
+    LeaGot,
     /// `ldr` family (zero-extends narrow loads; sign extension is an
     /// explicit MIR Sext). Slots: [def, mem].
     Load,
@@ -142,6 +145,9 @@ pub fn op_id(op: Op) -> OpId {
 const G: RegClass = RegClass::Gpr;
 const V: RegClass = RegClass::Vec;
 
+/// Register slots the encoder encodes by number must stay in
+/// registers: a def with `Any` could legally land in a spill slot,
+/// which the fixed-word encoder cannot represent.
 const fn reg(def: bool, constraint: Constraint) -> SlotSpec {
     SlotSpec { kind: SlotKind::Reg(G), def, constraint }
 }
@@ -161,21 +167,21 @@ const fn sym() -> SlotSpec {
 /// Three-operand register ALU: genuinely destructive-free on AArch64 —
 /// the result may share a register with an input but need not.
 fn alu3_g() -> Vec<SlotSpec> {
-    vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), reg(false, Constraint::Reg)]
+    vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), reg(false, Constraint::Reg)]
 }
 fn alu3_v() -> Vec<SlotSpec> {
-    vec![vreg(true, Constraint::Any), vreg(false, Constraint::Reg), vreg(false, Constraint::Reg)]
+    vec![vreg(true, Constraint::Reg), vreg(false, Constraint::Reg), vreg(false, Constraint::Reg)]
 }
 /// Two-operand: `op dst, src`.
 fn un_g() -> Vec<SlotSpec> {
-    vec![reg(true, Constraint::Any), reg(false, Constraint::Reg)]
+    vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg)]
 }
 fn un_v() -> Vec<SlotSpec> {
-    vec![vreg(true, Constraint::Any), vreg(false, Constraint::Reg)]
+    vec![vreg(true, Constraint::Reg), vreg(false, Constraint::Reg)]
 }
 /// ALU immediate: `op dst, a, #imm`.
 fn alu_i() -> Vec<SlotSpec> {
-    vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 4095))]
+    vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 4095))]
 }
 
 fn spec(name: &'static str, slots: Vec<SlotSpec>, flags: OpFlags) -> OpSpec {
@@ -200,9 +206,10 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         .collect();
     ops.extend(vec![
         plain("mov", un_g()),                                                       // MovRR
-        plain("const", vec![reg(true, Constraint::Any), imm(Constraint::Any)]),      // Const64
-        plain("lea", vec![reg(true, Constraint::Any), mem_slot()]),                  // Lea
-        plain("load", vec![reg(true, Constraint::Any), mem_slot()]),                 // Load
+        plain("const", vec![reg(true, Constraint::Reg), imm(Constraint::Any)]),      // Const64
+        plain("lea", vec![reg(true, Constraint::Reg), mem_slot()]),                  // Lea
+        plain("lea.got", vec![reg(true, Constraint::Reg), mem_slot()]),              // LeaGot
+        plain("load", vec![reg(true, Constraint::Reg), mem_slot()]),                 // Load
         plain("store", vec![reg(false, Constraint::Reg), mem_slot()]),               // Store
         plain("add", alu3_g()),                                                      // AddRR
         plain("sub", alu3_g()),                                                      // SubRR
@@ -211,8 +218,8 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("eor", alu3_g()),                                                      // EorRR
         plain("mul", alu3_g()),                                                      // MulRR
         plain("add.i", alu_i()),                                                     // AddI
-        plain("sub.i", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 4095))]), // SubI
-        plain("mul.i", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::Any)]), // MulI
+        plain("sub.i", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 4095))]), // SubI
+        plain("mul.i", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // MulI
         plain("sdiv", alu3_g()),                                                     // SdivRR
         plain("udiv", alu3_g()),                                                     // UdivRR
         plain("srem", alu3_g()),                                                     // Srem
@@ -222,14 +229,14 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("lslv", alu3_g()),                                                     // ShlRR
         plain("lsrv", alu3_g()),                                                     // LshrRR
         plain("asrv", alu3_g()),                                                     // AsrRR
-        plain("lsl.i", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // ShlI
-        plain("lsr.i", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // LshrI
-        plain("asr.i", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // AsrI
+        plain("lsl.i", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // ShlI
+        plain("lsr.i", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // LshrI
+        plain("asr.i", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 63))]), // AsrI
         plain("cmp", vec![reg(false, Constraint::Reg), reg(false, Constraint::Reg)]), // CmpRR
         plain("cmp.i", vec![reg(false, Constraint::Reg), imm(Constraint::ImmRange(0, 4095))]), // CmpI
         plain("tst", vec![reg(false, Constraint::Reg), reg(false, Constraint::Reg)]), // TstRR
-        plain("cset", vec![reg(true, Constraint::Any), imm(Constraint::Any)]),        // Cset
-        plain("csel", vec![reg(true, Constraint::Any), reg(false, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Csel
+        plain("cset", vec![reg(true, Constraint::Reg), imm(Constraint::Any)]),        // Cset
+        plain("csel", vec![reg(true, Constraint::Reg), reg(false, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Csel
         plain("sxtb", un_g()),                                                       // Sxtb
         plain("sxth", un_g()),                                                       // Sxth
         plain("sxtw", un_g()),                                                       // Sxtw
@@ -240,7 +247,7 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         call("blr", vec![reg(false, Constraint::Reg)]),                              // Blr
         no_slots("dmb"),                                                             // Dmb
         plain("fmov", un_v()),                                                       // FMovRR
-        plain("fld", vec![vreg(true, Constraint::Any), mem_slot()]),                 // FLoad
+        plain("fld", vec![vreg(true, Constraint::Reg), mem_slot()]),                 // FLoad
         plain("fst", vec![vreg(false, Constraint::Reg), mem_slot()]),                // FStore
         plain("fadd", alu3_v()),                                                     // FAddRR
         plain("fsub", alu3_v()),                                                     // FSubRR
@@ -249,22 +256,22 @@ pub static OPCODES: LazyLock<OpcodeTable> = LazyLock::new(|| {
         plain("fneg", un_v()),                                                       // FNeg
         plain("fsqrt", un_v()),                                                      // FSqrt
         plain("fcmp", vec![vreg(false, Constraint::Reg), vreg(false, Constraint::Reg)]), // FCmp
-        plain("fcvt.sd", vec![vreg(true, Constraint::Any), vreg(false, Constraint::Reg)]), // FCvtSD
-        plain("fcvt.ds", vec![vreg(true, Constraint::Any), vreg(false, Constraint::Reg)]), // FCvtDS
+        plain("fcvt.sd", vec![vreg(true, Constraint::Reg), vreg(false, Constraint::Reg)]), // FCvtSD
+        plain("fcvt.ds", vec![vreg(true, Constraint::Reg), vreg(false, Constraint::Reg)]), // FCvtDS
         // The imm slot names the other precision (0 = single, 1 =
         // double): scvtf/ucvtf's type field is the DESTINATION's,
         // fcvtzs/fcvtzu's the SOURCE's, and the instruction width can
         // only carry one of the two.
-        plain("scvtf", vec![vreg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Scvtf
-        plain("ucvtf", vec![vreg(true, Constraint::Any), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Ucvtf
-        plain("fcvtzs", vec![reg(true, Constraint::Any), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // Fcvtzs
-        plain("fcvtzu", vec![reg(true, Constraint::Any), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // Fcvtzu
-        plain("fmov.g2v", vec![vreg(true, Constraint::Any), reg(false, Constraint::Reg)]), // GprToVec
-        plain("fmov.v2g", vec![reg(true, Constraint::Any), vreg(false, Constraint::Reg)]), // VecToGpr
-        plain("fcsel", vec![vreg(true, Constraint::Any), vreg(false, Constraint::Reg), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // FCsel
+        plain("scvtf", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Scvtf
+        plain("ucvtf", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg), imm(Constraint::Any)]), // Ucvtf
+        plain("fcvtzs", vec![reg(true, Constraint::Reg), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // Fcvtzs
+        plain("fcvtzu", vec![reg(true, Constraint::Reg), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // Fcvtzu
+        plain("fmov.g2v", vec![vreg(true, Constraint::Reg), reg(false, Constraint::Reg)]), // GprToVec
+        plain("fmov.v2g", vec![reg(true, Constraint::Reg), vreg(false, Constraint::Reg)]), // VecToGpr
+        plain("fcsel", vec![vreg(true, Constraint::Reg), vreg(false, Constraint::Reg), vreg(false, Constraint::Reg), imm(Constraint::Any)]), // FCsel
         plain("stp", vec![reg(false, Constraint::Reg), reg(false, Constraint::Reg), mem_slot()]), // StpI
-        plain("ldp", vec![reg(true, Constraint::Any), reg(true, Constraint::Any), mem_slot()]), // LdpI
-        plain("ldp.post", vec![reg(true, Constraint::Any), reg(true, Constraint::Any), mem_slot()]), // LdpPost
+        plain("ldp", vec![reg(true, Constraint::Reg), reg(true, Constraint::Reg), mem_slot()]), // LdpI
+        plain("ldp.post", vec![reg(true, Constraint::Reg), reg(true, Constraint::Reg), mem_slot()]), // LdpPost
     ]);
     assert_eq!(ops.len() as u32, 16 + OP_COUNT, "opcode table out of sync with the Op enum");
     OpcodeTable { ops }

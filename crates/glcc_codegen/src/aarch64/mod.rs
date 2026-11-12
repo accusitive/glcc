@@ -132,6 +132,8 @@ impl TargetIsa for A64 {
             K::PagePc => (object::elf::R_AARCH64_ADR_PREL_PG_HI21.0, true, 4),
             K::Lo12 => (object::elf::R_AARCH64_ADD_ABS_LO12_NC.0, false, 4),
             K::Call26 => (object::elf::R_AARCH64_CALL26.0, true, 4),
+            K::GotPage => (object::elf::R_AARCH64_ADR_GOT_PAGE.0, true, 4),
+            K::GotLo12 => (object::elf::R_AARCH64_LD64_GOT_LO12_NC.0, false, 4),
             K::PcRel32 => (object::elf::R_AARCH64_PREL32.0, true, 4),
             K::Plt32 => (object::elf::R_AARCH64_JUMP26.0, true, 4),
             K::Abs64 => (object::elf::R_AARCH64_ABS64.0, false, 8),
@@ -882,11 +884,27 @@ fn term_hook(sel: &mut FuncSel, mir: &Function, block: Block) -> bool {
             let mut next = sel.cur_block();
             for (i, &(value, target)) in cases.iter().enumerate() {
                 sel.set_cur(next);
-                sel.emit(MInst::new(
-                    op_id(Op::CmpI),
-                    Width::W32,
-                    smallvec::smallvec![Operand::Reg(Reg::V(scrut)), Operand::Imm(value as i64)],
-                ));
+                // imm12 covers 0..4095 only; larger case values
+                // materialize into a register first.
+                if (0..=4095).contains(&(value as i64)) {
+                    sel.emit(MInst::new(
+                        op_id(Op::CmpI),
+                        Width::W32,
+                        smallvec::smallvec![Operand::Reg(Reg::V(scrut)), Operand::Imm(value as i64)],
+                    ));
+                } else {
+                    let c = sel.alloc_vreg();
+                    sel.emit(MInst::new(
+                        sel.isa.const_move_op(value as i64),
+                        Width::W32,
+                        smallvec::smallvec![Operand::Reg(Reg::V(c)), Operand::Imm(value as i64)],
+                    ));
+                    sel.emit(MInst::new(
+                        op_id(Op::CmpRR),
+                        Width::W32,
+                        smallvec::smallvec![Operand::Reg(Reg::V(scrut)), Operand::Reg(Reg::V(c))],
+                    ));
+                }
                 let last = i + 1 == cases.len();
                 let fallthrough = if last { default.index() as BlockId } else { sel.new_block() };
                 sel.emit_branch(
@@ -1134,11 +1152,18 @@ fn is_const(mir: &Function, v: Value) -> bool {
     matches!(mir.values[v].def, Def::Const(_))
 }
 
-/// Address of a function/global/extern: adrp+add with the full addend
-/// folded into both relocations.
+/// Address of a function/global/extern. Symbols this module defines
+/// use adrp+add with the full addend folded into both relocations;
+/// everything else (extern declarations, extern data) goes through the
+/// GOT — PIE linkers cannot resolve adrp+add against preemptible
+/// symbols.
 fn addr(sel: &mut FuncSel, mir: &Function, inst: Inst, target: SymTarget) {
-    let _ = mir;
     let dst = result_vreg(sel, mir, inst);
+    let preemptible = match target {
+        SymTarget::Global(g) => sel.module.globals[g.index()].external,
+        SymTarget::Extern(_) => true,
+        SymTarget::Func(_) | SymTarget::Named(_) => false,
+    };
     let mem = crate::machine::MemOperand {
         base: None,
         index: None,
@@ -1146,7 +1171,8 @@ fn addr(sel: &mut FuncSel, mir: &Function, inst: Inst, target: SymTarget) {
         disp: 0,
         sym: Some(SymOperand { target, reloc: crate::machine::RelocKind::PcRel32, addend: 0 }),
     };
-    sel.emit(MInst::new(op_id(Op::Lea), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
+    let op = if preemptible { Op::LeaGot } else { Op::Lea };
+    sel.emit(MInst::new(op_id(op), Width::W64, smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)]));
 }
 
 enum CallTarget {
@@ -1290,11 +1316,11 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
     } else {
         let total = (stack_off as u64).next_multiple_of(16) as i64;
         let sp = PReg::gpr(regs::SP);
-        sel.emit(MInst::new(
-            op_id(Op::SubI),
-            Width::W64,
-            smallvec::smallvec![Operand::Reg(Reg::P(sp)), Operand::Reg(Reg::P(sp)), Operand::Imm(total)],
-        ));
+        let mut pre = Vec::new();
+        abi::sp_adjust(&mut pre, sp, sp, -total);
+        for inst in pre {
+            sel.emit(inst);
+        }
         for (arg, off, ty) in stack.iter() {
             if ty.is_aggregate() {
                 let src = sel.mem_of(mir, *arg);
@@ -1347,11 +1373,11 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
     }
     if stack_bytes > 0 {
         let sp = PReg::gpr(regs::SP);
-        sel.emit(MInst::new(
-            op_id(Op::AddI),
-            Width::W64,
-            smallvec::smallvec![Operand::Reg(Reg::P(sp)), Operand::Reg(Reg::P(sp)), Operand::Imm(stack_bytes)],
-        ));
+        let mut post = Vec::new();
+        abi::sp_adjust(&mut post, sp, sp, stack_bytes);
+        for inst in post {
+            sel.emit(inst);
+        }
     }
 }
 

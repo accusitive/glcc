@@ -25,15 +25,15 @@ impl AbiImpl for SysV {
                 };
                 let all_int = pieces.iter().all(|(c, _)| *c == RegClass::Gpr);
                 let all_vec = pieces.iter().all(|(c, _)| *c == RegClass::Vec);
-                let regs: Vec<PReg> = if all_int {
-                    vec![PReg::gpr(regs::RAX), PReg::gpr(regs::RDX)]
-                } else if all_vec {
-                    vec![PReg::vec(0), PReg::vec(1)]
-                } else {
+                let mut pregs = [PReg::gpr(regs::RAX); 4];
+                if all_vec {
+                    pregs[0] = PReg::vec(0);
+                    pregs[1] = PReg::vec(1);
+                } else if !all_int {
                     // Mixed rax/xmm0 returns: rare; defer until needed.
                     return RetLoc::Memory;
-                };
-                RetLoc::Regs([regs[0], regs[1]], pieces.len() as u8)
+                }
+                RetLoc::Regs(pregs, pieces.len() as u8)
             }
             Ty::Struct { .. } => RetLoc::Memory,
             _ => panic!("glcc native backend: return type {ty:?} not yet supported"),
@@ -79,7 +79,7 @@ impl AbiImpl for SysV {
                 if gp_used + gp_need > regs::ARG_REGS.len() || fp_used + fp_need > regs::VEC_ARG_REGS.len() {
                     return ParamLoc::Stack;
                 }
-                let mut pregs = [regs::ARG_REGS[0]; 2];
+                let mut pregs = [regs::ARG_REGS[0]; 4];
                 let (mut g, mut f) = (gp_used, fp_used);
                 for (i, (class, _)) in pieces.iter().enumerate() {
                     pregs[i] = if *class == RegClass::Gpr {

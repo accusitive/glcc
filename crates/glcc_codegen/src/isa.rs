@@ -256,9 +256,9 @@ pub trait AbiImpl: Sync {
 pub enum RetLoc {
     Void,
     Reg(PReg),
-    /// Small by-value aggregate returned in one or two piece registers
-    /// (rax/rdx, or xmm0/xmm1 for all-SSE layouts).
-    Regs([PReg; 2], u8),
+    /// Small by-value aggregate returned in up to four piece registers
+    /// (x86-64 rax/rdx or xmm0/xmm1; AAPCS64 HFAs up to four V regs).
+    Regs([PReg; 4], u8),
     /// Returned through a hidden pointer; the pointer comes back in the
     /// first argument register.
     Memory,
@@ -267,8 +267,8 @@ pub enum RetLoc {
 #[derive(Clone, Copy, Debug)]
 pub enum ParamLoc {
     Reg(PReg),
-    /// By-value aggregate of one or two eightbytes, in argument order
-    /// (class per piece from the SysV classification).
-    Regs([PReg; 2], u8),
+    /// By-value aggregate pieces in argument order (class per piece
+    /// from the classification; up to four — AAPCS64 HFA upper bound).
+    Regs([PReg; 4], u8),
     Stack,
 }

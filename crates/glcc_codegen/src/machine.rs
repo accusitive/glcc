@@ -151,6 +151,12 @@ pub enum RelocKind {
     /// AArch64 26-bit PC-relative call/branch field (b/bl), in units of
     /// instructions.
     Call26,
+    /// AArch64 GOT-indirect pair: page-of(GOT entry) for the `adrp`,
+    /// then a 64-bit load of the entry.
+    GotPage,
+    /// AArch64 GOT-indirect pair: low 12 bits of the GOT entry address
+    /// in the load's offset field.
+    GotLo12,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

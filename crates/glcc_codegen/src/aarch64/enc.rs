@@ -107,6 +107,23 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
                 }
             }
         }
+        Op::LeaGot => {
+            let d = ops_reg(inst, 0);
+            let Operand::Mem(m) = &inst.ops[1] else { panic!("glcc native backend: lea.got without a memory operand") };
+            let Some(sym) = &m.sym else { panic!("glcc native backend: lea.got without a symbol") };
+            // adrp dst, :got:sym+A ; ldr dst, [dst, :got_lo12:sym+A].
+            // The load's zero displacement is patched by the linker; the
+            // addend rides both relocations.
+            word(out, 0x90000000 | d as u32);
+            let ldr = (3 << 30) | 0b111 << 27 | 0b01 << 24 | 0b01 << 22 | ((d as u32) << 5) | d as u32;
+            word(out, ldr);
+            let mut page = sym.clone();
+            page.reloc = RelocKind::GotPage;
+            out.relocs.push(RelocReq { at: 0, size: 4, pcrel: true, addend: m.disp, sym: page });
+            let mut lo12 = sym.clone();
+            lo12.reloc = RelocKind::GotLo12;
+            out.relocs.push(RelocReq { at: 4, size: 4, pcrel: false, addend: m.disp, sym: lo12 });
+        }
         Op::Load | Op::FLoad => {
             let rt = ops_reg(inst, 0);
             let Operand::Mem(m) = &inst.ops[1] else { panic!("glcc native backend: load without a memory operand") };
@@ -404,10 +421,18 @@ fn alu3(inst: &MInst, out: &mut EncOut, base: u32) {
 }
 
 /// Add/sub-immediate: `op dst, a, #imm12` (Rd/Rn=31 reads/writes SP).
+/// Multiples of 4096 use the shift field (imm12 << 12), which stack
+/// adjustments on deep frames rely on.
 fn alu_i(inst: &MInst, out: &mut EncOut, base: u32) {
     let (d, a, imm) = (ops_reg(inst, 0), ops_reg(inst, 1), ops_imm(inst, 2));
-    assert!((0..=4095).contains(&imm), "glcc native backend: immediate {imm} outside imm12");
-    word(out, log_shift(base, inst.width) | (imm as u32) << 10 | (a as u32) << 5 | d as u32);
+    let (imm12, sh) = if (0..=4095).contains(&imm) {
+        (imm as u32, 0)
+    } else if imm % 4096 == 0 && imm / 4096 <= 4095 {
+        ((imm / 4096) as u32, 1)
+    } else {
+        panic!("glcc native backend: immediate {imm} outside imm12");
+    };
+    word(out, log_shift(base, inst.width) | imm12 << 10 | sh << 22 | (a as u32) << 5 | d as u32);
 }
 
 fn cvt(inst: &MInst, out: &mut EncOut, base: u32) {

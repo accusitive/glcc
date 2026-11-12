@@ -146,6 +146,13 @@ for t in ${TARGETS_OPT//,/ }; do
       fi
       ;;
     aarch64|riscv64)
+      # Native on the matching host (aarch64 on aarch64): no cross
+      # tooling needed — the link driver is the host cc and the runtime
+      # is the one build.rs staged under ~/.local/lib/glcc.
+      if [[ "$t" == aarch64 && "$(uname -m)" == aarch64 ]]; then
+        ACTIVE_TARGETS+=("$t")
+        continue
+      fi
       qemu="qemu-$t-static"
       command -v "$qemu" >/dev/null 2>&1 || qemu="qemu-$t"
       if ! command -v "$qemu" >/dev/null 2>&1; then
@@ -190,7 +197,11 @@ run_one() {
   local flag="" extra="" qemu="" qemu_flags=() cc_env=()
   local cc_status run_status
 
-  if [[ "$t" != x86_64 ]]; then
+  if [[ "$t" == aarch64 && "$(uname -m)" == aarch64 ]]; then
+    # Native run on an aarch64 host: host cc links dynamically and the
+    # staged runtime is found in ~/.local/lib/glcc.
+    flag="--target=$t"
+  elif [[ "$t" != x86_64 ]]; then
     qemu="qemu-$t-static"
     command -v "$qemu" >/dev/null 2>&1 || qemu="qemu-$t"
     flag="--target=$t"
