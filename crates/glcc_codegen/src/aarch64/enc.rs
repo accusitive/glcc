@@ -5,7 +5,7 @@
 //! tests).
 
 use crate::isa::{EncOut, RelocReq};
-use crate::machine::{MFunction, MInst, Operand, Reg, RelocKind, Width};
+use crate::machine::{MFunction, MInst, Operand, PReg, Reg, RelocKind, Width};
 
 use super::regs;
 use super::tables::{Op, op_of};
@@ -159,11 +159,11 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         Op::AsrI => shift_i(inst, out, ShiftImm::Asr),
         Op::CmpRR => {
             let (a, b) = (ops_reg(inst, 0), ops_reg(inst, 1));
-            word(out, log_shift(0x6B000000, inst.width) | (b as u32) << 16 | 31 << 5 | a as u32);
+            word(out, log_shift(0x6B000000, inst.width) | (b as u32) << 16 | (a as u32) << 5 | 31);
         }
         Op::CmpI => {
             let (a, imm) = (ops_reg(inst, 0), ops_imm(inst, 1));
-            word(out, log_shift(0x71000000, inst.width) | (imm as u32 & 0xFFF) << 10 | 31 << 5 | a as u32);
+            word(out, log_shift(0x71000000, inst.width) | (imm as u32 & 0xFFF) << 10 | (a as u32) << 5 | 31);
         }
         Op::TstRR => {
             let (a, b) = (ops_reg(inst, 0), ops_reg(inst, 1));
@@ -176,7 +176,7 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         }
         Op::Csel => {
             let (d, t, e, cond) = (ops_reg(inst, 0), ops_reg(inst, 1), ops_reg(inst, 2), ops_imm(inst, 3) as u8);
-            word(out, log_shift(0x1A800000, inst.width) | (t as u32) << 16 | (cond as u32) << 12 | (e as u32) << 5 | d as u32);
+            word(out, log_shift(0x1A800000, inst.width) | (e as u32) << 16 | (cond as u32) << 12 | (t as u32) << 5 | d as u32);
         }
         Op::Sxtb | Op::Sxth | Op::Sxtw | Op::Uxtb | Op::Uxth => {
             let (d, s) = (ops_reg(inst, 0), ops_reg(inst, 1));
@@ -226,10 +226,10 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             let base = f_base(inst.width, 0x1E204000, 0x1E604000);
             word(out, base | (s as u32) << 5 | d as u32);
         }
-        Op::FAddRR => alu3(inst, out, 0x1E202800),
-        Op::FSubRR => alu3(inst, out, 0x1E203800),
-        Op::FMulRR => alu3(inst, out, 0x1E200800),
-        Op::FDivRR => alu3(inst, out, 0x1E201800),
+        Op::FAddRR => alu3f(inst, out, 0x1E202800, 0x1E602800),
+        Op::FSubRR => alu3f(inst, out, 0x1E203800, 0x1E603800),
+        Op::FMulRR => alu3f(inst, out, 0x1E200800, 0x1E600800),
+        Op::FDivRR => alu3f(inst, out, 0x1E201800, 0x1E601800),
         Op::FNeg => {
             let (d, s) = (ops_reg(inst, 0), ops_reg(inst, 1));
             let base = f_base(inst.width, 0x1E214000, 0x1E614000);
@@ -280,7 +280,7 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         Op::FCsel => {
             let (d, t, e, cond) = (ops_reg(inst, 0), ops_reg(inst, 1), ops_reg(inst, 2), ops_imm(inst, 3) as u8);
             let type_bits = f_type(inst.width);
-            word(out, 0x1E200C00 | type_bits | (t as u32) << 16 | (cond as u32) << 12 | (e as u32) << 5 | d as u32);
+            word(out, 0x1E200C00 | type_bits | (e as u32) << 16 | (cond as u32) << 12 | (t as u32) << 5 | d as u32);
         }
         Op::StpI => {
             let (a, b) = (ops_reg(inst, 0), ops_reg(inst, 1));
@@ -369,6 +369,14 @@ fn sbfm_base(sf: bool) -> u32 {
     } else {
         0x13000000
     }
+}
+
+/// Three-operand float op: `op dst, a, b`. No sf bit — the s/d forms
+/// differ in the type field, which the base constants already carry.
+fn alu3f(inst: &MInst, out: &mut EncOut, single: u32, double: u32) {
+    let (d, a, b) = (ops_reg(inst, 0), ops_reg(inst, 1), ops_reg(inst, 2));
+    let base = f_base(inst.width, single, double);
+    word(out, base | (b as u32) << 16 | (a as u32) << 5 | d as u32);
 }
 
 /// Three-operand register op: `op dst, a, b` (b in Rm).
@@ -556,4 +564,267 @@ fn fp_spill(f: &MFunction, slot: u32) -> crate::machine::MemOperand {
 fn spill_disp(f: &MFunction, slot: u32) -> i64 {
     let index = f.frame.spill_start as usize + slot as usize;
     -(f.frame.slots[index].offset as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::aarch64::A64;
+    use crate::machine::OpId;
+    use crate::aarch64::tables::op_id as opid;
+    use crate::aarch64::enc::cc;
+    use crate::isa::TargetIsa;
+    use crate::machine::{BranchInfo, MFunction, PReg, Reg, SymOperand, SymTarget};
+
+    fn f() -> MFunction {
+        MFunction {
+            name: "t".into(),
+            local: true,
+            weak: false,
+            blocks: vec![Default::default()],
+            frame: Default::default(),
+            num_vregs: 0,
+            vreg_class: Vec::new(),
+        }
+    }
+
+    fn g(hw: u8) -> Operand {
+        Operand::Reg(Reg::P(PReg::gpr(hw)))
+    }
+
+    fn v(hw: u8) -> Operand {
+        Operand::Reg(Reg::P(PReg::vec(hw)))
+    }
+
+    fn imm(i: i64) -> Operand {
+        Operand::Imm(i)
+    }
+
+    fn mem(base: u8, disp: i64) -> Operand {
+        Operand::Mem(crate::machine::MemOperand { base: Some(Reg::P(PReg::gpr(base))), index: None, scale: 0, disp, sym: None })
+    }
+
+    fn enc1(inst: MInst) -> Vec<u32> {
+        let f = f();
+        let mut out = EncOut::new();
+        encode(&f, &inst, &mut out);
+        out.bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    }
+
+    fn expect(words: &[u32], expected: &[u32]) {
+        assert_eq!(words, expected, "encoding mismatch");
+    }
+
+    fn m(op: Op, width: Width, ops: Vec<Operand>) -> MInst {
+        MInst::new(opid(op), width, ops)
+    }
+
+    #[test]
+    fn moves_and_immediates() {
+        expect(&enc1(m(Op::MovRR, Width::W64, vec![g(0), g(1)])), &[0xAA01_03E0]);
+        expect(&enc1(m(Op::MovRR, Width::W32, vec![g(0), g(1)])), &[0x2A01_03E0]);
+        expect(&enc1(m(Op::Const64, Width::W64, vec![g(0), imm(0x1234)])), &[0xD282_4680]);
+        expect(&enc1(m(Op::Const64, Width::W32, vec![g(0), imm(0x1234)])), &[0x5282_4680]);
+        // 0x0000567812340000: movz hw0=0, movk hw2=0x5678
+        expect(&enc1(m(Op::Const64, Width::W64, vec![g(0), imm(0x5678_1234_0000)])), &[0xD280_0000, 0xF2A2_4680, 0xF2CA_CF00]);
+        expect(&enc1(m(Op::Const64, Width::W64, vec![g(0), imm(-1)])), &[0xD282_0000 | 0xFFFF << 5, 0xF282_0000 | 1 << 21 | 0xFFFF << 5, 0xF282_0000 | 2 << 21 | 0xFFFF << 5, 0xF282_0000 | 3 << 21 | 0xFFFF << 5]);
+    }
+
+    #[test]
+    fn alu() {
+        expect(&enc1(m(Op::AddRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x8B02_0020]);
+        expect(&enc1(m(Op::AddRR, Width::W32, vec![g(0), g(1), g(2)])), &[0x0B02_0020]);
+        expect(&enc1(m(Op::AddI, Width::W64, vec![g(0), g(1), imm(42)])), &[0x9100_A820]);
+        expect(&enc1(m(Op::SubI, Width::W64, vec![g(0), g(1), imm(42)])), &[0xD100_A820]);
+        expect(&enc1(m(Op::SubI, Width::W64, vec![g(31), g(31), imm(32)])), &[0xD100_83FF]);
+        expect(&enc1(m(Op::MulRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9B02_7C20]);
+        expect(&enc1(m(Op::MulRR, Width::W32, vec![g(0), g(1), g(2)])), &[0x1B02_7C20]);
+        expect(&enc1(m(Op::SdivRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_0C20]);
+        expect(&enc1(m(Op::UdivRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_0820]);
+        expect(&enc1(m(Op::Neg, Width::W64, vec![g(0), g(1)])), &[0xCB01_03E0]);
+        expect(&enc1(m(Op::Not, Width::W64, vec![g(0), g(1)])), &[0xAA21_03E0]);
+    }
+
+    #[test]
+    fn shifts() {
+        expect(&enc1(m(Op::ShlRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_2020]);
+        expect(&enc1(m(Op::LshrRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_2420]);
+        expect(&enc1(m(Op::AsrRR, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_2820]);
+        expect(&enc1(m(Op::ShlI, Width::W64, vec![g(0), g(1), imm(3)])), &[0xD37D_F020]);
+        expect(&enc1(m(Op::LshrI, Width::W64, vec![g(0), g(1), imm(3)])), &[0xD343_FC20]);
+        expect(&enc1(m(Op::AsrI, Width::W64, vec![g(0), g(1), imm(3)])), &[0x9343_FC20]);
+        expect(&enc1(m(Op::ShlI, Width::W32, vec![g(0), g(1), imm(3)])), &[0x531D_7020]);
+        expect(&enc1(m(Op::LshrI, Width::W32, vec![g(0), g(1), imm(3)])), &[0x5303_7C20]);
+        expect(&enc1(m(Op::AsrI, Width::W32, vec![g(0), g(1), imm(3)])), &[0x1303_7C20]);
+    }
+
+    #[test]
+    fn compares_and_sets() {
+        expect(&enc1(m(Op::CmpRR, Width::W64, vec![g(0), g(1)])), &[0xEB01_001F]);
+        expect(&enc1(m(Op::CmpRR, Width::W32, vec![g(0), g(1)])), &[0x6B01_001F]);
+        expect(&enc1(m(Op::CmpI, Width::W64, vec![g(0), imm(42)])), &[0xF100_A81F]);
+        expect(&enc1(m(Op::TstRR, Width::W64, vec![g(0), g(1)])), &[0xEA01_001F]);
+        expect(&enc1(m(Op::TstRR, Width::W32, vec![g(0), g(1)])), &[0x6A01_001F]);
+        expect(&enc1(m(Op::Cset, Width::W64, vec![g(0), imm(cc::NE as i64)])), &[0x9A9F_07E0]);
+        expect(&enc1(m(Op::Cset, Width::W32, vec![g(0), imm(cc::EQ as i64)])), &[0x1A9F_17E0]);
+        expect(&enc1(m(Op::Csel, Width::W64, vec![g(0), g(1), g(2), imm(cc::LT as i64)])), &[0x9A82_B020]);
+        expect(&enc1(m(Op::Csel, Width::W32, vec![g(0), g(1), g(2), imm(cc::GT as i64)])), &[0x1A82_C020]);
+    }
+
+    #[test]
+    fn extends() {
+        expect(&enc1(m(Op::Sxtb, Width::W64, vec![g(0), g(1)])), &[0x9340_1C20]);
+        expect(&enc1(m(Op::Sxth, Width::W64, vec![g(0), g(1)])), &[0x9340_3C20]);
+        expect(&enc1(m(Op::Sxtw, Width::W64, vec![g(0), g(1)])), &[0x9340_7C20]);
+        expect(&enc1(m(Op::Sxtb, Width::W32, vec![g(0), g(1)])), &[0x1300_1C20]);
+        expect(&enc1(m(Op::Uxtb, Width::W32, vec![g(0), g(1)])), &[0x5300_1C20]);
+        expect(&enc1(m(Op::Uxth, Width::W32, vec![g(0), g(1)])), &[0x5300_3C20]);
+    }
+
+    #[test]
+    fn loads_stores() {
+        expect(&enc1(m(Op::Load, Width::W64, vec![g(0), mem(1, 0)])), &[0xF940_0020]);
+        expect(&enc1(m(Op::Store, Width::W64, vec![g(0), mem(1, 0)])), &[0xF900_0020]);
+        expect(&enc1(m(Op::Load, Width::W32, vec![g(0), mem(1, 0)])), &[0xB940_0020]);
+        expect(&enc1(m(Op::Store, Width::W32, vec![g(0), mem(1, 0)])), &[0xB900_0020]);
+        expect(&enc1(m(Op::Load, Width::W8, vec![g(0), mem(1, 0)])), &[0x3940_0020]);
+        expect(&enc1(m(Op::Store, Width::W8, vec![g(0), mem(1, 0)])), &[0x3900_0020]);
+        expect(&enc1(m(Op::Load, Width::W16, vec![g(0), mem(1, 0)])), &[0x7940_0020]);
+        expect(&enc1(m(Op::Store, Width::W16, vec![g(0), mem(1, 0)])), &[0x7900_0020]);
+        expect(&enc1(m(Op::Load, Width::W64, vec![g(0), mem(1, 8)])), &[0xF940_0420]);
+        expect(&enc1(m(Op::Store, Width::W32, vec![g(0), mem(1, 4)])), &[0xB900_0420]);
+        expect(&enc1(m(Op::Load, Width::W64, vec![g(0), mem(1, -8)])), &[0xF85F_8020]);
+        expect(&enc1(m(Op::Store, Width::W64, vec![g(0), mem(1, -8)])), &[0xF81F_8020]);
+        expect(&enc1(m(Op::Load, Width::W32, vec![g(0), mem(1, -4)])), &[0xB85F_C020]);
+        expect(&enc1(m(Op::FLoad, Width::W64, vec![v(0), mem(1, 0)])), &[0xFD40_0020]);
+        expect(&enc1(m(Op::FStore, Width::W64, vec![v(0), mem(1, 0)])), &[0xFD00_0020]);
+        expect(&enc1(m(Op::FLoad, Width::W32, vec![v(0), mem(1, 0)])), &[0xBD40_0020]);
+        expect(&enc1(m(Op::FStore, Width::W32, vec![v(0), mem(1, 0)])), &[0xBD00_0020]);
+    }
+
+    #[test]
+    fn float_ops() {
+        expect(&enc1(m(Op::FMovRR, Width::W64, vec![v(0), v(1)])), &[0x1E60_4020]);
+        expect(&enc1(m(Op::FMovRR, Width::W32, vec![v(0), v(1)])), &[0x1E20_4020]);
+        expect(&enc1(m(Op::FAddRR, Width::W64, vec![v(0), v(1), v(2)])), &[0x1E62_2820]);
+        expect(&enc1(m(Op::FAddRR, Width::W32, vec![v(0), v(1), v(2)])), &[0x1E22_2820]);
+        expect(&enc1(m(Op::FSubRR, Width::W64, vec![v(0), v(1), v(2)])), &[0x1E62_3820]);
+        expect(&enc1(m(Op::FMulRR, Width::W64, vec![v(0), v(1), v(2)])), &[0x1E62_0820]);
+        expect(&enc1(m(Op::FDivRR, Width::W64, vec![v(0), v(1), v(2)])), &[0x1E62_1820]);
+        expect(&enc1(m(Op::FNeg, Width::W64, vec![v(0), v(1)])), &[0x1E61_4020]);
+        expect(&enc1(m(Op::FNeg, Width::W32, vec![v(0), v(1)])), &[0x1E21_4020]);
+        expect(&enc1(m(Op::FSqrt, Width::W64, vec![v(0), v(1)])), &[0x1E61_C020]);
+        expect(&enc1(m(Op::FCmp, Width::W64, vec![v(0), v(1)])), &[0x1E61_2000]);
+        expect(&enc1(m(Op::FCmp, Width::W32, vec![v(0), v(1)])), &[0x1E21_2000]);
+        expect(&enc1(m(Op::FCvtSD, Width::W64, vec![v(0), v(1)])), &[0x1E22_C020]);
+        expect(&enc1(m(Op::FCvtDS, Width::W64, vec![v(0), v(1)])), &[0x1E62_4020]);
+        // scvtf/ucvtf: width = source, imm slot = dest precision.
+        expect(&enc1(m(Op::Scvtf, Width::W32, vec![v(0), g(1), imm(0)])), &[0x1E22_0020]);
+        expect(&enc1(m(Op::Scvtf, Width::W64, vec![v(0), g(1), imm(1)])), &[0x9E62_0020]);
+        expect(&enc1(m(Op::Scvtf, Width::W64, vec![v(0), g(1), imm(0)])), &[0x9E22_0020]);
+        expect(&enc1(m(Op::Ucvtf, Width::W32, vec![v(0), g(1), imm(0)])), &[0x1E23_0020]);
+        expect(&enc1(m(Op::Ucvtf, Width::W64, vec![v(0), g(1), imm(1)])), &[0x9E63_0020]);
+        // fcvtzs/fcvtzu: width = dest, imm slot = source precision.
+        expect(&enc1(m(Op::Fcvtzs, Width::W64, vec![g(0), v(1), imm(1)])), &[0x9E78_0020]);
+        expect(&enc1(m(Op::Fcvtzs, Width::W32, vec![g(0), v(1), imm(0)])), &[0x1E38_0020]);
+        expect(&enc1(m(Op::Fcvtzu, Width::W64, vec![g(0), v(1), imm(1)])), &[0x9E79_0020]);
+        expect(&enc1(m(Op::Fcvtzu, Width::W32, vec![g(0), v(1), imm(0)])), &[0x1E39_0020]);
+        expect(&enc1(m(Op::GprToVec, Width::W64, vec![v(0), g(1)])), &[0x9E67_0020]);
+        expect(&enc1(m(Op::GprToVec, Width::W32, vec![v(0), g(1)])), &[0x1E27_0020]);
+        expect(&enc1(m(Op::VecToGpr, Width::W64, vec![g(0), v(1)])), &[0x9E66_0020]);
+        expect(&enc1(m(Op::VecToGpr, Width::W32, vec![g(0), v(1)])), &[0x1E26_0020]);
+        expect(&enc1(m(Op::FCsel, Width::W64, vec![v(0), v(1), v(2), imm(cc::MI as i64)])), &[0x1E62_4C20]);
+        expect(&enc1(m(Op::FCsel, Width::W32, vec![v(0), v(1), v(2), imm(cc::GE as i64)])), &[0x1E22_AC20]);
+    }
+
+    #[test]
+    fn control_flow_and_frame() {
+        expect(&enc1(m(Op::Blr, Width::W64, vec![g(0)])), &[0xD63F_0000]);
+        expect(&enc1(MInst::new(OpId::RET, Width::W64, vec![])), &[0xD65F_03C0]);
+        expect(&enc1(MInst::new(OpId::UNREACHABLE, Width::W64, vec![])), &[0xD420_0000]);
+        expect(&enc1(m(Op::Dmb, Width::W64, vec![])), &[0xD503_3BBF]);
+        expect(&enc1(m(Op::StpI, Width::W64, vec![g(29), g(30), mem(31, 0)])), &[0xA900_7BFD]);
+        expect(&enc1(m(Op::LdpI, Width::W64, vec![g(29), g(30), mem(31, 0)])), &[0xA940_7BFD]);
+        expect(&enc1(m(Op::LdpPost, Width::W64, vec![g(29), g(30), mem(31, 16)])), &[0xA8C1_7BFD]);
+        // bcond: b.!cond skip(+2 words); b targets[0]; b targets[1].
+        let mut b = m(Op::BCond, Width::W64, vec![imm(cc::NE as i64)]);
+        b.branch = Some(BranchInfo { targets: smallvec::smallvec![1, 2], args: vec![smallvec::smallvec![], smallvec::smallvec![]] });
+        expect(&enc1(b), &[0x5400_0040, 0x1400_0000, 0x1400_0000]);
+    }
+
+    #[test]
+    fn lea_and_calls() {
+        // adrp+add against a symbol: two words, two reloc requests with
+        // the full addend on both.
+        let mut inst = MInst::new(
+            opid(Op::Lea),
+            Width::W64,
+            vec![
+                g(0),
+                Operand::Mem(crate::machine::MemOperand {
+                    base: None,
+                    index: None,
+                    scale: 0,
+                    disp: 42,
+                    sym: Some(SymOperand { target: SymTarget::Named("x"), reloc: crate::machine::RelocKind::PcRel32, addend: 0 }),
+                }),
+            ],
+        );
+        let f = f();
+        let mut out = EncOut::new();
+        encode(&f, &inst, &mut out);
+        let words: Vec<u32> = out.bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        expect(&words, &[0x9000_0000, 0x9100_0000]);
+        assert_eq!(out.relocs.len(), 2);
+        assert_eq!(out.relocs[0].addend, 42);
+        assert!(out.relocs[0].pcrel);
+        assert!(!out.relocs[1].pcrel);
+        // bl with a symbol: one Call26 reloc.
+        inst = MInst::new(opid(Op::Bl), Width::W64, vec![Operand::Sym(SymOperand { target: SymTarget::Named("memcpy"), reloc: crate::machine::RelocKind::Plt32, addend: 0 })]);
+        let mut out = EncOut::new();
+        encode(&f, &inst, &mut out);
+        let words: Vec<u32> = out.bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        expect(&words, &[0x9400_0000]);
+        assert_eq!(out.relocs.len(), 1);
+    }
+
+    #[test]
+    fn imm26_patch() {
+        // bl placeholder + patch to target 0x100 bytes ahead of the
+        // instruction (delta = 0x100 - 0 - 4).
+        let mut text = vec![0u8; 4];
+        text[..4].copy_from_slice(&0x9400_0000u32.to_le_bytes());
+        A64.patch_branch_field(&mut text, 0, 0x100 - 4);
+        let w = u32::from_le_bytes(text[..4].try_into().unwrap());
+        assert_eq!(w, 0x9400_0040); // imm26 = 0x100/4 = 0x40
+        // Backward branch: target 8 bytes before the instruction start.
+        let mut text = vec![0u8; 4];
+        text[..4].copy_from_slice(&0x1400_0000u32.to_le_bytes());
+        A64.patch_branch_field(&mut text, 0, -8 - 4);
+        let w = u32::from_le_bytes(text[..4].try_into().unwrap());
+        assert_eq!(w, 0x17FF_FFFE); // imm26 = -2
+    }
+
+    #[test]
+    fn remainder() {
+        // srem x0, x1, x2 = sdiv x16, x1, x2; msub x0, x16, x1, x2
+        expect(&enc1(m(Op::Srem, Width::W64, vec![g(0), g(1), g(2)])), &[0x9AC2_0C30, 0x9B10_8440]);
+    }
+
+    #[test]
+    fn lea_forms() {
+        // lea x0, [x1+8]: add x0, x1, #8
+        expect(&enc1(m(Op::Lea, Width::W64, vec![g(0), mem(1, 8)])), &[0x9100_2020]);
+        // lea x0, [x1-8]: sub x0, x1, #8
+        expect(&enc1(m(Op::Lea, Width::W64, vec![g(0), mem(1, -8)])), &[0xD100_2020]);
+        // lea x0, [x1+x2 lsl #3] with no disp
+        expect(
+            &enc1(m(
+                Op::Lea,
+                Width::W64,
+                vec![g(0), Operand::Mem(crate::machine::MemOperand { base: Some(Reg::P(PReg::gpr(1))), index: Some(Reg::P(PReg::gpr(2))), scale: 3, disp: 0, sym: None })],
+            )),
+            &[0x8B02_0C20],
+        );
+    }
 }

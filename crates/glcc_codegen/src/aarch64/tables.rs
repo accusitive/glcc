@@ -13,7 +13,7 @@ use crate::sel::PatternTable;
 use super::regs;
 
 #[repr(u32)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     // -- integer ----------------------------------------------------------
     /// `mov dst, src` (orr dst, xzr, src).

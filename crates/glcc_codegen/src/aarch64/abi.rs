@@ -32,7 +32,7 @@ impl AbiImpl for Aapcs64 {
                     }
                     return RetLoc::Regs(pregs, pieces.len() as u8);
                 }
-                let n = ty.size_bytes().div_ceil(8);
+                let n = ty.size_bytes().div_ceil(8) as usize;
                 let mut pregs = [PReg::gpr(0); 2];
                 for i in 0..n {
                     pregs[i] = PReg::gpr(i as u8);
@@ -81,7 +81,7 @@ impl AbiImpl for Aapcs64 {
                     }
                     return ParamLoc::Regs(pregs, pieces.len() as u8);
                 }
-                let chunks = ty.size_bytes().div_ceil(8);
+                let chunks = ty.size_bytes().div_ceil(8) as usize;
                 if gp_used + chunks > regs::ARG_REGS.len() {
                     return ParamLoc::Stack;
                 }
