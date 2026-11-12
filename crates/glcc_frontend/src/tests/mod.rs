@@ -5790,6 +5790,66 @@ fn c23_nullptr() {
 }
 
 #[test]
+fn c23_nullptr_t_type_keyword() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(_Generic(nullptr, nullptr_t: 1, default: 0), \"identity\");\n\
+             _Static_assert(!_Generic(nullptr, void *: 1, default: 0), \"not void pointer\");\n\
+             _Static_assert(sizeof(nullptr_t) == sizeof(void *), \"size\");\n\
+             nullptr_t p = nullptr;\n\
+             nullptr_t a[2] = { nullptr, 0 };\n\
+             int main(void) {\n\
+                 nullptr_t q = p;\n\
+                 int *v = q;\n\
+                 q = (nullptr_t)0;\n\
+                 return (v == nullptr) + (q == nullptr) + (a[1] == nullptr);\n\
+             }",
+            c23
+        )
+        .is_empty()
+    );
+    // Pre-C23 dialects keep `nullptr_t` a plain identifier, so the
+    // <stddef.h>-style typedef spelling still works.
+    assert!(tu_diagnostics("typedef int nullptr_t; nullptr_t x;").is_empty());
+}
+
+#[test]
+fn c23_char8_t_type_keyword() {
+    let c23 = LangOpts {
+        std: Std::C23,
+        gnu: false,
+        ms: false,
+        clang: false,
+        strict: false,
+    };
+    assert!(
+        tu_diagnostics_with_lang(
+            "_Static_assert(_Generic((char8_t)0, unsigned char: 1, default: 0), \"code unit\");\n\
+             _Static_assert(sizeof(char8_t) == 1, \"size\");\n\
+             _Static_assert(_Alignof(char8_t) == _Alignof(unsigned char), \"align\");\n\
+             int main(void) {\n\
+                 char8_t c = u8'x';\n\
+                 char8_t s[] = u8\"ab\";\n\
+                 char8_t d = c + 1;\n\
+                 return (int)d + (int)s[0];\n\
+             }",
+            c23
+        )
+        .is_empty()
+    );
+    // Pre-C23 dialects keep `char8_t` a plain identifier, so the
+    // <uchar.h>-style typedef spelling still works.
+    assert!(tu_diagnostics("typedef unsigned char char8_t; char8_t c = 1;").is_empty());
+}
+
+#[test]
 fn c23_auto_deduces_from_initializer() {
     let c23 = LangOpts {
         std: Std::C23,

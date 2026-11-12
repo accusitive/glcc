@@ -86,6 +86,8 @@ fn c17_language_probes() {
     ] {
         accepts(name, std, src);
     }
+    rejects("C23 nullptr_t", std, "nullptr_t p = nullptr;\n");
+    rejects("C23 char8_t", std, "char8_t c = 1;\n");
 }
 
 #[test]
@@ -112,6 +114,8 @@ fn c23_language_probes() {
         ("label before declaration", "int f(void) { L: int x = 1; return x; }\n"),
         ("label at block end", "int f(void) { goto end; end: }\n"),
         ("nullptr comparison", "int f(void) { return nullptr == nullptr; }\n"),
+        ("nullptr_t type", "nullptr_t p = nullptr;\n"),
+        ("char8_t type", "char8_t c = u8'x';\n"),
         ("nullptr generic identity", "int f(void) { return _Generic(nullptr, void *: 0, default: 1); }\n"),
         ("auto nullptr", "int f(void) { auto p = nullptr; return p == nullptr; }\n"),
     ] {

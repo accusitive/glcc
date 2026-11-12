@@ -1,6 +1,7 @@
 # ISO C conformance audit (C99 through C2y)
 
-Audit date: 2026-10-22
+Audit date: 2026-10-22 (tables re-verified 2026-11-12; see "Post-fix
+status" and the current-status notes in each section)
 
 Compiler: `target/debug/glcc` 0.1.0 (Cranelift backend), built from
 `025098c` plus uncommitted MIR/lowering changes in
@@ -56,6 +57,13 @@ the conformance plan have since landed:
 * `crates/glcc_frontend/src/tests/conformance.rs` carries table-driven
   language probes for C99 through C2y.
 
+Re-verified 2026-11-12 against `crates/glcc_frontend` plus this session's
+change: `nullptr_t` and `char8_t` are now C23 type keywords in their own
+right (`nullptr_t` names `Ty::Nullptr`; `char8_t` names `unsigned char`,
+matching the type `u8"..."` strings already carry), usable in
+declarations, casts, `sizeof`/`_Alignof`/`_Generic`, and still plain
+identifiers (typedef-able) in C17 and earlier.
+
 Known remaining gaps are deliberate or narrow: N3658 duplicate-label
 reuse is not in the C2y working draft yet; `_Imaginary` is optional Annex
 G and stays diagnosed as unsupported; `[[gnu::packed]]` does not pack;
@@ -103,17 +111,12 @@ multiplication.
 
 ### Gaps
 
-**Digraphs and trigraphs are absent.** The lexer explicitly excludes
-digraphs from its punctuator set (`crates/glcc_frontend/src/lexer.rs:893`),
-and no trigraph translation happens before lexing:
+**Digraphs and trigraphs: fixed.** Both now lex and preprocess
+(`int a<:1:> = { 1 };`, `%:include <stdio.h>`, `??(` all verified
+2026-11-12).
 
-```c
-int a<:1:> = { 1 };      /* error: expected `;`, got Punctuator(Less) */
-int a??(1??) = { 1 };    /* error */
-```
-
-Digraphs are required by C99 and C23; trigraphs are required through
-C17 and removed in C23.
+**`<tgmath.h>`: fixed.** glcc ships its own `_Generic`-based
+`include/tgmath.h` that works in C99 and later.
 
 **`_Imaginary` is rejected.**
 
@@ -149,26 +152,9 @@ Runtime checks confirmed `_Generic` selection, `_Thread_local` storage,
 
 ### Gaps
 
-**`_Alignas` only works after a type specifier.** It fails when it opens
-a declaration, at both file and block scope:
-
-```c
-_Alignas(16) int x;              /* error: no type specifier */
-int f(void){ _Alignas(16) int y; /* error */ }
-```
-
-These forms work:
-
-```c
-int _Alignas(16) x;
-struct S { int _Alignas(8) c; };
-int f(void){ int _Alignas(16) y; }
-```
-
-Root cause: `can_start_declaration` (`crates/glcc_frontend/src/parse.rs:2663`)
-does not recognise `_Alignas`/`alignas`, so the leading spelling is read as
-an implicit-`int` identifier. `parse_declaration_specifiers` already handles
-`_Alignas` correctly once it is entered.
+**Leading `_Alignas`: fixed.** `_Alignas(16) int x;` and
+`_Alignas(16) int y;` at block scope are accepted (`can_start_declaration`
+recognises `_Alignas`/`alignas`).
 
 **Loading an atomic aggregate panics in codegen.** Scalar atomics are fine;
 `atomic_load` on an `_Atomic struct` crashes:
@@ -213,89 +199,60 @@ C23 support:
 
 ### Keywords and syntax
 
+Statuses re-verified 2026-11-12.
+
 | Feature | Status |
 | --- | --- |
-| `bool`, `true`, `false` as keywords | Missing (only `<stdbool.h>` macros) |
-| `nullptr`, `nullptr_t` | Missing |
-| `constexpr` objects | Missing |
-| `auto` type inference | Wrong (implicit `int`) |
+| `bool`, `true`, `false` as keywords | Works |
+| `nullptr` | Works (`Ty::Nullptr`) |
+| `nullptr_t` | Works as a type keyword (names `Ty::Nullptr`); plain identifier in C17 and earlier |
+| `constexpr` objects | Works |
+| `auto` type inference | Works (deduced from the initializer) |
 | `typeof` | Works (GNU extension) |
-| `typeof_unqual` | Missing |
-| `static_assert` spelling | Missing (only `_Static_assert`) |
-| `alignas` spelling | Missing as keyword (the C23 header defines no macro); `_Alignas` is partial |
-| `alignof` spelling | Missing as keyword; `_Alignof` works |
+| `typeof_unqual` | Works |
+| `static_assert` spelling | Works (file and block scope) |
+| `alignas` spelling | Works, including as the leading specifier |
+| `alignof` spelling | Works |
 | `thread_local` spelling | Works |
-| `_BitInt(N)`, `wb` suffix | Missing |
-| `[[attribute]]` syntax | Missing |
-| `enum E : type` | Missing |
-| `char8_t` | Works through `<uchar.h>` |
+| `_BitInt(N)`, `wb` suffix | Works |
+| `[[attribute]]` syntax | Works |
+| `enum E : type` | Works |
+| `char8_t` | Works as a C23 type keyword (maps to `unsigned char`, the type `u8"..."` already carries); `<uchar.h>` typedef spelling still works pre-C23 |
 | `_Decimal32/64/128` | Missing (optional decimal floating types) |
-| `unreachable()` | Not reachable: `<stddef.h>` fails in C23 mode |
-
-Reproductions:
-
-```c
-bool b = true;                    /* error: expected `;`, got Identifier */
-nullptr_t p = nullptr;            /* error: use of undeclared identifier 'nullptr' */
-constexpr int n = 3;              /* error: expected `;`, got Keyword(Int) */
-typeof_unqual(int) x;             /* error */
-_Static_assert(1);                /* works */
-static_assert(1);                 /* block scope: implicit function call; file scope: parse error */
-[[nodiscard]] int f(void);        /* error: expected external declaration, got '[' */
-enum E : unsigned char { A, B };  /* error: declaration does not declare anything */
-_BitInt(17) x;                    /* error: no type specifier */
-```
-
-`static_assert` is especially dangerous at block scope: without
-`<assert.h>`, `static_assert(0, "boom");` passes `-fsyntax-only` as an
-implicit call to an undeclared function. A full compile then panics in
-codegen (mismatched argument count) rather than reporting a failed
-assertion. With `<assert.h>` it does fail correctly, because the header
-maps `static_assert` to `_Static_assert`.
+| `unreachable()` | Works via `<stddef.h>` / `__builtin_unreachable` |
 
 ### Literals and tokens
 
 | Feature | Status |
 | --- | --- |
-| Binary literals `0b1010` | Missing |
-| Digit separators `1'000'000` | Missing |
-| `u8'c'` character constants | Missing |
-| `u8"..."` type `char8_t[]` | Wrong: it is `char[]` |
-| `wb` bit-precise suffix | Missing |
-
-`u8"x"[0]` selects `char` in `_Generic`, not `char8_t` (which is
-`unsigned char` in C23).
+| Binary literals `0b1010` | Works |
+| Digit separators `1'000'000` | Works |
+| `u8'c'` character constants | Works (typed `unsigned char`) |
+| `u8"..."` type `char8_t[]` | Works (typed `unsigned char`, which is what `char8_t` names here) |
+| `wb` bit-precise suffix | Works |
 
 ### Declarations and statements
 
-* Labels before declarations are rejected:
-  `L: int x = 1;` fails with `expected expression`.
-* Compound-literal storage classes are rejected:
-  `((static int[]){1,2})[0]` fails.
-* Enum fixed underlying types are rejected; `enum E : short { ... }`
-  produces `declaration does not declare anything`.
-* Attributes on enumerators (`A [[deprecated]]`) are rejected.
-* `static_assert`/`alignas`/`alignof` are not keywords.
+* Labels before declarations work: `L: int x = 1;` is accepted.
+* Compound-literal storage classes work: `((static int[]){1,2})[0]`.
+* Enum fixed underlying types work: `enum E : unsigned char { A, B };`.
+* Attributes on enumerators (`A [[deprecated]]`) are accepted.
+* `static_assert`/`alignas`/`alignof` are keywords in C23 mode.
 
 ### Preprocessor
 
 | Feature | Status |
 | --- | --- |
-| `#embed` | Unknown directive |
-| `__VA_OPT__` | Explicitly unsupported error |
-| `#elifdef`, `#elifndef` | Unknown directive |
-| `#warning` | Silently ignored (`ControlLine::Warning => {}` in `glcc_pp/src/expand.rs:1514`) |
-| `__has_c_attribute` | Always true, even for nonexistent attributes |
-| `__has_builtin` | Always true |
-| `__has_attribute` | Always true |
-| `__has_embed` | Undefined, so evaluates to 0 |
+| `#embed` | Works (verified: embeds file bytes) |
+| `__VA_OPT__` | Works |
+| `#elifdef`, `#elifndef` | Work |
+| `#warning` | Emits a real warning diagnostic |
+| `__has_c_attribute` | Truthful (false for nonexistent attributes) |
+| `__has_builtin` | Truthful |
+| `__has_attribute` | Truthful |
+| `__has_embed` | Implemented |
 | `__has_include` | Works |
 | `#line` | Works |
-
-The `__has_*` defaults come from `expand.rs:1044` (`_ => true`). This is
-not merely cosmetic. For example, `<stdbit.h>` currently fails on `bool`
-first, but once `bool` works it would select the `__builtin_stdc_*`
-implementations because `__has_builtin` reports them as available.
 
 ### Headers
 
@@ -306,27 +263,23 @@ Headers that parse on their own in C23: `assert.h`, `complex.h`,
 `stdckdint.h`, `stdnoreturn.h`, `string.h`, `threads.h`, `time.h`,
 `uchar.h`, `wchar.h`, `wctype.h`.
 
-Broken in C23 mode:
-
-* **`<stddef.h>`** — uses `nullptr` in `__stddef_nullptr_t.h:26`, so the
-  header cannot be included. This also blocks `unreachable()`, `nullptr_t`
-  and anything that includes it.
-* **`<stdatomic.h>`** — includes `<stddef.h>`, so it fails on `nullptr`.
-  It works in C11/C17.
-* **`<stdbit.h>`** — uses `bool` at `stdbit.h:622`; `bool` is not a
-  keyword, so parsing fails.
-* **`<stdarg.h>`** — the header itself parses, but `va_start` expands to
-  `__builtin_c23_va_start`, which is undeclared. Any variadic function
-  definition fails.
-* **`<tgmath.h>`** — fails in every mode (see C99).
+Broken in C23 mode (as of 2026-10-22): all fixed. Re-verified 2026-11-12:
+`<stddef.h>`, `<stdatomic.h>`, `<stdbit.h>`, `<stdarg.h>` (variadic
+definitions compile and run end-to-end) and `<tgmath.h>` all parse and
+work in C23 mode.
 
 `<stdckdint.h>` works, including overflow detection (signed overflow
-wraps and reports `true`). `<uchar.h>` provides `char8_t`, but the
-`u8"..."` literal still has type `char[]`.
+wraps and reports `true`). `<uchar.h>` provides `char8_t`, and the
+`u8"..."` literal now has the type `char8_t` names (`unsigned char`).
 
 ## C2y
 
-`-std=c2y` is not a recognised standard:
+`-std=c2y` is now a recognised dialect (see "Post-fix status"): `_Countof`,
+selection declarations, named loops, `_Generic` type operands, delimited
+escapes, bit-precise enums, expression `static_assert`, `0o` octal
+literals, and complex `++`/`--` are implemented behind the C2y gate.
+
+Historical audit findings (2026-10-22, when `-std=c2y` was rejected):
 
 ```
 glcc: error: invalid argument to '-std=' (unrecognized standard 'c2y')
@@ -400,35 +353,16 @@ under C11. The panic is in the Cranelift lowering path, not the frontend.
 
 ## Highest-impact work
 
-Ranked by conformance gained per unit of effort:
+Items 1–9 and 11–12 of the original list are done (see "Post-fix
+status" and the section updates above). Still open, ranked:
 
-1. **Accept `-std=c2y`.** Add the variant to `Std`, give it a level and
-   `__STDC_VERSION__`, and gate the C2y features behind it. Even an
-   empty gate is better than rejecting the flag.
-2. **Fix leading `_Alignas`.** Add `peek_alignas()` to
-   `can_start_declaration`. This is a small parser change that repairs
-   C11 and C23 alignment declarations, including `<stdalign.h>` users.
-3. **Add the C23 keyword set.** `bool`, `true`, `false`, `nullptr`,
-   `constexpr`, `static_assert`, `alignas`, `alignof`, `typeof_unqual`.
-   `bool` unlocks `<stdbit.h>`; `<stdatomic.h>` additionally needs
-   `nullptr` for `<stddef.h>`.
-4. **Implement C23 `auto` inference.** Reject the current implicit-`int`
-   interpretation; derive the type from the initializer.
-5. **Implement `[[attributes]]` and make `__has_c_attribute` truthful.**
-   Start with the seven standard attributes and namespace handling.
-6. **Fix the C23 headers.** `__builtin_c23_va_start` for `<stdarg.h>`,
-   `nullptr` for `<stddef.h>`, and `bool` for `<stdatomic.h>`/`<stdbit.h>`.
-7. **Add C23 literals.** Binary constants, digit separators, `u8'c'`,
-   and the correct `u8"..."` type.
-8. **Add the C23 preprocessor features.** `#elifdef`/`#elifndef`,
-   `#embed`, `__VA_OPT__`, and a real `#warning` diagnostic.
-9. **Add `_BitInt(N)` and fixed enum underlying types.**
-10. **Fix aggregate `_Atomic` lowering.** Loads of `_Atomic struct` must
-    go through the address path rather than asking for a scalar Clif
-    result.
-11. **Add C99 digraphs (and trigraphs for pre-C23 modes).**
-12. **Repair `<tgmath.h>`.** Either support `__attribute__((overloadable))`
-    or provide a glcc-specific `tgmath.h` built on `_Generic`.
+1. **Fix aggregate `_Atomic` lowering.** Loads of `_Atomic struct` must
+   go through the address path rather than asking for a scalar Clif
+   result. This is the last known C11 conformance hole.
+2. **`_Decimal32/64/128`** — optional in C23; large effort, low value.
+3. **Attribute fidelity.** `[[gnu::packed]]` does not pack;
+   `deprecated` fires on identifier uses; `maybe_unused` is not
+   enforced.
 
 ## Reproduction
 
