@@ -152,7 +152,7 @@ caller out-pointer.
 | `glcc_mir` | The middle IR: SSA with aggregate types, `FunctionBuilder`, `PassManager`, the pass suite in `passes/` (Mem2Reg, Sroa, Sccp, InstCombine, Inline, LoopUnroll/Vec, Slp, Licm, ...), coroutine lowering (`LowerCoroutines`), text parse/print (round-trip), verifier, debug records. |
 | `glcc_lower_mir` | C → MIR lowering over `Sema`. `lower_translation_unit`; per-topic modules (expr, addr, data, init, atomic, complex, fp, vector, vla). Unimplemented features `todo!()` loudly. |
 | `glcc_lower_cl` | MIR → Cranelift (production backend). `lower_module*` entry points; `abi/mod.rs` is the target/ABI brain (Arch/Os/Env, SysV vs WindowsFastcall, eightbyte classification, per-target va_list); `quad/` F128/F80 support; `asm/` + `asm_native.rs` inline asm; `ehframe.rs`; `initarray.rs`. Targets: x86-64 Linux/Win, aarch64, riscv64. |
-| `glcc_codegen` | The native backend (Cranelift-free): MIR → machine IR → sel → regalloc2 → frame → encode → ELF. x86-64 SysV only. Adding an x86-64 instruction = three table rows in `x64/tables.rs` (`Op`, `OPCODES`/`ENCODINGS`, `PATTERNS`). |
+| `glcc_codegen` | The native backend (Cranelift-free): MIR → machine IR → sel → regalloc2 → frame → encode → ELF. Targets: x86-64 SysV and aarch64 Linux (AAPCS64; integer + F32/F64, `src/aarch64/`). Adding an x86-64 instruction = three table rows in `x64/tables.rs` (`Op`, `OPCODES`/`ENCODINGS`, `PATTERNS`); aarch64 is hook-driven (`aarch64/mod.rs`) with the opcode/slot table in `aarch64/tables.rs`. |
 | `glcc_dwarf` | DWARF emission from `LoweredDebug` records (produced by glcc_lower_cl) via gimli onto the cranelift-object product. |
 | `glasm` + `glasm_data` | Native assembler ported from nasm (x86-64 full; RISC-V 32/64 and AArch64 integer-only), GAS/AT&T frontend (`gas.rs`), ELF output via the `object` crate. `glasm_data` holds the generated ~26k-line instruction table (committed) so it recompiles rarely. |
 | `glcc_toolchain` | Host tool discovery: `find_clang()`, MSVC/Windows SDK layout (cfg(windows) gated). |
@@ -201,7 +201,9 @@ glcc_toolchain ─► glcc_pp ─► glcc_frontend ─► glcc_lower_mir ─► 
 - **Floats**: F32/F64 everywhere; `long double` is F80 on x86-64, F128 on
   aarch64/riscv64. The Cranelift backend carries F80/F128 as Clif `F128`
   with software support (`glcc_lower_cl/src/quad/` + `rt/softfloat/` +
-  x87 asm in `rt/glccrt.c`); the native backend panics on them.
+  x87 asm in `rt/glccrt.c`); the native backend panics on them (on
+  aarch64 that means `long double`/F128 — the next milestone routes it
+  through `__*tf3` libcalls).
 - **Runtime**: `rt/glccrt.c` (x87 f80, variadic trampolines, setjmp,
   quad trampolines) is compiled by root `build.rs` into
   `~/.local/lib/glcc/glccrt.o` (and `glccrt-win64.lib` / `glccrt-mingw.a`
@@ -256,6 +258,7 @@ Testing conventions:
   (`gnu.rs`, `ia32.rs`, `msvc.rs`, `atomic.rs`), declare a prototype in
   `check/prototypes.rs`, lower in `glcc_lower_mir` (see `builtin.rs`,
   `fp.rs`, `ia32.rs`).
+- **New aarch64 feature in the native backend**: `crates/glcc_codegen/src/aarch64/` — opcode/slot rows in `tables.rs`, encoding in `enc.rs` (fixed 32-bit words; golden tests pin them to GNU as output), AAPCS64 in `abi.rs`, selection in `mod.rs`. Narrow (sub-32-bit) values keep garbage upper halves; signed uses canonicalize with sxtb/uxtb at the use site.
 - **New x86-64 instruction in the native backend**: three table rows in
   `crates/glcc_codegen/src/x64/tables.rs` (`Op` enum + `OPCODES`/slots +
   `ENCODINGS` recipe); pattern selection in `PATTERNS` or `select_custom`
