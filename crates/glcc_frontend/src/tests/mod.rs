@@ -3570,6 +3570,49 @@ fn c2y_bit_precise_enum_underlying_types() {
 }
 
 #[test]
+fn gnu_packed_enums_shrink_repr() {
+    // GCC's packed-enum extension: the representation shrinks to the
+    // smallest type holding every enumerator — unsigned when all
+    // values are non-negative, signed otherwise (verified against
+    // host gcc). A fixed underlying type wins and packed is ignored.
+    let src = "enum pos { P0 = 1, P1 = 200 } __attribute__((packed));\n\
+               _Static_assert(sizeof(enum pos) == 1, \"uchar\");\n\
+               _Static_assert((int)(enum pos)-1 == 255, \"unsigned repr\");\n\
+               enum neg { N0 = 1, N1 = -3 } __attribute__((packed));\n\
+               _Static_assert(sizeof(enum neg) == 1, \"schar\");\n\
+               _Static_assert((int)(enum neg)-1 == -1, \"signed repr\");\n\
+               enum big { B0 = 1, B1 = 40000 } __attribute__((packed));\n\
+               _Static_assert(sizeof(enum big) == 2, \"ushort\");\n\
+               enum fixed : unsigned char { F0 = 1 } __attribute__((packed));\n\
+               _Static_assert(sizeof(enum fixed) == 1, \"fixed wins\");\n\
+               enum pre __attribute__((packed)) { R0 = 1, R1 = 100 };\n\
+               _Static_assert(sizeof(enum pre) == 1, \"prefix attr\");\n\
+               int f(void) { enum pos p = P1; return p + 1; }\n";
+    let diags = tu_diagnostics(src);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+}
+
+#[test]
+fn gnu_bswap_folds_in_const_contexts() {
+    // The fold happens after the implicit conversion to the builtin's
+    // parameter width, so a wider literal truncates first; non-constant
+    // arguments still compile through the runtime lowering.
+    let src = "_Static_assert(__builtin_bswap16(0x0800u) == 0x0008u, \"u16\");\n\
+               _Static_assert(__builtin_bswap32(0x12345678u) == 0x78563412u, \"u32\");\n\
+               _Static_assert(__builtin_bswap64(0x0123456789abcdefull) == 0xefcdab8967452301ull, \"u64\");\n\
+               _Static_assert(__builtin_bswap16(0x12345678u) == 0x7856u, \"narrows first\");\n\
+               typedef unsigned short be16;\n\
+               int f(unsigned short x) {\n\
+                   switch ((be16)__builtin_bswap16((unsigned short)0x0800)) {\n\
+                       case 0x0008: return __builtin_bswap16(x) != 0;\n\
+                       default: return 0;\n\
+                   }\n\
+               }\n";
+    let diags = tu_diagnostics(src);
+    assert!(diags.iter().all(|d| !d.is_error()), "{diags:#?}");
+}
+
+#[test]
 fn named_loops_resolve_enclosing_targets() {
     use crate::lang::Std;
     let c2y = LangOpts {
@@ -6920,6 +6963,65 @@ fn builtin_offsetof_folds() {
         enum_value_of("struct R { union { int a; char b[4]; }; }; enum { N = __builtin_offsetof(struct R, b[2]) };", "N"),
         2
     );
+}
+
+#[test]
+fn builtin_offsetof_runtime_index_stays_arithmetic() {
+    // GCC extension: a non-constant array index keeps the folded prefix
+    // and adds `i * sizeof(elem)` as ordinary arithmetic (`prefix + i * sizeof(elem)`),
+    // still typed `size_t`. A designator after the runtime index folds
+    // into the constant prefix.
+    let expr = check_with(&["struct S { char c; int a[4]; };", "unsigned long i;"], "__builtin_offsetof(struct S, a[i])");
+    assert_eq!(expr.ty, Ty::UnsignedLong);
+    match expr.kind {
+        CheckedExprKind::Binary(BinaryOp::Add, prefix, term) => {
+            assert!(matches!(&prefix.kind, CheckedExprKind::Offsetof { offset: 4, .. }));
+            match &term.kind {
+                CheckedExprKind::Binary(BinaryOp::Mul, idx, elem) => {
+                    // A narrower index carries an explicit Convert; `i`
+                    // here is already `size_t` and stays as-is.
+                    assert!(matches!(&idx.kind, CheckedExprKind::Ident(_) | CheckedExprKind::Convert { .. }));
+                    assert!(matches!(&elem.kind, CheckedExprKind::SizeofTy(_)));
+                }
+                other => panic!("expected an index * sizeof(elem) term, got {other:?}"),
+            }
+        }
+        other => panic!("expected prefix + runtime term, got {other:?}"),
+    }
+    let expr = check_with(
+        &["struct In { int pad; char b[4]; };", "struct S { char c; struct In arr[4]; };", "unsigned long i;"],
+        "__builtin_offsetof(struct S, arr[i].b[1])",
+    );
+    match expr.kind {
+        CheckedExprKind::Binary(BinaryOp::Add, prefix, term) => {
+            // offsetof(S, arr) + offsetof(In, b) + 1 (4 + 4 + 1 with
+            // `struct In` aligned to 4).
+            assert!(matches!(&prefix.kind, CheckedExprKind::Offsetof { offset: 9, .. }));
+            assert!(matches!(&term.kind, CheckedExprKind::Binary(BinaryOp::Mul, ..)));
+        }
+        other => panic!("expected prefix + runtime term, got {other:?}"),
+    }
+}
+
+#[test]
+fn builtin_offsetof_negative_constant_index_errors() {
+    let msg = check_with_err(&["struct S { int a[4]; };"], "__builtin_offsetof(struct S, a[-1])");
+    assert!(msg.contains("offsetof index is not an integer constant expression"), "{msg}");
+}
+
+#[test]
+fn static_assert_rejects_runtime_index_offsetof() {
+    // The runtime-index offsetof only survives in runtime positions;
+    // a context that needs a constant still rejects it (sanely).
+    let mut sema = Sema::leak_for_tests();
+    let mut interner = Interner::new();
+    let mut parser = test_parser(
+        "struct S { int a[4]; }; unsigned long i; _Static_assert(__builtin_offsetof(struct S, a[i]) == 0, \"msg\");",
+        &mut sema,
+        &mut interner,
+    );
+    parser.parse_translation_unit();
+    assert_parse_error(&parser, "`_Static_assert` needs an integer constant expression");
 }
 
 #[test]

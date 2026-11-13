@@ -1120,6 +1120,16 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     mir_ty,
                 )
             }
+            fe::check::CheckedExprKind::Bswap { arg, bits } => {
+                // The operand was already converted to the builtin's
+                // parameter width at check time (the result type is
+                // the same unsigned type), so the swap emits at that
+                // width with no further adjustment.
+                let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
+                let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                let swapped = self.emit(func, frame, mir::InstKind::Bswap(value), operand_mir);
+                self.convert(func, frame, swapped, &arg.ty, &expr.ty)
+            }
             fe::check::CheckedExprKind::Rotate { left, arg, count, bits } => {
                 // Rotate at the operand's declared width. Reduce the
                 // count modulo that width in the count's own type: a

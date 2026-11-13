@@ -166,6 +166,13 @@ pub enum CheckedExprKind<'a> {
         arg: &'a CheckedExpr<'a>,
         fallback: Option<&'a CheckedExpr<'a>>,
     },
+    /// A byte-order reversal (`__builtin_bswap16/32/64`): the operand
+    /// is already converted to the prototype's parameter type, and
+    /// `bits` is that width. Constant operands fold in `eval_const`.
+    Bswap {
+        arg: &'a CheckedExpr<'a>,
+        bits: u32,
+    },
     /// A type-generic C23/C2y rotate
     /// (`__builtin_stdc_rotate_left`/`_right`): the value keeps its
     /// declared unsigned width, and `bits` is that width (a bit-field's
@@ -2380,12 +2387,24 @@ impl<'a> Sema<'a> {
                 })
             }
             Expr::Offsetof { ty, designators, .. } => {
-                let offset = self.check_offsetof(ty, designators, interner, span)?;
-                Ok(CheckedExpr {
-                    ty: self.target.size_type(),
-                    span,
-                    kind: CheckedExprKind::Offsetof { ty: ty.clone(), offset },
-                })
+                let (offset, runtime) = self.check_offsetof(ty, designators, interner, span)?;
+                let size_ty = self.target.size_type();
+                // A runtime index keeps the folded prefix in the
+                // `Offsetof` node and adds the index terms as ordinary
+                // arithmetic, so lowering needs no new node kind.
+                let kind = match runtime {
+                    None => CheckedExprKind::Offsetof { ty: ty.clone(), offset },
+                    Some(term) => CheckedExprKind::Binary(
+                        BinaryOp::Add,
+                        self.alloc(CheckedExpr {
+                            ty: size_ty.clone(),
+                            span,
+                            kind: CheckedExprKind::Offsetof { ty: ty.clone(), offset },
+                        }),
+                        term,
+                    ),
+                };
+                Ok(CheckedExpr { ty: size_ty, span, kind })
             }
             Expr::StmtExpr { items, .. } => {
                 // Items checked inline at parse (declarations declared,
@@ -3239,6 +3258,9 @@ impl<'a> Sema<'a> {
                 // optional `int` zero-fallback second argument.
                 Some("__builtin_clzg") => return self.check_clzg(args, interner, span, false),
                 Some("__builtin_ctzg") => return self.check_clzg(args, interner, span, true),
+                Some(n @ ("__builtin_bswap16" | "__builtin_bswap32" | "__builtin_bswap64")) => {
+                    return self.check_bswap(n, args, interner, span);
+                }
                 Some("__builtin_stdc_rotate_left") => return self.check_rotate(args, interner, span, true),
                 Some("__builtin_stdc_rotate_right") => return self.check_rotate(args, interner, span, false),
                 Some("__builtin_constant_p") => return self.check_constant_p(args, interner, span),
@@ -3626,10 +3648,15 @@ impl<'a> Sema<'a> {
 
     /// Byte offset of a `__builtin_offsetof(TYPE, .a.b[i])` designator
     /// (GCC's `offsetof`): each `.field` descends through the current
-    /// struct or union (anonymous members included), each `[i]` needs
-    /// an integer constant index into a member array. Bit-fields have
-    /// no addressable offset and are rejected, like GCC.
-    fn check_offsetof(&self, ty: &Ty, designators: &[Designator<'a>], interner: &Interner, span: Span) -> Result<u64, CompileError> {
+    /// struct or union (anonymous members included), each `[i]` steps
+    /// into a member array. Bit-fields have no addressable offset and
+    /// are rejected, like GCC.
+    ///
+    /// A constant index folds into the byte offset; a runtime one is
+    /// the GCC extension, lowered to `prefix + i * sizeof(elem)` as
+    /// plain arithmetic (returned as the second component) so any
+    /// context that truly needs a constant still rejects it.
+    fn check_offsetof(&self, ty: &Ty, designators: &[Designator<'a>], interner: &Interner, span: Span) -> Result<(u64, Option<&'a CheckedExpr<'a>>), CompileError> {
         let Ty::Struct(_) = ty.unqualified() else {
             return Err(CompileError::new("`offsetof` needs a struct or union type", span));
         };
@@ -3638,6 +3665,7 @@ impl<'a> Sema<'a> {
         }
         let mut cur = ty.clone();
         let mut offset: u64 = 0;
+        let mut runtime: Option<&'a CheckedExpr<'a>> = None;
         let mut visiting = Vec::new();
         for designator in designators {
             match designator {
@@ -3687,18 +3715,48 @@ impl<'a> Sema<'a> {
                     if !is_integer(&index.ty) {
                         return Err(CompileError::new("array designator must have integer type", *span));
                     }
-                    let n = match crate::eval::eval_const(index, self, interner) {
-                        Some(crate::eval::Value::Int(n)) if n >= 0 => n as u64,
-                        _ => {
-                            return Err(CompileError::new("offsetof index is not an integer constant expression", *span));
-                        }
-                    };
                     let elem_size = self
                         .type_size(elem, interner)
                         .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
-                    offset = offset
-                        .checked_add(n.checked_mul(elem_size).ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?)
-                        .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
+                    match crate::eval::eval_const(index, self, interner) {
+                        Some(crate::eval::Value::Int(n)) if n >= 0 => {
+                            offset = offset
+                                .checked_add((n as u64).checked_mul(elem_size).ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?)
+                                .ok_or_else(|| CompileError::new("cannot compute layout for `offsetof`", *span))?;
+                        }
+                        // A negative constant index stays rejected like GCC.
+                        Some(crate::eval::Value::Int(_)) => {
+                            return Err(CompileError::new("offsetof index is not an integer constant expression", *span));
+                        }
+                        None => {
+                            let size_ty = self.target.size_type();
+                            let idx = self.convert(self.decay_checked(index.clone()), size_ty.clone());
+                            let mul = CheckedExpr {
+                                ty: size_ty.clone(),
+                                span: *span,
+                                kind: CheckedExprKind::Binary(
+                                    BinaryOp::Mul,
+                                    self.alloc(idx),
+                                    self.alloc(CheckedExpr {
+                                        ty: size_ty.clone(),
+                                        span: *span,
+                                        kind: CheckedExprKind::SizeofTy(elem.as_ref().clone()),
+                                    }),
+                                ),
+                            };
+                            runtime = Some(match runtime {
+                                None => self.alloc(mul),
+                                Some(prev) => self.alloc(CheckedExpr {
+                                    ty: size_ty.clone(),
+                                    span: *span,
+                                    kind: CheckedExprKind::Binary(BinaryOp::Add, prev, self.alloc(mul)),
+                                }),
+                            });
+                        }
+                        _ => {
+                            return Err(CompileError::new("offsetof index is not an integer constant expression", *span));
+                        }
+                    }
                     cur = elem.as_ref().clone();
                 }
                 Designator::AnonField { span, .. } => {
@@ -3706,7 +3764,7 @@ impl<'a> Sema<'a> {
                 }
             }
         }
-        Ok(offset)
+        Ok((offset, runtime))
     }
 
     fn check_cast(&self, ty: &Ty, operand: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {

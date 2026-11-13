@@ -59,6 +59,10 @@ pub enum ControlLine {
         line: u64,
     },
     Line(Vec<Tok>),
+    /// Assembler mode only: an unrecognized `#...` line is a GAS
+    /// comment; `toks` are the line's tokens after the `#` (newline
+    /// excluded) and are re-emitted verbatim, without macro expansion.
+    AsmComment { toks: Vec<Tok> },
     Empty,
 }
 
@@ -108,14 +112,16 @@ pub struct IntoTokenTree {
     pub tokens: Vec<Tok>,
     pub pos: usize,
     pub expecting_opposition: bool,
+    pub assembler: bool,
 }
 
 impl IntoTokenTree {
-    pub fn new(tokens: Vec<Tok>) -> Self {
+    pub fn new(tokens: Vec<Tok>, assembler: bool) -> Self {
         Self {
             tokens,
             pos: 0,
             expecting_opposition: false,
+            assembler,
         }
     }
 
@@ -150,7 +156,7 @@ impl IntoTokenTree {
             return Ok(Some(TokenTree::Token(tok)));
         }
         let rest = self.directive_rest();
-        let control = parse_control_line(&rest, file, tok.line, interner)?;
+        let control = parse_control_line(&rest, file, tok.line, interner, self.assembler)?;
         match control {
             ControlLine::DefineObject { .. }
             | ControlLine::DefineFunction { .. }
@@ -161,7 +167,8 @@ impl IntoTokenTree {
             | ControlLine::Include { .. }
             | ControlLine::PragmaOnce
             | ControlLine::PragmaOther { .. }
-            | ControlLine::Line(..) => Ok(Some(TokenTree::Directive(control))),
+            | ControlLine::Line(..)
+            | ControlLine::AsmComment { .. } => Ok(Some(TokenTree::Directive(control))),
             ControlLine::If { condition } => {
                 let body = self.until_closer(file, interner)?;
                 let opposition = Box::new(self.maybe_opposition(file, interner)?);
@@ -239,7 +246,7 @@ impl IntoTokenTree {
         }
         self.next();
         let rest = self.directive_rest();
-        let control = parse_control_line(&rest, file, tok.line, interner)?;
+        let control = parse_control_line(&rest, file, tok.line, interner, self.assembler)?;
         match control {
             ControlLine::Elif { condition } => {
                 self.expecting_opposition = true;
@@ -285,8 +292,8 @@ enum Kind {
 }
 
 /// Collect every tree of one file's token stream up front.
-pub fn collect_trees(toks: Vec<Tok>, file: &str, interner: &Interner) -> Result<Vec<TokenTree>, PpError> {
-    let mut grouper = IntoTokenTree::new(toks);
+pub fn collect_trees(toks: Vec<Tok>, file: &str, interner: &Interner, assembler: bool) -> Result<Vec<TokenTree>, PpError> {
+    let mut grouper = IntoTokenTree::new(toks, assembler);
     let mut out = Vec::new();
     while let Some(t) = grouper.next_tree(file, interner)? {
         out.push(t);
@@ -322,8 +329,9 @@ fn ident_name<'a>(t: &Tok, interner: &'a Interner) -> Option<&'a str> {
     }
 }
 
-/// Parse directive tokens (after the `#`) into a [`ControlLine`].
-pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Interner) -> Result<ControlLine, PpError> {
+/// Parse directive tokens (after the `#`) into a [`ControlLine`]. In
+/// assembler mode an unrecognized directive is a comment line.
+pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Interner, assembler: bool) -> Result<ControlLine, PpError> {
     let loc = format!("{file}:{line}");
     let toks: Vec<&Tok> = rest.iter().filter(|t| !is_ws(t)).collect();
     let Some(first) = toks.first() else {
@@ -336,6 +344,9 @@ pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Intern
         return Ok(ControlLine::Line(rest.to_vec()));
     }
     let Some(name) = ident_name(first, interner) else {
+        if assembler {
+            return Ok(ControlLine::AsmComment { toks: rest.to_vec() });
+        }
         return Err(err(format!("{loc}: malformed directive (expected a name)")));
     };
     // Raw tail after the directive name (for faithful bodies): skip the
@@ -415,6 +426,7 @@ pub fn parse_control_line(rest: &[Tok], file: &str, line: u64, interner: &Intern
         }
         "line" => Ok(ControlLine::Line(tail.to_vec())),
         "include" | "include_next" => parse_include(tail, &loc, interner, name == "include_next"),
+        _ if assembler => Ok(ControlLine::AsmComment { toks: rest.to_vec() }),
         _ => Err(err(format!("{loc}: unknown directive '#{name}'"))),
     }
 }

@@ -425,9 +425,9 @@ impl Recover for Param {
     }
 }
 
-impl Recover for (Vec<Enumerator>, Ty) {
+impl Recover for (Vec<Enumerator>, Ty, i128, i128) {
     fn recover() -> Self {
-        (Vec::new(), Ty::Void)
+        (Vec::new(), Ty::Void, i128::MAX, i128::MIN)
     }
 }
 
@@ -3070,6 +3070,9 @@ impl<'a, 'b> Parser<'a, 'b> {
             CheckedExprKind::Rotate { arg, count, .. } => {
                 self.check_flow_expr(arg, labels, gotos, scope, fv);
                 self.check_flow_expr(count, labels, gotos, scope, fv);
+            }
+            CheckedExprKind::Bswap { arg, .. } => {
+                self.check_flow_expr(arg, labels, gotos, scope, fv);
             }
             CheckedExprKind::FpClass { arg, .. } => {
                 self.check_flow_expr(arg, labels, gotos, scope, fv);
@@ -6149,7 +6152,9 @@ impl<'a, 'b> Parser<'a, 'b> {
     pub fn parse_enum_specifier(&mut self) -> TypeSpecifier {
         let kw_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
         self.tokens.advance();
-        self.skip_gnu_suffixes();
+        // Prefix attributes (`enum __attribute__((packed)) E {...}`),
+        // mirroring the struct specifier.
+        let mut attrs = self.parse_gnu_annotations();
         let tag = if let Some(Located { val: Token::Identifier(s), .. }) = self.tokens.peek().copied() {
             let tag_span = self.tokens.peek().map(|t| t.span()).unwrap_or_default();
             self.tokens.advance();
@@ -6157,7 +6162,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         } else {
             None
         };
-        self.skip_gnu_suffixes();
+        attrs.merge(self.parse_gnu_annotations());
         // In a `_Generic` association the colon after `enum E` is the
         // association separator, not a fixed underlying type. A fixed
         // type always begins with a type-name token, so `enum E: 1`
@@ -6178,7 +6183,7 @@ impl<'a, 'b> Parser<'a, 'b> {
         } else {
             None
         };
-        self.skip_gnu_suffixes();
+        attrs.merge(self.parse_gnu_annotations());
         if !matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBrace))) {
             // Anonymous types must carry a body to describe (C17 §6.7.2.3).
             let Some((tag, tag_span)) = tag else {
@@ -6208,15 +6213,44 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             None => self.sema.new_anonymous_enum(kw_span),
         };
+        attrs.merge(self.parse_gnu_annotations());
         self.expect_punct(Punctuator::LBrace);
-        let (enumerators, repr) = self.parse_enumerator_list(fixed.as_ref());
+        let (enumerators, repr, min_value, max_value) = self.parse_enumerator_list(fixed.as_ref());
         if !self.cancelled() {
             self.expect_punct(Punctuator::RBrace);
         }
-        self.skip_gnu_suffixes();
-        let completed = self.sema.complete_enum_tag(id, enumerators, repr, fixed);
+        // Trailing attributes (`enum E {...} __attribute__((packed))`),
+        // mirroring the struct specifier: they apply to the type even
+        // when a declarator follows.
+        attrs.merge(self.parse_gnu_annotations());
+        // GNU packed enums shrink below the C23 ladder to the smallest
+        // type holding every value (verified against GCC: unsigned when
+        // every value is non-negative, signed otherwise). A fixed
+        // underlying type already pins the representation, and GCC
+        // ignores packed there — so only the nonfixed path shrinks.
+        let packed = attrs.is_packed() && fixed.is_none() && min_value <= max_value;
+        let repr = if packed { self.packed_enum_repr(min_value, max_value, repr) } else { repr };
+        let completed = self.sema.complete_enum_tag(id, enumerators, repr, fixed, packed);
         self.unwrap_diag(completed);
         TypeSpecifier::Enum(id)
+    }
+
+    // Smallest integer type holding `[min, max]` (GNU packed enums):
+    // unsigned when every value is non-negative, signed otherwise,
+    // widening through `char`, `short`, `int`, `long`. `fallback` is
+    // the unparsed-ladder representation, kept when even `long` is too
+    // small (packed cannot shrink past it).
+    fn packed_enum_repr(&self, min: i128, max: i128, fallback: Ty) -> Ty {
+        const RUNGS: [(Ty, Ty); 4] = [(Ty::UnsignedChar, Ty::SignedChar), (Ty::UnsignedShort, Ty::Short), (Ty::UnsignedInt, Ty::Int), (Ty::UnsignedLong, Ty::Long)];
+        for (unsigned, signed) in RUNGS {
+            if min >= 0 && self.enum_value_fits(max, &unsigned) {
+                return unsigned;
+            }
+            if self.enum_value_fits(min, &signed) && self.enum_value_fits(max, &signed) {
+                return signed;
+            }
+        }
+        fallback
     }
 
     fn is_enum_underlying_type(ty: &Ty) -> bool {
@@ -6286,12 +6320,14 @@ impl<'a, 'b> Parser<'a, 'b> {
     // constant takes the smallest of `int`, `unsigned int`, `long`,
     // `unsigned long` holding it (so `DW_CIE_ID_32` is unsigned), and
     // the enum's representation is the largest of those. Anything
-    // outside `unsigned long` fails.
-    fn parse_enumerator_list(&mut self, fixed: Option<&Ty>) -> (Vec<Enumerator>, Ty) {
+    // outside `unsigned long` fails. The completed value range comes
+    // back too (min > max for an empty list) for the packed shrink.
+    fn parse_enumerator_list(&mut self, fixed: Option<&Ty>) -> (Vec<Enumerator>, Ty, i128, i128) {
         let mut enumerators = Vec::new();
         let mut previous: Option<i128> = None;
         let mut repr = fixed.cloned().unwrap_or(Ty::Int);
         let mut all_nonnegative = fixed.is_none();
+        let (mut min_value, mut max_value) = (i128::MAX, i128::MIN);
         loop {
             if self.cancelled() {
                 break;
@@ -6358,6 +6394,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 }
                 all_nonnegative &= const_value >= 0;
             }
+            min_value = min_value.min(const_value);
+            max_value = max_value.max(const_value);
             previous = Some(const_value);
             let declared = self.sema.declare(
                 name,
@@ -6405,7 +6443,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 other => other,
             };
         }
-        (enumerators, repr)
+        (enumerators, repr, min_value, max_value)
     }
 
     // Smallest C integer type holding enumerator value `v` (C23

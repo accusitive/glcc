@@ -1945,6 +1945,31 @@ impl<'a, 'b> Expander<'a, 'b> {
             ControlLine::Line(tail) => {
                 self.apply_line(&tail)?;
             }
+            ControlLine::AsmComment { toks } => {
+                let first = toks.first();
+                let line = first.map(|t| t.line).unwrap_or(0);
+                let hash = Tok {
+                    tok: PpToken::Directive,
+                    line,
+                    file: first.map(|t| t.file).unwrap_or(self.file_display),
+                    expanded: false,
+                    lined: false,
+                    space: false,
+                    sol: true,
+                    col: 1,
+                    end_line: line,
+                    spell: None,
+                    noexpand: false,
+                };
+                let line_toks = std::iter::once(hash).chain(toks).collect::<Vec<Tok>>();
+                if self.emit_inline {
+                    for t in &line_toks {
+                        self.emit_out(t)?;
+                    }
+                } else {
+                    self.output.extend(line_toks);
+                }
+            }
             ControlLine::Include { header, verbatim, next, .. } => {
                 self.handle_include(&header, verbatim, next)?;
             }
@@ -2697,7 +2722,7 @@ impl<'a, 'b> Expander<'a, 'b> {
         let mut lexer = Lexer::new(text, self.interner);
         let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
         let disp = self.display();
-        let trees = crate::tree::collect_trees(toks, &disp, &*self.interner)?;
+        let trees = crate::tree::collect_trees(toks, &disp, &*self.interner, self.files.opts.assembler)?;
         let stop_at = self.trees.remaining();
         self.trees.prepend_extend(trees.into_iter());
         while self.trees.remaining() > stop_at {

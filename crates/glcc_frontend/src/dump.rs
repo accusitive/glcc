@@ -282,6 +282,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             }
             format!("({} {} :{})", if *ctz { "ctz" } else { "clz" }, parts.join(" "), t)
         }
+        CheckedExprKind::Bswap { arg, .. } => format!("(bswap {} :{})", dump_ex(arg, sema, interner), t),
         CheckedExprKind::Rotate { left, arg, count, .. } => format!(
             "({} {} {} :{})",
             if *left { "rotate-left" } else { "rotate-right" },

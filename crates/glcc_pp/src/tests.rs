@@ -799,3 +799,59 @@ fn include_operand_expands_function_like_macros() {
     assert!(got.contains("from_header"), "{got}");
     assert!(got.contains("int y;"), "{got}");
 }
+
+#[test]
+fn non_assembler_mode_errors_on_unknown_directive() {
+    let e = pp("#bogus x\nint y;\n").unwrap_err();
+    assert!(e.0.contains("unknown directive '#bogus'"), "{e}");
+}
+
+#[test]
+fn assembler_mode_passes_unknown_directives_through_verbatim() {
+    let o = PpOptions { assembler: true, ..opts() };
+    let src = "# Setup for GCC\n#APP\nnop\n#NO_APP\n\t# indented tail\n";
+    assert_eq!(preprocess(src, "t.S", &o).unwrap(), src);
+}
+
+#[test]
+fn assembler_mode_comments_do_not_expand_macros() {
+    let o = PpOptions {
+        assembler: true,
+        defines: vec![("reload".to_string(), Some("KILLED".to_string()))],
+        ..opts()
+    };
+    let got = preprocess("#define K 7\n# reload K now\nint v = K;\n", "t.S", &o).unwrap();
+    assert!(got.contains("# reload K now"), "{got}");
+    assert!(got.contains("int v = 7;"), "{got}");
+}
+
+#[test]
+fn assembler_mode_keeps_known_directives_working() {
+    let o = PpOptions { assembler: true, ..opts() };
+    let src = "#define FOO 3\nint v = FOO;\n#if FOO != 3\n#error wrong\n#endif\n# plain comment\n";
+    let got = preprocess(src, "t.S", &o).unwrap();
+    assert!(got.contains("int v = 3;"), "{got}");
+    assert!(got.contains("# plain comment"), "{got}");
+    assert!(!got.contains("#error"), "{got}");
+}
+
+#[test]
+fn assembler_mode_linemarkers_still_remap() {
+    let dir = test_dir("asmlin");
+    let inc = dir.join("sub.S");
+    write_file(&inc, "int from_inc;\n");
+    let main = dir.join("m.S");
+    write_file(&main, "# a comment\n#include \"sub.S\"\n# 5 \"foo.S\" 1\nint y;\n");
+    let o = PpOptions { linemarkers: true, assembler: true, ..opts() };
+    let got = preprocess(&std::fs::read_to_string(&main).unwrap(), &main.display().to_string(), &o).unwrap();
+    let main_d = main.display().to_string();
+    assert!(got.starts_with(&marker(1, &main_d)), "was:\n{got}");
+    assert!(got.contains(" # a comment\n"), "was:\n{got}");
+    assert!(got.contains("int from_inc;\n"), "was:\n{got}");
+    // The `# 5 "foo.S" 1` input linemarker is consumed (not passed
+    // through as a comment): the line number remaps so `int y;`
+    // accounts as line 5, exactly like C mode (no file-rename marker).
+    assert!(got.contains(&format!("{}\n\nint y;\n", marker_flag(3, &main_d, 2))), "was:\n{got}");
+    assert!(!got.contains("foo.S"), "was:\n{got}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

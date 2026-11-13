@@ -213,3 +213,111 @@ driver's warn-and-continue on unknown flags, so `-mno-red-zone`,
 `-mcmodel=kernel`, `-fno-omit-frame-pointer` etc. are silently *ignored* —
 fine for compiling, but any runtime experiment with this kernel needs them
 revisited.
+
+Sections 1–6 above are fixed (2026-11-12). The next C-side wave, by error
+count in the post-fix build log, is the two below. The glasm macro family
+(`.macro`/`.endm`/`.if`/`.endif`/`.else`/`.rept`/`.irp`/`.fill`/`.code16/32/64`,
+~700 error lines, blocks `arch/x86/entry/entry.S`) is deliberately deferred —
+it is a much bigger chunk of assembler work.
+
+## 8. frontend: `packed` on enums (252 errors)
+
+**Symptom.** `_Static_assert(sizeof(enum rw_hint) == 1)` fails everywhere
+`include/linux/rw_hint.h` is included. The kernel declares
+
+```c
+enum rw_hint { WRITE_LIFE_NOT_SET = 0, …, WRITE_LIFE_EXTREME } __packed;
+```
+
+GCC's packed-enum extension shrinks the representation to the smallest
+integer type that holds every enumerator — here one byte.
+
+**Root cause.** Two gaps, both cheap:
+- `parse_enum` (`crates/glcc_frontend/src/parse.rs:6200`) ends with
+  `self.skip_gnu_suffixes()` (parse.rs:6216 → parse.rs:5589), which *parses
+  and discards* trailing `__attribute__((packed))`. The struct path right
+  next door (`parse.rs:5509`–5523, "Trailing attributes") shows the shape:
+  collect `GnuAttributes`, set `def.packed = true`.
+- `EnumDef` (`crates/glcc_frontend/src/sema.rs:52`) has no `packed` field at
+  all, and the representation ladder in `parse_enumerator_list`
+  (parse.rs:6293–6408: starts at `int`, widens via `enum_ladder_rank`,
+  flips to unsigned when all values are non-negative) has no packed tier —
+  it can never go *below* `int`.
+
+**Fix sketch.**
+- Add `pub packed: bool` to `EnumDef` (default false), threaded through
+  `complete_enum_tag` like `fixed`. Packed-ness is fixed at completion,
+  same as `repr` — forward declarations share the `EnumId`, so nothing
+  else changes.
+- In `parse_enum`, replace `skip_gnu_suffixes()` with
+  `parse_gnu_annotations()` and read `attrs.is_packed()` (same helper the
+  struct path uses), passing it into `complete_enum_tag`.
+- Extend the ladder: when packed, *after* the existing widen/unsigned logic,
+  shrink to the first fitting type of `unsigned char`/`signed char` →
+  `unsigned short`/`short` → `unsigned int`/`int` → … using the existing
+  `enum_value_fits` (parse.rs:6243) over the completed min/max. GCC picks
+  unsigned when every value is non-negative — differential-test the sign
+  choice against the host `gcc` rather than guessing (a one-line
+  `enum { A } __attribute__((packed));` + `sizeof`). A C23 `enum E : T`
+  fixed underlying type wins over packed (GCC warns/errors in some
+  versions; pin whatever gcc does).
+- The ripple is mostly free: layout, `sizeof`, conversions, and promotions
+  all key off `repr` already (check/mod.rs:679–703 promotes enums to their
+  repr unless it is `int` — a `uchar`-repr enum still promotes to `int` in
+  arithmetic, exactly like GCC; `enum_repr_pair` at check/mod.rs:1189 keys
+  off repr too). Watch `complete_enum_tag`'s re-declaration compatibility
+  check so a later redecl without `__packed` still matches.
+
+**Verify.**
+```c
+enum hint { A = 0, B, C, D, E } __attribute__((packed));
+_Static_assert(sizeof(enum hint) == 1, "packed enum");
+int f(void) { return B + 1; }   // arithmetic still promotes to int
+```
+compile at -O0 and -O2, run, and diff `sizeof` against the host gcc. Kernel
+check: the `sizeof(enum rw_hint) == 1` cluster (252 errors) disappears.
+
+## 9. frontend: `__builtin_bswap16/32/64` don't const-fold (26 errors)
+
+**Symptom.** `error: case label is not an integer constant expression` on
+the kernel's ethertype switch (`include/linux/netdevice.h:4876`):
+
+```c
+case (( __be16)(__u16)__builtin_bswap16((__u16)((0x0800)))):
+```
+
+**Root cause.** bswap goes through the generic builtin-prototype path
+(`check/prototypes.rs:73`–75) and is checked as an ordinary call, so it
+lands in `CheckedExprKind::Call` — which `eval_const` rejects wholesale
+(`eval.rs:1052`). The case-label check (`parse.rs:2581`) folds the label and
+fails. Runtime lowering is fine already (`ScalarBuiltin::Bswap`,
+`glcc_lower_mir/src/lower/builtin.rs:51`); only const-eval is missing.
+
+**Fix sketch.** Fold at check time, no new node kind: in the builtin-check
+path, intercept `__builtin_bswap16/32/64` before the generic-call fallback.
+If the argument folds via `eval_const`, emit a constant node with the byte
+order reversed at the argument's width, typed as the prototype's result type
+(`UnsignedShort`/`UnsignedInt`/`UnsignedLongLong`); otherwise fall back to
+the existing call so the runtime path is untouched. Care points:
+- The fold happens *after* the usual implicit conversions, at the
+  prototype's parameter type — `bswap16(0x0800u)` swaps a `u16`, i.e.
+  `0x0008`, regardless of the source literal's width.
+- Keep the existing should-panic substrings intact; this only *adds* folds,
+  never new errors. (The same treatment would cover the clz family later if
+  the kernel needs it, but bswap is the only cluster in the log.)
+- Mirroring precedent: `__builtin_constant_p` folds to
+  `CheckedExprKind::ConstantP` (`eval.rs:985`) and `__builtin_clzg` gets its
+  own `CheckedExprKind::Clz` (`check/gnu.rs:123`). A dedicated
+  `CheckedExprKind::Bswap` + `eval_const` arm is the more uniform shape if
+  folding at check time fights the AST; try check-time folding first since
+  it touches one site.
+
+**Verify.**
+```c
+_Static_assert(__builtin_bswap32(0x12345678u) == 0x78563412u, "bswap");
+unsigned short g(unsigned short x) { return __builtin_bswap16(x); }
+int main(void) { return g(0x0102) == 0x0201 ? 0 : 1; }
+```
+must compile at -O0 and -O2 and run correctly (the non-constant path still
+goes through `ScalarBuiltin::Bswap`). Kernel check: the netdevice.h
+case-label cluster (26 errors) disappears.

@@ -142,7 +142,7 @@ extra:  ret
     // .pushsection must place subsequent code in its section.
     assert!(stmts.iter().any(|s| matches!(
         s,
-        glasm::Stmt::Section(spec) if spec.name == ".text.extra"
+        glasm::Stmt::PushSection(spec) if spec.name == ".text.extra"
     )));
 }
 
@@ -223,4 +223,190 @@ fp:     .quad target
     );
     // 5*3+1 + 6*3+1 + 7*3+1 = 16+19+22; the skipped movq must not fire.
     assert_eq!(code, Some(57));
+}
+
+#[test]
+fn pushsection_popsection_restores_section() {
+    // The kernel emits exception-table entries this way inside function
+    // bodies; the two nops must end up back in .text.
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+        nop
+        .pushsection .foo,"a"
+        .long 1
+        .popsection
+        nop
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let text = obj.section_by_name(".text").expect(".text");
+    assert_eq!(text.data().unwrap(), &[0x90, 0x90][..]);
+    let foo = obj.section_by_name(".foo").expect(".foo");
+    assert_eq!(foo.data().unwrap(), &[1, 0, 0, 0][..]);
+}
+
+#[test]
+fn previous_restores_last_section() {
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+        nop
+        .section .foo,"a"
+        .long 1
+        .previous
+        nop
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let text = obj.section_by_name(".text").expect(".text");
+    assert_eq!(text.data().unwrap(), &[0x90, 0x90][..]);
+    let foo = obj.section_by_name(".foo").expect(".foo");
+    assert_eq!(foo.data().unwrap(), &[1, 0, 0, 0][..]);
+}
+
+#[test]
+fn nested_pushsections() {
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+        nop
+        .pushsection .foo,"a"
+        .long 1
+        .pushsection .bar,"a"
+        .long 2
+        .popsection
+        .long 3
+        .popsection
+        nop
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let text = obj.section_by_name(".text").expect(".text");
+    assert_eq!(text.data().unwrap(), &[0x90, 0x90][..]);
+    let foo = obj.section_by_name(".foo").expect(".foo");
+    assert_eq!(foo.data().unwrap(), &[1, 0, 0, 0, 3, 0, 0, 0][..]);
+    let bar = obj.section_by_name(".bar").expect(".bar");
+    assert_eq!(bar.data().unwrap(), &[2, 0, 0, 0][..]);
+}
+
+#[test]
+fn set_directive() {
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+f:      nop
+        .set sz, .-f
+        .globl sz
+        .set K, 42
+        .quad K
+        .set K, 43
+        .quad K
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection, ObjectSymbol};
+    let sz = obj
+        .symbols()
+        .find(|s| s.name().unwrap_or("") == "sz")
+        .expect("sz symbol");
+    assert_eq!(sz.address(), 1);
+    assert!(matches!(sz.section(), object::SymbolSection::Absolute), "sz must be absolute");
+    let text = obj.section_by_name(".text").expect(".text");
+    let mut want = vec![0x90u8];
+    want.extend_from_slice(&42i64.to_le_bytes());
+    want.extend_from_slice(&43i64.to_le_bytes());
+    assert_eq!(text.data().unwrap(), &want[..]);
+}
+
+#[test]
+fn quoted_section_name() {
+    // EXPORT_SYMBOL emits `.section ".export_symbol","a"`.
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .section ".foo","a"
+        .long 1
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let foo = obj.section_by_name(".foo").expect(".foo");
+    assert_eq!(foo.data().unwrap(), &[1, 0, 0, 0][..]);
+}
+
+#[test]
+fn quoted_pushsection_name() {
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+        nop
+        .pushsection ".foo","a"
+        .long 1
+        .popsection
+        nop
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let text = obj.section_by_name(".text").expect(".text");
+    assert_eq!(text.data().unwrap(), &[0x90, 0x90][..]);
+    let foo = obj.section_by_name(".foo").expect(".foo");
+    assert_eq!(foo.data().unwrap(), &[1, 0, 0, 0][..]);
+}
+
+#[test]
+fn star_multiplies_in_displacement() {
+    // `1*8(%rdi)` is a displacement expression: `*` mid-expression is
+    // multiplication, so it must encode like `8(%rdi)`.
+    let scaled = glasm::gas::assemble_to_elf(".text\n movq %rax,1*8(%rdi)\n", glasm::Arch::X86_64).expect("assemble");
+    let plain = glasm::gas::assemble_to_elf(".text\n movq %rax,8(%rdi)\n", glasm::Arch::X86_64).expect("assemble");
+    assert_eq!(scaled, plain);
+}
+
+#[test]
+fn leading_star_is_still_indirect() {
+    // The leading indirect position (`call *%rax`) is consumed before
+    // the displacement expression runs; it must stay FF /2 (mod=11).
+    let bytes = glasm::gas::assemble_to_elf(".text\n call *%rax\n", glasm::Arch::X86_64).expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSection};
+    let text = obj.section_by_name(".text").expect(".text");
+    assert_eq!(text.data().unwrap(), &[0xff, 0xd0][..]);
+}
+
+#[test]
+fn set_assignment_alias() {
+    // `symbol = expression` is the .set alias GAS also accepts.
+    let bytes = glasm::gas::assemble_to_elf(
+        r#"
+        .text
+f:      nop
+sz = . - f
+        .globl sz
+    "#,
+        glasm::Arch::X86_64,
+    )
+    .expect("assemble");
+    let obj = object::File::parse(&*bytes).expect("parse object");
+    use object::read::{Object, ObjectSymbol};
+    let sz = obj
+        .symbols()
+        .find(|s| s.name().unwrap_or("") == "sz")
+        .expect("sz symbol");
+    assert_eq!(sz.address(), 1);
 }

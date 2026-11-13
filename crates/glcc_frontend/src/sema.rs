@@ -63,6 +63,11 @@ pub struct EnumDef {
     /// C23 `enum E : type`: the declared underlying type, retained so
     /// later declarations must agree with it.
     pub fixed: Option<Ty>,
+    /// GNU `__attribute__((packed))`: `repr` was shrunk below the C23
+    /// ladder to the smallest type holding every enumerator. Recorded
+    /// so diagnostics can tell a shrunk enum from a fixed one; a
+    /// fixed underlying type wins over packed (GCC ignores it there).
+    pub packed: bool,
     pub span: Span,
 }
 
@@ -1077,6 +1082,7 @@ impl<'a> Sema<'a> {
             // for every enum without out-of-range sentinels.
             repr: Ty::Int,
             fixed: None,
+            packed: false,
             span,
         });
         self.scopes.insert(Ns::EnumTag, tag, id);
@@ -1093,6 +1099,7 @@ impl<'a> Sema<'a> {
             complete: false,
             repr: Ty::Int,
             fixed: None,
+            packed: false,
             span,
         });
         id
@@ -1121,7 +1128,7 @@ impl<'a> Sema<'a> {
 
     // Attach the parsed enumerator list, completing the type.
     // Completing an already-complete tag again is a redefinition.
-    pub fn complete_enum_tag(&mut self, id: EnumId, enumerators: Vec<Enumerator>, repr: Ty, fixed: Option<Ty>) -> Result<(), CompileError> {
+    pub fn complete_enum_tag(&mut self, id: EnumId, enumerators: Vec<Enumerator>, repr: Ty, fixed: Option<Ty>, packed: bool) -> Result<(), CompileError> {
         self.set_enum_fixed(id, fixed, self.enums[id.0 as usize].span)?;
         let def = &mut self.enums[id.0 as usize];
         if def.complete {
@@ -1129,6 +1136,7 @@ impl<'a> Sema<'a> {
         }
         def.enumerators = enumerators;
         def.repr = repr;
+        def.packed = packed;
         def.complete = true;
         Ok(())
     }
@@ -1512,6 +1520,10 @@ fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits:
             ctz: *ctz,
             arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
             fallback: fallback.map(|e| &*arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        },
+        CheckedExprKind::Bswap { arg, bits } => CheckedExprKind::Bswap {
+            arg: arena.alloc(remap_expr_ident(arg, arena, inits, map)),
+            bits: *bits,
         },
         CheckedExprKind::Rotate { left, arg, count, bits } => CheckedExprKind::Rotate {
             left: *left,

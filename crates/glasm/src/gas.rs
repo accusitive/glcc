@@ -433,10 +433,8 @@ const IGNORED_DIRECTIVES: &[&str] = &[
     "type",
     "local",
     "extern",
-    "previous",
     "end",
     "appfile",
-    "popsection",
     "appline",
     "line",
     "loc",
@@ -451,7 +449,6 @@ const IGNORED_DIRECTIVES: &[&str] = &[
     "warn",
     "err",
     "print",
-    "popsection",
     "pushsection_nop",
     "stabn",
     "stabs",
@@ -529,6 +526,14 @@ fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, ar
         return Ok(out);
     }
 
+    // `symbol = expression` assignment (the `.set` alias).
+    if let (Some(GTok::Ident(name)), Some(GTok::Punct("="))) = (g.get(i), g.get(i + 1)) {
+        let mut t = GToks { g: &g, pos: i + 2 };
+        let value = t.expr(lineno, numlabels)?;
+        out.push(Stmt::Set { name: name.clone(), value, line: line_no });
+        return Ok(out);
+    }
+
     match &g[i] {
         GTok::Ident(word) if word.starts_with('.') => {
             out.push(parse_directive(&g[i..], line_no, lineno, numlabels, arch)?);
@@ -555,9 +560,23 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
         "data" => Ok(section_stmt(".data", SectionKind::Data, None)),
         "bss" => Ok(section_stmt(".bss", SectionKind::Bss, None)),
         "rodata" => Ok(section_stmt(".rodata", SectionKind::Rodata, None)),
-        // .pushsection behaves like .section for the common single-level
-        // case; a matching .popsection is a no-op (no section stack).
-        "section" | "pushsection" => parse_section(&mut t),
+        // .section and .pushsection share the spec grammar; pushsection
+        // additionally saves the section active before it for
+        // .popsection/.previous (assemble.rs keeps the stack).
+        "section" => Ok(Stmt::Section(parse_section(&mut t)?)),
+        "pushsection" => Ok(Stmt::PushSection(parse_section(&mut t)?)),
+        "previous" => Ok(Stmt::Previous(line_no)),
+        "popsection" => Ok(Stmt::PopSection(line_no)),
+        "set" => {
+            let Some(GTok::Ident(name)) = t.bump().cloned() else {
+                return Err("expected symbol name after .set".into());
+            };
+            if !t.eat_punct(",") {
+                return Err("expected `,' after .set symbol".into());
+            }
+            let value = t.expr(lineno, numlabels)?;
+            Ok(Stmt::Set { name, value, line: line_no })
+        }
         "globl" | "global" | "weak" | "extern" => {
             let mut names = Vec::new();
             while let Some(GTok::Ident(n)) = t.bump() {
@@ -693,9 +712,14 @@ fn section_stmt(name: &str, kind: SectionKind, align: Option<u64>) -> Stmt {
     })
 }
 
-fn parse_section(t: &mut GToks) -> Result<Stmt, String> {
-    let Some(GTok::Ident(name)) = t.bump().cloned() else {
-        return Err("expected section name".into());
+fn parse_section(t: &mut GToks) -> Result<crate::insn::SectionSpec, String> {
+    // The name is usually a bare ident, but the kernel's EXPORT_SYMBOL
+    // expansion quotes it (`.section ".export_symbol","a"`); a quoted
+    // name is the literal string, no escapes in practice.
+    let name = match t.bump().cloned() {
+        Some(GTok::Ident(name)) => name,
+        Some(GTok::Str(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
+        _ => return Err("expected section name".into()),
     };
     // Attributes: `.section name, "flags", @type`.
     let mut write = false;
@@ -734,11 +758,11 @@ fn parse_section(t: &mut GToks) -> Result<Stmt, String> {
         write = true;
     }
     let align = None;
-    Ok(Stmt::Section(crate::insn::SectionSpec {
+    Ok(crate::insn::SectionSpec {
         name: name.clone(),
         flags: crate::insn::SectionFlags::Custom { write, exec, nobits, align },
         align: None,
-    }))
+    })
 }
 
 /// Wrapper over GAS tokens for operand/directive parsing.
@@ -793,6 +817,10 @@ impl GToks<'_> {
                     GTok::Ident(_)
                     | GTok::Int(_)
                     | GTok::NumRef(..)
+                    // `*` lexes as Star; mid-expression it is
+                    // multiplication (the leading indirect position is
+                    // consumed before expr runs).
+                    | GTok::Star
                     | GTok::Punct("+")
                     | GTok::Punct("-")
                     | GTok::Punct("*")
@@ -824,7 +852,10 @@ impl GToks<'_> {
                     paren = paren.saturating_sub(1);
                     toks.push(Tok::Punct(")"));
                 }
+                GTok::Star => toks.push(Tok::Punct("*")),
                 GTok::Punct(p) => toks.push(Tok::Punct(p)),
+                // GAS's `.` (current location) maps onto the nasm-side `$`.
+                GTok::Ident(n) if n == "." => toks.push(Tok::Punct("$")),
                 GTok::Ident(n) => toks.push(Tok::Ident(n.clone())),
                 GTok::Int(v) => toks.push(Tok::Int(*v)),
                 GTok::NumRef(d, fwd) => {

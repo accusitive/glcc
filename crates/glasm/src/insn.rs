@@ -203,6 +203,20 @@ pub enum Stmt {
     Weak(Vec<String>, u32),
     Extern(Vec<String>, u32),
     Section(SectionSpec),
+    /// `.pushsection`: like `.section` but the section active before it
+    /// is saved for the matching `.popsection`.
+    PushSection(SectionSpec),
+    /// `.popsection` / `.previous`: restore a section saved by
+    /// `.pushsection` / `.section`.
+    PopSection(u32),
+    Previous(u32),
+    /// GAS `.set`/`symbol =`: define or reassign a symbol to an
+    /// expression value (absolute, or section-relative via `.`).
+    Set {
+        name: String,
+        value: Expr,
+        line: u32,
+    },
     /// Default operand size (`bits 16/32/64`); only 64 is supported.
     Bits(u8, u32),
     /// `times N <inner>`; N must eventually be constant.
@@ -233,9 +247,12 @@ impl Stmt {
             | Stmt::Extern(_, l)
             | Stmt::Bits(_, l)
             | Stmt::Times { line: l, .. }
-            | Stmt::Comm { line: l, .. } => *l,
+            | Stmt::Comm { line: l, .. }
+            | Stmt::PopSection(l)
+            | Stmt::Previous(l) => *l,
+            Stmt::Set { line: l, .. } => *l,
             Stmt::Insn(i) => i.line(),
-            Stmt::Section(_) => 0,
+            Stmt::Section(_) | Stmt::PushSection(_) => 0,
         }
     }
 }

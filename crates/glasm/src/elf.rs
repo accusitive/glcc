@@ -59,8 +59,12 @@ pub(crate) fn write_elf(module: &Module, backend: &dyn Backend) -> Result<Vec<u8
             SymbolScope::Linkage
         };
         let section = match (sym.extern_, sym.sect) {
-            (true, _) | (_, None) => SymbolSection::Undefined,
+            (true, _) => SymbolSection::Undefined,
             (false, Some(si)) => SymbolSection::Section(section_ids[si]),
+            // Defined with no section: an absolute symbol (.set of a
+            // constant expression).
+            (false, None) if sym.defined => SymbolSection::Absolute,
+            (false, None) => SymbolSection::Undefined,
         };
         let kind = match sym.sect.map(|si| &module.sections[si].flags) {
             Some(SectionFlags::Text) => SymbolKind::Text,

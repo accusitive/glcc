@@ -68,6 +68,32 @@ pub(super) fn typed_overflow_builtin(name: &str) -> Option<(OverflowOp, Ty)> {
 }
 
 impl<'a> Sema<'a> {
+    /// `__builtin_bswap16/32/64(x)`: byte-order reversal at the
+    /// prototype's fixed width. The operand converts to the parameter
+    /// type *before* anything else — `bswap16(0x0800u)` swaps a `u16`,
+    /// i.e. `0x0008`, regardless of the source literal's width — and
+    /// constant operands fold in `eval_const` (the kernel's ethertype
+    /// `case` labels are `bswap` of literals).
+    pub(super) fn check_bswap(&self, name: &str, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        let (bits, param) = match name {
+            "__builtin_bswap16" => (16, Ty::UnsignedShort),
+            "__builtin_bswap32" => (32, Ty::UnsignedInt),
+            _ => (64, Ty::UnsignedLongLong),
+        };
+        let [arg] = args else {
+            return Err(CompileError::new(format!("`{name}` takes exactly one argument"), span));
+        };
+        let checked = self.convert_for_assignment(&param, self.check_expr(arg, interner)?, interner)?;
+        Ok(CheckedExpr {
+            ty: param,
+            span,
+            kind: CheckedExprKind::Bswap {
+                arg: self.alloc(checked),
+                bits,
+            },
+        })
+    }
+
     /// `__builtin_await(handle)` (glcc extension): checks the operand
     /// to be a `_Future(T)` handle and yields a node of type `T`. Only
     /// valid inside an async function — elsewhere there is no

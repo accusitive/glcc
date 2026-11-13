@@ -1049,6 +1049,22 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             };
             Some(Value::Int(rotated as i128))
         }
+        // `__builtin_bswap16/32/64`: reverse the bytes of a constant
+        // at the builtin's fixed width (the operand was already
+        // converted to that width at check time).
+        CheckedExprKind::Bswap { arg, bits } => {
+            let Some(Value::Int(value)) = eval_const(arg, sema, interner) else {
+                return None;
+            };
+            let mask = if *bits == 128 { u128::MAX } else { (1u128 << *bits) - 1 };
+            let mut value = (value as u128) & mask;
+            let mut swapped = 0u128;
+            for _ in 0..*bits / 8 {
+                swapped = (swapped << 8) | (value & 0xff);
+                value >>= 8;
+            }
+            Some(Value::Int(swapped as i128))
+        }
         CheckedExprKind::Call { .. }
         | CheckedExprKind::Shuffle { .. }
         | CheckedExprKind::ShuffleVector { .. }

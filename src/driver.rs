@@ -1215,6 +1215,8 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         let text = decode_source(&bytes);
         let mut opts = glcc_pp::cpp_flags_to_opts(&job.cpp, &input.to_string_lossy());
         opts.linemarkers = !job.cpp.iter().any(|a| a == "-P");
+        // `.S` is assembler-with-cpp: GAS comments (`# ...`) pass through.
+        opts.assembler = Path::new(input).extension().is_some_and(|e| e == "S");
         opts.target = Some(job.target);
         let std = pp_std_flag(job);
         opts.std = std.clone();

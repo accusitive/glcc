@@ -456,6 +456,10 @@ pub struct PpOptions {
     /// `-trigraphs`/`-no-trigraphs`; `None` follows the standard level
     /// (enabled before C23, disabled from C23 on).
     pub trigraphs: Option<bool>,
+    /// Assembler-with-cpp mode (`.S` inputs): an unrecognized `#word`
+    /// line is a GAS comment, passed through verbatim instead of an
+    /// error. Known directives and `# <n>` linemarkers keep working.
+    pub assembler: bool,
 }
 
 /// The clang resource include directory of an include list, when the
@@ -782,7 +786,7 @@ fn seed_macros(pairs: &[(String, String)], filename: &str, interner: &mut Intern
         let toks = lexer.lex_pp_all();
         let file = interner.get_or_intern(filename);
         let rest: Vec<Tok> = toks.into_iter().map(|t| Tok::from_pp(&t, file, false, false)).collect();
-        let control = parse_control_line(&rest, filename, 1, interner)?;
+        let control = parse_control_line(&rest, filename, 1, interner, false)?;
         match control {
             ControlLine::DefineObject { macro_name, replacement } => {
                 let sym = interner.get_or_intern(macro_name);
@@ -837,7 +841,7 @@ fn run_source(
         eprintln!("DBG lex {}: {} toks, {} newlines, max line {}", path.display(), toks.len(), nl, mx);
     }
     let disp_str = interner.resolve(display).unwrap_or("").to_string();
-    let trees = tree::collect_trees(toks, &disp_str, interner)?;
+    let trees = tree::collect_trees(toks, &disp_str, interner, opts.assembler)?;
     if entered && opts.linemarkers {
         push_marker(&mut ctx.out, &marker_flag(1, &disp_str, 1));
     }

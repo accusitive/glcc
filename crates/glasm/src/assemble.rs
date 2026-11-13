@@ -286,6 +286,10 @@ fn run_pass(
     let mut cur_sect = 0usize;
     let mut cur_off = 0i64;
     let mut insn_index = 0usize;
+    // GAS section stack: `.section`/`.pushsection` save the section
+    // active before them, `.previous`/`.popsection` restore it.
+    let mut prev_sect: Option<usize> = None;
+    let mut sect_stack: Vec<(Option<usize>, usize)> = Vec::new();
     for stmt in stmts {
         match stmt {
             Stmt::Label(name, line) => {
@@ -305,11 +309,83 @@ fn run_pass(
             }
             Stmt::Global(..) | Stmt::Weak(..) | Stmt::Extern(..) => {}
             Stmt::Section(spec) => {
+                prev_sect = Some(cur_sect);
                 cur_sect = ensure_section(sections, &spec.name, spec.flags.clone());
                 if let Some(a) = spec.align {
                     sections[cur_sect].align = a.max(sections[cur_sect].align);
                 }
                 cur_off = sections[cur_sect].data.len() as i64;
+            }
+            Stmt::PushSection(spec) => {
+                sect_stack.push((prev_sect, cur_sect));
+                prev_sect = Some(cur_sect);
+                cur_sect = ensure_section(sections, &spec.name, spec.flags.clone());
+                if let Some(a) = spec.align {
+                    sections[cur_sect].align = a.max(sections[cur_sect].align);
+                }
+                cur_off = sections[cur_sect].data.len() as i64;
+            }
+            Stmt::PopSection(line) => match sect_stack.pop() {
+                Some((prev, sect)) => {
+                    prev_sect = prev;
+                    cur_sect = sect;
+                    cur_off = sections[cur_sect].data.len() as i64;
+                }
+                None => errors.push(AsmError {
+                    line: *line,
+                    msg: ".popsection without matching .pushsection".into(),
+                }),
+            },
+            Stmt::Previous(line) => match prev_sect {
+                Some(sect) => {
+                    prev_sect = Some(cur_sect);
+                    cur_sect = sect;
+                    cur_off = sections[cur_sect].data.len() as i64;
+                }
+                None => errors.push(AsmError {
+                    line: *line,
+                    msg: ".previous without matching .section".into(),
+                }),
+            },
+            Stmt::Set { name, value, line } => {
+                let tab = SymTab { syms: symbols, undefined };
+                let ctx = EvalCtx {
+                    cur_sect,
+                    cur_off,
+                    syms: &tab,
+                    optimistic: true,
+                    unknown_hit: None,
+                };
+                let evaluated = value.eval(&ctx);
+                drop(ctx);
+                match evaluated {
+                    Ok(RValue::Const(c)) => {
+                        let i = intern(symbols, name);
+                        let s = &mut symbols[i];
+                        s.defined = true;
+                        s.seen = true;
+                        s.extern_ = false;
+                        s.sect = None;
+                        s.value = c;
+                    }
+                    Ok(RValue::SectVal { sect, off, .. }) => {
+                        let i = intern(symbols, name);
+                        let s = &mut symbols[i];
+                        s.defined = true;
+                        s.seen = true;
+                        s.extern_ = false;
+                        s.sect = Some(sect);
+                        s.value = off;
+                    }
+                    Ok(RValue::ExternRef { sym, .. }) => {
+                        let name = symbols[sym].name.clone();
+                        errors.push(AsmError {
+                            line: *line,
+                            msg: format!("cannot set `{name}' to an external symbol"),
+                        });
+                    }
+                    Err(m) => errors.push(AsmError { line: *line, msg: m }),
+                }
             }
             Stmt::Bits(bits, line) => {
                 if *bits != 64 {
