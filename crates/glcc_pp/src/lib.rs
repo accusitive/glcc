@@ -460,6 +460,10 @@ pub struct PpOptions {
     /// line is a GAS comment, passed through verbatim instead of an
     /// error. Known directives and `# <n>` linemarkers keep working.
     pub assembler: bool,
+    /// `-dM`: instead of the expanded text, emit `#define NAME body`
+    /// lines for every macro defined at the end of preprocessing
+    /// (builtins and `-D` included), sorted by name like clang.
+    pub dump_macros: bool,
 }
 
 /// The clang resource include directory of an include list, when the
@@ -527,13 +531,17 @@ pub(crate) struct Ctx {
     pub once: HashSet<PathBuf>,
     pub depth: u32,
     pub warnings: Vec<PpWarning>,
+    /// Every file a directive resolved to (main source, `-include`,
+    /// `#include`, `#include_next`, `#embed`, `__has_include` probes),
+    /// in resolution order — the input for `-MD`-style depfiles.
+    pub deps: Vec<PathBuf>,
 }
 
 impl Ctx {
     /// Search for a header: quoted tries the includer's directory first,
     /// then `-I` paths; bracketed tries `-I` paths only. With `after`,
     /// resume past the current file (`#include_next`).
-    pub fn resolve_header(&self, name: &str, quoted: bool, after: Option<FoundKind>, dir: &Path, loc: &str) -> Result<(PathBuf, FoundKind), PpError> {
+    pub fn resolve_header(&mut self, name: &str, quoted: bool, after: Option<FoundKind>, dir: &Path, loc: &str) -> Result<(PathBuf, FoundKind), PpError> {
         let start = match after {
             None | Some(FoundKind::Start) | Some(FoundKind::QuoterDir) => None,
             Some(FoundKind::Index(i)) => Some(i + 1),
@@ -541,6 +549,7 @@ impl Ctx {
         if quoted && after.is_none() {
             let cand = dir.join(name);
             if cand.is_file() {
+                self.deps.push(cand.clone());
                 return Ok((cand, FoundKind::QuoterDir));
             }
         }
@@ -557,6 +566,7 @@ impl Ctx {
                 if self.skips_clang_intrinsic(p, name) {
                     continue;
                 }
+                self.deps.push(cand.clone());
                 return Ok((cand, FoundKind::Index(i)));
             }
         }
@@ -690,6 +700,13 @@ pub fn preprocess(source: &str, filename: &str, opts: &PpOptions) -> Result<Stri
 /// [`preprocess`], also returning the `#warning` diagnostics it emitted
 /// (including from included files).
 pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) -> Result<(String, Vec<PpWarning>), PpError> {
+    preprocess_with_all(source, filename, opts).map(|(text, warnings, _)| (text, warnings))
+}
+
+/// [`preprocess_with_warnings`], also returning the files every
+/// directive resolved to (main source first, then `-include` files,
+/// then headers in resolution order) for depfile generation.
+pub fn preprocess_with_all(source: &str, filename: &str, opts: &PpOptions) -> Result<(String, Vec<PpWarning>, Vec<PathBuf>), PpError> {
     let source = translate_source(source, opts);
     let mut interner = Interner::new();
     let mut ctx = Ctx {
@@ -698,6 +715,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
         once: HashSet::new(),
         depth: 0,
         warnings: Vec::new(),
+        deps: Vec::new(),
     };
     let mut macros: HashMap<SymbolU32, MacroDef> = HashMap::new();
     seed_macros(&opts.predefined, filename, &mut interner, &mut macros)?;
@@ -719,6 +737,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
     let main_path = PathBuf::from(filename);
     let main_dir = main_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let main_display = interner.get_or_intern(filename);
+    ctx.deps.push(main_path.clone());
     // `-include` files come first, as if included at line 1. They are
     // command-line inclusions, so a relative name resolves against the
     // working directory, not the main source's directory (kbuild passes
@@ -728,6 +747,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
             .resolve_header(&pre, true, None, Path::new("."), filename)
             .map_err(|_| err(format!("{filename}: -include '{pre}' not found")))?;
         let canon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+        ctx.deps.push(canon.clone());
         if ctx.once.contains(&canon) {
             continue;
         }
@@ -772,7 +792,54 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
     } else if !ctx.out.ends_with('\n') {
         ctx.out.push('\n');
     }
-    Ok((ctx.out, ctx.warnings))
+    if opts.dump_macros {
+        ctx.out = dump_macros(&interner, &macros);
+    }
+    Ok((ctx.out, ctx.warnings, ctx.deps))
+}
+
+/// `-dM`: every macro defined at the end of preprocessing, as
+/// `#define` lines sorted by name (clang's ordering).
+fn dump_macros(interner: &Interner, macros: &HashMap<SymbolU32, MacroDef>) -> String {
+    use substitute::render_raw;
+    use std::fmt::Write as _;
+    let mut defs: Vec<(String, &MacroDef)> = macros
+        .iter()
+        .map(|(sym, def)| (interner.resolve(*sym).unwrap_or("").to_string(), def))
+        .collect();
+    defs.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut out = String::new();
+    for (name, def) in defs {
+        match def {
+            MacroDef::Object(body) => {
+                let _ = write!(out, "#define {name}");
+                let body = render_raw(body, interner);
+                if !body.is_empty() {
+                    let _ = write!(out, " {}", body.trim_end());
+                }
+                out.push('\n');
+            }
+            MacroDef::Func { params, variadic, named_variadic, body } => {
+                let mut params = params.join(", ");
+                if *variadic {
+                    if *named_variadic {
+                        params.push_str("...");
+                    } else if params.is_empty() {
+                        params = "...".to_string();
+                    } else {
+                        params.push_str(", ...");
+                    }
+                }
+                let _ = write!(out, "#define {name}({params})");
+                let body = render_raw(body, interner);
+                if !body.is_empty() {
+                    let _ = write!(out, " {}", body.trim_end());
+                }
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Seed the macro table from `(name, replacement)` pairs (predefined

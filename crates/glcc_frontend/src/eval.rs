@@ -907,6 +907,72 @@ pub fn initializer_is_constant(init: &Initializer, sema: &Sema, interner: &Inter
     }
 }
 
+/// The bit width an unsigned value occupies per its expression type,
+/// for the bit-count folds. `v` must be non-negative (unsigned
+/// conversions never fold to negatives).
+fn unsigned_width(arg: &CheckedExpr, sema: &Sema, v: &Value) -> Option<(i128, i128)> {
+    let Value::Int(v) = v else { return None };
+    if *v < 0 {
+        return None;
+    }
+    let width = match arg.ty.unqualified() {
+        Ty::Bool | Ty::UnsignedChar | Ty::Char => 8,
+        Ty::UnsignedShort => 16,
+        Ty::UnsignedInt => 32,
+        Ty::UnsignedLong => i128::from(sema.target.long_size * 8),
+        Ty::UnsignedLongLong => i128::from(sema.target.long_long_size * 8),
+        _ => return None,
+    };
+    Some((*v, width))
+}
+
+
+enum BitCount {
+    Clz,
+    Ctz,
+    Popcount,
+    Parity,
+    Clrsb,
+}
+
+/// GCC's fixed-width bit-count builtins (`__builtin_clzll` and
+/// friends) fold when every argument is constant — the
+/// `63 - __builtin_clzll(x)` shapes the kernel's `ilog2` helpers
+/// inline into array bounds. Non-constant calls stay runtime calls.
+fn eval_bitcount_call(func: &CheckedExpr, args: &[CheckedExpr], sema: &Sema, interner: &Interner, addr_conds: bool) -> Option<Value> {
+    let CheckedExprKind::Ident(id) = &func.kind else { return None };
+    let binding = sema.decls.get(id.0 as usize)?;
+    let name = interner.resolve(binding.name?)?;
+    let builtin = match name {
+        "__builtin_clz" | "__builtin_clzl" | "__builtin_clzll" => BitCount::Clz,
+        "__builtin_ctz" | "__builtin_ctzl" | "__builtin_ctzll" => BitCount::Ctz,
+        "__builtin_popcount" | "__builtin_popcountl" | "__builtin_popcountll" => BitCount::Popcount,
+        "__builtin_parity" | "__builtin_parityl" | "__builtin_parityll" => BitCount::Parity,
+        "__builtin_clrsb" | "__builtin_clrsbl" | "__builtin_clrsbll" => BitCount::Clrsb,
+        _ => return None,
+    };
+    let [arg] = args else { return None };
+    let (v, width) = eval_const_in(arg, sema, interner, addr_conds).and_then(|val| unsigned_width(arg, sema, &val))?;
+    Some(match builtin {
+        BitCount::Clz => {
+            if v == 0 {
+                Value::Int(width)
+            } else {
+                Value::Int(width - (128 - v.leading_zeros() as i128))
+            }
+        }
+        BitCount::Ctz => Value::Int(if v == 0 { width } else { v.trailing_zeros() as i128 }),
+        BitCount::Popcount => Value::Int(v.count_ones() as i128),
+        BitCount::Parity => Value::Int((v.count_ones() & 1) as i128),
+        // Redundant sign bits: `clz(x ^ (x >> 1)) - 1` at the operand's
+        // width (the xor's top bit is always clear).
+        BitCount::Clrsb => {
+            let y = v ^ (v >> 1);
+            Value::Int(width - (128 - y.leading_zeros() as i128) - 1)
+        }
+    })
+}
+
 fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_conds: bool) -> Option<Value> {
     match &expr.kind {
         CheckedExprKind::Int(lit) => {
@@ -1065,8 +1131,27 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
             }
             Some(Value::Int(swapped as i128))
         }
-        CheckedExprKind::Call { .. }
-        | CheckedExprKind::Shuffle { .. }
+        CheckedExprKind::ObjectSize(zero) => Some(Value::Int(if *zero { 0 } else { -1 })),
+        CheckedExprKind::Call { func, args } => eval_bitcount_call(func, args, sema, interner, addr_conds),
+        CheckedExprKind::Clz { ctz, arg, fallback } => {
+            let (v, width) = eval_const_in(arg, sema, interner, addr_conds).and_then(|v| unsigned_width(arg, sema, &v))?;
+            let folded = if *ctz {
+                if v == 0 {
+                    match fallback.and_then(|fb| eval_const_in(fb, sema, interner, addr_conds)) {
+                        Some(f) => f,
+                        None => Value::Int(width),
+                    }
+                } else {
+                    Value::Int(v.trailing_zeros() as i128)
+                }
+            } else if v == 0 {
+                Value::Int(width)
+            } else {
+                Value::Int(width - (128 - v.leading_zeros() as i128))
+            };
+            Some(folded)
+        }
+        CheckedExprKind::Shuffle { .. }
         | CheckedExprKind::ShuffleVector { .. }
         | CheckedExprKind::VaArg { .. }
         | CheckedExprKind::Atomic { .. }
@@ -1074,7 +1159,6 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         | CheckedExprKind::Overflow { .. }
         | CheckedExprKind::Alloca { .. }
         | CheckedExprKind::FrameAddress { .. }
-        | CheckedExprKind::Clz { .. }
         // Statement expressions are never constant expressions.
         | CheckedExprKind::StmtExpr { .. }
         | CheckedExprKind::Subscript { .. }
@@ -1289,7 +1373,22 @@ fn neg_part(v: Value, part: &Ty, target: Target) -> Option<Value> {
 }
 
 fn eval_cast(ty: &Ty, operand: &CheckedExpr, sema: &Sema, interner: &Interner, addr_conds: bool) -> Option<Value> {
-    let v = eval_const_in(operand, sema, interner, addr_conds)?;
+    // A null pointer constant hidden behind a pointer cast stays
+    // foldable through a further cast (`(unsigned long)(struct S *)0`
+    // switch labels), but a pointer-cast expression itself never folds
+    // to a value — the qualified-`void *` composite rules and static
+    // initializers depend on that.
+    let v = match &operand.kind {
+        CheckedExprKind::Cast { expr, ty: inner } | CheckedExprKind::Convert { expr, ty: inner }
+            if matches!(inner.unqualified(), Ty::Pointer { .. }) =>
+        {
+            match eval_const_in(expr, sema, interner, addr_conds) {
+                Some(Value::Int(0)) => Value::Int(0),
+                _ => eval_const_in(operand, sema, interner, addr_conds)?,
+            }
+        }
+        _ => eval_const_in(operand, sema, interner, addr_conds)?,
+    };
     // Qualification is value-transparent: `const float` folds like `float`.
     let t = ty.unqualified();
     // A complex target takes the value as its real part over a zero

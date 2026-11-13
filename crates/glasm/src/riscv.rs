@@ -2103,7 +2103,7 @@ fn resolve_delta(f: &Fixup) -> Option<i64> {
 /// the symbol value (0 for externs) relative to the field's base.
 fn est_delta(f: &Fixup) -> i64 {
     match &f.val {
-        RValue::ExternRef { off, .. } | RValue::SectVal { off, .. } => off - f.pcrel_base(),
+        RValue::ExternRef { off, .. } | RValue::SectVal { off, .. } | RValue::RelDiff { off, .. } | RValue::RelDiffExtern { off, .. } => off - f.pcrel_base(),
         RValue::Const(_) => 0,
     }
 }
@@ -2111,7 +2111,7 @@ fn est_delta(f: &Fixup) -> i64 {
 fn sym_off(v: &RValue) -> i64 {
     match v {
         RValue::Const(c) => *c,
-        RValue::SectVal { off, .. } => *off,
+        RValue::SectVal { off, .. } | RValue::RelDiff { off, .. } | RValue::RelDiffExtern { off, .. } => *off,
         RValue::ExternRef { off, .. } => *off,
     }
 }
@@ -2150,6 +2150,11 @@ fn push_reloc(relocs: &mut Vec<Reloc>, symbols: &[Symbol], f: &Fixup, val: &RVal
             (Target::Symbol(*i), *off - base)
         }
         RValue::SectVal { sect, off, sym: None } => (Target::Section(*sect), *off),
+        RValue::RelDiff { sect, off, sym } => (match sym {
+            Some(i) => Target::Symbol(*i),
+            None => Target::Section(*sect),
+        }, *off),
+        RValue::RelDiffExtern { sym, off } => (Target::Symbol(*sym), *off),
         RValue::Const(_) => return 0,
     };
     relocs.push(Reloc {

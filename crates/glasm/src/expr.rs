@@ -42,6 +42,50 @@ pub enum Expr {
     Xor(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     BitNot(Box<Expr>),
+    /// Comparison and logical operators, C-precedence (GAS `.if`
+    /// expressions and `.skip` guards). Constant-only: comparing
+    /// relocatable values is meaningless here.
+    Cmp {
+        op: CmpOp,
+        l: Box<Expr>,
+        r: Box<Expr>,
+    },
+    LogAnd(Box<Expr>, Box<Expr>),
+    LogOr(Box<Expr>, Box<Expr>),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl CmpOp {
+    fn apply(self, x: i64, y: i64) -> bool {
+        match self {
+            CmpOp::Eq => x == y,
+            CmpOp::Ne => x != y,
+            CmpOp::Lt => x < y,
+            CmpOp::Le => x <= y,
+            CmpOp::Gt => x > y,
+            CmpOp::Ge => x >= y,
+        }
+    }
+
+    pub(crate) fn spell(self) -> &'static str {
+        match self {
+            CmpOp::Eq => "==",
+            CmpOp::Ne => "!=",
+            CmpOp::Lt => "<",
+            CmpOp::Le => "<=",
+            CmpOp::Gt => ">",
+            CmpOp::Ge => ">=",
+        }
+    }
 }
 
 /// The fully-resolved shape of an expression value.
@@ -59,6 +103,21 @@ pub enum RValue {
     },
     /// Reference to an external symbol plus addend; needs a relocation.
     ExternRef {
+        sym: usize,
+        off: i64,
+    },
+    /// Cross-section `sym - .` (kernel asm writes `.long label - .`
+    /// inside side sections like `.smp_locks`). Not a value: it becomes
+    /// a PC-relative relocation against the target's section/symbol
+    /// with the target's own offset as addend (the place address the
+    /// PC-relative form subtracts stands in for the `.`).
+    RelDiff {
+        sect: usize,
+        off: i64,
+        sym: Option<usize>,
+    },
+    /// Same shape with an external target.
+    RelDiffExtern {
         sym: usize,
         off: i64,
     },
@@ -168,6 +227,8 @@ impl Expr {
                     (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(x - y)),
                     (a, RValue::Const(y)) => Ok(add_const(a, -y)),
                     (RValue::SectVal { sect: s1, off: o1, .. }, RValue::SectVal { sect: s2, off: o2, .. }) if s1 == s2 => Ok(RValue::Const(o1 - o2)),
+                    (RValue::SectVal { sect: s1, off: o1, sym }, RValue::SectVal { sect: s2, .. }) if s1 != s2 => Ok(RValue::RelDiff { sect: s1, off: o1, sym }),
+                    (RValue::ExternRef { sym, off }, RValue::SectVal { .. }) => Ok(RValue::RelDiffExtern { sym, off }),
                     (RValue::Const(x), RValue::SectVal { sect, off, sym }) => Ok(RValue::SectVal { sect, off: x - off, sym }),
                     (RValue::Const(x), RValue::ExternRef { sym, off }) => Ok(RValue::ExternRef { sym, off: x - off }),
                     _ => Err("cannot subtract these values".into()),
@@ -180,9 +241,35 @@ impl Expr {
             Expr::And(a, b) => binary(ctx, a, b, |x, y| x & y),
             Expr::Or(a, b) => binary(ctx, a, b, |x, y| x | y),
             Expr::Xor(a, b) => binary(ctx, a, b, |x, y| x ^ y),
+            Expr::Cmp { op, l, r } => {
+                let (a, b) = (l.eval(ctx)?, r.eval(ctx)?);
+                match (a, b) {
+                    (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(i64::from(op.apply(x, y)))),
+                    _ => Err("comparison needs constant operands".into()),
+                }
+            }
+            Expr::LogAnd(a, b) => {
+                let (x, y) = (a.eval(ctx)?, b.eval(ctx)?);
+                match (x, y) {
+                    (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(i64::from(x != 0 && y != 0))),
+                    _ => Err("&& needs constant operands".into()),
+                }
+            }
+            Expr::LogOr(a, b) => {
+                let (x, y) = (a.eval(ctx)?, b.eval(ctx)?);
+                match (x, y) {
+                    (RValue::Const(x), RValue::Const(y)) => Ok(RValue::Const(i64::from(x != 0 || y != 0))),
+                    _ => Err("|| needs constant operands".into()),
+                }
+            }
             Expr::Neg(a) => match a.eval(ctx)? {
                 RValue::Const(x) => Ok(RValue::Const(-x)),
                 RValue::SectVal { sect, off, sym } => Ok(RValue::SectVal { sect, off: -off, sym }),
+                // `-(a - b)` reads as `b - a`: the place stands in for
+                // the other side, so the relocation flips target.
+                RValue::RelDiff { .. } | RValue::RelDiffExtern { .. } => {
+                    Err("cannot negate a cross-section difference".into())
+                }
                 RValue::ExternRef { sym, off } => Ok(RValue::ExternRef { sym, off: -off }),
             },
             Expr::BitNot(a) => match a.eval(ctx)? {
@@ -210,6 +297,8 @@ fn add_const(v: RValue, c: i64) -> RValue {
     match v {
         RValue::Const(x) => RValue::Const(x + c),
         RValue::SectVal { sect, off, sym } => RValue::SectVal { sect, off: off + c, sym },
+        RValue::RelDiff { sect, off, sym } => RValue::RelDiff { sect, off: off + c, sym },
+        RValue::RelDiffExtern { sym, off } => RValue::RelDiffExtern { sym, off: off + c },
         RValue::ExternRef { sym, off } => RValue::ExternRef { sym, off: off + c },
     }
 }

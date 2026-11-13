@@ -102,6 +102,64 @@ pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
                             let (mb, mi) = ra.inst_loc[i.index()];
                             let mut inst = f.blocks[mb as usize].insts[mi].clone();
                             apply_allocs(&mut inst, out.inst_allocs(i), &resolve);
+                            // The asm pseudo-instruction renders its
+                            // operands as register names, so an operand
+                            // the allocator sent to a spill slot must
+                            // round-trip through the scratch register:
+                            // reload before, spill back after. (The
+                            // encoder has no room to inject moves.)
+                            if inst.op == OpId::ASM
+                                && let Some(blob) = inst.asm.clone()
+                            {
+                                let mut spills = Vec::new();
+                                let mut cursor = 0usize;
+                                for (si, slot) in blob.slots.iter().enumerate() {
+                                    let nops = blob.ops_of(slot);
+                                    for k in 0..nops {
+                                        let spilled = matches!(
+                                            inst.ops[cursor + k],
+                                            Operand::Reg(Reg::Spill(_))
+                                        );
+                                        if spilled {
+                                            spills.push((si, cursor + k, slot.is_use, slot.is_def));
+                                        }
+                                    }
+                                    cursor += nops;
+                                }
+                                if spills.len() > 1 {
+                                    panic!("glcc native backend: more than one spilled inline-asm operand needs two scratch registers");
+                                }
+                                for (_, idx, is_use, is_def) in spills {
+                                    let scratch = reginfo.scratch[crate::machine::RegClass::Gpr as usize]
+                                        .expect("gpr scratch for asm spill");
+                                    let spill = match inst.ops[idx] {
+                                        Operand::Reg(r) => r,
+                                        Operand::FixedReg(r, _) => r,
+                                        _ => unreachable!("asm spill check matched a non-register operand"),
+                                    };
+                                    let Reg::Spill(_) = spill else {
+                                        unreachable!("asm spill check matched a non-spill register");
+                                    };
+                                    if is_use {
+                                        insts.push(MInst::new(
+                                            OpId::MOVE,
+                                            crate::machine::Width::W64,
+                                            smallvec::smallvec![Operand::Reg(Reg::P(scratch)), Operand::Reg(spill)],
+                                        ));
+                                    }
+                                    inst.ops[idx] = match inst.ops[idx] {
+                                        Operand::FixedReg(_, pin) => Operand::FixedReg(Reg::P(scratch), pin),
+                                        _ => Operand::Reg(Reg::P(scratch)),
+                                    };
+                                    if is_def {
+                                        insts.push(MInst::new(
+                                            OpId::MOVE,
+                                            crate::machine::Width::W64,
+                                            smallvec::smallvec![Operand::Reg(spill), Operand::Reg(Reg::P(scratch))],
+                                        ));
+                                    }
+                                }
+                            }
                             insts.push(inst);
                         }
                         regalloc2::InstOrEdit::Edit(Edit::Move { from, to }) => {

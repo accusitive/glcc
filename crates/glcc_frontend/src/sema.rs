@@ -1414,6 +1414,7 @@ fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits:
         CheckedExprKind::Char(lit) => CheckedExprKind::Char(*lit),
         CheckedExprKind::Str(parts) => CheckedExprKind::Str(parts),
         CheckedExprKind::ConstantP(value) => CheckedExprKind::ConstantP(*value),
+        CheckedExprKind::ObjectSize(zero) => CheckedExprKind::ObjectSize(*zero),
         CheckedExprKind::ClassifyType(code) => CheckedExprKind::ClassifyType(*code),
         CheckedExprKind::Offsetof { ty, offset } => CheckedExprKind::Offsetof { ty: ty.clone(), offset: *offset },
         CheckedExprKind::SizeofTy(ty) => CheckedExprKind::SizeofTy(ty.clone()),

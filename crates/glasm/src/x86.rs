@@ -19,7 +19,7 @@ impl Backend for X86Backend {
     fn finalize_all(
         &self,
         sections: &mut [crate::assemble::Section],
-        _symbols: &mut Vec<crate::assemble::Symbol>,
+        symbols: &mut Vec<crate::assemble::Symbol>,
         fixups: Vec<Fixup>,
         relocs: &mut Vec<Reloc>,
     ) -> Result<(), Vec<String>> {
@@ -101,6 +101,40 @@ impl X86Backend {
                     size: f.size,
                     pcrel: f.pcrel,
                     addend: f.reloc_addend(*off),
+                    target: Target::Symbol(*sym),
+                    r_type: 0,
+                });
+                Ok(())
+            }
+            // Cross-section `sym - .`: PC-relative against the target,
+            // so the place address stands in for the subtracted `.`.
+            RValue::RelDiff { sect, off, sym } => {
+                // A defined in-module target (a local label of the same
+                // text) relocates against its section with the label's
+                // offset as addend, like GNU as; only external targets
+                // name a symbol.
+                let target = match sym {
+                    Some(i) => Target::Symbol(*i),
+                    None => Target::Section(*sect),
+                };
+                relocs.push(Reloc {
+                    section: f.section,
+                    offset: f.offset,
+                    size: f.size,
+                    pcrel: true,
+                    addend: *off,
+                    target,
+                    r_type: 0,
+                });
+                Ok(())
+            }
+            RValue::RelDiffExtern { sym, off } => {
+                relocs.push(Reloc {
+                    section: f.section,
+                    offset: f.offset,
+                    size: f.size,
+                    pcrel: true,
+                    addend: *off,
                     target: Target::Symbol(*sym),
                     r_type: 0,
                 });

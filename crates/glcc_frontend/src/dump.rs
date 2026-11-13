@@ -291,6 +291,7 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             t
         ),
         CheckedExprKind::ConstantP(b) => format!("(constant-p {} :{})", i32::from(*b), t),
+        CheckedExprKind::ObjectSize(zero) => format!("(object-size {} :{})", i32::from(*zero), t),
         CheckedExprKind::ClassifyType(code) => format!("(classify-type {} :{})", code, t),
         CheckedExprKind::FpClass { op, arg } => {
             let what = match op {

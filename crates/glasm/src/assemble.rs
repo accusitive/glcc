@@ -130,6 +130,14 @@ impl Fixup {
 const MAX_PASSES: usize = 32;
 
 pub fn assemble(stmts: &[Stmt], arch: crate::arch::Arch) -> Result<Module, Vec<AsmError>> {
+    // GNU as auto-externs referenced-but-undeclared symbols (kernel .S
+    // files rely on it), so leniency is the default; nothing calls the
+    // strict form today.
+    assemble_with(stmts, arch, false)
+}
+
+/// `strict_undefined` on rejects referenced-but-undeclared symbols.
+pub fn assemble_with(stmts: &[Stmt], arch: crate::arch::Arch, strict_undefined: bool) -> Result<Module, Vec<AsmError>> {
     let backend = arch.backend();
     let backend = backend.as_ref();
     let mut sections: Vec<Section> = Vec::new();
@@ -185,7 +193,7 @@ pub fn assemble(stmts: &[Stmt], arch: crate::arch::Arch) -> Result<Module, Vec<A
             // estimates; only definedness resets each pass.
             s.defined = false;
         }
-        let (fixups, errors) = run_pass(&mut sections, &mut symbols, stmts, &force_long, &undefined, backend);
+        let (fixups, mut errors) = run_pass(&mut sections, &mut symbols, stmts, &force_long, &undefined, backend);
         let changed = sections.iter().map(|s| s.data.len() as i64).collect::<Vec<_>>() != prev_lens || symbols.iter().map(|s| s.value).collect::<Vec<_>>() != prev_syms;
 
         // Relax branches whose displacement outgrew their field, based on
@@ -198,7 +206,7 @@ pub fn assemble(stmts: &[Stmt], arch: crate::arch::Arch) -> Result<Module, Vec<A
             }
             let d = match f.val {
                 RValue::SectVal { sect, off, .. } if sect == f.section => Some(off - f.pcrel_base()),
-                RValue::SectVal { .. } | RValue::ExternRef { .. } => Some(i64::MAX),
+                RValue::SectVal { .. } | RValue::ExternRef { .. } | RValue::RelDiff { .. } | RValue::RelDiffExtern { .. } => Some(i64::MAX),
                 RValue::Const(_) => None,
             };
             if let Some(d) = d {
@@ -214,16 +222,32 @@ pub fn assemble(stmts: &[Stmt], arch: crate::arch::Arch) -> Result<Module, Vec<A
         }
 
         if !changed && !relaxed {
+            // Lenient mode drops the undefined-symbol eval errors: the
+            // undeclared references become externs and the next pass
+            // resolves them through relocations.
+            if !strict_undefined {
+                errors.retain(|e| !e.msg.starts_with("undefined symbol"));
+            }
             if !errors.is_empty() {
                 return Err(errors);
             }
             let mut unresolved = undefined.borrow().clone();
             unresolved.retain(|n| symbols.iter().find(|s| &s.name == n).map_or(true, |s| !s.defined && !s.extern_));
-            if let Some(name) = unresolved.first() {
-                return Err(vec![AsmError {
-                    line: 0,
-                    msg: format!("undefined symbol `{name}'"),
-                }]);
+            if strict_undefined {
+                if let Some(name) = unresolved.first() {
+                    return Err(vec![AsmError {
+                        line: 0,
+                        msg: format!("undefined symbol `{name}'"),
+                    }]);
+                }
+            } else if !unresolved.is_empty() {
+                for name in &unresolved {
+                    let i = intern(&mut symbols, name);
+                    symbols[i].extern_ = true;
+                    symbols[i].global = true;
+                }
+                // The pass loop must re-run so fixups see the externs.
+                continue;
             }
             let mut relocs = Vec::new();
             backend
@@ -377,13 +401,18 @@ fn run_pass(
                         s.sect = Some(sect);
                         s.value = off;
                     }
-                    Ok(RValue::ExternRef { sym, .. }) => {
+                    Ok(RValue::ExternRef { sym, .. }) | Ok(RValue::RelDiffExtern { sym, .. }) => {
                         let name = symbols[sym].name.clone();
                         errors.push(AsmError {
                             line: *line,
                             msg: format!("cannot set `{name}' to an external symbol"),
                         });
                     }
+                    // Cross-section differences (`.set size_sym, .-sym`
+                    // written while a side section is active) have no
+                    // absolute value; nothing consumes them here (.size
+                    // is ignored), so just skip the definition.
+                    Ok(RValue::RelDiff { .. }) => {}
                     Err(m) => errors.push(AsmError { line: *line, msg: m }),
                 }
             }

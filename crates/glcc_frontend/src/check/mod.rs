@@ -190,6 +190,11 @@ pub enum CheckedExprKind<'a> {
     /// (GCC never evaluates it, side effects included), so only the
     /// folded 0/1 remains.
     ConstantP(bool),
+    /// A folded `__builtin_object_size(ptr, type)`: object sizes are
+    /// not tracked, so the result is GCC's unknown constant — all of
+    /// memory for types 0/1 (`(size_t)-1`), nothing for types 2/3
+    /// (`0`). The pointer is checked but not evaluated.
+    ObjectSize(bool),
     /// A folded `__builtin_classify_type(arg)`: GCC's type-class code
     /// for the argument's type. The argument is checked but discarded
     /// (GCC never evaluates it), so only the folded code remains.
@@ -3264,6 +3269,9 @@ impl<'a> Sema<'a> {
                 Some("__builtin_stdc_rotate_left") => return self.check_rotate(args, interner, span, true),
                 Some("__builtin_stdc_rotate_right") => return self.check_rotate(args, interner, span, false),
                 Some("__builtin_constant_p") => return self.check_constant_p(args, interner, span),
+                Some("__builtin_object_size" | "__builtin_dynamic_object_size") => {
+                    return self.check_object_size(args, interner, span)
+                }
                 Some("__builtin_isnan" | "__builtin_isnanf" | "__builtin_isnanl") => {
                     return self.check_fp_class(args, interner, span, FpPredicate::IsNan, "__builtin_isnan");
                 }

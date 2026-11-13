@@ -1043,6 +1043,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                 self.expr_value(module, func, frame, funcs, externs, globals, chosen)
             }
             fe::check::CheckedExprKind::ConstantP(b) => self.iconst(func, int_bits(&mir_ty), i128::from(*b)),
+            fe::check::CheckedExprKind::ObjectSize(zero) => self.iconst(func, int_bits(&mir_ty), if *zero { 0 } else { -1 }),
             fe::check::CheckedExprKind::ClassifyType(code) => self.iconst(func, int_bits(&mir_ty), i128::from(*code)),
             fe::check::CheckedExprKind::FpClass { op, arg } => {
                 self.lower_fp_class(module, func, frame, funcs, externs, globals, op, arg, &mir_ty)

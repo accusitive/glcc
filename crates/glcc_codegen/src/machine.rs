@@ -141,6 +141,9 @@ pub enum SymTarget {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RelocKind {
     Abs64,
+    /// 32-bit absolute field (`.long sym - .` without pcrel... plain
+    /// `R_X86_64_32` data references).
+    Abs32,
     /// 32-bit RIP-relative field (x86-64 `lea`, direct calls want
     /// [`RelocKind::Plt32`]).
     PcRel32,
@@ -282,7 +285,33 @@ pub enum AsmSlotKind {
     Sel,
 }
 
+/// A relocation the assembled asm fragment needs: the glasm symbol
+/// name, resolved against the module's tables at selection time.
 #[derive(Clone, Debug)]
+pub struct AsmSymReloc {
+    /// Byte offset within the assembled fragment.
+    pub offset: u32,
+    pub size: u8,
+    pub pcrel: bool,
+    pub addend: i64,
+    /// `Some((section, offset))`: targets a fragment-local label at
+    /// that position; the caller synthesizes a local symbol.
+    pub local: Option<(String, i64)>,
+    pub sym: String,
+}
+
+/// A non-`.text` section an inline-asm block wrote, with its symbol
+/// relocations already resolved to module targets.
+#[derive(Clone, Debug)]
+pub struct AsmSideSection {
+    pub name: String,
+    pub write: bool,
+    pub exec: bool,
+    pub nobits: bool,
+    pub data: Vec<u8>,
+    pub relocs: Vec<(AsmSymReloc, SymOperand)>,
+}
+
 pub struct AsmBlob {
     /// The decoded template (frontend escapes already processed).
     pub template: String,
@@ -297,6 +326,37 @@ pub struct AsmBlob {
     pub unique: u32,
     pub is_basic: bool,
     pub is_goto: bool,
+    /// Symbol relocations the fragment needs, resolved to module
+    /// targets (empty when the template references no symbols).
+    pub sym_relocs: Vec<(AsmSymReloc, SymOperand)>,
+    /// Side sections the fragment's `.pushsection` wrote.
+    pub side_sections: Vec<AsmSideSection>,
+    /// The enclosing function's name: fragment-local label relocations
+    /// retarget to it (the fragment's text lands inside its body).
+    pub func_name: String,
+}
+
+impl Clone for AsmBlob {
+    fn clone(&self) -> AsmBlob {
+        AsmBlob {
+            template: self.template.clone(),
+            slots: self.slots.clone(),
+            clobbers: self.clobbers.clone(),
+            labels: self.labels.clone(),
+            unique: self.unique,
+            is_basic: self.is_basic,
+            is_goto: self.is_goto,
+            sym_relocs: self.sym_relocs.clone(),
+            side_sections: self.side_sections.clone(),
+            func_name: self.func_name.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for AsmBlob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsmBlob").field("template", &self.template).field("func", &self.func_name).finish()
+    }
 }
 
 impl AsmBlob {

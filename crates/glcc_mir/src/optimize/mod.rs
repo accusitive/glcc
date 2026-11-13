@@ -50,7 +50,26 @@ impl OptLevel {
 /// Wide-integer legalization is not an optimization: the backend only
 /// lowers scalars, so it runs first at every level, before any pass
 /// that assumes `Ty::Int` fits in a register.
+/// Pipeline configuration knobs. `vectorize` gates the passes that
+/// mint `Ty::Vector` values (`LoopVec`, `Slp`): backends without
+/// vector codegen (the native machine-code backend) must not receive
+/// vector-typed IR.
+#[derive(Clone, Copy)]
+pub struct OptConfig {
+    pub vectorize: bool,
+}
+
+impl Default for OptConfig {
+    fn default() -> OptConfig {
+        OptConfig { vectorize: true }
+    }
+}
+
 pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool)> {
+    optimize_with(module, level, OptConfig::default())
+}
+
+pub fn optimize_with(module: &mut Module, level: OptLevel, cfg: OptConfig) -> Vec<(&'static str, bool)> {
     let mut report = PassManager::new()
         .add_module_pass(passes::LegalizeWideInts::new())
         .run(module);
@@ -63,7 +82,7 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
         .add_module_pass(passes::GlobalConstProp)
         .add_module_pass(passes::MergeReadOnlyGlobals)
         .add_module_pass(passes::DeadModuleItems);
-    report.extend(function_pipeline(pm).run(module));
+    report.extend(function_pipeline(pm, cfg).run(module));
     // Function passes turn aggregate loads and stores into copies, so
     // give module-level propagation another look at the settled IR. A
     // copied read-only global can then expose its field initializers.
@@ -75,7 +94,7 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
         if !changed {
             break;
         }
-        report.extend(function_pipeline(PassManager::new()).run(module));
+        report.extend(function_pipeline(PassManager::new(), cfg).run(module));
     }
     // Function passes can orphan the last reference to an internal
     // object (a load that `GlobalConstProp` replaced, a call `Inline`
@@ -85,23 +104,43 @@ pub fn optimize(module: &mut Module, level: OptLevel) -> Vec<(&'static str, bool
     report
 }
 
-fn function_pipeline(pm: PassManager) -> PassManager {
-    pm.add_func_pass(passes::Sroa)
-        .add_func_pass(passes::Mem2Reg)
-        .add_func_pass(passes::ConstFold)
-        .add_func_pass(passes::Sccp)
-        .add_func_pass(passes::LoopVec)
-        .add_func_pass(passes::LoopUnroll)
-        .add_func_pass(passes::ForwardAggregateCopy)
-        .add_func_pass(passes::DeadStoreElim)
-        .add_func_pass(passes::LoadStoreForward)
-        .add_func_pass(passes::InstCombine)
-        .add_func_pass(passes::Slp)
-        .add_func_pass(passes::ConstMerge)
-        .add_func_pass(passes::Cse)
-        .add_func_pass(passes::Licm)
-        .add_func_pass(passes::SimplifyCfg)
-        .add_func_pass(passes::DeadCodeElim)
+fn function_pipeline(_pm: PassManager, cfg: OptConfig) -> PassManager {
+    let pm = PassManager::new();
+    // Conditional members break the builder chain, so the two shapes
+    // are spelled out: vectorize adds LoopVec and Slp.
+    if cfg.vectorize {
+        pm.add_func_pass(passes::LoopVec)
+            .add_func_pass(passes::Sroa)
+            .add_func_pass(passes::Mem2Reg)
+            .add_func_pass(passes::ConstFold)
+            .add_func_pass(passes::Sccp)
+            .add_func_pass(passes::LoopUnroll)
+            .add_func_pass(passes::ForwardAggregateCopy)
+            .add_func_pass(passes::DeadStoreElim)
+            .add_func_pass(passes::LoadStoreForward)
+            .add_func_pass(passes::InstCombine)
+            .add_func_pass(passes::Slp)
+            .add_func_pass(passes::ConstMerge)
+            .add_func_pass(passes::Cse)
+            .add_func_pass(passes::Licm)
+            .add_func_pass(passes::SimplifyCfg)
+            .add_func_pass(passes::DeadCodeElim)
+    } else {
+        pm.add_func_pass(passes::Sroa)
+            .add_func_pass(passes::Mem2Reg)
+            .add_func_pass(passes::ConstFold)
+            .add_func_pass(passes::Sccp)
+            .add_func_pass(passes::LoopUnroll)
+            .add_func_pass(passes::ForwardAggregateCopy)
+            .add_func_pass(passes::DeadStoreElim)
+            .add_func_pass(passes::LoadStoreForward)
+            .add_func_pass(passes::InstCombine)
+            .add_func_pass(passes::ConstMerge)
+            .add_func_pass(passes::Cse)
+            .add_func_pass(passes::Licm)
+            .add_func_pass(passes::SimplifyCfg)
+            .add_func_pass(passes::DeadCodeElim)
+    }
 }
 
 #[cfg(test)]

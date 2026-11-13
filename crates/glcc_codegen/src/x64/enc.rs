@@ -75,7 +75,7 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             crate::machine::OpId::UNREACHABLE => out.bytes.extend_from_slice(&[0x0F, 0x0B]),
             crate::machine::OpId::JMP => {
                 out.bytes.push(0xE9);
-                let at = out.bytes.len() as u8;
+                let at = out.bytes.len() as u32;
                 out.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 out.block_refs.push((at, inst.branch.as_ref().expect("JMP branch").targets[0]));
             }
@@ -103,9 +103,19 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
                         other => panic!("glcc native backend: asm operand {other:?} was not allocated"),
                     }
                 }
-                let bytes = crate::asm::blob_x86_64(&blob.template, &blob.slots, &blob.labels, blob.is_basic, blob.is_goto, blob.unique, &|i: usize| preg_of(blob, inst, i))
+                let (bytes, frag_relocs, sides) = crate::asm::blob_x86_64(&blob.template, &blob.slots, &blob.labels, blob.is_basic, blob.is_goto, blob.unique, &|i: usize| preg_of(blob, inst, i))
                     .unwrap_or_else(|reason| panic!("glcc native backend: inline asm encoding failed: {reason}"));
                 out.bytes.extend_from_slice(&bytes);
+                for (rel, symop) in &blob.sym_relocs {
+                    out.relocs.push(RelocReq {
+                        at: rel.offset,
+                        size: rel.size,
+                        pcrel: rel.pcrel,
+                        addend: rel.addend,
+                        sym: symop.clone(),
+                    });
+                }
+                out.sides = blob.side_sections.clone();
             }
             other => panic!("glcc native backend: cannot encode pseudo op {other:?}"),
         };
@@ -196,7 +206,7 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             let targets = &inst.branch.as_ref().expect("Jcc branch").targets;
             out.bytes.push(0x0F);
             out.bytes.push(0x80 + cc);
-            let at = out.bytes.len() as u8;
+            let at = out.bytes.len() as u32;
             out.bytes.extend_from_slice(&[0, 0, 0, 0]);
             out.block_refs.push((at, targets[0]));
             // The not-taken path falls through to whatever the layout
@@ -205,7 +215,7 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
             // this when the else block already follows.
             if targets.len() == 2 {
                 out.bytes.push(0xE9);
-                let at = out.bytes.len() as u8;
+                let at = out.bytes.len() as u32;
                 out.bytes.extend_from_slice(&[0, 0, 0, 0]);
                 out.block_refs.push((at, targets[1]));
             }
@@ -230,14 +240,14 @@ pub fn encode(f: &MFunction, inst: &MInst, out: &mut EncOut) {
         }
         Enc::Rel32 { call } => {
             out.bytes.push(if call { 0xE8 } else { 0xE9 });
-            let at = out.bytes.len() as u8;
+            let at = out.bytes.len() as u32;
             out.bytes.extend_from_slice(&[0, 0, 0, 0]);
             // The target symbol sits among the pinned operands.
             let sym = match inst.ops.iter().find(|o| matches!(o, Operand::Sym(_))) {
                 Some(Operand::Sym(s)) => s.clone(),
                 other => panic!("glcc native backend: call without symbol {other:?}"),
             };
-            out.relocs.push(RelocReq { at, size: 4, pcrel: true, addend: -4, sym });
+            out.relocs.push(RelocReq { at: at as u32, size: 4, pcrel: true, addend: -4, sym });
         }
         Enc::CallRm => {
             let callee = inst
@@ -445,7 +455,7 @@ fn emit_mem(f: &MFunction, inst: &MInst, out: &mut EncOut, opcode: &[u8], reg: u
 
 /// RIP-relative displacement field with its relocation (or zero).
 fn emit_sym_disp(out: &mut EncOut, m: &crate::machine::MemOperand) {
-    let at = out.bytes.len() as u8;
+    let at = out.bytes.len() as u32;
     out.bytes.extend_from_slice(&[0, 0, 0, 0]);
     if let Some(sym) = &m.sym {
         let pcrel = match sym.reloc {
@@ -454,7 +464,7 @@ fn emit_sym_disp(out: &mut EncOut, m: &crate::machine::MemOperand) {
             // AArch64-only field shapes never reach the x86-64 encoder.
             _ => panic!("glcc native backend: {kind:?} field on x86-64", kind = sym.reloc),
         };
-        out.relocs.push(RelocReq { at, size: 4, pcrel, addend: -4, sym: sym.clone() });
+        out.relocs.push(RelocReq { at: at as u32, size: 4, pcrel, addend: -4, sym: sym.clone() });
     }
 }
 

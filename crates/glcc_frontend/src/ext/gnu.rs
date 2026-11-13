@@ -21,6 +21,16 @@ pub fn qualifier_of(word: &str) -> Option<TypeQualifier> {
     QUALIFIER_SPELLINGS.iter().find(|(spelling, _)| *spelling == word).map(|(_, q)| *q)
 }
 
+/// GCC x86's named address spaces (`__seg_fs`/`__seg_gs` and their
+/// kernel-mode spellings), which the kernel's per-cpu code qualifies
+/// pointee types with under `CONFIG_CC_HAS_NAMED_AS`. Their effect
+/// (segment-relative addressing) is erased here; see `peek_named_as`.
+pub const NAMED_AS_SPELLINGS: &[&str] = &["__seg_fs", "__seg_gs", "__seg_kfs", "__seg_kgs"];
+
+pub fn is_named_as_spelling(word: &str) -> bool {
+    NAMED_AS_SPELLINGS.contains(&word)
+}
+
 /// Alternate `inline` spellings (`static __inline` definitions in
 /// system headers).
 pub fn is_inline_spelling(word: &str) -> bool {

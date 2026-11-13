@@ -241,6 +241,30 @@ impl<'a> Sema<'a> {
         })
     }
 
+    /// `size_t __builtin_object_size(ptr, type)` (and the dynamic
+    /// spelling): object sizes are not tracked, so the result is the
+    /// GCC unknown constant chosen by the (required-constant) `type`:
+    /// `(size_t)-1` for types 0/1, `0` for types 2/3.
+    pub(super) fn check_object_size(&self, args: &[Expr<'a>], interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
+        let [ptr, ty_arg] = args else {
+            return Err(CompileError::new("`__builtin_object_size` takes exactly two arguments", span));
+        };
+        let ptr = self.decay_checked(self.check_expr(ptr, interner)?);
+        if !matches!(ptr.ty.unqualified(), Ty::Pointer { .. }) {
+            return Err(CompileError::new("`__builtin_object_size` requires a pointer first argument", ptr.span));
+        }
+        let ty_checked = self.convert_for_assignment(&Ty::Int, self.check_expr(ty_arg, interner)?, interner)?;
+        let ty_value = match crate::eval::eval_const(&ty_checked, self, interner) {
+            Some(crate::eval::Value::Int(v)) => v,
+            _ => return Err(CompileError::new("`__builtin_object_size` type argument must be a constant", span)),
+        };
+        Ok(CheckedExpr {
+            ty: self.target.size_type(),
+            span,
+            kind: CheckedExprKind::ObjectSize(ty_value & 2 == 0),
+        })
+    }
+
     /// The single-argument floating-point classifications
     /// (`__builtin_isnan`, `__builtin_isinf`, `__builtin_isinf_sign`,
     /// `__builtin_isfinite`, `__builtin_isnormal`): single evaluation of

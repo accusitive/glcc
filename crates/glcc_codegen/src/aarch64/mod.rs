@@ -137,6 +137,7 @@ impl TargetIsa for A64 {
             K::PcRel32 => (object::elf::R_AARCH64_PREL32.0, true, 4),
             K::Plt32 => (object::elf::R_AARCH64_JUMP26.0, true, 4),
             K::Abs64 => (object::elf::R_AARCH64_ABS64.0, false, 8),
+            K::Abs32 => (object::elf::R_AARCH64_ABS32.0, false, 4),
         }
     }
 

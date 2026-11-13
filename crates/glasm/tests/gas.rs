@@ -410,3 +410,63 @@ sz = . - f
         .expect("sz symbol");
     assert_eq!(sz.address(), 1);
 }
+
+
+#[test]
+fn gas_kernel_macros() {
+    // The macro shapes arch/x86 headers generate after cpp: parameter
+    // substitution, `\@` counters, `\()` joins, keyword arguments with
+    // defaults, register comparisons in `.if`, nested invocations
+    // separated by `;`, parenthesized argument lists, `.rept`/`.irp`
+    // loops, and `.fill`.
+    let src = r#"
+.macro ANNOTATE
+	.Lannotate_\@:
+	.pushsection .altinstructions,"a"
+	.long .Lannotate_\@
+	.popsection
+.endm
+
+.macro __ALT oldinstr, newinstr, ft_flags
+	\oldinstr ;
+	.byte \ft_flags
+.endm
+
+.macro ALTERNATIVE_2 oldinstr, newinstr1, ft_flags1, newinstr2, ft_flags2
+	__ALT("\oldinstr", "\newinstr1", "\ft_flags1") ;
+	__ALT("\oldinstr", "\newinstr2", "\ft_flags2") ;
+.endm
+
+.macro HINT base=%rsp offset=0
+	.if \base == %rsp
+		.byte 1
+	.else
+		.byte 2
+	.endif
+	.byte \offset
+.endm
+
+	ANNOTATE
+	ALTERNATIVE_2 nop, "xor %eax,%eax", 7, cpuid, 9
+	ALTERNATIVE_2(nop, "xor %eax,%eax", 7, cpuid, 9) ;
+	HINT
+	HINT base=%rbp offset=8
+	i = 0
+	.rept 3
+	.if (5 >> i) & 1
+		.byte 10 + i
+	.else
+		.byte 20 + i
+	.endif
+	i = i + 1
+	.endr
+	.irp rs, %rax, %rbx
+		mov \rs, \rs
+	.endr
+	.fill 2, 4, 0xdeadbeef
+"#;
+    match glasm::gas::assemble_to_elf(src, glasm::Arch::X86_64) {
+        Ok(_) => {}
+        Err(errs) => panic!("macro expansion failed: {errs:?}"),
+    }
+}

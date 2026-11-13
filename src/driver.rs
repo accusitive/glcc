@@ -61,7 +61,7 @@ fn native_pp_default(env: Option<&OsStr>) -> bool {
 /// Preprocessor-output modes the native pp does not implement: those
 /// jobs keep the `clang -E` path (`-P` is handled by the caller).
 fn pp_flags_native_compatible(cpp: &[OsString]) -> bool {
-    const INCOMPATIBLE: [&str; 6] = ["-dM", "-dD", "-dN", "-H", "-C", "-CC"];
+    const INCOMPATIBLE: [&str; 5] = ["-dD", "-dN", "-H", "-C", "-CC"];
     !cpp.iter().any(|a| INCOMPATIBLE.iter().any(|f| a.as_os_str() == OsStr::new(f)))
 }
 
@@ -1206,6 +1206,89 @@ fn pp_std_flag(job: &Job) -> Option<String> {
     found
 }
 
+/// Build native-preprocessor options for one input, shared by
+/// preprocessing and dependency generation. The second value marks
+/// where the system include directories begin in `include_paths`
+/// (entries before it came from `-I`/`-iquote`), for `-MM` filtering.
+fn native_pp_opts(job: &Job, input: &OsStr) -> Outcome<(glcc_pp::PpOptions, usize)> {
+    let mut opts = glcc_pp::cpp_flags_to_opts(&job.cpp, &input.to_string_lossy());
+    opts.dump_macros = job.cpp.iter().any(|a| a == "-dM");
+    // `-dM` output is a plain macro listing: no linemarkers.
+    opts.linemarkers = !opts.dump_macros && !job.cpp.iter().any(|a| a == "-P");
+    // `.S` is assembler-with-cpp: GAS comments (`# ...`) pass through.
+    opts.assembler = Path::new(input).extension().is_some_and(|e| e == "S");
+    opts.target = Some(job.target);
+    let std = pp_std_flag(job);
+    opts.std = std.clone();
+    // GCC drops all builtins under `-undef`; otherwise seed the
+    // native preprocessor with exactly what `clang -E` predefines.
+    if !job.cpp.iter().any(|a| a == "-undef") {
+        let mut predefined = glcc_pp::predefines(&job.target, std.as_deref());
+        if !job.pic {
+            predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
+        }
+        opts.predefined = predefined;
+    }
+    // The default system search (resource headers, libc) comes from
+    // the same clang seed; `-nostdinc` keeps only the `-I` paths.
+    let sys_start = opts.include_paths.len();
+    if !opts.no_std_includes {
+        let native = glcc_pp::include_paths(&job.target);
+        if job.target.os == Os::Windows {
+            opts.clang_resource_dir = glcc_pp::clang_resource_dir(&native);
+        }
+        if let Some(dir) = find_glcc_include_dir() {
+            opts.include_paths.push(dir);
+        }
+        opts.include_paths.extend(native);
+    }
+    Ok((opts, sys_start))
+}
+
+/// Generate one depfile rule (gcc `-M` shape, lines wrapped at ~72
+/// columns) by running the native preprocessor over `input`.
+/// `-MM` drops system headers; `-MP` appends phony targets.
+fn native_depfile(job: &Job, input: &OsStr, target: &OsStr) -> Outcome<String> {
+    let (opts, sys_start) = native_pp_opts(job, input)?;
+    let bytes = std::fs::read(input).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(input).display())))?;
+    let text = decode_source(&bytes);
+    let (_, warnings, deps) = glcc_pp::preprocess_with_all(&text, &input.to_string_lossy(), &opts)
+        .map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())))?;
+    for warning in warnings {
+        eprintln!("{warning}");
+    }
+    let sys_dirs = &opts.include_paths[sys_start..];
+    let deps: Vec<String> = deps
+        .iter()
+        .filter(|d| {
+            if job.deps_sys_excluded && sys_dirs.iter().any(|s| d.starts_with(s)) {
+                return false;
+            }
+            true
+        })
+        .map(|d| d.display().to_string().replace(' ', "\\ "))
+        .collect();
+    let mut out = format!("{}:", target.to_string_lossy());
+    let mut col = out.len();
+    for dep in &deps {
+        if col + 1 + dep.len() > 72 {
+            out.push_str(" \\\n ");
+            col = 1;
+        }
+        out.push(' ');
+        out.push_str(dep);
+        col += 1 + dep.len();
+    }
+    out.push('\n');
+    if job.dep_phony {
+        for dep in &deps {
+            out.push_str(dep);
+            out.push_str(":\n\n");
+        }
+    }
+    Ok(out)
+}
+
 fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
     if use_native_pp(job) {
         if ctx.dry_run {
@@ -1213,34 +1296,7 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
         }
         let bytes = std::fs::read(input).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(input).display())))?;
         let text = decode_source(&bytes);
-        let mut opts = glcc_pp::cpp_flags_to_opts(&job.cpp, &input.to_string_lossy());
-        opts.linemarkers = !job.cpp.iter().any(|a| a == "-P");
-        // `.S` is assembler-with-cpp: GAS comments (`# ...`) pass through.
-        opts.assembler = Path::new(input).extension().is_some_and(|e| e == "S");
-        opts.target = Some(job.target);
-        let std = pp_std_flag(job);
-        opts.std = std.clone();
-        // GCC drops all builtins under `-undef`; otherwise seed the
-        // native preprocessor with exactly what `clang -E` predefines.
-        if !job.cpp.iter().any(|a| a == "-undef") {
-            let mut predefined = glcc_pp::predefines(&job.target, std.as_deref());
-            if !job.pic {
-                predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
-            }
-            opts.predefined = predefined;
-        }
-        // The default system search (resource headers, libc) comes from
-        // the same clang seed; `-nostdinc` keeps only the `-I` paths.
-        if !opts.no_std_includes {
-            let native = glcc_pp::include_paths(&job.target);
-            if job.target.os == Os::Windows {
-                opts.clang_resource_dir = glcc_pp::clang_resource_dir(&native);
-            }
-            if let Some(dir) = find_glcc_include_dir() {
-                opts.include_paths.push(dir);
-            }
-            opts.include_paths.extend(native);
-        }
+        let (opts, _) = native_pp_opts(job, input)?;
         let (text, warnings) =
             glcc_pp::preprocess_with_warnings(&text, &input.to_string_lossy(), &opts).map_err(|e| fail(format!("preprocessing '{}' failed:\n{e}", Path::new(input).display())))?;
         for warning in warnings {
@@ -1276,6 +1332,7 @@ fn lower_source_to_mir(
     async_enabled: bool,
     lang: LangOpts,
     error_format: ErrorFormat,
+    backend: Backend,
 ) -> std::result::Result<(glcc_mir::Module, String), ()> {
     // The driver owns the interner, the lexer output, and the
     // sema: the lexer fills spellings, the parser borrows all of
@@ -1323,7 +1380,9 @@ fn lower_source_to_mir(
     // The canonical pipeline shared with every other consumer. It always
     // runs wide-integer legalization; at `-O0` that is the only pass
     // (best debug fidelity).
-    glcc_mir::optimize(&mut mir_module, opt_level);
+    // Vector-generating passes stay off for the native backend: it
+    // has no vector codegen yet.
+    glcc_mir::optimize_with(&mut mir_module, opt_level, glcc_mir::OptConfig { vectorize: backend != Backend::Native });
     let errors = glcc_mir::verify::verify_module(&mir_module);
     if !errors.is_empty() {
         for e in &errors {
@@ -1353,7 +1412,7 @@ fn compile_source(
     backend: Backend,
 ) -> std::result::Result<(Vec<u8>, String), ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (mir_module, asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
+        let (mir_module, asm_text) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format, backend)?;
         emit_object(mir_module, asm_text, target, debug, pic, opt_level, backend)
     }));
     match outcome {
@@ -1571,7 +1630,7 @@ fn dump_mir_source(
     full: bool,
 ) -> std::result::Result<String, ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format)?;
+        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format, Backend::Cranelift)?;
         Ok::<String, ()>(if full {
             glcc_mir::display::dump_module_full(&module)
         } else {
@@ -1669,19 +1728,20 @@ fn assemble_in_process(input: &OsStr, output: &Path, arch: glasm::Arch) -> Resul
 }
 
 /// The glasm architecture for a target, if the integrated assembler
-/// supports it.
+/// supports it. glasm is host-portable (the `object` crate carries
+/// per-arch endianness), so this works for cross targets too.
 fn integrated_as_arch(target: Target) -> Option<glasm::Arch> {
     match target.arch {
-        Arch::X86_64 if cfg!(target_arch = "x86_64") => Some(glasm::Arch::X86_64),
-        Arch::Aarch64 if cfg!(target_arch = "aarch64") => Some(glasm::Arch::Aarch64),
+        Arch::X86_64 => Some(glasm::Arch::X86_64),
+        Arch::Aarch64 => Some(glasm::Arch::Aarch64),
         _ => None,
     }
 }
 
-/// Whether `-fintegrated-as` can serve this job: glasm targets native
-/// ELF64 only.
+/// Whether `-fintegrated-as` can serve this job: glasm emits ELF64
+/// objects, so Linux targets only.
 fn integrated_as_ok(job: &Job) -> bool {
-    job.integrated_as && job.target.is_native() && integrated_as_arch(job.target).is_some()
+    job.integrated_as && job.target.os == Os::Linux && integrated_as_arch(job.target).is_some()
 }
 
 /// Dedicated assembler for raw `.s` input and glcc's generated asm
@@ -1969,6 +2029,33 @@ fn emit_stdout(bytes: &[u8]) -> Outcome<()> {
 /// clang invocation per input (or a single shared one when `-MF`
 /// names the file for several inputs).
 fn run_depgen(ctx: &Ctx, job: &Job, units: &[(OsString, Option<OsString>)]) -> Outcome<()> {
+    if use_native_pp(job) {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        for (input, obj) in units {
+            let target = match (&job.dep_target, obj) {
+                (Some(t), _) => t.clone(),
+                (None, Some(o)) => o.clone(),
+                (None, None) => {
+                    let mut o = stem_of(input);
+                    o.push(".o");
+                    o
+                }
+            };
+            let content = native_depfile(job, input, &target)?;
+            let dest = match (&job.dep_file, units.len()) {
+                (Some(f), 1) => PathBuf::from(f),
+                _ => {
+                    let mut d = stem_of(input);
+                    d.push(".d");
+                    PathBuf::from(d)
+                }
+            };
+            std::fs::write(&dest, content).map_err(|e| fail(format!("cannot write '{}': {e}", dest.display())))?;
+        }
+        return Ok(());
+    }
     let flag = if job.depgen == Some(true) { "-MMD" } else { "-MD" };
     // `-E`: dependencies only — without it clang would link.
     if job.dep_file.is_some() && units.len() > 1 {
@@ -2116,6 +2203,28 @@ fn do_deps(ctx: &Ctx, job: &Job) -> Outcome<()> {
 
     if inputs.is_empty() {
         warn_unused_link_inputs(job, "dependency generation");
+        return Ok(());
+    }
+    if use_native_pp(job) {
+        if ctx.dry_run {
+            return Ok(());
+        }
+        let mut combined = String::new();
+        for input in &inputs {
+            let target = job.dep_target.clone().unwrap_or_else(|| {
+                let mut o = stem_of(input);
+                o.push(".o");
+                o
+            });
+            combined.push_str(&native_depfile(job, input, &target)?);
+        }
+        if let Some(f) = &job.dep_file {
+            std::fs::write(f, &combined).map_err(|e| fail(format!("cannot write '{}': {e}", Path::new(f).display())))?;
+        }
+        match (&job.dep_file, &job.output) {
+            (None, Some(o)) => emit_output(o, combined.as_bytes())?,
+            _ => emit_stdout(combined.as_bytes())?,
+        }
         return Ok(());
     }
     let (prog, args) = deps_cmd(job, job.deps_sys_excluded, &inputs);
@@ -2728,9 +2837,16 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
                         } else {
                             (PathBuf::from(&input.path), None)
                         };
-                        assemble_in_process(asm_path.as_os_str(), &out, integrated_as_arch(job.target).expect("checked by integrated_as_ok")).map_err(|e| {
+                        assemble_in_process(asm_path.as_os_str(), &out, integrated_as_arch(job.target).expect("checked by integrated_as_ok")).inspect_err(|_| {
+                            if std::env::var_os("GLCC_DUMP_FAILED_ASM").is_some() {
+                                let _ = std::fs::copy(&asm_path, "/tmp/glcc-failed.s");
+                            }
+                        }).map_err(|e| {
+                            let context = std::fs::read_to_string(&asm_path).ok().and_then(|text| {
+                                e.split_once("line ").and_then(|(_, rest)| rest.split_once(':')).and_then(|(n, _)| n.trim().parse::<usize>().ok()).and_then(|n| text.lines().nth(n.saturating_sub(1)).map(|l| format!("| {l}")))
+                            }).unwrap_or_default();
                             fail(format!(
-                                "assembling '{}' failed:\n{e}",
+                                "assembling '{}' failed:\n{e}\n{context}",
                                 Path::new(&input.path).display()
                             ))
                         })?;
@@ -4008,7 +4124,7 @@ mod tests {
     #[test]
     fn native_divide_sign_extends_narrow_operands() {
         let src = "int d10(int x) { return x / 10; }\nlong ds(short x) { return (long)x / 3; }\n";
-        let (mir, _) = lower_source_to_mir(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human).expect("lower");
+        let (mir, _) = lower_source_to_mir(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("lower");
         let out = glcc_codegen::emit_module(&mir, glcc_codegen::Arch::X86_64).expect("emit");
         // The divide always runs at 64 bits, so a narrow dividend must
         // be canonicalized first: without the movsxd, cqo consumes the

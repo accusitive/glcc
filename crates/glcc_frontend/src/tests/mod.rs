@@ -11157,3 +11157,39 @@ fn diagnostics_json_includes_codes_and_helps() {
     assert!(json.contains("\"code\":\"E0201\""), "{json}");
     assert!(json.contains("\"helps\":[\"a variable with a similar name exists: `count`\"]"), "{json}");
 }
+
+#[test]
+fn named_address_spaces_are_erased() {
+    // GCC x86's `__seg_gs`/`__seg_fs` (and the kernel-mode `__seg_k*`
+    // spellings) qualify per-cpu pointee types under
+    // CONFIG_CC_HAS_NAMED_AS. The segment-relative addressing they
+    // request is not modeled, so they leave no trace on the type in
+    // the positions the kernel uses them: leading the declaration
+    // specifiers, between specifiers and `*`, in a cast type-name, and
+    // after a struct specifier inside `typeof`.
+    let mut sema = gated_sema(LangOpts { gnu: true, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let src = "\
+        int __seg_gs *p;\
+        typedef int *gs_ptr;\
+        __seg_gs struct S { int x; } s;\
+        struct S *q = (__seg_gs struct S *)&s;\
+        __typeof__(const struct S __seg_gs) t;\
+        int * __seg_gs r = p;\
+    ";
+    let mut parser = test_parser(src, &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(!parser.has_errors(), "errors: {:?}", parser.diagnostics.borrow().iter().map(|d| d.message.clone()).collect::<Vec<_>>());
+    // The plain pointer type survives wherever the qualifier appeared.
+    let ptr_i32 = Ty::Pointer { qualifiers: TypeQualifiers::empty(), size: PtrSize::Default, pointee: Box::new(Ty::Int) };
+    assert_eq!(parser.sema.decls[0].ty, ptr_i32);
+}
+
+#[test]
+fn named_address_spaces_require_gnu() {
+    let mut sema = gated_sema(LangOpts { gnu: false, ..LangOpts::default() });
+    let mut interner = Interner::new();
+    let mut parser = test_parser("int __seg_gs *p;", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(parser.has_errors());
+}

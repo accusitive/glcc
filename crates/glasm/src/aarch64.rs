@@ -1657,7 +1657,7 @@ fn patch_bits(data: &mut [u8], off: i64, mask: u32, shift: u32, val: u32) {
 fn sym_off(v: &RValue) -> i64 {
     match v {
         RValue::Const(c) => *c,
-        RValue::SectVal { off, .. } => *off,
+        RValue::SectVal { off, .. } | RValue::RelDiff { off, .. } | RValue::RelDiffExtern { off, .. } => *off,
         RValue::ExternRef { off, .. } => *off,
     }
 }
@@ -1670,6 +1670,11 @@ fn push_reloc(relocs: &mut Vec<Reloc>, f: &Fixup, val: &RValue, r_type: u32) {
         RValue::ExternRef { sym, off } => (Target::Symbol(*sym), *off),
         // Local symbols relocate against the section, like GNU as.
         RValue::SectVal { sect, off, .. } => (Target::Section(*sect), *off),
+        RValue::RelDiff { sect, off, sym } => (match sym {
+            Some(i) => Target::Symbol(*i),
+            None => Target::Section(*sect),
+        }, *off),
+        RValue::RelDiffExtern { sym, off } => (Target::Symbol(*sym), *off),
         RValue::Const(_) => return,
     };
     relocs.push(Reloc {

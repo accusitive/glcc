@@ -33,7 +33,7 @@ pub use ir::{
     AsmBlock, AsmOperand, AtomicRmwOp, Block, BlockData, Const, DataReloc, Def, Extern, ExternData, ExternEffect, FcmpPred, Func, Function, Global, GlobalData, IcmpPred, Inst,
     InstData, InstKind, InvokeCallee, LpadClause, MemFlags, Module, Terminator, Value, ValueData, ValueOrigin,
 };
-pub use optimize::{OptLevel, optimize};
+pub use optimize::{OptConfig, OptLevel, optimize, optimize_with};
 pub use parse::{MirParseError, parse_module};
 pub use pass::{FunctionPass, ModulePass, PassManager};
 pub use ty::{FloatKind, GepIndex, Signature, Ty, dense_field_offsets, struct_field_offsets};

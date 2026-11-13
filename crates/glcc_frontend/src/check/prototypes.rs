@@ -14,6 +14,20 @@ pub(crate) fn builtin_prototype(name: &str) -> Option<(Ty, Vec<Ty>, bool)> {
         "__builtin_va_start" | "__builtin_c23_va_start" => (Ty::Void, vec![Ty::BuiltinVaList], true),
         "__builtin_va_end" => (Ty::Void, vec![Ty::BuiltinVaList], false),
         "__builtin_va_copy" => (Ty::Void, vec![Ty::BuiltinVaList, Ty::BuiltinVaList], false),
+        "__builtin_object_size" | "__builtin_dynamic_object_size" => {
+            (
+                Ty::UnsignedLong,
+                vec![
+                    Ty::Pointer {
+                        qualifiers: TypeQualifiers::empty(),
+                        size: PtrSize::Default,
+                        pointee: Box::new(Ty::Void),
+                    },
+                    Ty::Int,
+                ],
+                false,
+            )
+        }
         "__builtin_clz" => (Ty::Int, vec![Ty::UnsignedInt], false),
         "__builtin_clzl" => (Ty::Int, vec![Ty::UnsignedLong], false),
         "__builtin_clzll" => (Ty::Int, vec![Ty::UnsignedLongLong], false),

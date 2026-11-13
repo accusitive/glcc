@@ -2,7 +2,7 @@
 //! `asm/parser.c` and `asm/stdscan.c`, reduced to the subset glasm
 //! supports).
 
-use crate::expr::Expr;
+use crate::expr::{CmpOp, Expr};
 use crate::insn::op;
 use crate::insn::*;
 use crate::regs;
@@ -216,15 +216,23 @@ pub(crate) fn parse_expr(t: &mut Toks, min_prec: u8) -> Result<Expr, String> {
     let mut lhs = parse_unary(t)?;
     loop {
         let (op, prec) = match t.peek() {
-            Some(Tok::Punct("|")) => ("|", 1),
-            Some(Tok::Punct("^")) => ("^", 2),
-            Some(Tok::Punct("&")) => ("&", 3),
-            Some(Tok::Punct("<<")) => ("<<", 4),
-            Some(Tok::Punct(">>")) => (">>", 4),
-            Some(Tok::Punct("+")) => ("+", 5),
-            Some(Tok::Punct("-")) => ("-", 5),
-            Some(Tok::Punct("*")) => ("*", 6),
-            Some(Tok::Punct("/")) | Some(Tok::Punct("//")) | Some(Tok::Punct("%%")) => ("/", 6),
+            Some(Tok::Punct("||")) => ("||", 1),
+            Some(Tok::Punct("&&")) => ("&&", 2),
+            Some(Tok::Punct("==")) => ("==", 3),
+            Some(Tok::Punct("!=")) => ("!=", 3),
+            Some(Tok::Punct("<")) => ("<", 4),
+            Some(Tok::Punct("<=")) => ("<=", 4),
+            Some(Tok::Punct(">")) => (">", 4),
+            Some(Tok::Punct(">=")) => (">=", 4),
+            Some(Tok::Punct("|")) => ("|", 5),
+            Some(Tok::Punct("^")) => ("^", 6),
+            Some(Tok::Punct("&")) => ("&", 7),
+            Some(Tok::Punct("<<")) => ("<<", 8),
+            Some(Tok::Punct(">>")) => (">>", 8),
+            Some(Tok::Punct("+")) => ("+", 9),
+            Some(Tok::Punct("-")) => ("-", 9),
+            Some(Tok::Punct("*")) => ("*", 10),
+            Some(Tok::Punct("/")) | Some(Tok::Punct("//")) | Some(Tok::Punct("%%")) => ("/", 10),
             _ => break,
         };
         if prec < min_prec {
@@ -242,6 +250,19 @@ pub(crate) fn parse_expr(t: &mut Toks, min_prec: u8) -> Result<Expr, String> {
             "&" => Expr::And(Box::new(lhs), Box::new(rhs)),
             "|" => Expr::Or(Box::new(lhs), Box::new(rhs)),
             "^" => Expr::Xor(Box::new(lhs), Box::new(rhs)),
+            "==" | "!=" | "<" | "<=" | ">" | ">=" => {
+                let op = match op {
+                    "==" => CmpOp::Eq,
+                    "!=" => CmpOp::Ne,
+                    "<" => CmpOp::Lt,
+                    "<=" => CmpOp::Le,
+                    ">" => CmpOp::Gt,
+                    _ => CmpOp::Ge,
+                };
+                Expr::Cmp { op, l: Box::new(lhs), r: Box::new(rhs) }
+            }
+            "&&" => Expr::LogAnd(Box::new(lhs), Box::new(rhs)),
+            "||" => Expr::LogOr(Box::new(lhs), Box::new(rhs)),
             _ => unreachable!(),
         };
     }
@@ -729,7 +750,7 @@ fn parse_mem_body(t: &mut Toks) -> Result<MemParts, String> {
         }
         // Terms may be scaled (`4*rbx`), so parse multiplicatively but
         // stop before the +/- separator.
-        let term = parse_expr(t, 6)?;
+        let term = parse_expr(t, 10)?;
         match &term {
             Expr::Sym(name) => {
                 if name == regs::RIP {

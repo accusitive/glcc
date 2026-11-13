@@ -89,6 +89,8 @@ pub struct FuncSel<'a> {
     pub isa: &'static dyn TargetIsa,
     /// The enclosing module (signatures of callees and externs).
     pub module: &'a glcc_mir::Module,
+    /// The function being selected, for asm symbol retargeting.
+    pub func_id: Option<glcc_mir::Func>,
     pub f: MFunction,
     locs: HashMap<Value, ValLoc>,
     next_vreg: u32,
@@ -116,7 +118,7 @@ pub struct FuncSel<'a> {
 }
 
 impl<'a> FuncSel<'a> {
-    fn new(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Module, mir: &Function) -> Self {
+    fn new(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Module, func_id: Option<glcc_mir::Func>, mir: &Function) -> Self {
         let mut f = MFunction {
             name: mir.name.clone(),
             local: mir.local,
@@ -136,6 +138,7 @@ impl<'a> FuncSel<'a> {
         FuncSel {
             isa,
             module,
+            func_id,
             f,
             locs: HashMap::new(),
             next_vreg: 0,
@@ -357,8 +360,8 @@ impl<'a> FuncSel<'a> {
 }
 
 /// Select a whole MIR function into machine IR.
-pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Module, mir: &Function) -> MFunction {
-    let mut sel = FuncSel::new(isa, module, mir);
+pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Module, func_id: Option<glcc_mir::Func>, mir: &Function) -> MFunction {
+    let mut sel = FuncSel::new(isa, module, func_id, mir);
 
     // Block parameters: every MIR block param gets a vreg up front, so
     // uses never depend on block walk order. Entry params are excluded:
@@ -395,7 +398,7 @@ pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Mo
             if try_pattern(&mut sel, mir, isa.patterns(), inst) {
                 continue;
             }
-            panic!("glcc native backend: cannot select {:?}", mir.insts[inst].kind);
+            panic!("glcc native backend: cannot select {:?} in function {}", mir.insts[inst].kind, mir.name);
         }
         if !isa.select_custom(&mut sel, mir, crate::isa::SelItem::Term(b)) {
             panic!("glcc native backend: unhandled terminator in block {b:?}");
@@ -543,7 +546,7 @@ pub fn value_width(ty: &glcc_mir::Ty) -> crate::machine::Width {
         b if (9..=16).contains(&b) => crate::machine::Width::W16,
         b if (17..=32).contains(&b) => crate::machine::Width::W32,
         b if (33..=64).contains(&b) => crate::machine::Width::W64,
-        b => panic!("glcc native backend: unsupported scalar width {b}"),
+        b => panic!("glcc native backend: unsupported scalar width {b} for type {:?}", ty),
     }
 }
 

@@ -637,6 +637,7 @@ pub struct RenderCx<'a> {
 /// Render the template for x86-64: `%%`, `%N`, `%cN`/`%nN`,
 /// `%bN`/`%wN`/`%kN`/`%qN`/`%hN`, `%[name]`, `%l[name]`, and `%=`.
 pub fn render_x86_64(template: &str, cx: &RenderCx) -> String {
+    let cx_template_debug = template;
     let mut out = String::with_capacity(template.len() + 16);
     let mut chars = template.chars().peekable();
     while let Some(c) = chars.next() {
@@ -684,6 +685,11 @@ pub fn render_x86_64(template: &str, cx: &RenderCx) -> String {
                 };
                 out.push_str(&expand_x86_64(cx, index, None));
             }
+            Some('%') => {
+                // GCC escapes a literal percent sign as `%%`.
+                chars.next();
+                out.push('%');
+            }
             _ => {
                 let modifier = match chars.peek() {
                     Some(c) if c.is_ascii_alphabetic() => {
@@ -693,6 +699,23 @@ pub fn render_x86_64(template: &str, cx: &RenderCx) -> String {
                     }
                     _ => None,
                 };
+                // A modifier may apply to a named operand too
+                // (`%c[size]` prints the constant without the `$`).
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    let mut name = String::new();
+                    for c in chars.by_ref() {
+                        if c == ']' {
+                            break;
+                        }
+                        name.push(c);
+                    }
+                    let Some(index) = cx.slots.iter().position(|slot| slot.name.as_deref() == Some(&name)) else {
+                        panic!("glcc native backend: asm template references unknown operand name [{name}]");
+                    };
+                    out.push_str(&expand_x86_64(cx, index, modifier));
+                    continue;
+                }
                 let mut digits = String::new();
                 while let Some(c) = chars.peek() {
                     if c.is_ascii_digit() {
@@ -703,7 +726,9 @@ pub fn render_x86_64(template: &str, cx: &RenderCx) -> String {
                     }
                 }
                 let Ok(index) = digits.parse::<usize>() else {
-                    panic!("bad `%` in asm template");
+                    panic!("bad `%` sequence in asm template: %{}{modifier:?}
+TEMPLATE:
+{}", digits, cx_template_debug);
                 };
                 if index >= cx.slots.len() {
                     panic!("glcc native backend: asm template references operand {index} which does not exist");
@@ -737,26 +762,112 @@ fn expand_x86_64(cx: &RenderCx, index: usize, modifier: Option<char>) -> String 
     }
 }
 
-/// Assemble AT&T x86-64 text into `.text` bytes. Symbol references are
-/// rejected: the native backend's object writer has no relocation path
-/// for them yet.
-pub fn assemble_x86_64(text: &str) -> Result<Vec<u8>, String> {
+/// A relocation the assembled fragment needs, carrying the glasm
+/// symbol name for the caller to resolve.
+#[derive(Clone, Debug)]
+pub struct FragmentReloc {
+    pub offset: u32,
+    pub size: u8,
+    pub pcrel: bool,
+    pub addend: i64,
+    /// `None`: the relocation targets the named symbol in `sym`.
+    /// `Some((section, offset))`: it targets a fragment-local label
+    /// defined at that position — the caller synthesizes a symbol.
+    pub local: Option<(String, i64)>,
+    pub sym: String,
+}
+
+/// A non-`.text` section the fragment's `.pushsection` wrote (the
+/// kernel's ALTERNATIVE/ANNOTATE blocks emit metadata this way).
+#[derive(Clone, Debug)]
+pub struct FragmentSection {
+    pub name: String,
+    pub write: bool,
+    pub exec: bool,
+    pub nobits: bool,
+    pub data: Vec<u8>,
+    pub relocs: Vec<FragmentReloc>,
+}
+
+/// Assemble AT&T x86-64 text into `.text` bytes, its symbol
+/// relocations, and any side sections the fragment created (the caller
+/// resolves relocation names).
+pub fn assemble_x86_64(text: &str) -> Result<(Vec<u8>, Vec<FragmentReloc>, Vec<FragmentSection>), String> {
     let stmts = glasm::gas::parse_module(text, GArch::X86_64)
         .map_err(|errs| errs.iter().map(|e| format!("line {}: {}", e.line, e.msg)).collect::<Vec<_>>().join("; "))?;
-    let module = glasm::assemble::assemble(&stmts, GArch::X86_64)
+    let module = glasm::assemble::assemble_with(&stmts, GArch::X86_64, false)
         .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-    if !module.relocs.is_empty() {
-        return Err("symbol references in inline asm are not supported by the native backend yet".to_string());
+    let local_of = |r: &glasm::assemble::Reloc| -> Result<Option<(String, i64)>, String> {
+        match &r.target {
+            glasm::assemble::Target::Symbol(i) => {
+                let s = &module.symbols[*i];
+                if s.defined && !s.extern_
+                    && let Some(sect) = s.sect {
+                        return Ok(Some((module.sections[sect].name.clone(), s.value)));
+                    }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    };
+    let name_of = |r: &glasm::assemble::Reloc| -> Result<String, String> {
+        match &r.target {
+            glasm::assemble::Target::Symbol(i) => Ok(module.symbols[*i].name.clone()),
+            // A fragment-local target (a local label's section) gets an
+            // unambiguous marker; the caller retargets it to the
+            // enclosing function.
+            glasm::assemble::Target::Section(s) => Ok(format!("<section {}>", module.sections[*s].name)),
+            glasm::assemble::Target::Abs => Err("inline asm references the null symbol".to_string()),
+        }
+    };
+    let mut relocs = Vec::new();
+    let mut sides: Vec<FragmentSection> = Vec::new();
+    for r in &module.relocs {
+        let rel = FragmentReloc {
+            offset: r.offset as u32,
+            size: r.size,
+            pcrel: r.pcrel,
+            addend: r.addend,
+            local: local_of(r)?,
+            sym: name_of(r)?,
+        };
+        if r.section == 0 && module.sections[0].name == ".text" {
+            relocs.push(rel);
+        } else {
+            let sect = &module.sections[r.section];
+            match sides.iter_mut().find(|s| s.name == sect.name) {
+                Some(side) => side.relocs.push(rel),
+                None => sides.push(FragmentSection { name: sect.name.clone(), write: false, exec: false, nobits: false, data: Vec::new(), relocs: vec![rel] }),
+            }
+        }
     }
     let mut code = Vec::new();
     for section in &module.sections {
         if section.name == ".text" {
             code.extend_from_slice(&section.data);
-        } else if !section.data.is_empty() {
-            return Err("inline asm switching to a non-.text section is not supported by the native backend yet".to_string());
+            continue;
+        }
+        if section.data.is_empty() {
+            continue;
+        }
+        let (write, exec, nobits) = match section.flags {
+            glasm::insn::SectionFlags::Text => (false, true, false),
+            glasm::insn::SectionFlags::Data => (true, false, false),
+            glasm::insn::SectionFlags::Bss => (true, false, true),
+            glasm::insn::SectionFlags::Rodata => (false, false, false),
+            glasm::insn::SectionFlags::Custom { write, exec, nobits, .. } => (write, exec, nobits),
+        };
+        match sides.iter_mut().find(|s| s.name == section.name) {
+            Some(side) => {
+                side.data = section.data.clone();
+                side.write = write;
+                side.exec = exec;
+                side.nobits = nobits;
+            }
+            None => sides.push(FragmentSection { name: section.name.clone(), write, exec, nobits, data: section.data.clone(), relocs: Vec::new() }),
         }
     }
-    Ok(code)
+    Ok((code, relocs, sides))
 }
 
 /// The complete assembled blob for one block: rendered template plus,
@@ -770,7 +881,7 @@ pub fn blob_x86_64(
     is_goto: bool,
     unique: u32,
     preg_of: &dyn Fn(usize) -> PReg,
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, Vec<FragmentReloc>, Vec<FragmentSection>), String> {
     let cx = RenderCx { slots, preg_of, labels, unique };
     let mut text = String::new();
     if is_goto {

@@ -2990,6 +2990,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             | CheckedExprKind::Char(_)
             | CheckedExprKind::Str(_)
             | CheckedExprKind::ConstantP(_)
+            | CheckedExprKind::ObjectSize(_)
             | CheckedExprKind::ClassifyType(_)
             | CheckedExprKind::Offsetof { .. }
             | CheckedExprKind::SizeofTy(_)
@@ -3200,6 +3201,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                             .into_iter()
                             .any(|kw| self.peek_ext(kw))
                         || self.peek_ms_unaligned()
+                        // GCC x86 named address spaces (`__seg_gs int x;`).
+                        || self.peek_named_as()
                     // `_Future(T)` opens a declaration like a typedef name does.
                     || self.is_future_specifier(*sym)
             }
@@ -3393,6 +3396,17 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// declarator, casts) can probe tokens that are not at the cursor.
     fn is_ms_unaligned_sym(&self, sym: SymbolU32) -> bool {
         self.intern.resolve(sym).is_some_and(crate::ext::is_ms_unaligned_spelling) && crate::ext::Fam::Ms.allowed(self.sema.lang)
+    }
+    fn peek_named_as(&self) -> bool {
+        matches!(self.tokens.peek_val(), Some(Token::Identifier(sym)) if self.is_named_as_sym(*sym))
+    }
+    /// Whether `sym` spells one of GCC x86's named address spaces
+    /// (`__seg_gs` and friends). They qualify pointee types in the
+    /// kernel's per-cpu code; the segment-relative effect is erased,
+    /// so only the spelling is consumed. Symbol-based, matching the
+    /// `__unaligned` handling.
+    fn is_named_as_sym(&self, sym: SymbolU32) -> bool {
+        self.intern.resolve(sym).is_some_and(crate::ext::is_named_as_spelling) && crate::ext::Fam::Gnu.allowed(self.sema.lang)
     }
     /// GNU builtin type keywords behave as specifiers, never as
     /// old-style identifier-list entries (`f(__float128)` prototypes).
@@ -4137,7 +4151,10 @@ impl<'a, 'b> Parser<'a, 'b> {
         if kind == BindingKind::Func && self.declarator_is_old_style(declarator) {
             return self.fail(span, "parameter list without types is only allowed in a function definition");
         }
-        if kind == BindingKind::Var && ty.unqualified() == &Ty::Void {
+        // `extern const void __start;` linker-symbol markers: GCC
+        // accepts `extern void` objects (no storage, no definition),
+        // while any other void object stays an error.
+        if kind == BindingKind::Var && ty.unqualified() == &Ty::Void && !specifiers.class.contains(&StorageClass::Extern) {
             return self.fail(span, "declaration of `void` object");
         }
         // Constructor/destructor attributes only mean anything on
@@ -5034,6 +5051,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.tokens.advance();
                 continue;
             }
+            // GCC x86 named address spaces: consumed and erased (see
+            // `is_named_as_sym`).
+            if self.peek_named_as() {
+                self.tokens.advance();
+                continue;
+            }
             match self.tokens.peek().map(|x| &x.val) {
                 Some(Token::Keyword(tq @ pat_type_qualifier!())) => {
                     qualifiers.insert_qualifier(match tq {
@@ -5121,6 +5144,12 @@ impl<'a, 'b> Parser<'a, 'b> {
             }
             if let Some(q) = self.peek_gnu_qualifier() {
                 ds.type_qualifier.insert_qualifier(q);
+                self.tokens.advance();
+                continue;
+            }
+            // GCC x86 named address spaces (`__seg_gs`): consumed and
+            // erased (see `is_named_as_sym`).
+            if self.peek_named_as() {
                 self.tokens.advance();
                 continue;
             }
@@ -7021,9 +7050,12 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.is_typedef_name(*sym)
                     || self.is_gnu_type_keyword(*sym)
                     || self.is_future_specifier(*sym)
-                    // `(__unaligned Big *)&b`: the cast type-name opens
-                    // with the qualifier.
-                    || self.is_ms_unaligned_sym(*sym)
+                // `(__unaligned Big *)&b`: the cast type-name opens
+                // with the qualifier.
+                || self.is_ms_unaligned_sym(*sym)
+                // Same for GCC's named address spaces
+                // (`(__seg_gs int *)&x` shapes).
+                || self.is_named_as_sym(*sym)
                     || self.is_c23_keyword(*sym, "typeof_unqual")
                     || self.is_c23_keyword(*sym, "bool")
                     || self.is_c23_keyword(*sym, "_BitInt")

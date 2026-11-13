@@ -32,6 +32,9 @@ impl AbiImpl for SysV {
                 } else if !all_int {
                     // Mixed rax/xmm0 returns: rare; defer until needed.
                     return RetLoc::Memory;
+                } else if pieces.len() > 1 {
+                    // SysV integer pieces: rax then rdx.
+                    pregs[1] = PReg::gpr(regs::RDX);
                 }
                 RetLoc::Regs(pregs, pieces.len() as u8)
             }

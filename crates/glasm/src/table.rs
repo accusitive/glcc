@@ -190,6 +190,18 @@ impl Val {
                 extern_sym: Some(*sym),
                 ..Default::default()
             },
+            // Cross-section differences never reach symbol-table
+            // entries; if one does, keep the target side.
+            RValue::RelDiff { sect, off, .. } => Val {
+                value: *off,
+                segment: Some(*sect),
+                ..Default::default()
+            },
+            RValue::RelDiffExtern { sym, off } => Val {
+                value: *off,
+                extern_sym: Some(*sym),
+                ..Default::default()
+            },
         }
     }
 

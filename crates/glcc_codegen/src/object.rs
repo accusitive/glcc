@@ -12,6 +12,7 @@ use crate::isa::{EncOut, RelocReq, TargetIsa};
 use crate::machine::{MFunction, RelocKind, SymTarget};
 use crate::ra;
 use crate::sel;
+use crate::FRAG_LOCAL;
 
 use glcc_mir::{Const, DataReloc};
 
@@ -34,11 +35,13 @@ struct TextBuilder {
     relocs: Vec<(u32, RelocReq)>,
     /// Relocations against real symbols, resolved during finalization.
     out_relocs: Vec<Reloc>,
+    /// Inline-asm side sections (fragment-relative reloc offsets).
+    sides: Vec<crate::machine::AsmSideSection>,
 }
 
 impl TextBuilder {
     fn new() -> Self {
-        TextBuilder { text: Vec::new(), block_offsets: Vec::new(), block_refs: Vec::new(), relocs: Vec::new(), out_relocs: Vec::new() }
+        TextBuilder { text: Vec::new(), block_offsets: Vec::new(), block_refs: Vec::new(), relocs: Vec::new(), out_relocs: Vec::new(), sides: Vec::new() }
     }
 }
 
@@ -73,14 +76,14 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
     // when unsupported features panic, emit an int3 stub for the
     // failures, and tally the panic messages. Used to survey which
     // feature gaps a large input hits.
-    let census = std::env::var_os("GLCC_NATIVE_CENSUS").is_some();
+    let census = std::env::var("GLCC_NATIVE_CENSUS").is_ok_and(|v| v == "1");
     let mut census_tally: Vec<(String, u32)> = Vec::new();
 
     for (fi, f) in mir.funcs.iter_enumerated() {
         let lowered = if census {
             let prev = std::panic::take_hook();
             std::panic::set_hook(Box::new(|_| {}));
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower_function(isa, mir, f)));
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lower_function(isa, mir, fi, f)));
             std::panic::set_hook(prev);
             match r {
                 Ok(mf) => Some(mf),
@@ -99,7 +102,7 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
                 }
             }
         } else {
-            Some(lower_function(isa, mir, f))
+            Some(lower_function(isa, mir, fi, f))
         };
         let Some(mf) = lowered else {
             let sym = func_syms[fi.index()].expect("function symbol");
@@ -161,14 +164,32 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
     Ok(Emitted { object, asm: printer.finish() })
 }
 
-fn lower_function(isa: &'static dyn TargetIsa, mir: &glcc_mir::Module, f: &glcc_mir::Function) -> MFunction {
+fn lower_function(isa: &'static dyn TargetIsa, mir: &glcc_mir::Module, fi: glcc_mir::Func, f: &glcc_mir::Function) -> MFunction {
     let trace = std::env::var_os("GLCC_NATIVE_TRACE").is_some();
     if trace {
         eprintln!("TRACE: select {}", f.name);
     }
-    let mut mf = sel::select_function(isa, mir, f);
+    let mut mf = sel::select_function(isa, mir, Some(fi), f);
+    // Fragment-local label relocations resolve against the enclosing
+    // function's own symbol: the fragment's text lands inside its body.
+    for block in &mut mf.blocks {
+        for inst in &mut block.insts {
+            if let Some(blob) = &mut inst.asm {
+                for (_, symop) in &mut blob.sym_relocs {
+                    if symop.target == crate::machine::SymTarget::Named(FRAG_LOCAL) {
+                        symop.target = crate::machine::SymTarget::Func(fi);
+                    }
+                }
+            }
+        }
+    }
     if trace {
         eprintln!("TRACE: ra {}", f.name);
+    }
+    if std::env::var_os("GLCC_PRE_RA_DUMP").is_some() {
+        let mut p = crate::printer::Printer::new();
+        p.function(&mf, isa);
+        eprintln!("{}", p.finish());
     }
     if std::env::var_os("GLCC_NATIVE_DUMP").is_some() {
         let mut p = crate::printer::Printer::new();
@@ -206,6 +227,12 @@ fn encode_function(isa: &'static dyn TargetIsa, f: &MFunction, tb: &mut TextBuil
             }
             for req in out.relocs {
                 tb.relocs.push((inst_start + req.at as u32, req));
+            }
+            for mut side in out.sides {
+                for (rel, _) in &mut side.relocs {
+                    rel.addend += inst_start as i64;
+                }
+                tb.sides.push(side);
             }
         }
     }
@@ -275,6 +302,63 @@ fn resolve_function_refs(
             target: RelocTarget::Symbol(sym),
             r_type,
         });
+    }
+    // Inline-asm side sections: append each fragment's bytes to the
+    // (possibly shared) section and relocate its fields. PC-relative
+    // entries (`.long label - .` in `.altinstructions`) always go
+    // through a relocation: the patch helper's base is the function,
+    // not this section.
+    for side in &tb.sides {
+        let idx = match asm.sections.iter().position(|s| s.name == side.name) {
+            Some(idx) => idx,
+            None => {
+                let flags = if side.nobits {
+                    SectionFlags::Bss
+                } else if side.exec {
+                    SectionFlags::Text
+                } else if side.write {
+                    SectionFlags::Data
+                } else {
+                    SectionFlags::Rodata
+                };
+                asm.sections.push(Section { name: side.name.clone(), flags, align: 1, data: Vec::new() });
+                asm.sections.len() - 1
+            }
+        };
+        let base = asm.sections[idx].data.len() as i64;
+        if !side.nobits {
+            asm.sections[idx].data.extend_from_slice(&side.data);
+        }
+        for (rel, symop) in &side.relocs {
+            let sym = match &symop.target {
+                SymTarget::Named(name) => *named_syms.entry(name).or_insert_with(|| {
+                    asm.symbols.push(Symbol {
+                        name: name.to_string(),
+                        defined: false,
+                        seen: true,
+                        extern_: true,
+                        global: true,
+                        weak: false,
+                        sect: None,
+                        value: 0,
+                    });
+                    asm.symbols.len() - 1
+                }),
+                SymTarget::Func(f) => func_syms[f.index()].expect("referenced function symbol"),
+                SymTarget::Global(g) => global_syms[g.index()].expect("referenced global symbol"),
+                SymTarget::Extern(e) => extern_syms[e.index()].expect("referenced extern symbol"),
+            };
+            let (r_type, pcrel, size) = isa.elf_reloc(symop.reloc);
+            tb.out_relocs.push(Reloc {
+                section: idx,
+                offset: base + rel.offset as i64,
+                size,
+                pcrel,
+                addend: rel.addend,
+                target: RelocTarget::Symbol(sym),
+                r_type,
+            });
+        }
     }
 }
 

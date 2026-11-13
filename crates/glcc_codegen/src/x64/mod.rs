@@ -107,6 +107,7 @@ impl TargetIsa for X64 {
             K::PcRel32 => (object::elf::R_X86_64_PC32.0, true, 4),
             K::Plt32 => (object::elf::R_X86_64_PLT32.0, true, 4),
             K::Abs64 => (object::elf::R_X86_64_64.0, false, 8),
+            K::Abs32 => (object::elf::R_X86_64_32.0, false, 4),
             _ => panic!("glcc native backend: x86-64 cannot emit {kind:?} relocation fields"),
         }
     }
@@ -373,6 +374,25 @@ fn spill_save_area(sel: &mut FuncSel, save_slot: u32, disp: i64, vr: crate::mach
 /// assembled by the encoder post-RA), and the output stores. An `asm
 /// goto`'s selector rides the MIR result; the following `Switch`
 /// dispatches on it.
+/// Placeholder target for fragment-local label relocations; the
+/// object writer replaces it with a synthesized local symbol.
+pub const FRAG_LOCAL: &str = "<glcc-frag-local>";
+
+/// Resolve a template symbol name against the module's function,
+/// global, and extern tables (in that order).
+fn find_module_sym(module: &glcc_mir::Module, name: &str) -> Option<crate::machine::SymTarget> {
+    if let Some(i) = module.funcs.iter().position(|f| f.name == name) {
+        return Some(crate::machine::SymTarget::Func(glcc_mir::Func::from_usize(i)));
+    }
+    if let Some(i) = module.globals.iter().position(|g| g.name == name) {
+        return Some(crate::machine::SymTarget::Global(glcc_mir::Global::from_usize(i)));
+    }
+    if let Some(i) = module.externs.iter().position(|e| e.name == name) {
+        return Some(crate::machine::SymTarget::Extern(glcc_mir::Extern::from_usize(i)));
+    }
+    None
+}
+
 fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     let InstKind::InlineAsm { block } = &mir.insts[inst].kind else { unreachable!() };
     let outputs = block.outputs as usize;
@@ -388,9 +408,62 @@ fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     // the allocator may choose, so a passing probe guarantees the
     // encode-time render assembles too.
     let probe_of = |i: usize| plan.slots[i].pin.unwrap_or_else(|| PReg::gpr(regs::R11));
-    if let Err(reason) = crate::asm::blob_x86_64(&block.template, &plan.slots, &block.labels, block.is_basic, is_goto, unique, &probe_of) {
-        panic!("glcc native backend: inline asm cannot be lowered: {reason}");
-    }
+    let (sym_relocs, side_sections) = match crate::asm::blob_x86_64(&block.template, &plan.slots, &block.labels, block.is_basic, is_goto, unique, &probe_of) {
+        Ok((_, relocs, sides)) => {
+            let resolve_one = |rel: &crate::asm::FragmentReloc| -> (crate::machine::AsmSymReloc, crate::machine::SymOperand) {
+                let reloc = match (rel.pcrel, rel.size) {
+                    (true, 4) => crate::machine::RelocKind::Plt32,
+                    (false, 8) => crate::machine::RelocKind::Abs64,
+                    (false, 4) => crate::machine::RelocKind::Abs32,
+                    (p, s) => panic!("glcc native backend: inline asm symbol field (pcrel={p}, size={s}) is not supported"),
+                };
+                if rel.local.is_some() {
+                    // Fragment-local label: the caller synthesizes a
+                    // symbol at its position (or retargets `.text`
+                    // locals to the enclosing function).
+                    return (
+                        crate::machine::AsmSymReloc { offset: rel.offset, size: rel.size, pcrel: rel.pcrel, addend: rel.addend, local: rel.local.clone(), sym: rel.sym.clone() },
+                        crate::machine::SymOperand { target: crate::machine::SymTarget::Named(FRAG_LOCAL), reloc, addend: 0 },
+                    );
+                }
+                // `<section X>`: a fragment-local label in the fragment's
+                // own text; it resolves against the enclosing function's
+                // symbol once the blob's offset within the function is
+                // added to the addend.
+                if rel.sym.starts_with("<section ") {
+                    return (
+                        crate::machine::AsmSymReloc { offset: rel.offset, size: rel.size, pcrel: rel.pcrel, addend: rel.addend, local: None, sym: rel.sym.clone() },
+                        crate::machine::SymOperand { target: crate::machine::SymTarget::Func(sel.func_id.expect("selecting without a function id")), reloc, addend: 0 },
+                    );
+                }
+                // Symbols the module does not declare (GCC asm may
+                // reference undeclared externs) become lazy externs.
+                let target = find_module_sym(sel.module, &rel.sym).unwrap_or_else(|| {
+                    crate::machine::SymTarget::Named(Box::leak(rel.sym.clone().into_boxed_str()))
+                });
+                (
+                    crate::machine::AsmSymReloc { offset: rel.offset, size: rel.size, pcrel: rel.pcrel, addend: rel.addend, local: None, sym: rel.sym.clone() },
+                    crate::machine::SymOperand { target, reloc, addend: 0 },
+                )
+            };
+            let resolved = relocs.iter().map(resolve_one).collect();
+            let sides = sides
+                .into_iter()
+                .map(|s| crate::machine::AsmSideSection {
+                    name: s.name,
+                    write: s.write,
+                    exec: s.exec,
+                    nobits: s.nobits,
+                    data: s.data,
+                    relocs: s.relocs.iter().map(resolve_one).collect(),
+                })
+                .collect();
+            (resolved, sides)
+        }
+        Err(reason) => panic!("glcc native backend: inline asm cannot be lowered: {reason}
+TEMPLATE:
+{}", block.template),
+    };
 
     let mut ops: smallvec::SmallVec<[Operand; 4]> = smallvec::smallvec![];
     let mut slot_vregs: Vec<Option<crate::machine::VReg>> = vec![None; plan.slots.len()];
@@ -498,6 +571,9 @@ fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
         unique,
         is_basic: block.is_basic,
         is_goto,
+        sym_relocs,
+        side_sections,
+        func_name: mir.name.clone(),
     }));
     sel.emit(asm_inst);
 
@@ -852,7 +928,16 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 copy_bytes(sel, &dstm, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
                 return true;
             }
-            false
+            // Scalar integer/pointer load through any address value
+            // (the patterns only cover slot addresses).
+            let dst = result_vreg(sel, mir, inst);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(
+                op_id(Op::Load),
+                value_width(&ty),
+                smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Mem(mem)],
+            ));
+            true
         }
         InstKind::Store { addr, val, .. } => {
             let ty = mir.values[*val].ty.clone();
@@ -866,7 +951,15 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
                 copy_bytes(sel, &dst, &src, ty.size_bytes(), glcc_mir::ty::ty_align(&ty).max(1) as u64);
                 return true;
             }
-            false
+            // Scalar store through any address value.
+            let v = sel.value_vreg(mir, *val);
+            let mem = sel.mem_of(mir, *addr);
+            sel.emit(MInst::new(
+                op_id(Op::Store),
+                value_width(&ty),
+                smallvec::smallvec![Operand::Reg(Reg::V(v)), Operand::Mem(mem)],
+            ));
+            true
         }
         InstKind::ExtractValue { agg, index } => {
             let res = mir.insts[inst].result.expect("extractvalue has a result");

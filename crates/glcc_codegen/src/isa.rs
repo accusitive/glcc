@@ -113,12 +113,15 @@ pub struct EncOut {
     pub bytes: Vec<u8>,
     pub relocs: Vec<RelocReq>,
     /// (byte offset of the rel32 field, target block) for branches.
-    pub block_refs: Vec<(u8, BlockId)>,
+    pub block_refs: Vec<(u32, BlockId)>,
+    /// Non-`.text` sections the instruction's inline-asm fragment
+    /// wrote, relocations resolved against the module tables.
+    pub sides: Vec<crate::machine::AsmSideSection>,
 }
 
 impl EncOut {
     pub fn new() -> Self {
-        EncOut { bytes: Vec::new(), relocs: Vec::new(), block_refs: Vec::new() }
+        EncOut { bytes: Vec::new(), relocs: Vec::new(), block_refs: Vec::new(), sides: Vec::new() }
     }
 }
 
@@ -132,8 +135,9 @@ impl Default for EncOut {
 /// time, for intra-object targets).
 #[derive(Clone, Debug)]
 pub struct RelocReq {
-    /// Byte offset of the field within the instruction.
-    pub at: u8,
+    /// Byte offset of the field within the instruction (for inline
+    /// asm blobs, within the whole fragment).
+    pub at: u32,
     pub size: u8,
     pub pcrel: bool,
     /// Link-time addend of the relocation (`-4` for a rel32 field, so

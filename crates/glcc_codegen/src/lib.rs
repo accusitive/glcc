@@ -19,6 +19,7 @@ pub mod ra;
 pub mod sched;
 pub mod sel;
 pub mod x64;
+pub use x64::FRAG_LOCAL;
 
 /// Machine targets the native backend supports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

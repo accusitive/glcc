@@ -10,6 +10,7 @@ use crate::expr::Expr;
 use crate::insn::{DataItem, Operand, Stmt, X86Insn, eaf, op};
 use crate::parse::{self, ParseError, Tok, Toks};
 use crate::regs;
+use std::collections::HashMap;
 
 /// Lexing quirks per architecture: comment/immediate/register markers.
 #[derive(Clone, Copy, PartialEq)]
@@ -32,21 +33,853 @@ pub fn assemble_to_elf(src: &str, arch: Arch) -> Result<Vec<u8>, Vec<AsmError>> 
 
 pub fn parse_module(src: &str, arch: Arch) -> Result<Vec<Stmt>, Vec<ParseError>> {
     let src = strip_block_comments(src);
-    let lines: Vec<&str> = src.lines().collect();
-    let numlabels = NumLabels::scan(&lines);
+    let raw: Vec<&str> = src.lines().collect();
+    let mode = match arch {
+        Arch::X86_64 => LexMode::X86,
+        Arch::Riscv32 | Arch::Riscv64 => LexMode::Riscv,
+        Arch::Aarch64 => LexMode::A64,
+    };
+    // Macros, conditionals, and `.rept`/`.irp` expand textually before
+    // any statement parsing: bodies repeat per invocation and `.if`
+    // sees the substituted arguments (GAS expands before assembling).
+    let mut pp = Preproc::new(mode);
+    let expanded = match pp.run(&raw) {
+        Ok(lines) => lines,
+        Err(errors) => return Err(errors),
+    };
+    #[allow(unused_mut)]
+    let mut expanded = if std::env::var_os("GLCC_NO_PREPROC").is_some() {
+        raw.iter().enumerate().map(|(i, s)| (s.to_string(), (i + 1) as u32)).collect::<Vec<_>>()
+    } else {
+        expanded
+    };
+    let texts: Vec<&str> = expanded.iter().map(|(text, _)| text.as_str()).collect();
+    let numlabels = NumLabels::scan(&texts);
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
-    for (lineno, line) in lines.iter().enumerate() {
+    for (lineno, (text, src_line)) in expanded.iter().enumerate() {
         // GAS `;` separates statements on a line.
-        for part in split_statements(line) {
-            let line_no = (lineno + 1) as u32;
-            match parse_line(&part, line_no, lineno, &numlabels, arch) {
+        for part in split_statements(text) {
+            match parse_line(&part, *src_line, lineno, &numlabels, arch) {
                 Ok(ss) => stmts.extend(ss),
-                Err(msg) => errors.push(ParseError { line: line_no, msg }),
+                Err(msg) => errors.push(ParseError { line: *src_line, msg }),
             }
         }
     }
-    if errors.is_empty() { Ok(stmts) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(stmts)
+    } else {
+        if std::env::var_os("GLCC_DUMP_FAILED_ASM").is_some() {
+            let _ = std::fs::write("/tmp/glcc-pp-out.s", expanded.iter().map(|(text, line)| format!("{text} !line {line}\n")).collect::<String>());
+        }
+        Err(errors)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Macro + conditional preprocessor (.macro/.rept/.irp/.if)
+// ---------------------------------------------------------------------
+
+/// One `.macro` definition: formal parameters (with optional defaults,
+/// raw text) and the raw body lines.
+#[derive(Clone)]
+struct GasMacro {
+    params: Vec<(String, Option<String>)>,
+    body: Vec<String>,
+}
+
+/// An expanded line: text plus the 1-based source line it came from
+/// (for diagnostics and numeric-label reporting).
+type PPLine = (String, u32);
+
+enum PPStop {
+    /// `.exitm`: stop the enclosing macro body / `.rept` loop.
+    Exit,
+    Fatal(u32, String),
+}
+
+type PPResult<T> = Result<T, PPStop>;
+
+fn fatal(line: u32, msg: impl Into<String>) -> PPStop {
+    PPStop::Fatal(line, msg.into())
+}
+
+struct Preproc {
+    mode: LexMode,
+    macros: HashMap<String, GasMacro>,
+    /// Values of `.set`/`sym =` definitions, for `.if` evaluation.
+    syms: HashMap<String, i64>,
+    counter: u64,
+    /// A bare instruction prefix (`lock`/`rep` alone before its
+    /// instruction — `lock; addl ...` or `lock` on its own line).
+    pending_prefix: Option<String>,
+}
+
+impl Preproc {
+    fn new(mode: LexMode) -> Preproc {
+        Preproc {
+            mode,
+            macros: HashMap::new(),
+            syms: HashMap::new(),
+            counter: 0,
+            pending_prefix: None,
+        }
+    }
+
+    fn run(&mut self, raw: &[&str]) -> Result<Vec<PPLine>, Vec<ParseError>> {
+        // Join backslash-continuations first: a continued line behaves
+        // as one logical line (GAS), and macro machinery expects it.
+        let mut joined: Vec<(String, u32)> = Vec::with_capacity(raw.len());
+        let mut pending: Option<(String, u32)> = None;
+        for (i, text) in raw.iter().enumerate() {
+            let line = (i + 1) as u32;
+            let text = text.trim_end();
+            let (base, base_line) = match pending.take() {
+                Some((b, l)) => (b, l),
+                None => (String::new(), line),
+            };
+            if let Some(stripped) = text.strip_suffix('\\') {
+                pending = Some((format!("{base}{} ", stripped), base_line));
+            } else {
+                joined.push((format!("{base}{text}"), base_line));
+            }
+        }
+        if let Some((b, l)) = pending {
+            joined.push((b, l));
+        }
+        let lines = joined;
+        match self.process(lines, 0) {
+            Ok(out) => Ok(out),
+            Err(PPStop::Exit) => Ok(Vec::new()),
+            Err(PPStop::Fatal(line, msg)) => {
+                if std::env::var_os("GLCC_DUMP_FAILED_ASM").is_some()
+                    && let Ok(existing) = std::fs::read_to_string("/tmp/glcc-failed.s")
+                {
+                    let _ = std::fs::write("/tmp/glcc-pp-out.s", format!("{msg}
+--- at line {line} of:
+{existing}"));
+                }
+                Err(vec![ParseError { line, msg }])
+            }
+        }
+    }
+
+    fn process(&mut self, lines: Vec<PPLine>, depth: usize) -> PPResult<Vec<PPLine>> {
+        if depth > 64 {
+            let (_, line) = lines.first().cloned().unwrap_or_default();
+            return Err(fatal(line, "macro/conditional nesting too deep"));
+        }
+        let mut out = Vec::new();
+        // Conditional frames: (active, ever-taken). `active` already
+        // accounts for outer frames, so a false outer frame pins
+        // everything inside off.
+        let mut conds: Vec<(bool, bool)> = Vec::new();
+        let mut i = 0;
+        while i < lines.len() {
+            let (text, line) = lines[i].clone();
+            let code = strip_line_comment(&text, self.mode);
+            let active = conds.iter().all(|(a, _)| *a);
+            let word = first_word(&code);
+            if !active {
+                match word.as_deref() {
+                    Some("if" | "ifdef" | "ifndef" | "ifb" | "ifnb" | "ifc" | "ifnc") => conds.push((false, true)),
+                    Some("else") => {
+                        let parent_active = conds[..conds.len().saturating_sub(1)].iter().all(|(a, _)| *a);
+                        if let Some(frame) = conds.last_mut()
+                            && parent_active
+                            && !frame.1 {
+                                *frame = (true, true);
+                            }
+                    }
+                    Some("elseif" | "elif") => {
+                        let parent_active = conds[..conds.len().saturating_sub(1)].iter().all(|(a, _)| *a);
+                        if let Some(frame) = conds.last_mut()
+                            && parent_active
+                            && !frame.1 {
+                                // Inside a false outer frame the
+                                // condition cannot be evaluated here;
+                                // stay eligible, not taken.
+                                *frame = (parent_active && !frame.1, frame.1);
+                            }
+                    }
+                    Some("endif") => {
+                        conds.pop();
+                    }
+                    // Skip whole definitions and blocks as units so a
+                    // stray `.endm`/`.endr` inside them cannot unbalance
+                    // the nesting.
+                    Some("macro") => {
+                        i = self.skip_block(&lines, i, ".macro", ".endm");
+                        continue;
+                    }
+                    Some("rept" | "irp" | "irpc") => {
+                        i = self.skip_block(&lines, i, "", ".endr");
+                        continue;
+                    }
+                    _ => {}
+                }
+                i += 1;
+                continue;
+            }
+            match word.as_deref() {
+                Some(name) if matches!(name, "if" | "ifdef" | "ifndef" | "ifb" | "ifnb" | "ifc" | "ifnc") => {
+                    let taken = self.eval_cond(&name, code.trim()[name.len() + 1..].trim(), line)?;
+                    conds.push((taken, taken));
+                    i += 1;
+                }
+                Some("else") => {
+                    if let Some(frame) = conds.last_mut() {
+                        // Outer frames already fold into `active` above:
+                        // a frame is only reached while every outer one
+                        // is on, so reactivation depends on `taken`.
+                        let taken = frame.1;
+                        *frame = (!taken, true);
+                    }
+                    i += 1;
+                }
+                Some(name @ ("elseif" | "elif")) => {
+                    if let Some(frame) = conds.last_mut() {
+                        if frame.1 {
+                            *frame = (false, true);
+                        } else {
+                            let taken = self.eval_cond("if", code.trim()[name.len() + 1..].trim(), line)?;
+                            *frame = (taken, taken);
+                        }
+                    }
+                    i += 1;
+                }
+                Some("endif") => {
+                    conds.pop();
+                    i += 1;
+                }
+                Some("exitm") => return Err(PPStop::Exit),
+                Some("macro") => {
+                    let (name, params, body, end) = self.collect_macro(&lines, i, line)?;
+                    self.macros.insert(name, GasMacro { params, body });
+                    i = end;
+                }
+                Some("endm") => {
+                    // A stray `.endm` outside a definition: ignore, like
+                    // an unmatched directive would at least not crash.
+                    i += 1;
+                }
+                Some("rept") => {
+                    let count = self.eval_expr(code.trim()[".rept".len()..].trim(), line)?;
+                    let (body, end) = collect_block(&lines, i + 1, "", ".endr", self.mode)?;
+                    let mut reps = Vec::new();
+                    for _ in 0..count.max(0) {
+                        let rep: Vec<PPLine> = body.iter().map(|(text, _)| (text.clone(), line)).collect();
+                        match self.process(rep, depth + 1) {
+                            Ok(lines) => reps.extend(lines),
+                            Err(PPStop::Exit) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    out.extend(reps);
+                    i = end;
+                }
+                Some("irp" | "irpc") => {
+                    let header = code.trim()[word.unwrap().len() + 1..].trim();
+                    let (sym, items) = self.parse_irp(header, line)?;
+                    let (body, end) = collect_block(&lines, i + 1, "", ".endr", self.mode)?;
+                    let mut reps = Vec::new();
+                    for item in items {
+                        let rep: Vec<PPLine> = body
+                            .iter()
+                            .map(|(text, _)| (substitute(text, &[(sym.clone(), item.clone())], self.counter), line))
+                            .collect();
+                        match self.process(rep, depth + 1) {
+                            Ok(lines) => reps.extend(lines),
+                            Err(PPStop::Exit) => break,
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    out.extend(reps);
+                    i = end;
+                }
+                Some("endr") => {
+                    i += 1;
+                }
+                _ => {
+                    // GAS splits statements on top-level `;` before
+                    // anything else: a macro call followed by more
+                    // statements must not swallow them as arguments.
+                    let stmts = split_statements(&code);
+                    if stmts.len() > 1 {
+                        let rest: Vec<PPLine> = stmts[1..].iter().map(|s| (s.to_string(), line)).collect();
+                        let mut first_stmts: Vec<PPLine> = vec![(stmts[0].to_string(), line)];
+                        first_stmts.extend(rest);
+                        let expanded = self.process(first_stmts, depth)?;
+                        out.extend(expanded);
+                        i += 1;
+                        continue;
+                    }
+                    let (labels, rest) = split_leading_labels(&code);
+                    let rest = rest.trim_start();
+                    // A bare prefix statement (`lock; addl` splits into
+                    // `lock` + `addl ...`) defers to the next
+                    // instruction, even across directives.
+                    if !rest.is_empty() && is_bare_prefix(rest) {
+                        self.pending_prefix = Some(rest.to_string());
+                        i += 1;
+                        continue;
+                    }
+                    // The invocation name ends at whitespace or an
+                    // argument-opening paren (`MACRO(a, b)`).
+                    let first_len = rest
+                        .char_indices()
+                        .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_' || *c == '$' || *c == '.')
+                        .map(|(k, _)| k)
+                        .last()
+                        .map(|k| k + 1)
+                        .unwrap_or(0);
+                    let first = &rest[..first_len];
+                    if let Some(def) = self.macros.get(first).cloned() {
+                        for label in labels {
+                            out.push((format!("{label}:"), line));
+                        }
+                        // `MACRO(a, b)` parenthesizes the arguments;
+                        // `MACRO a, b` leaves them bare.
+                        let tail = rest[first_len..].trim();
+                        let arg_text = match paren_group(tail) {
+                            Some((inside, _)) => inside.to_string(),
+                            None => tail.to_string(),
+                        };
+                        let expanded = self.expand(&def, &arg_text, line, depth)?;
+                        out.extend(expanded);
+                        i += 1;
+                        continue;
+                    }
+                    if std::env::var_os("GLCC_AS_TRACE").is_some() {
+                        eprintln!("AS[{line}]: {code}");
+                    }
+                    if let Some((name, value)) = assignment(&code) {
+                        self.record_set(name, value, line)?;
+                    }
+                    // Attach a deferred prefix to this statement.
+                    let text = if let Some(prefix) = self.pending_prefix.take()
+                        && !rest.starts_with('.')
+                        && self.macros.get(rest.split([' ', '\t', '(']).next().unwrap_or("")).is_none()
+                    {
+                        format!("{prefix} {text}")
+                    } else {
+                        text
+                    };
+                    if labels.is_empty() {
+                        // Pass the untouched line through: the statement
+                        // parser handles its own comments and labels.
+                        out.push((text, line));
+                    } else {
+                        // Labels were split off for macro matching; emit
+                        // them ahead of the (label-less) remainder.
+                        for label in labels {
+                            out.push((format!("{label}:"), line));
+                        }
+                        if !rest.is_empty() {
+                            out.push((rest.to_string(), line));
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Skip to the line after the matching closer, counting nested
+    /// openers. `open` is empty when any `.rept`/`.irp`/`.irpc` opens.
+    fn skip_block(&self, lines: &[PPLine], start: usize, open: &str, close: &str) -> usize {
+        let mut depth = 1;
+        let mut i = start + 1;
+        while i < lines.len() {
+            let word = first_word(&strip_line_comment(&lines[i].0, self.mode)).unwrap_or_default();
+            let is_open = if open.is_empty() {
+                matches!(word.as_str(), "rept" | "irp" | "irpc")
+            } else {
+                word == open.trim_start_matches('.')
+            };
+            if is_open {
+                depth += 1;
+            } else if word == close.trim_start_matches('.') {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            i += 1;
+        }
+        lines.len()
+    }
+
+    /// Collect a `.macro` definition: parameters from the header, body
+    /// through the matching `.endm`.
+    fn collect_macro(&mut self, lines: &[PPLine], start: usize, line: u32) -> PPResult<(String, Vec<(String, Option<String>)>, Vec<String>, usize)> {
+        let header = strip_line_comment(&lines[start].0, self.mode);
+        let header = header.trim()[".macro".len()..].trim();
+        let mut parts = header.splitn(2, [' ', '\t']);
+        let name = parts.next().unwrap_or("").trim().to_string();
+        if name.is_empty() {
+            return Err(fatal(line, "`.macro' needs a name"));
+        }
+        let mut params = Vec::new();
+        if let Some(rest) = parts.next() {
+            for param in split_args(rest) {
+                if param.is_empty() {
+                    continue;
+                }
+                // `:req`/`:vararg`/`:green` qualifiers qualify the name
+                // (`type:req` binds `	ype`); split at the colon.
+                let param = param.split(':').next().unwrap_or(&param).trim().to_string();
+                match param.split_once('=') {
+                    Some((name, default)) => params.push((name.trim().to_string(), Some(default.trim().to_string()))),
+                    None => params.push((param, None)),
+                }
+            }
+        }
+        let (body, end) = collect_block(lines, start + 1, ".macro", ".endm", self.mode)?;
+        let body: Vec<String> = body.into_iter().map(|(text, _)| text).collect();
+        Ok((name, params, body, end))
+    }
+
+    fn expand(&mut self, def: &GasMacro, arg_text: &str, line: u32, depth: usize) -> PPResult<Vec<PPLine>> {
+        self.counter += 1;
+        // GNU as strips one layer of enclosing double quotes from
+        // macro arguments (`ALTERNATIVE "jmp x", ""` substitutes
+        // unquoted); directive arguments keep their quotes.
+        let args: Vec<String> = split_args(arg_text).into_iter().map(|a| unquote(&a)).collect();
+        // Bind keyword arguments first, then positionals to the rest.
+        let mut values: Vec<Option<String>> = vec![None; def.params.len()];
+        let mut positional = Vec::new();
+        for arg in &args {
+            if let Some((name, value)) = arg.split_once('=') {
+                if let Some(slot) = def.params.iter().position(|(p, _)| p == name.trim()) {
+                    values[slot] = Some(value.trim().to_string());
+                    continue;
+                }
+            }
+            positional.push(arg.clone());
+        }
+        for (slot, arg) in positional.into_iter().enumerate() {
+            if slot < values.len() {
+                values[slot] = Some(arg);
+            } else {
+                return Err(fatal(line, format!("too many macro arguments ({} given, {} expected)", args.len(), def.params.len())));
+            }
+        }
+        let bindings: Vec<(String, String)> = def
+            .params
+            .iter()
+            .zip(values)
+            .filter_map(|((name, default), value)| Some((name.clone(), value.or_else(|| default.clone())?)))
+            .collect();
+        let body: Vec<PPLine> = def
+            .body
+            .iter()
+            .map(|text| (substitute(text, &bindings, self.counter), line))
+            .collect();
+        self.process(body, depth + 1)
+    }
+
+    fn parse_irp(&self, header: &str, line: u32) -> PPResult<(String, Vec<String>)> {
+        let mut parts = split_args(header).into_iter();
+        let sym = parts.next().unwrap_or_default();
+        if sym.is_empty() {
+            return Err(fatal(line, "`.irp' needs a symbol name"));
+        }
+        Ok((sym, parts.collect()))
+    }
+
+    /// Evaluate a `.if`-family condition. `.ifc`/`.ifnc` compare two
+    /// (unquoted) strings; everything else is a numeric expression.
+    fn eval_cond(&mut self, name: &str, rest: &str, line: u32) -> PPResult<bool> {
+        let result = match name {
+            "ifc" => {
+                let mut parts = split_args(rest).into_iter();
+                let (a, b) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+                unquote(&a) == unquote(&b)
+            }
+            "ifnc" => {
+                let mut parts = split_args(rest).into_iter();
+                let (a, b) = (parts.next().unwrap_or_default(), parts.next().unwrap_or_default());
+                unquote(&a) != unquote(&b)
+            }
+            "ifdef" => {
+                let sym = rest.trim();
+                !sym.is_empty() && self.syms.contains_key(sym)
+            }
+            "ifndef" => {
+                let sym = rest.trim();
+                sym.is_empty() || !self.syms.contains_key(sym)
+            }
+            "ifb" => split_args(rest).into_iter().next().map(|a| a.trim().is_empty()).unwrap_or(true),
+            "ifnb" => !split_args(rest).into_iter().next().map(|a| a.trim().is_empty()).unwrap_or(true),
+            _ => self.eval_expr(rest, line)? != 0,
+        };
+        Ok(result)
+    }
+
+    /// Evaluate a constant expression over the preprocessor's own
+    /// `.set` symbols (register names count as their GAS numbers).
+    fn eval_expr(&self, text: &str, line: u32) -> PPResult<i64> {
+        if text.is_empty() {
+            return Err(fatal(line, "expected an expression"));
+        }
+        let g = lex_line(text, self.mode).map_err(|msg| fatal(line, msg))?;
+        let mut t = GToks { g: &g, pos: 0 };
+        let expr = t.expr(line as usize, &NumLabels::empty()).map_err(|msg| fatal(line, msg))?;
+        let syms = PPSyms(&self.syms);
+        let ctx = crate::expr::EvalCtx {
+            cur_sect: 0,
+            cur_off: 0,
+            syms: &syms,
+            optimistic: false,
+            unknown_hit: None,
+        };
+        match expr.eval(&ctx).map_err(|msg| fatal(line, msg))? {
+            crate::expr::RValue::Const(v) => Ok(v),
+            _ => Err(fatal(line, "conditional expression is not constant")),
+        }
+    }
+
+    fn record_set(&mut self, name: &str, value: &str, line: u32) -> PPResult<()> {
+        if let Ok(v) = self.eval_expr(value, line) {
+            self.syms.insert(name.to_string(), v);
+        }
+        Ok(())
+    }
+}
+
+/// Symbol table adapter for `.if` evaluation: the preprocessor's
+/// `.set` values, plus x86 register names at their GAS numbers (`.if
+/// \base == %rsp` compares register codes).
+struct PPSyms<'a>(&'a HashMap<String, i64>);
+
+impl crate::expr::SymLookup for PPSyms<'_> {
+    fn lookup(&self, name: &str) -> Option<crate::expr::SymbolVal> {
+        if let Some(v) = self.0.get(name) {
+            return Some(crate::expr::SymbolVal {
+                index: 0,
+                defined: true,
+                seen: true,
+                extern_: false,
+                sect: None,
+                value: *v,
+            });
+        }
+        let reg = name.strip_prefix('%')?;
+        Some(crate::expr::SymbolVal {
+            index: 0,
+            defined: true,
+            seen: true,
+            extern_: false,
+            sect: None,
+            value: gas_reg_number(reg)?,
+        })
+    }
+}
+
+/// The numbers GAS compares registers by (`%rsp == 4` in a macro
+/// argument check).
+fn gas_reg_number(name: &str) -> Option<i64> {
+    let name = name.strip_suffix(['d', 'w', 'b']).filter(|_| name.len() > 3).unwrap_or(name);
+    let n = match name {
+        "rax" => 0,
+        "rcx" => 1,
+        "rdx" => 2,
+        "rbx" => 3,
+        "rsp" => 4,
+        "rbp" => 5,
+        "rsi" => 6,
+        "rdi" => 7,
+        other => other.strip_prefix('r')?.parse::<i64>().ok()?,
+    };
+    Some(n)
+}
+
+/// Remove a line's `;` (and `#` in x86 mode) comment tail, keeping
+/// quoted strings intact byte-for-byte.
+fn strip_line_comment(line: &str, mode: LexMode) -> String {
+    let bytes = line.as_bytes();
+    let mut out = String::with_capacity(line.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'"' || c == b'\'' {
+            let quote = c;
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out.push_str(&line[start..i.min(line.len())]);
+            continue;
+        }
+        if c == b';' {
+            break;
+        }
+        if c == b'#' && mode != LexMode::A64 {
+            break;
+        }
+        if mode == LexMode::A64 && c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            break;
+        }
+        let ch = line[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// The first directive word of a line (without the leading dot), when
+/// the line opens with one.
+fn first_word(code: &str) -> Option<String> {
+    let trimmed = code.trim_start();
+    if !trimmed.starts_with('.') {
+        return None;
+    }
+    let end = trimmed.find(|c: char| c.is_whitespace()).unwrap_or(trimmed.len());
+    Some(trimmed[1..end].trim_end().to_string())
+}
+
+/// Split macro arguments on commas and spaces outside quotes and
+/// bracketing punctuation (GAS separates macro arguments on either).
+fn split_args(text: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut cur = String::new();
+    let mut depth = 0u32;
+    let mut in_str = false;
+    let mut quote = ' ';
+    for c in text.chars() {
+        if in_str {
+            cur.push(c);
+            if c == quote {
+                in_str = false;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                in_str = true;
+                quote = c;
+                cur.push(c);
+            }
+            '(' | '[' | '<' => {
+                depth += 1;
+                cur.push(c);
+            }
+            ')' | ']' | '>' => {
+                depth = depth.saturating_sub(1);
+                cur.push(c);
+            }
+            ',' if depth == 0 => {
+                args.push(cur.trim().to_string());
+                cur = String::new();
+            }
+            c if depth == 0 && (c == ' ' || c == '\t') => {
+                if !cur.trim().is_empty() {
+                    args.push(cur.trim().to_string());
+                    cur = String::new();
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.trim().is_empty() {
+        args.push(cur.trim().to_string());
+    }
+    args
+}
+
+/// A parenthesized group at the start of `text`: the contents and the
+/// offset just past the closing paren.
+fn paren_group(text: &str) -> Option<(&str, usize)> {
+    if !text.starts_with('(') {
+        return None;
+    }
+    let bytes = text.as_bytes();
+    let mut depth = 0u32;
+    let mut i = 0;
+    let mut in_str = false;
+    let mut quote = ' ';
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if in_str {
+            if c == quote {
+                in_str = false;
+            }
+        } else {
+            match c {
+                '"' | '\'' => {
+                    in_str = true;
+                    quote = c;
+                }
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((&text[1..i], i + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Strip one layer of surrounding quotes (`.ifc` operands).
+fn unquote(text: &str) -> String {
+    let text = text.trim();
+    if text.len() >= 2 && (text.starts_with('"') && text.ends_with('"') || text.starts_with('\'') && text.ends_with('\'')) {
+        text[1..text.len() - 1].to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// Expand `\param`, `\@` (invocation counter), and `\()` in a macro
+/// body line. Longest parameter name wins, and a name must end at a
+/// non-identifier boundary.
+fn substitute(text: &str, bindings: &[(String, String)], counter: u64) -> String {
+    if !text.contains('\\') {
+        return text.to_string();
+    }
+    let mut names: Vec<&(String, String)> = bindings.iter().collect();
+    names.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            out.push(text[i..].chars().next().unwrap());
+            i += text[i..].chars().next().unwrap().len_utf8();
+            continue;
+        }
+        if i + 2 < bytes.len() && bytes[i + 1] == b'(' && bytes[i + 2] == b')' {
+            i += 3;
+            continue;
+        }
+        if i + 1 < bytes.len() && bytes[i + 1] == b'@' {
+            out.push_str(&counter.to_string());
+            i += 2;
+            continue;
+        }
+        let rest = &text[i + 1..];
+        let name_len = rest
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
+            .map(|(k, _)| k)
+            .last()
+            .map(|k| k + 1)
+            .unwrap_or(0);
+        let candidate = &rest[..name_len];
+        if let Some((_, value)) = names.iter().find(|(name, _)| name.as_str() == candidate) {
+            out.push_str(value);
+            i += 1 + name_len;
+        } else {
+            out.push('\\');
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Split leading `label:` pairs off a line, textually (idents and
+/// numeric labels; `%gs:`-style prefixes never match).
+fn split_leading_labels(code: &str) -> (Vec<String>, &str) {
+    let mut labels = Vec::new();
+    let mut rest = code;
+    loop {
+        let trimmed = rest.trim_start();
+        let end = trimmed
+            .char_indices()
+            .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '$')
+            .map(|(k, _)| k)
+            .last()
+            .map(|k| k + 1)
+            .unwrap_or(0);
+        if end == 0 {
+            break;
+        }
+        let name = &trimmed[..end];
+        if !name.bytes().all(|c| c.is_ascii_digit()) && !name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_' || c == '.') {
+            break;
+        }
+        let after = trimmed[end..].trim_start();
+        if !after.starts_with(':') {
+            break;
+        }
+        labels.push(name.to_string());
+        rest = &after[1..];
+    }
+    (labels, rest)
+}
+
+/// Whether the statement is a lone instruction prefix.
+fn is_bare_prefix(stmt: &str) -> bool {
+    matches!(stmt.trim_end_matches([';', ' ', '\t']), "lock" | "rep" | "repe" | "repz" | "repne" | "repnz" | "bnd" | "xacquire" | "xrelease")
+}
+
+/// `sym = expr` assignment (the `.set` alias), recognized textually
+/// after label stripping.
+fn assignment(code: &str) -> Option<(&str, &str)> {
+    let (labels, rest) = split_leading_labels(code);
+    let _ = labels;
+    let rest = rest.trim_start();
+    let end = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '$')
+        .map(|(k, _)| k)
+        .last()
+        .map(|k| k + 1)
+        .unwrap_or(0);
+    if end == 0 {
+        return None;
+    }
+    let name = &rest[..end];
+    let after = rest[end..].trim_start();
+    let value = after.strip_prefix('=')?.trim_start();
+    if value.is_empty() {
+        return None;
+    }
+    Some((name, value))
+}
+
+/// Collect the lines between `open`'s matching `close`, counting
+/// nested opens. `open` empty means any `.rept`/`.irp`/`.irpc`.
+fn collect_block(lines: &[PPLine], start: usize, open: &str, close: &str, mode: LexMode) -> PPResult<(Vec<PPLine>, usize)> {
+    let mut depth = 1u32;
+    let mut body = Vec::new();
+    let mut i = start;
+    while i < lines.len() {
+        let word = first_word(&strip_line_comment(&lines[i].0, mode)).unwrap_or_default();
+        let is_open = if open.is_empty() {
+            matches!(word.as_str(), "rept" | "irp" | "irpc")
+        } else {
+            word == open.trim_start_matches('.')
+        };
+        if is_open {
+            depth += 1;
+        } else if word == close.trim_start_matches('.') {
+            depth -= 1;
+            if depth == 0 {
+                return Ok((body, i + 1));
+            }
+        }
+        body.push(lines[i].clone());
+        i += 1;
+    }
+    let (_, line) = lines.last().cloned().unwrap_or_default();
+    Err(fatal(line, format!("missing `.{}`", close.trim_start_matches('.'))))
 }
 
 // ---------------------------------------------------------------------
@@ -220,6 +1053,22 @@ fn lex_line(line: &str, mode: LexMode) -> Result<Vec<GTok>, String> {
                 i += 1;
             }
             b'+' | b'-' | b'/' | b'|' | b'&' | b'^' | b'~' | b'!' | b'<' | b'>' | b':' | b'=' => {
+                // Two-character operators (`==`, `!=`, `<=`, `>=`, `&&`,
+                // `||`) matter for `.if`/`.skip` expressions.
+                let two: Option<&'static str> = match c {
+                    b'=' if b.get(i + 1) == Some(&b'=') => Some("=="),
+                    b'!' if b.get(i + 1) == Some(&b'=') => Some("!="),
+                    b'<' if b.get(i + 1) == Some(&b'=') => Some("<="),
+                    b'>' if b.get(i + 1) == Some(&b'=') => Some(">="),
+                    b'&' if b.get(i + 1) == Some(&b'&') => Some("&&"),
+                    b'|' if b.get(i + 1) == Some(&b'|') => Some("||"),
+                    _ => None,
+                };
+                if let Some(p) = two {
+                    out.push(GTok::Punct(p));
+                    i += 2;
+                    continue;
+                }
                 if c == b'<' && i + 1 < b.len() && b[i + 1] == b'<' {
                     out.push(GTok::Punct("<<"));
                     i += 2;
@@ -355,6 +1204,10 @@ pub struct NumLabels {
 }
 
 impl NumLabels {
+    fn empty() -> NumLabels {
+        NumLabels { defs: Vec::new() }
+    }
+
     fn scan(lines: &[&str]) -> NumLabels {
         let mut defs = Vec::with_capacity(lines.len());
         for line in lines {
@@ -459,7 +1312,7 @@ const IGNORED_DIRECTIVES: &[&str] = &[
 /// GNU as.
 fn data_directives(arch: Arch) -> &'static [(&'static str, u8)] {
     match arch {
-        Arch::X86_64 => &[("byte", 1), ("half", 2), ("word", 2), ("short", 2), ("value", 2), ("long", 4), ("int", 4), ("quad", 8)],
+        Arch::X86_64 => &[("byte", 1), ("half", 2), ("word", 2), ("short", 2), ("value", 2), ("2byte", 2), ("long", 4), ("int", 4), ("4byte", 4), ("quad", 8), ("8byte", 8)],
         // GNU as calls the 2-byte directive `.hword` on AArch64 and
         // `.half` on RISC-V.
         Arch::Aarch64 => &[("byte", 1), ("hword", 2), ("half", 2), ("short", 2), ("value", 2), ("word", 4), ("long", 4), ("int", 4), ("quad", 8), ("xword", 8)],
@@ -473,8 +1326,13 @@ fn split_statements(line: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut i = 0;
+    // Parens group macro-call arguments: a `;` inside them (from a
+    // substituted argument that itself carried statements) stays put.
+    let mut depth = 0u32;
     while i < b.len() {
         match b[i] {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
             b'"' | b'\'' => {
                 i += 1;
                 while i < b.len() && b[i] != b'"' && b[i] != b'\'' {
@@ -484,7 +1342,7 @@ fn split_statements(line: &str) -> Vec<&str> {
                     i += 1;
                 }
             }
-            b';' => {
+            b';' if depth == 0 => {
                 parts.push(&line[start..i]);
                 start = i + 1;
             }
@@ -624,19 +1482,24 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
             })
         }
         "align" => {
-            let Some(GTok::Int(v)) = t.bump() else {
-                return Err("expected alignment for .align".into());
-            };
-            let v = *v;
-            // On x86 ELF, .align is in bytes.
-            Ok(Stmt::Align(Expr::Int(v), line_no))
+            // On x86 ELF, .align is in bytes. The argument is a full
+            // expression (`.align (1 << 6)` shapes in kernel headers).
+            let v = t.expr(lineno, numlabels)?;
+            Ok(Stmt::Align(v, line_no))
         }
         "p2align" | "balign" => {
-            let Some(GTok::Int(v)) = t.bump() else {
-                return Err("expected alignment for .p2align".into());
+            let v = t.expr(lineno, numlabels)?;
+            let bytes = if name == "p2align" {
+                // Exponent form: evaluate then shift (values are small
+                // alignment powers in practice).
+                match v {
+                    Expr::Int(k) => Expr::Int(1i64 << k.clamp(0, 40)),
+                    _ => return Err("p2align needs a constant exponent".into()),
+                }
+            } else {
+                v
             };
-            let bytes = if name == "p2align" { 1i64 << (*v).min(40) } else { *v };
-            Ok(Stmt::Align(Expr::Int(bytes), line_no))
+            Ok(Stmt::Align(bytes, line_no))
         }
         "ascii" => {
             let items = t.strings()?;
@@ -660,24 +1523,46 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
             }
             Ok(Stmt::Data { size, items, line: line_no })
         }
-        "zero" | "skip" | "space" => {
-            let Some(GTok::Int(n)) = t.bump() else {
-                return Err("expected count".into());
+        "fill" => {
+            // `.fill repeat[, size[, value]]`: repeats of a data item.
+            let count = t.expr(lineno, numlabels)?;
+            let size = if t.eat_punct(",") {
+                match t.bump() {
+                    Some(GTok::Int(v)) if *v == 1 || *v == 2 || *v == 4 || *v == 8 => *v as u8,
+                    _ => return Err("expected 1/2/4/8 size for .fill".into()),
+                }
+            } else {
+                1
             };
-            let n = *n;
+            let value = if t.eat_punct(",") { t.expr(lineno, numlabels)? } else { Expr::Int(0) };
+            Ok(Stmt::Times {
+                count,
+                inner: Box::new(Stmt::Data {
+                    size,
+                    items: vec![DataItem::Expr(value)],
+                    line: line_no,
+                }),
+                line: line_no,
+            })
+        }
+        "zero" | "skip" | "space" => {
+            // The count is a full expression (`.skip -(a - b) * n, 0x90`
+            // padding guards in kernel asm); a non-positive count skips
+            // nothing (assemble clamps it).
+            let count = t.expr(lineno, numlabels)?;
             let fill = if t.eat_punct(",") {
                 match t.bump() {
-                    Some(GTok::Int(v)) => *v as u8,
+                    Some(GTok::Int(v)) => *v as i64,
                     _ => return Err("expected fill value".into()),
                 }
             } else {
                 0
             };
             Ok(Stmt::Times {
-                count: Expr::Int(n),
+                count,
                 inner: Box::new(Stmt::Data {
                     size: 1,
-                    items: vec![DataItem::Expr(Expr::Int(fill as i64))],
+                    items: vec![DataItem::Expr(Expr::Int(fill))],
                     line: line_no,
                 }),
                 line: line_no,
@@ -805,6 +1690,13 @@ impl GToks<'_> {
 
     /// Parses an expression in GAS syntax into the shared Expr AST.
     fn expr(&mut self, lineno: usize, numlabels: &NumLabels) -> Result<Expr, String> {
+        self.expr_ex(lineno, numlabels, true)
+    }
+
+    /// `parens` off keeps `(` out of the expression (memory operands:
+    /// `disp(base,index,scale)`), on treats parens as grouping
+    /// (directive arguments).
+    fn expr_ex(&mut self, lineno: usize, numlabels: &NumLabels, parens: bool) -> Result<Expr, String> {
         let mut toks = Vec::new();
         let depth_of = |g: &[GTok], start: usize| -> usize {
             // Consume tokens that belong to an expression: idents, ints,
@@ -830,8 +1722,22 @@ impl GToks<'_> {
                     | GTok::Punct("^")
                     | GTok::Punct("~")
                     | GTok::Punct("!")
+                    | GTok::Punct("<")
+                    | GTok::Punct("<=")
+                    | GTok::Punct(">")
+                    | GTok::Punct(">=")
+                    | GTok::Punct("==")
+                    | GTok::Punct("!=")
+                    | GTok::Punct("=")
+                    | GTok::Punct("&&")
+                    | GTok::Punct("||")
                     | GTok::Punct("<<")
                     | GTok::Punct(">>") => end += 1,
+                    // Parens are memory-operand syntax in displacement
+                    // expressions (`disp(base)`); in directive
+                    // expressions they group. The guard binds the whole
+                    // arm, so this pair must stay on its own.
+                    GTok::Punct("(") | GTok::Punct(")") if parens => end += 1,
                     _ => break,
                 }
             }
@@ -856,6 +1762,10 @@ impl GToks<'_> {
                 GTok::Punct(p) => toks.push(Tok::Punct(p)),
                 // GAS's `.` (current location) maps onto the nasm-side `$`.
                 GTok::Ident(n) if n == "." => toks.push(Tok::Punct("$")),
+                // Register operands appear in `.if` comparisons
+                // (`.if \base == %rsp`); they resolve to their GAS
+                // numbers in the preprocessor's symbol lookup.
+                GTok::Reg(name) => toks.push(Tok::Ident(format!("%{name}"))),
                 GTok::Ident(n) => toks.push(Tok::Ident(n.clone())),
                 GTok::Int(v) => toks.push(Tok::Int(*v)),
                 GTok::NumRef(d, fwd) => {
@@ -1021,7 +1931,7 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
             } else {
                 // Memory: `expr(base,index,scale)` or a bare displacement.
                 let had_paren = matches!((t.g.get(t.pos), find_paren(t.g, t.pos)), (_, Some(_)));
-                let disp = t.expr(lineno, numlabels)?;
+                let disp = t.expr_ex(lineno, numlabels, false)?;
                 let mut base: Option<i32> = None;
                 let mut index: Option<i32> = None;
                 let mut scale: u8 = 1;

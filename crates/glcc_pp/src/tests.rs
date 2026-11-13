@@ -855,3 +855,39 @@ fn assembler_mode_linemarkers_still_remap() {
     assert!(!got.contains("foo.S"), "was:\n{got}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn dump_macros_lists_definitions_sorted() {
+    let o = PpOptions { dump_macros: true, ..opts() };
+    let src = "#define B 2\n#define A 1\n#define F(x) ((x)+1)\n#define V(v...) v\nint z = A + B;\n";
+    let got = preprocess(src, "t.c", &o).unwrap();
+    let lines: Vec<&str> = got.lines().collect();
+    assert_eq!(lines, ["#define A 1", "#define B 2", "#define F(x) ((x)+1)", "#define V(v...) v"], "was:\n{got}");
+}
+
+#[test]
+fn dump_macros_covers_builtins_and_undefs() {
+    let o = PpOptions { dump_macros: true, ..opts() };
+    let (text, _) = preprocess_with_warnings("#undef __GNUC__\n#define G 1\n", "t.c", &o).unwrap();
+    assert!(!text.contains("#define __GNUC__"), "was:\n{text}");
+    assert!(text.contains("#define G 1"), "was:\n{text}");
+}
+
+#[test]
+fn deps_collect_resolved_headers_in_order() {
+    let dir = test_dir("deps");
+    write_file(&dir.join("b.h"), "#define B 1\n");
+    write_file(&dir.join("a.h"), "#include \"b.h\"\n");
+    write_file(&dir.join("sys.h"), "#define SYS 1\n");
+    let src = "#include \"a.h\"\n#include <sys.h>\nint v = B;\n";
+    let o = PpOptions { include_paths: vec![dir.clone()], ..opts() };
+    let (_, _, deps) = preprocess_with_all(src, "t.c", &o).unwrap();
+    let names: Vec<String> = deps.iter().map(|d| d.file_name().unwrap().to_string_lossy().into_owned()).collect();
+    // Main file first, then headers in resolution order (with repeats,
+    // like gcc's -M which lists every open).
+    assert_eq!(names[0], "t.c");
+    assert_eq!(names[1], "a.h");
+    assert_eq!(names[2], "b.h");
+    assert!(names.iter().any(|n| n == "sys.h"), "deps: {names:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
