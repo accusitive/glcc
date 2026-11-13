@@ -2358,10 +2358,10 @@ impl<'a, 'b> Expander<'a, 'b> {
             self.parse_header_name(header, &loc)?
         } else {
             // Expand first; the result must take header-name form.
-            let mut expanded = Vec::new();
-            for h in header {
-                expanded.extend(self.expand_tok(h.clone())?);
-            }
+            // One sequence expansion, not per-token: a function-like
+            // macro in the operand needs its `(...)` arguments
+            // (`#include TRACE_INCLUDE(TRACE_SYSTEM)`).
+            let expanded = self.expand_arg(header.to_vec())?;
             let flat: Vec<Tok> = expanded.into_iter().filter(|t| !matches!(t.tok, PpToken::Ws(_))).collect();
             self.parse_header_tokens(&flat, &loc)?
         };

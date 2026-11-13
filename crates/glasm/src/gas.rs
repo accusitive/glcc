@@ -31,6 +31,7 @@ pub fn assemble_to_elf(src: &str, arch: Arch) -> Result<Vec<u8>, Vec<AsmError>> 
 }
 
 pub fn parse_module(src: &str, arch: Arch) -> Result<Vec<Stmt>, Vec<ParseError>> {
+    let src = strip_block_comments(src);
     let lines: Vec<&str> = src.lines().collect();
     let numlabels = NumLabels::scan(&lines);
     let mut stmts = Vec::new();
@@ -51,6 +52,59 @@ pub fn parse_module(src: &str, arch: Arch) -> Result<Vec<Stmt>, Vec<ParseError>>
 // ---------------------------------------------------------------------
 // Lexer
 // ---------------------------------------------------------------------
+
+/// GAS accepts C-style `/* ... */` block comments, which span lines and
+/// so cannot be handled by the per-line lexer. Strip them before
+/// splitting into lines, keeping newlines so line numbers survive.
+/// Quoted strings are left untouched; `//` is only a comment in AArch64
+/// mode (on x86 it is division) and stays with the line lexer.
+fn strip_block_comments(src: &str) -> String {
+    if !src.contains("/*") {
+        return src.to_string();
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    #[derive(PartialEq)]
+    enum S {
+        Code,
+        Block,
+        Str(char),
+    }
+    let mut state = S::Code;
+    while let Some(c) = chars.next() {
+        match state {
+            S::Code => {
+                if c == '/' && chars.peek() == Some(&'*') {
+                    chars.next();
+                    state = S::Block;
+                    out.push(' ');
+                } else if c == '"' || c == '\'' {
+                    state = S::Str(c);
+                    out.push(c);
+                } else {
+                    out.push(c);
+                }
+            }
+            S::Block => {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    state = S::Code;
+                } else if c == '\n' {
+                    out.push('\n');
+                }
+            }
+            S::Str(q) => {
+                out.push(c);
+                if c == '\\' && chars.peek().is_some() {
+                    out.push(chars.next().unwrap());
+                } else if c == q {
+                    state = S::Code;
+                }
+            }
+        }
+    }
+    out
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GTok {
@@ -899,7 +953,7 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
         }
     }
     let GTok::Ident(mn) = g.get(idx).ok_or("expected instruction after prefix")? else {
-        unreachable!()
+        return Err(format!("expected instruction, got {:?}", g.get(idx)));
     };
     let mn = mn.to_ascii_lowercase();
     let Some(gas_insn) = translate_mnemonic(&mn) else {

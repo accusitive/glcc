@@ -8303,7 +8303,20 @@ fn auto_at_file_scope_panics() {
     let mut interner = Interner::new();
     let mut parser = test_parser("auto int x;", &mut sema, &mut interner);
     parser.parse_translation_unit();
-    assert_parse_error(&parser, "`auto`/`register` at file scope");
+    assert_parse_error(&parser, "`auto` at file scope");
+}
+
+#[test]
+fn register_at_file_scope_is_accepted_with_warning() {
+    // GCC's global register variable extension, pervasive in the kernel
+    // (`register unsigned long current_stack_pointer asm("rsp")`).
+    // glcc treats it as an ordinary object; accepted, warned.
+    let mut sema = Sema::leak_for_tests();
+    let mut interner = Interner::new();
+    let mut parser = test_parser("register unsigned long sp asm(\"rsp\");", &mut sema, &mut interner);
+    parser.parse_translation_unit();
+    assert!(!parser.failed(), "register asm-label at file scope must parse");
+    assert!(parser.diagnostics.borrow().iter().any(|d| d.message.contains("register at file scope")));
 }
 
 #[test]

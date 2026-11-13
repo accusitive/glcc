@@ -2712,12 +2712,27 @@ fn do_compile(ctx: &Ctx, job: &Job, scratch: Option<&TempDir>) -> Outcome<(Vec<(
             match input.lang {
                 Lang::Assembler => {
                     if integrated_as_ok(job) {
-                        assemble_in_process(&input.path, &out, integrated_as_arch(job.target).expect("checked by integrated_as_ok")).map_err(|e| {
+                        // `.S` is assembler-with-cpp: preprocess first,
+                        // then hand the text to glasm (raw `.s` goes
+                        // straight through). The pp's `# <n> "file"`
+                        // linemarkers are comments to the x86 lexer.
+                        let needs_pp = Path::new(&input.path).extension().is_some_and(|e| e == "S");
+                        let (asm_path, temp) = if needs_pp {
+                            let bytes = run_preprocess(ctx, job, &input.path)?;
+                            let dir = TempDir::create().map_err(|e| fail(format!("cannot create temporary directory: {e}")))?;
+                            let path = dir.path().join(format!("{}.s", stem_of(&input.path).to_string_lossy()));
+                            std::fs::write(&path, &bytes).map_err(|e| fail(format!("cannot write '{}': {e}", path.display())))?;
+                            (PathBuf::from(&path), Some(dir))
+                        } else {
+                            (PathBuf::from(&input.path), None)
+                        };
+                        assemble_in_process(asm_path.as_os_str(), &out, integrated_as_arch(job.target).expect("checked by integrated_as_ok")).map_err(|e| {
                             fail(format!(
                                 "assembling '{}' failed:\n{e}",
                                 Path::new(&input.path).display()
                             ))
                         })?;
+                        drop(temp);
                         produced.push((input.path.clone(), out));
                         continue;
                     }

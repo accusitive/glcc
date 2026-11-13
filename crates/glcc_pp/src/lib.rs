@@ -583,6 +583,15 @@ pub(crate) fn marker_flag(n: i64, display: &str, flag: u8) -> String {
     format!("# {n} \"{}\" {flag}\n", display.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
+/// Push a linemarker, keeping it at column 0: a source file may end
+/// without a newline (C requires one, so behave as if it were there).
+pub(crate) fn push_marker(out: &mut String, s: &str) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(s);
+}
+
 /// Clang's `-E` output padding, reproduced so expanded text matches
 /// byte-for-byte: at a macro-expansion boundary, emit one space iff
 /// the adjoining characters are `(digit-or-dot, +, -, .)` or
@@ -706,10 +715,13 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
     let main_path = PathBuf::from(filename);
     let main_dir = main_path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let main_display = interner.get_or_intern(filename);
-    // `-include` files come first, as if included at line 1.
+    // `-include` files come first, as if included at line 1. They are
+    // command-line inclusions, so a relative name resolves against the
+    // working directory, not the main source's directory (kbuild passes
+    // `-include ./include/...`).
     for pre in opts.preincludes.clone() {
         let (target, found) = ctx
-            .resolve_header(&pre, true, None, &main_dir, filename)
+            .resolve_header(&pre, true, None, Path::new("."), filename)
             .map_err(|_| err(format!("{filename}: -include '{pre}' not found")))?;
         let canon = std::fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
         if ctx.once.contains(&canon) {
@@ -735,7 +747,7 @@ pub fn preprocess_with_warnings(source: &str, filename: &str, opts: &PpOptions) 
         r?;
     }
     if opts.linemarkers {
-        ctx.out.push_str(&marker(1, filename));
+        push_marker(&mut ctx.out, &marker(1, filename));
     }
     run_source(
         source.as_ref(),
@@ -827,7 +839,7 @@ fn run_source(
     let disp_str = interner.resolve(display).unwrap_or("").to_string();
     let trees = tree::collect_trees(toks, &disp_str, interner)?;
     if entered && opts.linemarkers {
-        ctx.out.push_str(&marker_flag(1, &disp_str, 1));
+        push_marker(&mut ctx.out, &marker_flag(1, &disp_str, 1));
     }
     let mut expander = Expander {
         interner,

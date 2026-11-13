@@ -778,3 +778,24 @@ fn include_paths_exist() {
     #[cfg(not(windows))]
     assert!(!dirs.is_empty(), "no include paths");
 }
+
+#[test]
+fn include_operand_expands_function_like_macros() {
+    // The kernel's trace headers do `#include TRACE_INCLUDE(TRACE_SYSTEM)`:
+    // a function-like macro in the operand whose arguments come from the
+    // same line. The operand must expand as one sequence, ending in a
+    // stringized header name.
+    let dir = std::env::temp_dir();
+    let header = dir.join("glcc_pp_include_macro_test.h");
+    std::fs::write(&header, "int from_header;\n").unwrap();
+    let src = format!(
+        "#define __STR1(x) #x\n\
+         #define __STR(x) __STR1(x)\n\
+         #define WI(x) __STR(x)\n\
+         #include WI({})\nint y;\n",
+        header.display()
+    );
+    let got = pp(&src).unwrap();
+    assert!(got.contains("from_header"), "{got}");
+    assert!(got.contains("int y;"), "{got}");
+}

@@ -1936,7 +1936,7 @@ impl<'a, 'b> Parser<'a, 'b> {
             Token::Identifier(sym) => match self.intern.resolve(*sym) {
                 Some("volatile" | "__volatile__") => Some((true, false)),
                 Some("goto" | "__goto__") => Some((false, true)),
-                Some("inline" | "__inline__") => Some((false, false)),
+                Some("inline" | "__inline__" | "__inline") => Some((false, false)),
                 _ => None,
             },
             _ => None,
@@ -4302,13 +4302,18 @@ impl<'a, 'b> Parser<'a, 'b> {
         if file_scope { Linkage::External } else { Linkage::NoLinkage }
     }
     /// At most one storage-class specifier (C17 §6.7.1p2), and no
-    /// `auto`/`register` at file scope (C17 §6.9p2).
+    /// `auto` at file scope (C17 §6.9p2). `register` at file scope is
+    /// GCC's global-register-variable extension
+    /// (`register unsigned long sp asm("rsp")`, pervasive in the
+    /// kernel); accepted with a warning, treated as an ordinary object.
     fn check_specifiers_file_scope(&self, specifiers: &DeclarationSpecifiers) {
         if specifiers.class.len() > 1 {
             return self.fail(specifiers.span, "multiple storage class specifiers");
         }
-        if specifiers.has_storage(StorageClass::Auto) || specifiers.has_storage(StorageClass::Register) {
-            self.fail(specifiers.span, "`auto`/`register` at file scope")
+        if specifiers.has_storage(StorageClass::Auto) {
+            self.fail(specifiers.span, "`auto` at file scope")
+        } else if specifiers.has_storage(StorageClass::Register) {
+            self.warn(specifiers.span, "register at file scope (GCC global register variable) is treated as an ordinary object")
         }
     }
     fn check_specifiers_block_scope(&self, specifiers: &DeclarationSpecifiers) {
@@ -5791,9 +5796,15 @@ impl<'a, 'b> Parser<'a, 'b> {
                 self.fail::<()>(span, "`_Static_assert` needs a string literal message");
                 return self.span_since(start);
             };
-            let lit = *lit;
+            let mut body = self.string_literal_body(*lit);
             self.tokens.advance();
-            self.intern.resolve(lit.spelling).unwrap_or("").to_string()
+            // Adjacent string literals concatenate (C17 §6.4.5); the
+            // kernel's clamp() assert writes `"low limit " "min" "..."`.
+            while let Some(Token::StringLiteral(next)) = self.tokens.peek_val() {
+                body.push_str(&self.string_literal_body(*next));
+                self.tokens.advance();
+            }
+            body
         } else {
             String::new()
         };
@@ -5804,7 +5815,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 if msg.is_empty() {
                     self.fail::<()>(span, "static assertion failed");
                 } else {
-                    self.fail::<()>(span, format!("static assertion failed: {msg}"));
+                    self.fail::<()>(span, format!("static assertion failed: \"{msg}\""));
                 }
             }
             Some(crate::eval::Value::Int(_)) => {}
@@ -5989,9 +6000,19 @@ impl<'a, 'b> Parser<'a, 'b> {
                 } else if normalized == "section" {
                     // `section("name")`: the object lands in that
                     // section (bare-metal vector tables, `.noinit`, ...).
+                    // Adjacent string literals concatenate
+                    // (C17 §6.4.5); the kernel writes
+                    // `section(".data" "..read_mostly")`.
                     self.tokens.advance();
                     let body = match self.tokens.advance().map(|located| located.val) {
-                        Some(Token::StringLiteral(lit)) => self.string_literal_body(lit),
+                        Some(Token::StringLiteral(lit)) => {
+                            let mut body = self.string_literal_body(lit);
+                            while let Some(Token::StringLiteral(next)) = self.tokens.peek_val() {
+                                body.push_str(&self.string_literal_body(*next));
+                                self.tokens.advance();
+                            }
+                            body
+                        }
                         other => {
                             let span = self.peek_span();
                             return self.fail(span, format!("attribute `section` needs a string literal, got {}", self.describe_token(other)));
