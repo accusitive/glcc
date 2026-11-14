@@ -2720,6 +2720,7 @@ impl<'a, 'b> Expander<'a, 'b> {
     fn run_tokens(&mut self, text: &str, display: SymbolU32) -> Result<(), PpError> {
         use glcc_frontend::lexer::Lexer;
         let mut lexer = Lexer::new(text, self.interner);
+        lexer.dollars_in_idents = !self.files.opts.assembler;
         let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
         let disp = self.display();
         let trees = crate::tree::collect_trees(toks, &disp, &*self.interner, self.files.opts.assembler)?;

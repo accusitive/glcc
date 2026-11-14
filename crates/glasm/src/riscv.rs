@@ -216,6 +216,7 @@ impl GToks<'_> {
         while let Some(tok) = self.peek() {
             match tok {
                 GTok::Punct("(") | GTok::Punct(")") | GTok::Punct(",") | GTok::Reg(_) => break,
+                GTok::BigInt(_) => break,
                 GTok::Ident(n) => {
                     toks.push(crate::parse::Tok::Ident(n.clone()));
                     self.pos += 1;

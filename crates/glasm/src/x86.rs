@@ -27,6 +27,14 @@ impl Backend for X86Backend {
         for f in &fixups {
             let data = &mut sections[f.section].data;
             if let Err(msgs) = self.finalize_one(data, f, relocs) {
+                // Name the extern symbol when the error is about one.
+                let msgs = msgs.into_iter().map(|m| {
+                    if let (crate::expr::RValue::ExternRef { sym, .. }, false) = (&f.val, false) {
+                        m + &format!(" (symbol `{}`)", symbols[*sym].name)
+                    } else {
+                        m
+                    }
+                }).collect::<Vec<_>>();
                 errors.extend(msgs);
             }
         }
@@ -93,7 +101,7 @@ impl X86Backend {
             }
             RValue::ExternRef { sym, off } => {
                 if f.size < 4 {
-                    return Err(vec!["relocation does not fit in field".into()]);
+                    return Err(vec![format!("extern reference needs a 4+ byte field (size {}, offset {:#x})", f.size, f.offset)]);
                 }
                 relocs.push(Reloc {
                     section: f.section,

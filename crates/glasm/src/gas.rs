@@ -55,12 +55,13 @@ pub fn parse_module(src: &str, arch: Arch) -> Result<Vec<Stmt>, Vec<ParseError>>
     };
     let texts: Vec<&str> = expanded.iter().map(|(text, _)| text.as_str()).collect();
     let numlabels = NumLabels::scan(&texts);
+    let aliases = scan_reg_aliases(&texts);
     let mut stmts = Vec::new();
     let mut errors = Vec::new();
     for (lineno, (text, src_line)) in expanded.iter().enumerate() {
         // GAS `;` separates statements on a line.
         for part in split_statements(text) {
-            match parse_line(&part, *src_line, lineno, &numlabels, arch) {
+            match parse_line(&part, *src_line, lineno, &numlabels, arch, &aliases) {
                 Ok(ss) => stmts.extend(ss),
                 Err(msg) => errors.push(ParseError { line: *src_line, msg }),
             }
@@ -164,7 +165,7 @@ impl Preproc {
         }
     }
 
-    fn process(&mut self, lines: Vec<PPLine>, depth: usize) -> PPResult<Vec<PPLine>> {
+    fn process(&mut self, mut lines: Vec<PPLine>, depth: usize) -> PPResult<Vec<PPLine>> {
         if depth > 64 {
             let (_, line) = lines.first().cloned().unwrap_or_default();
             return Err(fatal(line, "macro/conditional nesting too deep"));
@@ -192,14 +193,16 @@ impl Preproc {
                             }
                     }
                     Some("elseif" | "elif") => {
+                        // Outer frames active and nothing taken yet: the
+                        // arm is still eligible, so its condition must
+                        // be evaluated even though the region reads as
+                        // inactive (the `.if` itself was not taken).
                         let parent_active = conds[..conds.len().saturating_sub(1)].iter().all(|(a, _)| *a);
-                        if let Some(frame) = conds.last_mut()
-                            && parent_active
+                        if parent_active
+                            && let Some(frame) = conds.last_mut()
                             && !frame.1 {
-                                // Inside a false outer frame the
-                                // condition cannot be evaluated here;
-                                // stay eligible, not taken.
-                                *frame = (parent_active && !frame.1, frame.1);
+                                let taken = self.eval_cond("if", code.trim()[word.unwrap().len() + 1..].trim(), line)?;
+                                *frame = (taken, taken);
                             }
                     }
                     Some("endif") => {
@@ -264,11 +267,11 @@ impl Preproc {
                     i += 1;
                 }
                 Some("rept") => {
-                    let count = self.eval_expr(code.trim()[".rept".len()..].trim(), line)?;
-                    let (body, end) = collect_block(&lines, i + 1, "", ".endr", self.mode)?;
+                    let (count_text, body, end, queued) = self.rept_block(&lines, i, &code, line)?;
+                    let count = self.eval_expr(&count_text, line)?;
                     let mut reps = Vec::new();
                     for _ in 0..count.max(0) {
-                        let rep: Vec<PPLine> = body.iter().map(|(text, _)| (text.clone(), line)).collect();
+                        let rep: Vec<PPLine> = body.iter().map(|(text, l)| (text.clone(), *l)).collect();
                         match self.process(rep, depth + 1) {
                             Ok(lines) => reps.extend(lines),
                             Err(PPStop::Exit) => break,
@@ -277,16 +280,21 @@ impl Preproc {
                     }
                     out.extend(reps);
                     i = end;
+                    if !queued.is_empty() {
+                        // Statements after a same-line `.endr` rejoin the
+                        // stream right after the block.
+                        let at = i.min(lines.len());
+                        lines.splice(at..at, queued);
+                    }
                 }
                 Some("irp" | "irpc") => {
-                    let header = code.trim()[word.unwrap().len() + 1..].trim();
-                    let (sym, items) = self.parse_irp(header, line)?;
-                    let (body, end) = collect_block(&lines, i + 1, "", ".endr", self.mode)?;
+                    let (header, body, end, queued) = self.irp_block(&lines, i, &code, &word.unwrap(), line)?;
+                    let (sym, items) = self.parse_irp(&header, line)?;
                     let mut reps = Vec::new();
                     for item in items {
                         let rep: Vec<PPLine> = body
                             .iter()
-                            .map(|(text, _)| (substitute(text, &[(sym.clone(), item.clone())], self.counter), line))
+                            .map(|(text, l)| (substitute(text, &[(sym.clone(), item.clone())], self.counter), *l))
                             .collect();
                         match self.process(rep, depth + 1) {
                             Ok(lines) => reps.extend(lines),
@@ -296,6 +304,10 @@ impl Preproc {
                     }
                     out.extend(reps);
                     i = end;
+                    if !queued.is_empty() {
+                        let at = i.min(lines.len());
+                        lines.splice(at..at, queued);
+                    }
                 }
                 Some("endr") => {
                     i += 1;
@@ -466,11 +478,13 @@ impl Preproc {
                 return Err(fatal(line, format!("too many macro arguments ({} given, {} expected)", args.len(), def.params.len())));
             }
         }
+        // An unbound parameter without a default is empty (GAS);
+        // leaving it raw would leak `\param` into the output.
         let bindings: Vec<(String, String)> = def
             .params
             .iter()
             .zip(values)
-            .filter_map(|((name, default), value)| Some((name.clone(), value.or_else(|| default.clone())?)))
+            .map(|((name, default), value)| (name.clone(), value.or_else(|| default.clone()).unwrap_or_default()))
             .collect();
         let body: Vec<PPLine> = def
             .body
@@ -547,6 +561,41 @@ impl Preproc {
         }
         Ok(())
     }
+
+    /// `.rept` block layout: either a same-line body
+    /// (`.rept n ; stmts ; .endr ; tail`, common from macro
+    /// expansions) or the usual line-wise block. Returns (count
+    /// expression, body, index to resume at, statements after a
+    /// same-line `.endr` to re-queue).
+    fn rept_block(&self, lines: &[PPLine], i: usize, code: &str, line: u32) -> PPResult<(String, Vec<PPLine>, usize, Vec<PPLine>)> {
+        let stmts = split_statements(code);
+        if let Some(ep) = stmts.iter().position(|s| first_word(s).as_deref() == Some("endr")) {
+            let count_text = stmts[0].trim()[".rept".len()..].trim().to_string();
+            let body = stmts[1..ep].iter().filter(|s| !s.trim().is_empty()).map(|s| (s.to_string(), line)).collect();
+            let after = stmts[ep + 1..].iter().filter(|s| !s.trim().is_empty()).map(|s| (s.to_string(), line)).collect();
+            Ok((count_text, body, i + 1, after))
+        } else {
+            let (body, end) = collect_block(lines, i + 1, "", ".endr", self.mode)?;
+            let count_text = code.trim()[".rept".len()..].trim().to_string();
+            Ok((count_text, body, end, Vec::new()))
+        }
+    }
+
+    /// `.irp`/`.irpc` block layout, same split as `rept_block`.
+    fn irp_block(&self, lines: &[PPLine], i: usize, code: &str, word: &str, line: u32) -> PPResult<(String, Vec<PPLine>, usize, Vec<PPLine>)> {
+        let wlen = word.len() + 1; // the mnemonic plus its leading dot
+        let stmts = split_statements(code);
+        if let Some(ep) = stmts.iter().position(|s| first_word(s).as_deref() == Some("endr")) {
+            let header = stmts[0].trim()[wlen..].trim().to_string();
+            let body = stmts[1..ep].iter().filter(|s| !s.trim().is_empty()).map(|s| (s.to_string(), line)).collect();
+            let after = stmts[ep + 1..].iter().filter(|s| !s.trim().is_empty()).map(|s| (s.to_string(), line)).collect();
+            Ok((header, body, i + 1, after))
+        } else {
+            let (body, end) = collect_block(lines, i + 1, "", ".endr", self.mode)?;
+            let header = code.trim()[wlen..].trim().to_string();
+            Ok((header, body, end, Vec::new()))
+        }
+    }
 }
 
 /// Symbol table adapter for `.if` evaluation: the preprocessor's
@@ -580,7 +629,7 @@ impl crate::expr::SymLookup for PPSyms<'_> {
 
 /// The numbers GAS compares registers by (`%rsp == 4` in a macro
 /// argument check).
-fn gas_reg_number(name: &str) -> Option<i64> {
+pub fn gas_reg_number(name: &str) -> Option<i64> {
     let name = name.strip_suffix(['d', 'w', 'b']).filter(|_| name.len() > 3).unwrap_or(name);
     let n = match name {
         "rax" => 0,
@@ -596,8 +645,9 @@ fn gas_reg_number(name: &str) -> Option<i64> {
     Some(n)
 }
 
-/// Remove a line's `;` (and `#` in x86 mode) comment tail, keeping
-/// quoted strings intact byte-for-byte.
+/// Remove a line's comment tail (`#` in x86 mode), keeping quoted
+/// strings intact byte-for-byte. `;` is a statement separator on x86,
+/// not a comment, and stays in the code.
 fn strip_line_comment(line: &str, mode: LexMode) -> String {
     let bytes = line.as_bytes();
     let mut out = String::with_capacity(line.len());
@@ -622,7 +672,7 @@ fn strip_line_comment(line: &str, mode: LexMode) -> String {
             out.push_str(&line[start..i.min(line.len())]);
             continue;
         }
-        if c == b';' {
+        if c == b';' && mode != LexMode::X86 {
             break;
         }
         if c == b'#' && mode != LexMode::A64 {
@@ -671,11 +721,13 @@ fn split_args(text: &str) -> Vec<String> {
                 quote = c;
                 cur.push(c);
             }
-            '(' | '[' | '<' => {
+            // `<`/`>` are shift operators on x86, not argument
+            // grouping: `(a << 2)` must not swallow the commas after it.
+            '(' | '[' => {
                 depth += 1;
                 cur.push(c);
             }
-            ')' | ']' | '>' => {
+            ')' | ']' => {
                 depth = depth.saturating_sub(1);
                 cur.push(c);
             }
@@ -943,6 +995,8 @@ fn strip_block_comments(src: &str) -> String {
 pub enum GTok {
     Ident(String),
     Int(i64),
+    /// A literal wider than 64 bits (only `.octa` accepts it).
+    BigInt(u128),
     /// Numeric local label reference: `1b` / `1f`.
     NumRef(u32, bool),
     Str(Vec<u8>),
@@ -985,6 +1039,11 @@ fn lex_line(line: &str, mode: LexMode) -> Result<Vec<GTok>, String> {
                     return Err(format!("unexpected character `%'"));
                 }
                 i += 1;
+                // GAS skips whitespace between `%` and the register name
+                // (kernel macros expand to `x (%rip)` with a space).
+                while i < b.len() && (b[i] == b' ' || b[i] == b'\t') {
+                    i += 1;
+                }
                 let start = i;
                 while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                     i += 1;
@@ -1029,8 +1088,14 @@ fn lex_line(line: &str, mode: LexMode) -> Result<Vec<GTok>, String> {
                         }
                     }
                 }
-                let v = gas_parse_number(text).ok_or_else(|| format!("invalid number `{text}'"))?;
-                out.push(GTok::Int(v));
+                if let Some(v) = gas_parse_number(text) {
+                    out.push(GTok::Int(v));
+                } else {
+                    // A literal wider than 64 bits: only `.octa`
+                    // consumes it (BigInt carries the raw value).
+                    let v = gas_parse_wide_number(text).ok_or_else(|| format!("invalid number `{text}'"))?;
+                    out.push(GTok::BigInt(v));
+                }
             }
             b'(' => {
                 out.push(GTok::Punct("("));
@@ -1122,7 +1187,19 @@ fn is_ident_start(c: u8) -> bool {
 }
 
 fn gas_parse_number(text: &str) -> Option<i64> {
-    let (radix, digits) = if let Some(h) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
+    let (radix, digits) = gas_number_radix(text);
+    // Wrap like GNU as: 0xfffffffffffff7ff is -2049.
+    u64::from_str_radix(digits, radix).ok().map(|v| v as i64)
+}
+
+/// A literal wider than 64 bits (`.octa 0x...`); digits only.
+fn gas_parse_wide_number(text: &str) -> Option<u128> {
+    let (radix, digits) = gas_number_radix(text);
+    u128::from_str_radix(digits, radix).ok()
+}
+
+fn gas_number_radix(text: &str) -> (u32, &str) {
+    if let Some(h) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
         (16, h)
     } else if let Some(h) = text.strip_prefix("0b").or(text.strip_prefix("0B")) {
         (2, h)
@@ -1132,9 +1209,7 @@ fn gas_parse_number(text: &str) -> Option<i64> {
         (8, &text[1..])
     } else {
         (10, text)
-    };
-    // Wrap like GNU as: 0xfffffffffffff7ff is -2049.
-    u64::from_str_radix(digits, radix).ok().map(|v| v as i64)
+    }
 }
 
 /// Lexes a quoted string starting at `at`, handling GAS backslash
@@ -1354,7 +1429,37 @@ fn split_statements(line: &str) -> Vec<&str> {
     parts
 }
 
-fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, arch: Arch) -> Result<Vec<Stmt>, String> {
+/// `.set name, %reg` register aliases (GAS lets an aliased name stand
+/// in for the register in any operand position).
+pub type RegAliases = std::collections::HashMap<String, i32>;
+
+/// Scan the expanded statements for `.set name, %reg` /
+/// `name = %reg` register aliases.
+fn scan_reg_aliases(texts: &[&str]) -> RegAliases {
+    let mut out = RegAliases::new();
+    for text in texts {
+        for part in split_statements(text) {
+            let part = part.trim();
+            let (name, value) = if let Some((n, v)) = part.split_once('=') {
+                (n.trim(), v.trim())
+            } else if let Some(rest) = part.strip_prefix(".set") {
+                let Some((n, v)) = rest.trim().split_once(',') else { continue };
+                (n.trim(), v.trim())
+            } else {
+                continue;
+            };
+            if !value.starts_with('%') || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
+                continue;
+            }
+            if let Some(r) = regs::lookup(value[1..].trim()) {
+                out.insert(name.to_string(), r as i32);
+            }
+        }
+    }
+    out
+}
+
+fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, arch: Arch, aliases: &RegAliases) -> Result<Vec<Stmt>, String> {
     let mode = match arch {
         Arch::X86_64 => LexMode::X86,
         Arch::Riscv32 | Arch::Riscv64 => LexMode::Riscv,
@@ -1396,11 +1501,67 @@ fn parse_line(line: &str, line_no: u32, lineno: usize, numlabels: &NumLabels, ar
         GTok::Ident(word) if word.starts_with('.') => {
             out.push(parse_directive(&g[i..], line_no, lineno, numlabels, arch)?);
         }
+        GTok::Ident(word) if ljmp_off_size(word).is_some() => {
+            out.extend(parse_ljmp(&g[i..], line_no, lineno, numlabels)?);
+        }
         _ => {
-            out.push(crate::arch::parse_gas_insn(arch, &g[i..], line_no, lineno, numlabels)?);
+            out.push(crate::arch::parse_gas_insn(arch, &g[i..], line_no, lineno, numlabels, aliases)?);
         }
     }
     Ok(out)
+}
+
+/// Far-jump suffix → offset field size (None: not an ljmp form).
+fn ljmp_off_size(word: &str) -> Option<u8> {
+    match word {
+        "ljmp" | "ljmpq" | "ljmpl" => Some(4),
+        "ljmpw" => Some(2),
+        _ => None,
+    }
+}
+
+/// `ljmpl $seg, $off`: the direct far jump `EA <off> <seg>`, emitted
+/// as raw data (the encoder has no ptr16:N colon-operand form).
+fn parse_ljmp(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels) -> Result<Vec<Stmt>, String> {
+    let GTok::Ident(word) = &g[0] else {
+        return Err("expected ljmp".into());
+    };
+    let off_size = ljmp_off_size(word).unwrap();
+    let mut t = GToks { g: &g[1..], pos: 0 };
+    // `ljmpl *sym(%rip)`: indirect far jump through memory, `FF /5`
+    // with a rip-relative disp32.
+    if matches!(t.g.get(t.pos), Some(GTok::Star)) {
+        t.bump();
+        let disp = t.expr_ex(lineno, numlabels, false)?;
+        if !matches!(t.g.get(t.pos), Some(GTok::Punct("(")))
+            || t.g.get(t.pos + 1) != Some(&GTok::Reg(regs::RIP.to_string()))
+            || t.g.get(t.pos + 2) != Some(&GTok::Punct(")"))
+        {
+            return Err("indirect ljmp only supports `*sym(%rip)'".into());
+        }
+        t.bump();
+        t.bump();
+        t.bump();
+        let d = |size, e| Stmt::Data { size, items: vec![DataItem::Expr(e)], line: line_no };
+        return Ok(vec![d(1, Expr::Int(0xff)), d(1, Expr::Int(0x1d)), d(4, disp)]);
+    }
+    if matches!(t.g.get(t.pos), Some(GTok::Imm)) {
+        t.bump();
+    }
+    let seg = t.expr(lineno, numlabels)?;
+    if !t.eat_punct(",") {
+        return Err("expected `,' between ljmp segment and offset".into());
+    }
+    if matches!(t.g.get(t.pos), Some(GTok::Imm)) {
+        t.bump();
+    }
+    let off = t.expr(lineno, numlabels)?;
+    let d = |size, e| Stmt::Data { size, items: vec![DataItem::Expr(e)], line: line_no };
+    Ok(vec![
+        d(1, Expr::Int(0xea)),
+        d(off_size, off),
+        d(2, seg),
+    ])
 }
 
 fn directive_name(word: &str) -> &str {
@@ -1418,6 +1579,22 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
         "data" => Ok(section_stmt(".data", SectionKind::Data, None)),
         "bss" => Ok(section_stmt(".bss", SectionKind::Bss, None)),
         "rodata" => Ok(section_stmt(".rodata", SectionKind::Rodata, None)),
+        // Instruction width selectors; only 64-bit encodings exist here.
+        "code16" => Ok(Stmt::Bits(16, line_no)),
+        "code32" => Ok(Stmt::Bits(32, line_no)),
+        "code64" => Ok(Stmt::Bits(64, line_no)),
+        // GAS fails the assembly when a reached `.error` reports it.
+        "error" => {
+            let items = t.strings()?;
+            let msg = items
+                .iter()
+                .map(|item| match item {
+                    DataItem::Str(b) => String::from_utf8_lossy(b).into_owned(),
+                    DataItem::Expr(_) => String::new(),
+                })
+                .collect::<String>();
+            Err(if msg.is_empty() { format!(".error at line {line_no}") } else { msg })
+        }
         // .section and .pushsection share the spec grammar; pushsection
         // additionally saves the section active before it for
         // .popsection/.previous (assemble.rs keeps the stack).
@@ -1511,6 +1688,34 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
                 bytes.push(0);
             }
             Ok(Stmt::Data { size: 1, items, line: line_no })
+        }
+        "incbin" => {
+            // `.incbin "file"[, skip[, count]]`: the file's bytes as data.
+            let items = t.strings()?;
+            let Some(DataItem::Str(path)) = items.first() else {
+                return Err("expected a quoted file name for .incbin".into());
+            };
+            let path = String::from_utf8_lossy(path).into_owned();
+            let skip = if t.eat_punct(",") { t.expr(lineno, numlabels)? } else { Expr::Int(0) };
+            let count = if t.eat_punct(",") { t.expr(lineno, numlabels)? } else { Expr::Int(i64::MAX) };
+            Ok(Stmt::IncBin { path, skip, count, line: line_no })
+        }
+        "octa" => {
+            // 128-bit data: wider literals than the expression world
+            // holds, so the items carry their own bytes.
+            let mut items = Vec::new();
+            loop {
+                match t.bump().cloned() {
+                    Some(GTok::Int(v)) => items.push(DataItem::Str((v as u128).to_le_bytes().to_vec())),
+                    Some(GTok::BigInt(v)) => items.push(DataItem::Str(v.to_le_bytes().to_vec())),
+                    Some(GTok::Str(bytes)) => items.push(DataItem::Str(bytes)),
+                    other => return Err(format!("expected a literal number for .octa, got {other:?}")),
+                }
+                if !t.eat_punct(",") {
+                    break;
+                }
+            }
+            Ok(Stmt::Data { size: 16, items, line: line_no })
         }
         d if data_directives(arch).iter().any(|(n, _)| *n == d) => {
             let size = data_directives(arch).iter().find(|(n, _)| *n == d).unwrap().1;
@@ -1697,7 +1902,6 @@ impl GToks<'_> {
     /// `disp(base,index,scale)`), on treats parens as grouping
     /// (directive arguments).
     fn expr_ex(&mut self, lineno: usize, numlabels: &NumLabels, parens: bool) -> Result<Expr, String> {
-        let mut toks = Vec::new();
         let depth_of = |g: &[GTok], start: usize| -> usize {
             // Consume tokens that belong to an expression: idents, ints,
             // numeric label refs, and arithmetic punctuation.
@@ -1709,6 +1913,10 @@ impl GToks<'_> {
                     GTok::Ident(_)
                     | GTok::Int(_)
                     | GTok::NumRef(..)
+                    // Registers appear in `.if` comparisons
+                    // (`.if \base == %rsp`); they resolve to their GAS
+                    // numbers in the preprocessor's symbol lookup.
+                    | GTok::Reg(_)
                     // `*` lexes as Star; mid-expression it is
                     // multiplication (the leading indirect position is
                     // consumed before expr runs).
@@ -1744,20 +1952,47 @@ impl GToks<'_> {
             end
         };
         let end = depth_of(self.g, self.pos);
-        let slice = &self.g[self.pos..end];
+        let slice: Vec<GTok> = self.g[self.pos..end].to_vec();
         self.pos = end;
-        let mut sub = 0usize;
-        let mut paren = 0usize;
+        self.expr_toks(&slice, lineno, numlabels)
+    }
+
+    /// One balanced `( ... )` group at `pos`, parsed as a grouped
+    /// expression (`(pcpu_hot + 16)(%rip)`).
+    fn paren_group(&mut self, lineno: usize, numlabels: &NumLabels) -> Result<Expr, String> {
+        if !matches!(self.g.get(self.pos), Some(GTok::Punct("("))) {
+            return Err("expected `('".into());
+        }
+        let start = self.pos;
+        let mut depth = 0usize;
+        let mut end = start;
+        while end < self.g.len() {
+            match &self.g[end] {
+                GTok::Punct("(") => depth += 1,
+                GTok::Punct(")") => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += 1;
+        }
+        if depth != 0 {
+            return Err("unbalanced `('".into());
+        }
+        let inner: Vec<GTok> = self.g[start + 1..end].to_vec();
+        self.pos = end + 1;
+        self.expr_toks(&inner, lineno, numlabels)
+    }
+
+    fn expr_toks(&self, slice: &[GTok], lineno: usize, numlabels: &NumLabels) -> Result<Expr, String> {
+        let mut toks = Vec::new();
         for t in slice {
             match t {
-                GTok::Punct("(") => {
-                    paren += 1;
-                    toks.push(Tok::Punct("("));
-                }
-                GTok::Punct(")") => {
-                    paren = paren.saturating_sub(1);
-                    toks.push(Tok::Punct(")"));
-                }
+                GTok::Punct("(") => toks.push(Tok::Punct("(")),
+                GTok::Punct(")") => toks.push(Tok::Punct(")")),
                 GTok::Star => toks.push(Tok::Punct("*")),
                 GTok::Punct(p) => toks.push(Tok::Punct(p)),
                 // GAS's `.` (current location) maps onto the nasm-side `$`.
@@ -1772,7 +2007,6 @@ impl GToks<'_> {
                     let name = if *fwd { numlabels.next_at(lineno + 1, *d) } else { numlabels.last_before(lineno, *d) }
                         .ok_or_else(|| format!("no `{d}' label defined in that direction"))?;
                     toks.push(Tok::Ident(name));
-                    let _ = &mut sub;
                 }
                 _ => break,
             }
@@ -1823,7 +2057,7 @@ fn translate_mnemonic(mn: &str) -> Option<GasInsn> {
             return insn("movsx", Some(dst), Some(src), false);
         }
     }
-    const SPECIAL: &[(&str, &str)] = &[("movslq", "movsxd"), ("cltq", "cdqe"), ("cltd", "cdq"), ("cqto", "cqo"), ("cwtl", "cwde"), ("cbtw", "cbw")];
+    const SPECIAL: &[(&str, &str)] = &[("movslq", "movsxd"), ("cltq", "cdqe"), ("cltd", "cdq"), ("cqto", "cqo"), ("cwtl", "cwde"), ("cbtw", "cbw"), ("lret", "retf"), ("lretw", "retfw"), ("lretl", "retfd"), ("lretq", "retfq")];
     for (gas, intel) in SPECIAL {
         if mn == *gas {
             return insn(intel, None, None, false);
@@ -1880,7 +2114,14 @@ fn is_branch_mnemonic(intel: &str) -> bool {
     intel.len() <= 3 && intel.starts_with('j') && crate::parse::opcode_index(intel).is_some()
 }
 
-pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels) -> Result<Stmt, String> {
+/// Register names usable as `%seg:` memory-operand overrides.
+const SEG_REGS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+
+/// Shift/rotate mnemonics accepting the one-operand (shift by one)
+/// form in GAS.
+const SHIFT_MNEMONICS: [&str; 8] = ["shl", "shr", "sal", "sar", "rol", "ror", "rcl", "rcr"];
+
+pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabels, aliases: &RegAliases) -> Result<Stmt, String> {
     // Split off instruction prefixes (lock/rep/...).
     let mut idx = 0;
     let mut prefixes = Vec::new();
@@ -1906,13 +2147,23 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
         src_size,
         keep_order,
     } = gas_insn;
-    let opcode = crate::parse::opcode_index(intel).ok_or_else(|| format!("unknown instruction `{intel}'"))?;
+    let mut opcode = crate::parse::opcode_index(intel).ok_or_else(|| format!("unknown instruction `{intel}'"))?;
     let branch = is_branch_mnemonic(intel);
 
     let mut t = GToks { g: &g[idx + 1..], pos: 0 };
     let mut gas_operands: Vec<Operand> = Vec::new();
     if t.pos < t.g.len() {
         loop {
+            // Segment override: `%fs:` / `%gs:` ahead of a memory operand.
+            let mut seg: i32 = -1;
+            if let (Some(GTok::Reg(name)), Some(GTok::Punct(":"))) = (t.g.get(t.pos), t.g.get(t.pos + 1))
+                && SEG_REGS.contains(&name.as_str())
+            {
+                let r = regs::lookup(name).expect("segment register name");
+                seg = r as i32;
+                t.bump();
+                t.bump();
+            }
             // The lexer emits `*` as GTok::Star, not Punct.
             let indirect = if matches!(t.g.get(t.pos), Some(GTok::Star)) {
                 t.bump();
@@ -1922,16 +2173,39 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
             };
             let operand = if matches!(t.g.get(t.pos), Some(GTok::Imm)) {
                 // $immediate: size-agnostic (the suffix sizes memory).
+                if seg != -1 {
+                    return Err("segment override on an immediate operand".into());
+                }
                 t.bump();
                 Operand::imm(t.expr(lineno, numlabels)?)
             } else if matches!(t.g.get(t.pos), Some(GTok::Reg(_))) {
+                if seg != -1 {
+                    return Err("segment override on a register operand".into());
+                }
                 let Some(GTok::Reg(name)) = t.bump() else { unreachable!() };
                 let r = regs::lookup(name).ok_or_else(|| format!("unknown register `%{name}'"))?;
                 Operand::reg(r as i32, regs::flags(r))
+            } else if let Some(GTok::Ident(name)) = t.g.get(t.pos)
+                && let Some(&r) = aliases.get(name.as_str())
+            {
+                // A `.set` register alias stands in for the register.
+                if seg != -1 {
+                    return Err("segment override on a register operand".into());
+                }
+                t.bump();
+                Operand::reg(r, regs::flags(r as usize))
             } else {
                 // Memory: `expr(base,index,scale)` or a bare displacement.
                 let had_paren = matches!((t.g.get(t.pos), find_paren(t.g, t.pos)), (_, Some(_)));
-                let disp = t.expr_ex(lineno, numlabels, false)?;
+                // A leading `(` opens either the base group (`(%rsi)`,
+                // `(a+b)(%rip)`'s trailing base) or a grouped
+                // displacement (`(a + b)(%rip)`); a group holding a
+                // register is the base.
+                let disp = if matches!(t.g.get(t.pos), Some(GTok::Punct("("))) && !group_holds_reg(t.g, t.pos) {
+                    t.paren_group(lineno, numlabels)?
+                } else {
+                    t.expr_ex(lineno, numlabels, false)?
+                };
                 let mut base: Option<i32> = None;
                 let mut index: Option<i32> = None;
                 let mut scale: u8 = 1;
@@ -1948,12 +2222,27 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
                             let r = regs::lookup(bname).ok_or_else(|| format!("unknown register `%{bname}'"))?;
                             base = Some(r as i32);
                         }
+                    } else if let Some(GTok::Ident(name)) = t.g.get(t.pos)
+                        && let Some(&r) = aliases.get(name.as_str())
+                    {
+                        // A `.set` register alias as the base (or rip).
+                        t.bump();
+                        if regs::info(r as usize).name == regs::RIP {
+                            rel = true;
+                        } else {
+                            base = Some(r);
+                        }
                     }
                     if t.eat_punct(",") {
                         if matches!(t.g.get(t.pos), Some(GTok::Reg(_))) {
                             let Some(GTok::Reg(iname)) = t.bump() else { unreachable!() };
                             let r = regs::lookup(iname).ok_or_else(|| format!("unknown register `%{iname}'"))?;
                             index = Some(r as i32);
+                        } else if let Some(GTok::Ident(name)) = t.g.get(t.pos)
+                            && let Some(&r) = aliases.get(name.as_str())
+                        {
+                            t.bump();
+                            index = Some(r);
                         }
                         if t.eat_punct(",") {
                             match t.bump() {
@@ -1998,7 +2287,7 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
                     basereg: -1,
                     indexreg: -1,
                     scale,
-                    seg: -1,
+                    seg,
                     disp: Some(disp),
                     imm: None,
                     eaflags,
@@ -2021,11 +2310,28 @@ pub fn parse_x86_insn(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLa
                 break;
             }
         }
+        if t.pos < t.g.len() {
+            return Err(format!("unexpected token after operands: {:?}", t.g[t.pos]));
+        }
+    }
+
+    // One-operand shifts (`shrl %edx`) shift by one in GAS: fill the
+    // missing immediate ahead of the r/m operand.
+    if SHIFT_MNEMONICS.contains(&intel) && gas_operands.len() == 1 {
+        gas_operands.insert(0, Operand::imm(Expr::Int(1)));
     }
 
     let mut operands = gas_operands;
     if !keep_order {
         operands.reverse();
+    }
+
+    // `movq` with a vector operand is the SSE move, not the integer
+    // alias (`movq 0x00(%rdx),%xmm6`).
+    if mn == "movq" && operands.iter().any(|o| o.ty & op::REGISTER != 0 && o.ty & op::REG_CLASS_VECTOR != 0)
+        && let Some(sse) = crate::parse::opcode_index("movq")
+    {
+        opcode = sse;
     }
 
     Ok(Stmt::Insn(crate::arch::Insn::X86(X86Insn {
@@ -2046,4 +2352,24 @@ fn find_paren(g: &[GTok], pos: usize) -> Option<usize> {
         }
     }
     None
+}
+
+/// Whether the balanced group opening at `start` holds a register
+/// token: `(%rsi)` is a base group, `(a + b)` a grouped displacement.
+fn group_holds_reg(g: &[GTok], start: usize) -> bool {
+    let mut depth = 0usize;
+    for t in &g[start..] {
+        match t {
+            GTok::Punct("(") => depth += 1,
+            GTok::Punct(")") => {
+                depth -= 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            GTok::Reg(_) if depth == 1 => return true,
+            _ => {}
+        }
+    }
+    false
 }

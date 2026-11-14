@@ -610,6 +610,9 @@ pub fn opcode_index(mnemonic: &str) -> Option<usize> {
 
 const PREFIXES: [&str; 11] = ["lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack", "xacquire", "xrelease", "hint_nop"];
 
+/// Identifiers usable as `seg:` memory-operand overrides.
+const SEG_REGS: [&str; 6] = ["es", "cs", "ss", "ds", "fs", "gs"];
+
 fn parse_instruction(t: &mut Toks, line_no: u32) -> Result<Stmt, String> {
     let mut prefixes = Vec::new();
     let mn = loop {
@@ -651,6 +654,17 @@ fn parse_operand(t: &mut Toks) -> Result<Operand, String> {
     {
         t.bump();
     }
+    // Segment override: `fs:[...]` / `gs:sym`.
+    let mut seg: i32 = -1;
+    if let Some(Tok::Ident(n)) = t.peek() {
+        let lower = n.to_ascii_lowercase();
+        if SEG_REGS.contains(&lower.as_str()) && matches!(t.toks.get(t.pos + 1), Some(Tok::Punct(":"))) {
+            let r = regs::lookup(&lower).expect("segment register name");
+            seg = r as i32;
+            t.bump();
+            t.bump();
+        }
+    }
     let mut size_bits: Option<u64> = None;
     if let Some(Tok::Ident(n)) = t.peek() {
         let lower = n.to_ascii_lowercase();
@@ -664,7 +678,25 @@ fn parse_operand(t: &mut Toks) -> Result<Operand, String> {
         if !t.eat_punct("]") {
             return Err("expected `]'".into());
         }
-        return Ok(mem_operand(mem, size_bits));
+        let mut o = mem_operand(mem, size_bits);
+        o.seg = seg;
+        return Ok(o);
+    }
+    if seg != -1 {
+        // `seg:sym` without brackets: a memory reference to `sym`.
+        let e = parse_expr(t, 0)?;
+        let mut o = Operand {
+            ty: op::MEMORY_ANY,
+            basereg: -1,
+            indexreg: -1,
+            scale: 0,
+            seg,
+            disp: Some(e),
+            imm: None,
+            eaflags: crate::insn::eaf::REL,
+        };
+        o.ty |= op::RM_SEL;
+        return Ok(o);
     }
     if let Some(bits) = size_bits {
         let e = parse_expr(t, 0)?;

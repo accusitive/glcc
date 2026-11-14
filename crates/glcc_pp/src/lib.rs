@@ -901,6 +901,7 @@ fn run_source(
     opts: &PpOptions,
 ) -> Result<(), PpError> {
     let mut lexer = Lexer::new(source, interner);
+    lexer.dollars_in_idents = !opts.assembler;
     let toks: Vec<Tok> = lexer.lex_pp_all().into_iter().map(|t| Tok::from_pp(&t, display, false, false)).collect();
     if std::env::var_os("GLCC_PP_DEBUG").is_some() {
         let nl = toks.iter().filter(|t| matches!(t.tok, PpToken::Ws(PpWs::Newline))).count();

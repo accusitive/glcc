@@ -98,6 +98,13 @@ const P_VEX3: i32 = 24;
 const P_VEX2: i32 = 25;
 const P_NF: i32 = 26;
 const P_ZU: i32 = 27;
+// Segment overrides (nasm keeps them in the PPS_SEG prefix slot).
+const P_CS: i32 = 28;
+const P_DS: i32 = 29;
+const P_ES: i32 = 30;
+const P_SS: i32 = 31;
+const P_FS: i32 = 32;
+const P_GS: i32 = 33;
 
 const PFE_NULL: i32 = -1;
 const PFE_ERR: i32 = -2;
@@ -152,6 +159,12 @@ fn prefix_byte(pfx: i32, bits: u8) -> i32 {
         }
         P_OSP => 0x66,
         P_REX | P_VEX | P_EVEX | P_VEX3 | P_VEX2 | P_REX2 => PFE_MULTI,
+        P_CS => 0x2e,
+        P_DS => 0x3e,
+        P_ES => 0x26,
+        P_SS => 0x36,
+        P_FS => 0x64,
+        P_GS => 0x65,
         P_NF | P_NOBND | P_ZU | P_NONE => PFE_NULL,
         _ => PFE_WHAT,
     }
@@ -1413,6 +1426,25 @@ pub fn encode(insn: &X86Insn, ctx: &EvalCtx) -> Result<Encoded, String> {
             "xrelease" => prefixes[PPS_REP] = P_XRELEASE,
             _ => return Err(format!("prefix `{p}' is not supported")),
         }
+    }
+    // A `%seg:` override on any memory operand rides in the SEG slot.
+    for o in &insn.operands {
+        if o.seg < 0 {
+            continue;
+        }
+        let p = match insns_gen::REGS[o.seg as usize].val {
+            0 => P_ES,
+            1 => P_CS,
+            2 => P_SS,
+            3 => P_DS,
+            4 => P_FS,
+            5 => P_GS,
+            v => return Err(format!("cannot override with segment register {v}")),
+        };
+        if prefixes[PPS_SEG] != P_NONE && prefixes[PPS_SEG] != p {
+            return Err("conflicting segment overrides".into());
+        }
+        prefixes[PPS_SEG] = p;
     }
     let ins = InsState {
         bits: 64,

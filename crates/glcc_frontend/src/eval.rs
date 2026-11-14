@@ -1383,7 +1383,11 @@ fn eval_cast(ty: &Ty, operand: &CheckedExpr, sema: &Sema, interner: &Interner, a
             if matches!(inner.unqualified(), Ty::Pointer { .. }) =>
         {
             match eval_const_in(expr, sema, interner, addr_conds) {
-                Some(Value::Int(0)) => Value::Int(0),
+                // An integer behind a pointer cast survives a further
+                // cast back to an integer (`(unsigned long)SEND_SIG_PRIV`
+                // switch labels; GCC folds the round trip). The pointer
+                // cast itself still never folds.
+                Some(v @ Value::Int(_)) if matches!(ty.unqualified(), Ty::Int | Ty::UnsignedInt | Ty::Long | Ty::UnsignedLong | Ty::LongLong | Ty::UnsignedLongLong | Ty::Int128 | Ty::UnsignedInt128 | Ty::Short | Ty::UnsignedShort | Ty::Char | Ty::SignedChar | Ty::UnsignedChar | Ty::Bool) => v,
                 _ => eval_const_in(operand, sema, interner, addr_conds)?,
             }
         }

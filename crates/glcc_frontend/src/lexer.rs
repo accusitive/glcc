@@ -117,6 +117,10 @@ pub struct Lexer<'a> {
     /// occupy) and the `pack` directives lexed from `#pragma` lines.
     emitted: usize,
     packs: Vec<(usize, PackDirective)>,
+    /// GNU `$` in identifiers. Off for assembler-with-cpp input, where
+    /// `$` is the immediate marker and must not fuse into `FOO` (`gcc
+    /// -E -x assembler-with-cpp` expands `FOO` in `btsl $FOO, %ecx`).
+    pub dollars_in_idents: bool,
 }
 
 /// One preprocessing token for `glcc_pp` (over glcc's interner): raw
@@ -179,6 +183,7 @@ impl<'a> Lexer<'a> {
             char_off: 0,
             emitted: 0,
             packs: Vec::new(),
+            dollars_in_idents: true,
         }
     }
 
@@ -427,12 +432,12 @@ impl<'a> Lexer<'a> {
                     let sym = self.intern.get_or_intern(raw);
                     push!(PpToken::Char(sym), tok_line, start_col, tok_off);
                 }
-                c if c.is_alphabetic() || c == '_' || c == '$' => {
+                c if c.is_alphabetic() || c == '_' || (c == '$' && self.dollars_in_idents) => {
                     let start_col = col;
                     let mut word = String::from(c);
                     col += c.len_utf8() as u64;
                     while let Some((nc, _, _)) = self.chars.peek().copied() {
-                        if nc.is_alphanumeric() || nc == '_' || nc == '$' {
+                        if nc.is_alphanumeric() || nc == '_' || (nc == '$' && self.dollars_in_idents) {
                             word.push(nc);
                             col += nc.len_utf8() as u64;
                             let _ = self.pp_next(&mut line);

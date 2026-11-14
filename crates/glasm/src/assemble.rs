@@ -76,6 +76,14 @@ struct SymTab<'a> {
 
 impl SymLookup for SymTab<'_> {
     fn lookup(&self, name: &str) -> Option<SymbolVal> {
+        // A register name in an expression is its GAS register number
+        // (`movl %eax, %gs:sym(%rip)` aside, `.set x, %rdi` aliases).
+        if let Some(reg) = name.strip_prefix('%') {
+            let n = crate::gas::gas_reg_number(reg).or_else(|| crate::regs::lookup(reg).map(|r| crate::regs::info(r).val as i64));
+            if let Some(n) = n {
+                return Some(SymbolVal { index: 0, defined: true, extern_: false, sect: None, value: n, seen: true });
+            }
+        }
         let found = self.syms.iter().position(|s| s.name == name).map(|index| {
             let s = &self.syms[index];
             SymbolVal {
@@ -512,6 +520,42 @@ fn run_pass(
                     Err(m) => errors.push(AsmError { line: *line, msg: m }),
                 }
             }
+            Stmt::IncBin { path, skip, count, line } => {
+                let ctx = EvalCtx {
+                    cur_sect,
+                    cur_off,
+                    syms: &SymTab { syms: symbols, undefined },
+                    optimistic: true,
+                    unknown_hit: None,
+                };
+                let skip = match skip.eval(&ctx) {
+                    Ok(RValue::Const(v)) => v.max(0) as usize,
+                    Ok(_) | Err(_) => {
+                        errors.push(AsmError { line: *line, msg: "incbin skip must be constant".into() });
+                        0
+                    }
+                };
+                let count = match count.eval(&ctx) {
+                    Ok(RValue::Const(v)) => v.max(0),
+                    Ok(_) | Err(_) => {
+                        errors.push(AsmError { line: *line, msg: "incbin count must be constant".into() });
+                        i64::MAX
+                    }
+                };
+                drop(ctx);
+                match std::fs::read(path.as_str()) {
+                    Ok(bytes) => {
+                        for b in bytes.into_iter().skip(skip).take(count as usize) {
+                            sections[cur_sect].data.push(b);
+                            cur_off += 1;
+                        }
+                    }
+                    Err(e) => errors.push(AsmError {
+                        line: *line,
+                        msg: format!("cannot read `.incbin' file `{path}': {e}"),
+                    }),
+                }
+            }
             Stmt::Times { count, inner, line } => {
                 let tab = SymTab { syms: symbols, undefined };
                 let ctx = EvalCtx {
@@ -522,7 +566,9 @@ fn run_pass(
                     unknown_hit: None,
                 };
                 let count = match count.eval(&ctx) {
-                    Ok(RValue::Const(n)) if n >= 0 => n,
+                    // Negative counts clamp to zero (GAS); the kernel's
+                    // `.skip -((diff) > 0) * diff` guards emit exactly -1.
+                    Ok(RValue::Const(n)) => n.max(0),
                     Ok(_) => {
                         errors.push(AsmError {
                             line: *line,

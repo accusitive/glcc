@@ -1004,8 +1004,9 @@ mod tests {
             AsmSlot { kind: AsmSlotKind::Reg, width: Width::W64, is_use: true, is_def: true, early: false, pin: None, rides: None, name: None },
             AsmSlot { kind: AsmSlotKind::Reg, width: Width::W64, is_use: false, is_def: false, early: false, pin: None, rides: None, name: None },
         ];
-        let bytes = blob_x86_64("movq %1, %0\n\tincq %0", &slots, &[], false, false, 0, &|_| PReg::gpr(11)).expect("assembles");
+        let (bytes, relocs, sides) = blob_x86_64("movq %1, %0\n\tincq %0", &slots, &[], false, false, 0, &|_| PReg::gpr(11)).expect("assembles");
         assert!(!bytes.is_empty());
+        assert!(relocs.is_empty() && sides.is_empty());
     }
 
     #[test]
@@ -1016,7 +1017,7 @@ mod tests {
         ];
         // The stub and merge labels resolve inside the blob; the stub
         // writes 1 and the fallthrough clears the selector.
-        let bytes = blob_x86_64("jmp %l[done]", &slots, &["done".to_string()], false, true, 7, &|_| PReg::gpr(11)).expect("goto stubs assemble");
+        let (bytes, _, _) = blob_x86_64("jmp %l[done]", &slots, &["done".to_string()], false, true, 7, &|_| PReg::gpr(11)).expect("goto stubs assemble");
         assert!(!bytes.is_empty());
     }
 

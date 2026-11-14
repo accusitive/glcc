@@ -219,6 +219,13 @@ pub enum Stmt {
     },
     /// Default operand size (`bits 16/32/64`); only 64 is supported.
     Bits(u8, u32),
+    /// `.incbin "file"[, skip[, count]]`: raw bytes from a file.
+    IncBin {
+        path: String,
+        skip: Expr,
+        count: Expr,
+        line: u32,
+    },
     /// `times N <inner>`; N must eventually be constant.
     Times {
         count: Expr,
@@ -239,6 +246,7 @@ impl Stmt {
     pub fn line(&self) -> u32 {
         match self {
             Stmt::Label(_, l)
+            | Stmt::IncBin { line: l, .. }
             | Stmt::Data { line: l, .. }
             | Stmt::Reserve { line: l, .. }
             | Stmt::Align(_, l)

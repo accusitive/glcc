@@ -58,31 +58,75 @@ workarounds the shim applies (each one is a real glcc gap).
   ALTERNATIVE descriptors, `.smp_locks`) carry their own relocations;
   `%%` literal escapes and `%c[name]` modifier forms.
 
-## Known remaining gaps (census after the 2026-11-13 session, tinyconfig,
-## ~250 TUs compiled before the make aborts on early failures)
+## Session of 2026-11-13/14: the assembler+pp wave (entry_64/head_64 unblocked)
 
-- `non-constant global initializer` (data.rs, ~7 files: alternative.o,
-  cpu/common.o, dma/coherent.o, ...): static initializers the data
-  lowering cannot fold yet — the largest remaining C-side class.
-- Segment prefixes in assembler operands (`%gs:(sym)(%rip)` in retpoline.S):
-  the `Operand.seg` field exists but no encoder emits FS/GS prefix bytes.
-- `Int{128}` values reach selection: 128-bit atomics (`cmpxchg128`);
-  LegalizeWideInts does not cover these shapes.
-- Inline asm `.times` with label-difference counts ("times count must be
-  constant", vgetcpu.o); "shift amount -12 out of imm8 range" (a folded
-  negative shift reaching the encoder).
-- `asm operand constraint requires an integer constant` — "i"/"n"
-  constraint folding.
-- `.S` stragglers: entry.S (one `%/Str` quirk at line ~957), dtb.S,
-  vgetrandom-chacha.S (`expected ')'`); vdso.lds preprocessing still routes
-  to an external pp (`GLCC_PP`-independent `-E` path in the link flow).
+The build was stuck behind a wall of `.S` failures that all turned out to be
+glasm/glcc-pp gaps, each now fixed (each verified byte-for-byte against GNU as
+where applicable):
+
+glasm:
+- `%fs:`/`%gs:` segment overrides: parsed in AT&T and Intel syntax, emitted
+  via the nasm `PPS_SEG` prefix slot (`65`-prefixed `cmpq %gs:(%rsi)`,
+  `lock addq %gs:sym(%rip)`, ...). Grouped displacements `(a + b)(%rip)`
+  parse too.
+- Registers in pp expressions: `depth_of` skipped `GTok::Reg`, so every
+  `.if \base == %rsp` macro-argument check evaluated against an empty
+  expression and took the wrong arm (UNWIND_HINT_REGS' "bad base register").
+- The inactive-branch `.elseif` handler activated the frame without
+  evaluating the condition, so alternating `.elseif`s all ran.
+- `;` is a statement separator on x86, not a comment: the pp stripped
+  everything after the first `;`, so `i = 0 ; .rept N ; ... ; .endr` blocks
+  from kernel macros never reached the pp. Same-line `.rept`/`.irp` bodies
+  are handled now; `<`/`>` no longer group macro arguments (they are shifts:
+  `(3 << 16)` swallowed the following args).
+- Macro params missing at a call bind to the empty string (GAS), not raw
+  `\param` text (IBRS_ENTER without save_reg).
+- `.code16/32/64` directives recognized (only `.code64` encodes); `lretX`
+  translates to `retfX`; one-operand shifts (`shrl %edx`) fill the missing
+  `$1`; `movq` with a vector register selects the SSE move instead of the
+  integer alias; `.octa` carries >64-bit literals (`GTok::BigInt`); `ljmp`
+  forms emit their raw bytes (`EA seg/off` direct, `FF /5` indirect
+  `*sym(%rip)`); `.set name, %reg` register aliases stand in for the register
+  in operands (GAS semantics, vgetrandom-chacha.S); negative `.times`/`.skip`
+  counts clamp to zero (the kernel's `-((diff) > 0) * diff` padding guards);
+  `.incbin "file"[, skip[, count]]` (dtb.S); the finalizer names the symbol
+  in extern-in-small-field errors.
+- Whitespace between `%` and the register name lexes (`(% rip)` from
+  `_ASM_RIP`).
+
+glcc pp (assembler mode):
+- `$` no longer joins identifiers (`btsl $FOO` must expand `FOO`), for the
+  main file AND included files (the include path lexed with the C rules —
+  the root cause of every unexpanded `X86_*_BIT` inside kernel headers'
+  macro bodies).
+- `__ASSEMBLER__` is predefined in assembler mode, like GNU cpp
+  (vdso-note.S: build-salt.h branches on it).
+
+frontend:
+- Integer constants survive a pointer-cast round trip in const contexts
+  (`case (unsigned long) SEND_SIG_PRIV`, i.e. `(unsigned long)((T *)1)`).
+
+The driver test `pp_selection_flag_and_env` was updated: `-dM` is native now,
+so it no longer forces the external pp.
+
+## Known remaining gaps (census after the 2026-11-14 session, tinyconfig,
+## 333 TUs per pass, 7 error lines)
+
+The whole C-side list below the old census (non-constant global
+initializers, Int128 cmpxchg, "i"/"n" constraints, inline-asm shift counts,
+`%/Str`, entry.S, dtb.S, vgetrandom-chacha.S) is gone from the log; rerun
+`GLCC_NATIVE_CENSUS=1` for a survey of what still panics in codegen. What
+still fails:
+
+- `.code16`/`.code32` realmode encoding (reboot.S, trampoline_64.S): the
+  encoder is hardwired to 64-bit; operand/address-size prefixes per `.code`
+  state are the next milestone.
+- vdso.lds preprocessing routes to an external pp (`clang`), which is not
+  installed; the driver needs a native `-E` path for linker scripts.
 - MIR verifier: `bad gep step Field(N)` on nested-struct geps (execmem).
-- Diagnostics: `GLCC_DUMP_FAILED_ASM=1` writes the preprocessed `.S`
-  (`/tmp/glcc-failed.s`) and the glasm-expanded text
-  (`/tmp/glcc-pp-out.s`) for assembly failures.
-- OOM: big TUs peak 1-2GB of glcc RSS (one pathological TU asked for 3.5GB
-  in one allocation); `-j` > 8 OOMs a 27GB box — the shim caps at 3GB per
-  process so a runaway dies in its own log.
+- OOM: big TUs peak 1-2GB of glcc RSS; the shim caps at 3GB per process so
+  a runaway dies in its own log.
+
 
 ## Shim workarounds (all fixable in glcc itself)
 

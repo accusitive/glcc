@@ -1224,6 +1224,11 @@ fn native_pp_opts(job: &Job, input: &OsStr) -> Outcome<(glcc_pp::PpOptions, usiz
     // native preprocessor with exactly what `clang -E` predefines.
     if !job.cpp.iter().any(|a| a == "-undef") {
         let mut predefined = glcc_pp::predefines(&job.target, std.as_deref());
+        if opts.assembler {
+            // GNU cpp defines `__ASSEMBLER__` for `-x assembler-with-cpp`
+            // input; kernel headers guard C content with it.
+            predefined.push(("__ASSEMBLER__".to_string(), "1".to_string()));
+        }
         if !job.pic {
             predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
         }
@@ -4074,7 +4079,8 @@ mod tests {
         assert!(!native_pp_default(Some(OsStr::new("clang"))));
         assert!(!native_pp_default(Some(OsStr::new("/usr/bin/clang-22"))));
         // clang-only preprocessor output modes keep the clang path.
-        assert!(!pp_flags_native_compatible(&[OsString::from("-dM")]));
+        // `-dM` is native now (kbuild's cc-version probes); -CC stays clang-only.
+        assert!(pp_flags_native_compatible(&[OsString::from("-dM")]));
         assert!(!pp_flags_native_compatible(&[OsString::from("-CC")]));
         assert!(pp_flags_native_compatible(&[OsString::from("-P")]));
         assert!(pp_flags_native_compatible(&[OsString::from("-Iinc")]));

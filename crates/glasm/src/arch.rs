@@ -95,9 +95,9 @@ pub(crate) trait Backend {
 
 /// Parse a GAS-syntax instruction line for this arch; x86 goes through
 /// the AT&T translator, the other arches have native operand syntaxes.
-pub fn parse_gas_insn(arch: Arch, g: &[crate::gas::GTok], line_no: u32, lineno: usize, numlabels: &crate::gas::NumLabels) -> Result<crate::insn::Stmt, String> {
+pub fn parse_gas_insn(arch: Arch, g: &[crate::gas::GTok], line_no: u32, lineno: usize, numlabels: &crate::gas::NumLabels, aliases: &crate::gas::RegAliases) -> Result<crate::insn::Stmt, String> {
     match arch {
-        Arch::X86_64 => crate::gas::parse_x86_insn(g, line_no, lineno, numlabels),
+        Arch::X86_64 => crate::gas::parse_x86_insn(g, line_no, lineno, numlabels, aliases),
         Arch::Riscv32 | Arch::Riscv64 => crate::riscv::parse_insn(g, line_no, lineno, numlabels),
         Arch::Aarch64 => crate::aarch64::parse_insn(g, line_no, lineno, numlabels),
     }
