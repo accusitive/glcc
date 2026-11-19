@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(feature = "cranelift")]
 use crate::winunwind;
 
 /// Optimization selector, re-exported from `glcc_mir` so the driver and
@@ -419,15 +420,19 @@ pub struct Job {
     /// generated asm text with the built-in glasm assembler instead of
     /// spawning `as` (x86-64 ELF targets only). Default off like gcc.
     pub integrated_as: bool,
-    /// Code generator: cranelift by default; `-fbackend=native` selects
-    /// the in-repo machine-code backend (x86-64 Linux ELF only, so far).
+    /// Code generator: `-fbackend=cranelift|native`; the build's default
+    /// is Cranelift when the `cranelift` feature is compiled in, else the
+    /// native machine-code backend (x86-64/aarch64 Linux ELF only).
     pub backend: Backend,
+    /// Whether `backend` came from `-fbackend=` rather than the build's
+    /// default, which is chosen after the target is known.
+    pub backend_explicit: bool,
     /// Keep intermediate files (`-save-temps[=cwd|=obj]`): `<stem>.i`
     /// preprocessed C for every C input, plus `<stem>.int.c` raw
     /// EDG-lowered C for C++ inputs.
     pub save_temps: SaveTemps,
     /// Compilation target (`--target=`; native by default): selects the
-    /// preprocessor triple, the frontend's sizes, and the Cranelift ISA.
+    /// preprocessor triple, the frontend's sizes, and the backend's ISA.
     pub target: Target,
     /// `--pp=native` (Some(true)) / `--pp=clang` (Some(false)); None
     /// prefers `glcc_pp` (see `use_native_pp`).
@@ -542,7 +547,8 @@ impl Default for Job {
             opt_level: OptLevel::None,
             pic: true,
             integrated_as: false,
-            backend: Backend::Cranelift,
+            backend: Backend::Native,
+            backend_explicit: false,
             save_temps: SaveTemps::Off,
             target: Target::native(),
             lang_std: None,
@@ -1011,11 +1017,19 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                 } else if matches!(s.as_ref(), "-fno-integrated-as" | "-fno-asm") {
                     job.integrated_as = false;
                 } else if let Some(rest) = s.strip_prefix("-fbackend=") {
-                    job.backend = match rest {
+                    let backend = match rest {
                         "cranelift" => Backend::Cranelift,
                         "native" => Backend::Native,
                         other => return Err(format!("unknown backend '{other}' (cranelift|native)")),
                     };
+                    if !backend.is_enabled() {
+                        return Err(format!(
+                            "the '{rest}' backend is not enabled in this build (enabled backends: {}); rebuild with --features {rest}",
+                            Backend::enabled_names()
+                        ));
+                    }
+                    job.backend = backend;
+                    job.backend_explicit = true;
                 } else if s.starts_with("-f") {
                     // Spelling and machine-independent codegen flags:
                     // nothing to configure.
@@ -1035,6 +1049,9 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
             }
         }
         pos += 1;
+    }
+    if !job.backend_explicit {
+        job.backend = default_backend(&job.target);
     }
     Ok(job)
 }
@@ -1428,9 +1445,11 @@ fn compile_source(
 }
 
 /// Lower a finished MIR module to object bytes: Clif lowering, unwinding,
-/// narrow-reloc and DWARF patchup. Shared by the C path (frontend-lowered
-/// MIR) and the EDG C++ path (MIR parsed from cpfe's emitter output);
-/// `asm_text` collects per-TU assembly appended by lowering.
+/// narrow-reloc and DWARF patchup (Cranelift), or the in-repo machine IR
+/// pipeline (native). Shared by the C path (frontend-lowered MIR) and the
+/// EDG C++ path (MIR parsed from cpfe's emitter output); `asm_text`
+/// collects per-TU assembly appended by Cranelift lowering.
+///
 /// Which code generator lowers MIR to machine code.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Backend {
@@ -1438,18 +1457,89 @@ pub enum Backend {
     Native,
 }
 
+impl Backend {
+    /// Whether this build compiled in the backend.
+    const fn is_enabled(self) -> bool {
+        match self {
+            Backend::Cranelift => cfg!(feature = "cranelift"),
+            Backend::Native => cfg!(feature = "native"),
+        }
+    }
+
+    /// Comma-separated list for diagnostics.
+    const fn enabled_names() -> &'static str {
+        match (cfg!(feature = "cranelift"), cfg!(feature = "native")) {
+            (true, true) => "cranelift, native",
+            (true, false) => "cranelift",
+            (false, true) => "native",
+            (false, false) => "none",
+        }
+    }
+
+    /// Targets the enabled backend can actually emit for. The native
+    /// backend has no Windows or riscv64 codegen yet.
+    fn supports(self, target: &Target) -> bool {
+        match self {
+            Backend::Cranelift => true,
+            Backend::Native => {
+                target.os == Os::Linux && matches!(target.arch, Arch::X86_64 | Arch::Aarch64)
+            }
+        }
+    }
+}
+
+/// Default code generator for `target`: Cranelift when this build has it
+/// (the production backend), else the native one.
+fn default_backend(target: &Target) -> Backend {
+    if cfg!(feature = "cranelift") && Backend::Cranelift.supports(target) {
+        Backend::Cranelift
+    } else {
+        Backend::Native
+    }
+}
+
+#[cfg_attr(not(feature = "cranelift"), allow(unused_variables))]
 fn emit_object(
     mir_module: glcc_mir::Module,
-    mut asm_text: String,
+    asm_text: String,
     target: Target,
     debug: bool,
     pic: bool,
     opt_level: OptLevel,
     backend: Backend,
 ) -> std::result::Result<(Vec<u8>, String), ()> {
-    if backend == Backend::Native {
-        return emit_object_native(&mir_module, target);
+    match backend {
+        #[cfg(feature = "cranelift")]
+        Backend::Cranelift => emit_object_cranelift(mir_module, asm_text, target, debug, pic, opt_level),
+        #[cfg(not(feature = "cranelift"))]
+        Backend::Cranelift => {
+            let _ = (mir_module, asm_text, target, debug, pic, opt_level);
+            eprintln!("glcc: error: the cranelift backend is not enabled in this build");
+            Err(())
+        }
+        #[cfg(feature = "native")]
+        Backend::Native => {
+            let _ = asm_text;
+            emit_object_native(&mir_module, target)
+        }
+        #[cfg(not(feature = "native"))]
+        Backend::Native => {
+            let _ = (mir_module, asm_text, target, debug, pic, opt_level);
+            eprintln!("glcc: error: the native backend is not enabled in this build");
+            Err(())
+        }
     }
+}
+
+#[cfg(feature = "cranelift")]
+fn emit_object_cranelift(
+    mir_module: glcc_mir::Module,
+    mut asm_text: String,
+    target: Target,
+    debug: bool,
+    pic: bool,
+    opt_level: OptLevel,
+) -> std::result::Result<(Vec<u8>, String), ()> {
     let cl_target = match target.arch {
         glcc_frontend::target::Arch::X86_64 => glcc_lower_cl::Arch::X86_64,
         glcc_frontend::target::Arch::Aarch64 => glcc_lower_cl::Arch::Aarch64,
@@ -1530,19 +1620,34 @@ fn emit_object(
     Ok((bytes, asm_text))
 }
 
+/// Remedy for native-backend target gaps, depending on what this build has.
+#[cfg(feature = "native")]
+fn cranelift_hint() -> &'static str {
+    if cfg!(feature = "cranelift") {
+        "; try -fbackend=cranelift for this target"
+    } else {
+        "; rebuild with --features cranelift for this target"
+    }
+}
+
 /// The in-repo machine-code backend: MIR → machine IR → regalloc2 →
-/// encoded ELF, without cranelift. Supported targets error cleanly.
+/// encoded ELF, without cranelift. Unsupported targets error cleanly.
+#[cfg(feature = "native")]
 fn emit_object_native(mir_module: &glcc_mir::Module, target: Target) -> std::result::Result<(Vec<u8>, String), ()> {
     let arch = match target.arch {
         glcc_frontend::target::Arch::X86_64 => glcc_codegen::Arch::X86_64,
         glcc_frontend::target::Arch::Aarch64 => glcc_codegen::Arch::Aarch64,
         _ => {
-            eprintln!("glcc: error: the native backend does not yet support this target");
+            eprintln!("glcc: error: the native backend does not yet support this target{}", cranelift_hint());
             return Err(());
         }
     };
+    if target.os != Os::Linux {
+        eprintln!("glcc: error: the native backend only emits ELF{}", cranelift_hint());
+        return Err(());
+    }
     if !mir_module.funcs.iter().all(|f| f.personality.is_none()) {
-        eprintln!("glcc: error: the native backend does not yet support exception handling");
+        eprintln!("glcc: error: the native backend does not yet support exception handling{}", cranelift_hint());
         return Err(());
     }
     match glcc_codegen::emit_module(mir_module, arch) {
@@ -1564,6 +1669,7 @@ fn emit_object_native(mir_module: &glcc_mir::Module, target: Target) -> std::res
 /// Append our own `.eh_frame` + `.gcc_except_table` for EH modules (the
 /// plain-CFI case keeps cranelift's section). Degrades to a warning like
 /// the other object patchups.
+#[cfg(feature = "cranelift")]
 fn emit_eh_frame(product: &mut cranelift_object::ObjectProduct, eh: &[glcc_lower_cl::FuncEh], isa: cranelift_codegen::isa::OwnedTargetIsa) {
     if !eh.iter().any(|f| f.eh) {
         return;
@@ -1576,6 +1682,7 @@ fn emit_eh_frame(product: &mut cranelift_object::ObjectProduct, eh: &[glcc_lower
 /// Append `.init_array` entries for the module's declared constructors.
 /// The lowerings hand back the MIR Func → Cranelift FuncId map; missing
 /// entries or a non-ELF target degrade to a warning, like winunwind.
+#[cfg(feature = "cranelift")]
 fn emit_init_array(product: &mut cranelift_object::ObjectProduct, module: &glcc_mir::Module, ids: &std::collections::HashMap<glcc_mir::Func, cranelift_module::FuncId>) {
     if module.init_funcs.is_empty() {
         return;
@@ -1592,6 +1699,7 @@ fn emit_init_array(product: &mut cranelift_object::ObjectProduct, module: &glcc_
 /// them here; the object writer turns each into a format-appropriate
 /// 4-byte absolute reloc (`R_X86_64_32`, `IMAGE_REL_AMD64_ADDR32`) over
 /// the zeroed image.
+#[cfg(feature = "cranelift")]
 fn apply_narrow_relocs(product: &mut cranelift_object::ObjectProduct, narrow: &[glcc_lower_cl::NarrowReloc]) {
     use glcc_lower_cl::NarrowTarget;
     use object::write::{Relocation, SymbolId, SymbolSection};
@@ -1635,7 +1743,7 @@ fn dump_mir_source(
     full: bool,
 ) -> std::result::Result<String, ()> {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format, Backend::Cranelift)?;
+        let (module, _) = lower_source_to_mir(src, flavor, target, opt_level, async_enabled, lang, error_format, default_backend(&target))?;
         Ok::<String, ()>(if full {
             glcc_mir::display::dump_module_full(&module)
         } else {
@@ -3064,7 +3172,7 @@ fn print_help(flavor: Flavor) {
         "\
 Usage: {prog} [options] file...
 Drop-in GCC-style driver: preprocesses C++ to C (EDG cpfe, for glcpp), preprocesses C with clang,
-compiles with the Cranelift backend, and links via the system driver with mold.
+compiles with the Cranelift or native backend, and links via the system driver with mold.
 
 Actions (last of -c/-E/-M/-MM/-fsyntax-only/--emit-mir/--emit-full-mir wins):
   -c                 compile only; one .o per input (<stem>.o, or -o for one)
@@ -3105,6 +3213,12 @@ Link (forwarded in argv order):
   -L/-l (joined or separate), -Wl,..., -Xlinker, -e/-u/-z/-T,
   --sysroot=, -fuse-ld= (default: mold when installed), -pthread
 Codegen (last -O* wins, like gcc; default -O0):
+  -fbackend=cranelift|native
+                     code generator: Cranelift when the build has it
+                     (default), else the in-repo native backend
+                     (x86-64/aarch64 Linux ELF only). Each backend can
+                     be compiled out with cargo features; selecting one
+                     that is not built in is an error.
   -O0                no optimization, best debug fidelity
   -O1/-O2/-O3/-Og/-Ofast/bare -O  optimized (Cranelift `speed`)
   -Os/-Oz            optimize for size (Cranelift `speed_and_size`)
@@ -3179,7 +3293,12 @@ Examples:
 }
 
 fn print_version(flavor: Flavor) {
-    println!("{} {} (Cranelift backend; GCC-compatible command driver)", driver_name(flavor), env!("CARGO_PKG_VERSION"));
+    println!(
+        "{} {} ({} backend; GCC-compatible command driver)",
+        driver_name(flavor),
+        env!("CARGO_PKG_VERSION"),
+        if cfg!(feature = "cranelift") { "Cranelift" } else { "native" }
+    );
 }
 
 /// Run `cc <flag>` and print its stdout (for -print-search-dirs and
@@ -3502,10 +3621,12 @@ mod tests {
 
     /// Byte scan for a section name in an emitted object (ELF section
     /// header string tables spell names in full).
+    #[cfg(feature = "cranelift")]
     fn has_section(bytes: &[u8], name: &[u8]) -> bool {
         bytes.windows(name.len()).any(|w| w == name)
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn debug_flag_controls_debug_sections() {
         let src = "int add(int a, int b) { return a + b; }\nint main() { return add(2, 3); }\n";
@@ -3535,6 +3656,7 @@ mod tests {
         assert!(has_section(&optimized, b".debug_line"), "missing .debug_line at -O2 -g");
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn debug_sections_survive_empty_functions() {
         // A function with no statements still gets a subprogram and an
@@ -3551,6 +3673,7 @@ mod tests {
     /// must not carry a location, or the relocation in `.debug_info`
     /// references an undefined symbol and fails the link even when the
     /// variable is unused (c-testsuite 00094).
+    #[cfg(feature = "cranelift")]
     #[test]
     fn debug_extern_declaration_has_no_location() {
         let src = "extern int x;\nint main() { return 0; }\n";
@@ -3582,6 +3705,7 @@ mod tests {
     /// Cranelift's data descriptor only emits pointer-width
     /// relocations, so the driver adds a 32-bit absolute reloc itself
     /// after `finish`.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn ptr32_global_initializer_emits_a_32_bit_relocation() {
         let src = "int x;\nint *__ptr32 g = &x;\nint main(void) { return 0; }\n";
@@ -3612,6 +3736,7 @@ mod tests {
     /// emitted code. Its DIE must survive with a name and type but no
     /// location, so a debugger reports "optimized out" (and `ptype`
     /// still resolves) instead of "No symbol".
+    #[cfg(feature = "cranelift")]
     #[test]
     fn debug_optimized_out_variables_keep_their_die() {
         use gimli::constants::*;
@@ -3640,6 +3765,7 @@ mod tests {
     /// `RtlCaptureStackBackTrace`, SEH) walks these tables; without
     /// them stack walks stop at the first glcc frame. Non-Windows
     /// targets emit neither section.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn windows_target_emits_unwind_tables() {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -3728,6 +3854,7 @@ mod tests {
 
     /// DIE summary for DWARF read-back: enough to pin names, original
     /// lines, and layout facts without gdb.
+    #[cfg(feature = "cranelift")]
     struct DieSummary {
         depth: u32,
         tag: gimli::constants::DwTag,
@@ -3741,6 +3868,7 @@ mod tests {
 
     /// Parse `bytes` as an object and summarize every DIE plus the
     /// non-empty line rows of the line program.
+    #[cfg(feature = "cranelift")]
     fn read_dies(bytes: &[u8]) -> (Vec<DieSummary>, Vec<u64>) {
         use gimli::read::EndianSlice;
         use object::{Object as _, ObjectSection as _};
@@ -3826,12 +3954,14 @@ mod tests {
         (out, rows)
     }
 
+    #[cfg(feature = "cranelift")]
     fn find<'a>(dies: &'a [DieSummary], tag: gimli::constants::DwTag, name: &str) -> &'a DieSummary {
         dies.iter()
             .find(|d| d.tag == tag && d.name.as_deref() == Some(name))
             .unwrap_or_else(|| panic!("missing {tag:?} DIE for {name}"))
     }
 
+    #[cfg(feature = "cranelift")]
     fn udata(die: &DieSummary, at: gimli::constants::DwAt) -> u64 {
         die.udata_attrs
             .iter()
@@ -3842,6 +3972,7 @@ mod tests {
 
     /// `DW_AT_const_value` as written for either signed or unsigned
     /// enumerator representations.
+    #[cfg(feature = "cranelift")]
     fn const_value(die: &DieSummary) -> i64 {
         use gimli::constants::DW_AT_const_value as AT;
         die.udata_attrs
@@ -3852,6 +3983,7 @@ mod tests {
             .unwrap_or_else(|| panic!("missing DW_AT_const_value on {}", die.name.as_deref().unwrap_or("?")))
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn debug_info_records_types_vars_and_original_lines() {
         use gimli::constants::*;
@@ -3950,6 +4082,7 @@ mod tests {
         assert!(parse(&["-fno-pic", "-fPIE", "a.c"]).pic);
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn string_literals_are_emitted_read_only() {
         use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -3972,6 +4105,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn non_pic_globals_avoid_the_got() {
         let reloc_kinds = |pic| {
@@ -4034,6 +4168,33 @@ mod tests {
         assert!(parse_args(&args(&["foo.txt"])).is_err());
         // Bare `-c` parses; "no input files" is a run-time error.
         assert!(parse_args(&args(&["-c"])).unwrap().inputs.is_empty());
+    }
+
+    #[test]
+    fn default_backend_comes_from_the_build_features() {
+        let job = parse(&["-c", "a.c"]);
+        assert!(job.backend.is_enabled());
+        assert_eq!(job.backend, default_backend(&job.target));
+        assert!(!job.backend_explicit);
+    }
+
+    #[test]
+    fn explicit_backend_is_accepted_only_when_built_in() {
+        for (name, backend) in [("cranelift", Backend::Cranelift), ("native", Backend::Native)] {
+            let flag = format!("-fbackend={name}");
+            match parse_args(&args(&[flag.as_str(), "-c", "a.c"])) {
+                Ok(job) => {
+                    assert!(backend.is_enabled());
+                    assert_eq!(job.backend, backend);
+                    assert!(job.backend_explicit);
+                }
+                Err(err) => {
+                    assert!(!backend.is_enabled(), "{name} failed to parse but is enabled: {err}");
+                    assert!(err.contains("not enabled"), "{err}");
+                    assert!(err.contains("--features"), "{err}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -4108,14 +4269,26 @@ mod tests {
         assert!(parse_args(&args(&["--edg-c", "a.c"])).is_err());
     }
 
+    #[cfg(feature = "native")]
     #[test]
-    fn file_scope_asm_becomes_assembler_text() {
-        let src = "asm(\".globl x\\nx:\\n  ret\\n\");\nint f(void){return 0;}\n";
+    fn native_extern_globals_stay_undefined() {
+        let src = "extern int ext_counter;\nint get(void) { return ext_counter; }\n";
+        let (bytes, _) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Native)
+            .expect("compiles");
+        let obj = object::File::parse(&*bytes).expect("object parses");
+        let sym = obj.symbols().find(|s| s.name() == Ok("ext_counter")).expect("ext_counter symbol");
+        assert!(!sym.is_definition(), "a declaration must not define storage");
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn file_scope_asm_becomes_assembler_text() {        let src = "asm(\".globl x\\nx:\\n  ret\\n\");\nint f(void){return 0;}\n";
         let (bytes, asm_text) = compile_source(src, Flavor::C, Target::LP64, false, true, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("compiles");
         assert!(!bytes.is_empty());
         assert_eq!(asm_text, ".globl x\nx:\n  ret\n\n");
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn inline_asm_wrappers_become_assembler_text() {
         let src = "int f(int x){ __asm__(\"addl $1, %0\" : \"+r\"(x)); return x; }\n\
@@ -4127,10 +4300,11 @@ mod tests {
         assert_eq!(asm_text.matches(".weak __glcc_asm_").count(), 1, "{asm_text}");
     }
 
+    #[cfg(feature = "native")]
     #[test]
     fn native_divide_sign_extends_narrow_operands() {
         let src = "int d10(int x) { return x / 10; }\nlong ds(short x) { return (long)x / 3; }\n";
-        let (mir, _) = lower_source_to_mir(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Cranelift).expect("lower");
+        let (mir, _) = lower_source_to_mir(src, Flavor::C, Target::LP64, OptLevel::None, false, LangOpts::default(), ErrorFormat::Human, Backend::Native).expect("lower");
         let out = glcc_codegen::emit_module(&mir, glcc_codegen::Arch::X86_64).expect("emit");
         // The divide always runs at 64 bits, so a narrow dividend must
         // be canonicalized first: without the movsxd, cqo consumes the
@@ -4142,6 +4316,7 @@ mod tests {
         assert!(out.asm.contains("div.s"), "{}", out.asm);
     }
 
+    #[cfg(feature = "cranelift")]
     #[test]
     fn asm_goto_wrapper_returns_a_selector() {
         let src = "int f(int x){ asm goto(\"testl %0, %0; jnz %l[lab]\" : : \"r\"(x) : : lab); return 1; lab: return 2; }\n";
@@ -4392,6 +4567,7 @@ mod tests {
 
     /// A coroutine compiles into a start/resume pair: the original
     /// symbol allocates the frame, `<name>$resume` polls it.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn async_functions_split_into_start_and_resume() {
         let src = "\
@@ -4406,6 +4582,7 @@ int main(void) { add1(1); return 0; }
     }
 
     /// Awaiting copies the child result out and frees the child frame.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn awaiting_coroutines_free_child_frames() {
         let src = "\
@@ -4422,6 +4599,7 @@ int main(void) { return 0; }
 
     /// The optimizer runs after the split; starts may inline into their
     /// callers, resumes never do.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn coroutines_survive_the_optimizer() {
         let src = "\
@@ -4437,6 +4615,7 @@ int main(void) { _Future(int) f = twice(20); (void)f; return 0; }
 
     /// Without `-fglcc-async` the attribute is ignored, so no split
     /// occurs and the function stays an ordinary one.
+    #[cfg(feature = "cranelift")]
     #[test]
     fn async_extension_off_by_default() {
         let src = "\

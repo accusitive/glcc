@@ -6,13 +6,18 @@ The parser should be fairly portable/extensible if you want to programmatically 
 
 ## Building
 
-    cargo build
-    cargo test --workspace
+    cargo build                        # native backend (default features)
+    cargo build --features cranelift   # + the production Cranelift backend
+    cargo test --workspace --features glcc/cranelift
+
+The code generators are cargo features. `native` is on by default and
+Cranelift is not; a build without it rejects `-fbackend=cranelift` with
+a hint to rebuild with `--features cranelift`.
 
 The C++ front end (`glcpp`) is opt-in and needs the EDG submodule:
 
     git submodule update --init edg
-    cargo install --path . --locked
+    cargo install --path . --features cranelift --locked
     cargo install --path crates/glcc_cxx --features cxx --locked
     ./install.sh             # stage the runtimes in ~/.local/lib/glcc
 

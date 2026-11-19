@@ -83,7 +83,7 @@ ALLOW=("${norm[@]}")
 
 if ((BUILD)); then
   echo "building glcc..."
-  (cd "$ROOT" && cargo build 2>&1 | tail -2) || exit 1
+  (cd "$ROOT" && cargo build --features glcc/cranelift 2>&1 | tail -2) || exit 1
 fi
 [[ -x "$GLCC" ]] || { echo "error: glcc binary not found: $GLCC" >&2; exit 1; }
 command -v timeout >/dev/null || { echo "error: 'timeout' not found" >&2; exit 1; }

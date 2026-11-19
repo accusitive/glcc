@@ -108,7 +108,7 @@ glcc_lower_mir: CheckedExpr/Sema → glcc_mir (SSA IR with aggregate types)
   │     -O0 discipline: every param/local in a memory slot; Mem2Reg promotes
   │     later. Then glcc_mir::optimize(module, level) + verify_module.
   ▼
-┌─ BACKEND A (default, `-fbackend=cranelift`):
+┌─ BACKEND A (production, `-fbackend=cranelift`; the `cranelift` feature):
 │    glcc_lower_cl: MIR → Cranelift CLIF → object (cranelift-object)
 │      + own .eh_frame emission (ehframe.rs), .init_array (initarray.rs),
 │      quad-precision (F80/F128) software support (quad/),
@@ -117,7 +117,8 @@ glcc_lower_mir: CheckedExpr/Sema → glcc_mir (SSA IR with aggregate types)
 │    glcc_dwarf: LoweredDebug → DWARF (.debug_*) via gimli, appended to
 │      the cranelift-object product.
 │
-└─ BACKEND B (`-fbackend=native`, x86-64 Linux SysV only):
+└─ BACKEND B (`-fbackend=native`, x86-64/aarch64 Linux; the `native`
+     feature, on by default):
      glcc_codegen: MIR → machine IR (machine.rs) → instruction selection
        (sel/, declarative Pattern tables) → regalloc2 register allocation
        (ra.rs) → frame layout (frame.rs) → x86-64 encoding (x64/)
@@ -164,7 +165,7 @@ caller out-pointer.
 
 | Crate | What it is |
 |---|---|
-| `glcc` (root) | Driver binary. Hand-rolled argv classifier (NOT clap — link order matters), actions: link/-c/-E/-M/-fsyntax-only/--emit-mir. Flags: `--target=`, `-std=`, `-O`, `-g`, `-fbackend=cranelift|native`, `-fintegrated-as`, `-fglcc-async`, `--pp=`, `--error-format=json`, `-###`. C++ path via `EdgOps`. Links via host cc/mingw/MSVC + glccrt. 55 unit tests at bottom of driver.rs. |
+| `glcc` (root) | Driver binary. Hand-rolled argv classifier (NOT clap — link order matters), actions: link/-c/-E/-M/-fsyntax-only/--emit-mir. Flags: `--target=`, `-std=`, `-O`, `-g`, `-fbackend=cranelift|native`, `-fintegrated-as`, `-fglcc-async`, `--pp=`, `--error-format=json`, `-###`. Code generators are cargo features: `native` (default) and `cranelift` (production, off by default); `-fbackend=` rejects a backend that is not compiled in. C++ path via `EdgOps` (enables `cranelift`). Links via host cc/mingw/MSVC + glccrt. 55 unit tests at bottom of driver.rs. |
 | `glcc_explorer` | Godbolt-style inspector: C source → MIR + asm panels. CLI + HTTP server (feature `server`) + wasm32 cdylib (`tools/build-wasm.sh`) running the full pipeline in the browser. |
 | `abi_probe` | ABI conformance prober ("executable specification" of the C ABI): compiles cases with glcc, harnesses with cc/zig, runs under qemu-user, diffs stdout. `cargo run -p abi_probe`. |
 | `fern` | An ML-family language (HM inference + type classes, monomorphizing lowering to glcc_mir). Shows MIR is language-agnostic. |
@@ -221,7 +222,8 @@ glcc_toolchain ─► glcc_pp ─► glcc_frontend ─► glcc_lower_mir ─► 
 ### 2.5 How to build & test
 
 ```bash
-cargo build                          # everything except EDG/C++
+cargo build                          # everything except EDG/C++; native backend only
+cargo build --features cranelift     # + the production Cranelift backend
 cargo build --workspace --features cxx   # + glcpp/EDG (needs edg/ submodule)
 cargo test -p glcc_frontend          # per-crate tests live INSIDE each crate
 cargo test --workspace

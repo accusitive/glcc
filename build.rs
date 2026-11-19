@@ -37,6 +37,12 @@ const RENAMES: [&str; 11] = [
     "-D__clzti2=__glcc_clzti2",
 ];
 
+/// Whether this build has the Cranelift backend: the Windows-target
+/// runtime TUs are compiled with glcc itself, and only Cranelift emits COFF.
+fn cranelift_enabled() -> bool {
+    std::env::var_os("CARGO_FEATURE_CRANELIFT").is_some()
+}
+
 fn main() {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
     println!("cargo:rerun-if-changed=rt/glccrt.c");
@@ -114,6 +120,10 @@ fn stage_elf(root: &Path) {
 /// arithmetic; the x87/`long double` TUs are SysV-only and glcc-fe-win.c
 /// replaces the x87 glcc-fe.c), combined into one library.
 fn stage_windows(root: &Path) {
+    if !cranelift_enabled() {
+        println!("cargo:warning=the Win64 runtime needs the cranelift feature; skipping glccrt-win64.lib staging");
+        return;
+    }
     let out = home_dir().join(".local/lib/glcc/glccrt-win64.lib");
     if is_fresh(&out, root) {
         return;
@@ -192,6 +202,11 @@ fn stage_windows(root: &Path) {
 /// have mingw-w64 installed); the driver warns at link time if a
 /// mingw job needs the runtime and it is missing.
 fn stage_mingw(root: &Path) {
+    // Only Cranelift emits COFF, so a native-only build cannot stage this
+    // cross runtime; skip like the missing-cross-tools case.
+    if !cranelift_enabled() {
+        return;
+    }
     let out = home_dir().join(".local/lib/glcc/glccrt-mingw.a");
     let Some(clang) = glcc_toolchain::find_clang() else {
         return;

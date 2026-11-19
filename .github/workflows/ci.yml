@@ -52,14 +52,14 @@ jobs:
       # The `glcc` binary itself is built by this command, so fernc-style
       # driver tests inside the workspace find it next to the test binaries.
       - name: Build and test
-        run: cargo test --workspace --exclude fern --exclude fernc --exclude fern_exec --exclude fern_repl --locked
+        run: cargo test --workspace --exclude fern --exclude fernc --exclude fern_exec --exclude fern_repl --locked --features glcc/cranelift
       # Compile and run a C program through the driver, end to end.
       # build.rs staged glccrt.o and cc is present on the Linux runners.
       - name: C driver smoke test
         if: runner.os != 'Windows'
         run: |
           printf '#include <stdio.h>\nint main(void) { puts("smoke-ok"); return 0; }\n' > "$RUNNER_TEMP/smoke.c"
-          cargo run -q --locked -- "$RUNNER_TEMP/smoke.c" -o "$RUNNER_TEMP/smoke"
+          cargo run -q --locked --features cranelift -- "$RUNNER_TEMP/smoke.c" -o "$RUNNER_TEMP/smoke"
           "$RUNNER_TEMP/smoke"
       # The c-testsuite end to end (compile, link, run, diff output) on the
       # default cranelift backend. x86_64 needs no cross tooling; the
@@ -117,7 +117,7 @@ jobs:
       # fernc's link tests invoke glcc, which is a separate binary in the
       # workspace and therefore is not built by `cargo test -p fernc`.
       - name: Build glcc and fernc
-        run: cargo build -p glcc -p fernc --locked
+        run: cargo build -p glcc -p fernc --locked --features glcc/cranelift
       # build.rs stages glccrt-win64.lib by invoking the glcc binary, which
       # does not exist yet during the first build of a fresh checkout.
       # Touching the runtime source re-runs build.rs now that glcc.exe does.
@@ -126,7 +126,7 @@ jobs:
         shell: pwsh
         run: |
           (Get-Item rt/glccrt.c).LastWriteTime = Get-Date
-          cargo build -p glcc --locked
+          cargo build -p glcc --locked --features cranelift
       - name: Build and test
         if: runner.os != 'Windows'
         run: cargo test -p fern -p fernc -p fern_exec -p fern_repl --locked
@@ -186,7 +186,7 @@ jobs:
       - name: Install Tcl
         run: sudo apt-get update && sudo apt-get install -y tcl tcl-dev
       - name: Build glcc
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features cranelift
       - name: SQLite veryquick suite
         run: tests/sqlite/download-sqlite.sh
 
@@ -237,7 +237,7 @@ jobs:
           key: sqlite-windows
           save-if: ${{ github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main' }}
       - name: Build glcc
-        run: cargo build --release --locked
+        run: cargo build --release --locked --features cranelift
       - name: SQLite veryquick suite
         shell: pwsh
         run: tests/sqlite/run-windows.ps1

@@ -2,7 +2,7 @@
 # Build the compilers, then stage the link-time runtimes under
 # ~/.local/lib/glcc. The compilers themselves install with cargo:
 #
-#   cargo install --path . --locked                            # glcc
+#   cargo install --path . --features cranelift --locked          # glcc
 #   cargo install --path crates/glcc_cxx --features cxx --locked  # optional C++
 #
 # glcc's build script already stages glccrt.o during those installs; this
@@ -15,7 +15,7 @@ LIB="$HOME/.local/lib/glcc"
 mkdir -p "$LIB"
 
 if [ -z "${GLCC:-}" ]; then
-  cargo build --release -p glcc --locked
+  cargo build --release -p glcc --features cranelift --locked
   GLCC="$ROOT/target/release/glcc"
 fi
 if [ ! -x "$GLCC" ]; then

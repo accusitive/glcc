@@ -19,7 +19,8 @@ cd tools/fernmake
 
 `DESTDIR` stages the install into a packaging root, as usual. The
 scripts look for `fernc` and `glcc` in the repo's `target/debug` and
-`target/release` trees first (`cargo build -p glcc -p fernc`), then on
+`target/release` trees first
+(`cargo build -p glcc -p fernc --features glcc/cranelift`), then on
 `PATH`; `FERNC`/`GLCC` environment variables override both.
 
 Once built, use the binary for every example Makefile:

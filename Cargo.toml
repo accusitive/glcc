@@ -7,22 +7,39 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
+[features]
+# Code generators. Each can be compiled out to drop its crate tree:
+# the native backend is the small, dependency-free default; the
+# Cranelift backend is the production one (`--features cranelift`).
+# At least one must be enabled.
+default = ["native"]
+cranelift = [
+    "dep:glcc_lower_cl",
+    "dep:glcc_dwarf",
+    "dep:cranelift-codegen",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+    "dep:cranelift-object",
+    "dep:object",
+]
+native = ["dep:glcc_codegen"]
+
 [dependencies]
 glasm = { path = "crates/glasm" }
 glcc_frontend = { path = "crates/glcc_frontend" }
 glcc_pp = { path = "crates/glcc_pp" }
 glcc_mir = { path = "crates/glcc_mir" }
 glcc_lower_mir = { path = "crates/glcc_lower_mir" }
-glcc_lower_cl = { path = "crates/glcc_lower_cl" }
-glcc_codegen = { path = "crates/glcc_codegen" }
-glcc_dwarf = { path = "crates/glcc_dwarf" }
-cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64"] }
-cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
-cranelift-native = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
-cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype" }
+glcc_lower_cl = { path = "crates/glcc_lower_cl", optional = true }
+glcc_codegen = { path = "crates/glcc_codegen", optional = true }
+glcc_dwarf = { path = "crates/glcc_dwarf", optional = true }
+cranelift-codegen = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", default-features = false, features = ["x86", "arm64", "riscv64"], optional = true }
+cranelift-module = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", optional = true }
+cranelift-native = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", optional = true }
+cranelift-object = { git = "https://github.com/accusitive/wasmtime", branch = "inline-asm-prototype", optional = true }
 # Object read/write for patching 32-bit (`__ptr32`) data relocations the
-# Cranelift data machinery cannot express.
-object = { version = "0.40.0", default-features = false, features = ["write", "std"] }
+# Cranelift data machinery cannot express (and the tests' object reading).
+object = { version = "0.40.0", default-features = false, features = ["write", "std"], optional = true }
 
 [build-dependencies]
 # clang / `lib.exe` discovery for the Win64 runtime staging in build.rs.

@@ -6,8 +6,9 @@ edition = "2024"
 [features]
 # EDG-backed C++ front end. Off by default so plain workspace builds and
 # tests skip EDG; enable with `-p glcc_cxx --features cxx` (or
-# `--workspace --features cxx`).
-cxx = ["edg-sys/cxx"]
+# `--workspace --features cxx`). The EDG MIR path targets the Cranelift
+# backend, so the feature pulls it into glcc.
+cxx = ["edg-sys/cxx", "glcc/cranelift"]
 
 [dependencies]
 glcc = { path = "../.." }

@@ -19,7 +19,9 @@ The Makefile runner lives in `tools/fernmake`, not here; once
 bootstrapped, it can drive every example Makefile without GNU make.
 
 On Linux and macOS, run `make && make run` in any example directory.
-On Windows, build the tools with `cargo build -p glcc -p fernc`, build
+On Windows, build the tools with
+`cargo build -p glcc -p fernc --features glcc/cranelift` (the native
+backend cannot emit COFF), build
 `tools/fernmake/build/fernmake.exe` once (run `tools/fernmake/build.ps1`,
 see `tools/fernmake/README.md`), then use the PowerShell recipes:
 

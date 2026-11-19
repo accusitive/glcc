@@ -66,7 +66,7 @@ pub fn emit(mir: &glcc_mir::Module, isa: &'static dyn TargetIsa) -> Result<Emitt
         sym_index(&mut asm, &mut func_syms, fi.index(), true, &f.name, f.local, f.weak, false);
     }
     for (gi, g) in mir.globals.iter_enumerated() {
-        sym_index(&mut asm, &mut global_syms, gi.index(), true, &g.name, g.local, g.weak, false);
+        sym_index(&mut asm, &mut global_syms, gi.index(), !g.external, &g.name, g.local, g.weak, g.external);
     }
     for (ei, e) in mir.externs.iter_enumerated() {
         sym_index(&mut asm, &mut extern_syms, ei.index(), false, &e.name, false, e.weak, true);
