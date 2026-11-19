@@ -76,13 +76,14 @@ pub fn optimize_with(module: &mut Module, level: OptLevel, cfg: OptConfig) -> Ve
     if !level.optimize() {
         return report;
     }
-    let pm = PassManager::new()
+    let mut module_passes = PassManager::new()
         .add_module_pass(passes::Inline::small())
         .add_module_pass(passes::LowerLibcMemory)
         .add_module_pass(passes::GlobalConstProp)
         .add_module_pass(passes::MergeReadOnlyGlobals)
         .add_module_pass(passes::DeadModuleItems);
-    report.extend(function_pipeline(pm, cfg).run(module));
+    report.extend(module_passes.run(module));
+    report.extend(function_pipeline(cfg).run(module));
     // Function passes turn aggregate loads and stores into copies, so
     // give module-level propagation another look at the settled IR. A
     // copied read-only global can then expose its field initializers.
@@ -94,7 +95,7 @@ pub fn optimize_with(module: &mut Module, level: OptLevel, cfg: OptConfig) -> Ve
         if !changed {
             break;
         }
-        report.extend(function_pipeline(PassManager::new(), cfg).run(module));
+        report.extend(function_pipeline(cfg).run(module));
     }
     // Function passes can orphan the last reference to an internal
     // object (a load that `GlobalConstProp` replaced, a call `Inline`
@@ -104,7 +105,7 @@ pub fn optimize_with(module: &mut Module, level: OptLevel, cfg: OptConfig) -> Ve
     report
 }
 
-fn function_pipeline(_pm: PassManager, cfg: OptConfig) -> PassManager {
+fn function_pipeline(cfg: OptConfig) -> PassManager {
     let pm = PassManager::new();
     // Conditional members break the builder chain, so the two shapes
     // are spelled out: vectorize adds LoopVec and Slp.

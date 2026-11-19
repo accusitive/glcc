@@ -3409,6 +3409,7 @@ impl ModulePass for Inline {
                 // caller, whose promoted slots are then stale after
                 // `longjmp`.
                 if module.funcs[callee].noinline || module.funcs[callee].returns_twice {
+                    if std::env::var_os("GLCC_INLDBG").is_some() { eprintln!("INLDBG skip noinline/rtw {}", module.funcs[callee].name); }
                     continue;
                 }
                 let marked = module.funcs[callee].inline;
@@ -3428,19 +3429,21 @@ impl ModulePass for Inline {
                     self.max_insts
                 };
                 if total > limit {
+                    if std::env::var_os("GLCC_INLDBG").is_some() { eprintln!("INLDBG skip budget {} total {} limit {}", module.funcs[callee].name, total, limit); }
                     continue;
                 }
                 let single_block = module.funcs[callee].blocks.len() == 1;
                 if !callee_eligible(module, caller_id, callee, &args, result) {
+                    if std::env::var_os("GLCC_INLDBG").is_some() { eprintln!("INLDBG skip ineligible {} -> {}", module.funcs[caller_id].name, module.funcs[callee].name); }
                     continue;
                 }
                 if single_block {
                     if inline_single_block(module, caller_id, site, block, callee, &args, result) {
                         changed = true;
-                    }
+                    } else if std::env::var_os("GLCC_INLDBG").is_some() { eprintln!("INLDBG single failed {}", module.funcs[callee].name); }
                 } else if inline_multi_block(module, caller_id, site, callee, &args, result) {
                     changed = true;
-                }
+                } else if std::env::var_os("GLCC_INLDBG").is_some() { eprintln!("INLDBG multi failed {}", module.funcs[callee].name); }
             }
         }
         changed

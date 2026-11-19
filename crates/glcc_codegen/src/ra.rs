@@ -33,7 +33,17 @@ pub fn allocate(f: &mut MFunction, isa: &'static dyn TargetIsa) {
         let mut options = RegallocOptions::default();
         options.verbose_log = std::env::var_os("GLCC_RA_VERBOSE").is_some();
         options.validate_ssa = cfg!(debug_assertions);
-        regalloc2::run(&ra, &env, &options).expect("regalloc2")
+        match regalloc2::run(&ra, &env, &options) {
+            Ok(out) => out,
+            Err(e) => {
+                if let Some(path) = std::env::var_os("GLCC_RA_DUMP") {
+                    let mut printer = crate::printer::Printer::new();
+                    printer.function(f, isa);
+                    let _ = std::fs::write(&path, printer.finish());
+                }
+                panic!("regalloc2 failed on {}: {e:?}", f.name);
+            }
+        }
     };
 
     if std::env::var_os("GLCC_NATIVE_TRACE").is_some() {

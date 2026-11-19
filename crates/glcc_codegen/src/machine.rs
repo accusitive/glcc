@@ -271,7 +271,7 @@ pub struct AsmSlot {
     pub name: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum AsmSlotKind {
     /// A register operand rendered as the width-named AT&T register
     /// (`%al`, `%ax`, `%eax`, `%rax` per `width`/`modifier`).
@@ -281,6 +281,10 @@ pub enum AsmSlotKind {
     Mem,
     /// An immediate rendered with target syntax (`$N` on x86-64).
     Imm(i64),
+    /// A symbolic immediate (`"i" (&global)`): rendered as the symbol
+    /// name (+ byte addend), so the assembler's relocation pass ties it
+    /// to the module table. GCC calls this a relocatable constant.
+    SymImm { sym: String, addend: i64 },
     /// The `asm goto` selector, referenced via `%l[name]` stubs.
     Sel,
 }
@@ -367,7 +371,7 @@ impl AsmBlob {
     /// tied-input slots have none.
     pub fn ops_of(&self, slot: &AsmSlot) -> usize {
         match slot.kind {
-            AsmSlotKind::Imm(_) => 0,
+            AsmSlotKind::Imm(_) | AsmSlotKind::SymImm { .. } => 0,
             _ if slot.rides.is_some() => 0,
             _ if slot.is_use && slot.is_def => 2,
             _ => 1,

@@ -11,7 +11,7 @@ use glcc_mir::{Block, Const, Def, Function, GepIndex, Inst, InstKind, Terminator
 
 use crate::isa::{EncOut, ParamLoc, RetLoc, SelItem, SlotSpec, TargetIsa};
 use crate::machine::{BlockId, MFunction, MInst, OpId, Operand, PReg, Reg, SymOperand, SymTarget, Width};
-use crate::sel::{EmitWidth, FuncSel, value_width};
+use crate::sel::{EmitWidth, FuncSel, ValLoc, value_width};
 
 use tables::{Op, op_id};
 
@@ -399,7 +399,7 @@ fn select_asm(sel: &mut FuncSel, mir: &Function, inst: Inst) {
     let is_goto = !block.labels.is_empty();
     let unique = crate::asm::next_site();
 
-    let plan = crate::asm::plan_x86_64(block, mir);
+    let plan = crate::asm::plan_x86_64(block, mir, sel.module);
 
     // Probe: render the template with stand-in registers (real pregs
     // where a constraint pins one) and let glasm reject anything it
@@ -469,7 +469,7 @@ TEMPLATE:
     let mut slot_vregs: Vec<Option<crate::machine::VReg>> = vec![None; plan.slots.len()];
     for (i, slot) in plan.slots.iter().enumerate() {
         match &slot.kind {
-            crate::machine::AsmSlotKind::Imm(_) => {}
+            crate::machine::AsmSlotKind::Imm(_) | crate::machine::AsmSlotKind::SymImm { .. } => {}
             crate::machine::AsmSlotKind::Mem => {
                 let v = sel.value_vreg(mir, block.operands[i].value);
                 ops.push(match slot.pin {
@@ -793,7 +793,18 @@ fn inst_hook(sel: &mut FuncSel, mir: &Function, inst: Inst) -> bool {
             }
             true
         }
-        InstKind::GetFramePointer => panic!("glcc native backend: GetFramePointer is not yet supported"),
+        InstKind::GetFramePointer => {
+            // With the frame-pointer prologue in place, rbp holds the
+            // caller-frame base, which is exactly what
+            // __builtin_frame_address(0) asks for.
+            let dst = result_vreg(sel, mir, inst);
+            sel.emit(MInst::new(
+                op_id(Op::MovRR),
+                Width::W64,
+                smallvec::smallvec![Operand::Reg(Reg::V(dst)), Operand::Reg(Reg::P(PReg::gpr(regs::RBP)))],
+            ));
+            true
+        }
         InstKind::EhTypeId { .. } => panic!("glcc native backend: EH is not yet supported"),
         InstKind::Ceil(_) | InstKind::Floor(_) => {
             // Baseline x86-64 has no rounding instruction (SSE4.1's
@@ -1285,13 +1296,19 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
         match sel.isa.abi().ret_loc(&sig.ret) {
             RetLoc::Void => {}
             RetLoc::Reg(preg) => {
-                // The call defines a fresh vreg which BECOMES the result
-                // value's register (single fixed def per vreg — no
-                // unpacking copy needed).
-                let pin = sel.alloc_vreg_class(match preg.class {
-                    crate::machine::RegClass::Vec => crate::machine::RegClass::Vec,
-                    _ => crate::machine::RegClass::Gpr,
-                });
+                // The call defines the result value's vreg directly,
+                // pinned to the ABI return register. The vreg may
+                // already exist (uses selected before this def — MIR
+                // block order is not dominance order), in which case
+                // it is reused rather than replaced: replacing it
+                // would orphan the earlier uses' vreg.
+                let pin = match sel.value_loc(mir, res) {
+                    ValLoc::Reg(vr) => vr,
+                    ValLoc::Slot(_) => sel.alloc_vreg_class(match preg.class {
+                        crate::machine::RegClass::Vec => crate::machine::RegClass::Vec,
+                        _ => crate::machine::RegClass::Gpr,
+                    }),
+                };
                 sel.set_reg(res, pin);
                 ops.push(Operand::FixedReg(Reg::V(pin), preg));
             }

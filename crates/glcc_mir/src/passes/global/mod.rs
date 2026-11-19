@@ -402,10 +402,6 @@ impl ModulePass for DeadModuleItems {
     }
 
     fn run(&mut self, module: &mut Module) -> bool {
-        if has_inline_asm(module) {
-            return false;
-        }
-
         let nfuncs = module.funcs.len();
         let nglobals = module.globals.len();
         let mut func_calls = vec![Vec::new(); nfuncs];

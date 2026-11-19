@@ -255,6 +255,16 @@ pub(crate) fn emit_inst<M: Module>(
             let y = self.operand(builder, b);
             Some(builder.ins().imul(x, y))
         }
+        mir::InstKind::Umulh(a, b) => {
+            let x = self.operand(builder, a);
+            let y = self.operand(builder, b);
+            Some(builder.ins().umulhi(x, y))
+        }
+        mir::InstKind::Smulh(a, b) => {
+            let x = self.operand(builder, a);
+            let y = self.operand(builder, b);
+            Some(builder.ins().smulhi(x, y))
+        }
         mir::InstKind::Udiv(a, b) => {
             let x = self.operand(builder, a);
             let y = self.operand(builder, b);

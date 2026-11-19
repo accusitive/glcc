@@ -1333,7 +1333,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 naked,
                 is_async,
                 inline: specifiers.is_inline(),
-                forceinline: specifiers.force_inline,
+                forceinline: specifiers.force_inline || attrs.is_always_inline() || specifiers.attrs.is_always_inline(),
                 noinline: attrs.is_noinline() || specifiers.attrs.is_noinline(),
                 gnu_inline: attrs.is_gnu_inline() || specifiers.attrs.is_gnu_inline(),
                 align: attrs.aligned.or(specifiers.attrs.aligned),
@@ -4280,7 +4280,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 naked,
                 is_async,
                 inline: kind == BindingKind::Func && specifiers.is_inline(),
-                forceinline: kind == BindingKind::Func && specifiers.force_inline,
+                forceinline: kind == BindingKind::Func && (specifiers.force_inline || suffix.is_always_inline() || specifiers.attrs.is_always_inline()),
                 noinline: kind == BindingKind::Func && (suffix.is_noinline() || specifiers.attrs.is_noinline()),
                 gnu_inline: kind == BindingKind::Func && (suffix.is_gnu_inline() || specifiers.attrs.is_gnu_inline()),
                 align: suffix.aligned.or(specifiers.attrs.aligned),
@@ -6009,6 +6009,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                 } else if normalized == "noinline" {
                     self.skip_balanced_parens();
                     out.flags.insert(GnuAttrFlags::NOINLINE);
+                } else if normalized == "always_inline" {
+                    self.skip_balanced_parens();
+                    out.flags.insert(GnuAttrFlags::ALWAYS_INLINE);
                 } else if normalized == "gnu_inline" {
                     self.skip_balanced_parens();
                     out.flags.insert(GnuAttrFlags::GNU_INLINE);
@@ -6125,6 +6128,8 @@ impl<'a, 'b> Parser<'a, 'b> {
                 out.flags.insert(GnuAttrFlags::NAKED);
             } else if normalized == "noinline" {
                 out.flags.insert(GnuAttrFlags::NOINLINE);
+            } else if normalized == "always_inline" {
+                out.flags.insert(GnuAttrFlags::ALWAYS_INLINE);
             } else if normalized == "gnu_inline" {
                 out.flags.insert(GnuAttrFlags::GNU_INLINE);
             } else if normalized == "async" {
@@ -7959,6 +7964,7 @@ bitflags::bitflags! {
         const NAKED = 1 << 3;
         const ASYNC = 1 << 4;
         const GNU_INLINE = 1 << 5;
+        const ALWAYS_INLINE = 1 << 6;
     }
 }
 
@@ -8013,6 +8019,9 @@ impl GnuAttributes {
     }
     pub fn is_naked(&self) -> bool {
         self.flags.contains(GnuAttrFlags::NAKED)
+    }
+    pub fn is_always_inline(&self) -> bool {
+        self.flags.contains(GnuAttrFlags::ALWAYS_INLINE)
     }
     pub fn is_async(&self) -> bool {
         self.flags.contains(GnuAttrFlags::ASYNC)

@@ -248,6 +248,83 @@ fn const_int(func: &mir::Function, value: mir::Value) -> i64 {
     }
 }
 
+/// Whether `value` reduces to `global address + constant byte offset`:
+/// the shape of GCC's relocatable `"i"` operands (`&string`,
+/// `&struct.field`). Walks small arithmetic chains (`ptrtoint(g) + 12`,
+/// geps with constant indices) symbolically; a runtime term anywhere
+/// returns `None`. Returns `(None, v)` for a plain integer constant.
+fn sym_imm_of(module: &mir::Module, func: &mir::Function, value: mir::Value) -> Option<(Option<String>, i128)> {
+    if let mir::Def::Const(c) = &func.values[value].def {
+        return match c {
+            mir::Const::Int { value, .. } => Some((None, *value)),
+            mir::Const::Null | mir::Const::Undef => Some((None, 0)),
+            _ => None,
+        };
+    }
+    let idx = match &func.values[value].def {
+        mir::Def::Inst(i) => *i,
+        _ => return None,
+    };
+    match &func.insts[idx].kind {
+        mir::InstKind::PtrToInt(v) | mir::InstKind::IntToPtr(v) | mir::InstKind::Bitcast(v) => sym_imm_of(module, func, *v),
+        mir::InstKind::Sext(v) | mir::InstKind::Zext(v) | mir::InstKind::Trunc(v) => sym_imm_of(module, func, *v),
+        mir::InstKind::GlobalAddr { global } => Some((Some(module.globals[*global].name.clone()), 0)),
+        mir::InstKind::Add(a, b) => {
+            let (sa, va) = sym_imm_of(module, func, *a)?;
+            let (sb, vb) = sym_imm_of(module, func, *b)?;
+            match (sa, sb) {
+                (None, None) => Some((None, va.wrapping_add(vb))),
+                (Some(s), None) | (None, Some(s)) => Some((Some(s), va.wrapping_add(vb))),
+                (Some(_), Some(_)) => None,
+            }
+        }
+        mir::InstKind::Sub(a, b) => {
+            let (sa, va) = sym_imm_of(module, func, *a)?;
+            let (sb, vb) = sym_imm_of(module, func, *b)?;
+            match (sa, sb) {
+                (None, None) => Some((None, va.wrapping_sub(vb))),
+                (Some(s), None) => Some((Some(s), va.wrapping_sub(vb))),
+                _ => None,
+            }
+        }
+        mir::InstKind::Mul(a, b) => {
+            let (sa, va) = sym_imm_of(module, func, *a)?;
+            let (sb, vb) = sym_imm_of(module, func, *b)?;
+            if sa.is_some() || sb.is_some() {
+                return None;
+            }
+            Some((None, va.wrapping_mul(vb)))
+        }
+        mir::InstKind::GetElementPtr { base, indices } => {
+            let (sym, mut off) = sym_imm_of(module, func, *base)?;
+            let mut ty = match &func.values[*base].ty {
+                mir::Ty::Ptr { pointee, .. } => (**pointee).clone(),
+                _ => return None,
+            };
+            for idx in indices {
+                match idx {
+                    mir::GepIndex::Field(i) => {
+                        let mir::Ty::Struct { fields, offsets, .. } = &ty else { return None };
+                        off += offsets[*i as usize] as i128;
+                        ty = fields[*i as usize].clone();
+                    }
+                    mir::GepIndex::ConstIndex(c) => {
+                        let elem = match &ty {
+                            mir::Ty::Array { elem, .. } | mir::Ty::Vector { elem, .. } => (**elem).clone(),
+                            _ => return None,
+                        };
+                        off += *c as i128 * elem.size_bytes() as i128;
+                        ty = elem;
+                    }
+                    mir::GepIndex::Index(_) => return None,
+                }
+            }
+            Some((sym, off))
+        }
+        _ => None,
+    }
+}
+
 fn is_int_const(func: &mir::Function, value: mir::Value) -> bool {
     matches!(
         &func.values[value].def,
@@ -445,7 +522,7 @@ pub struct AsmPlan {
 /// Plan one asm block for the x86-64 native backend. Panics loudly on
 /// shapes the backend cannot honor (stable messages; tests match on
 /// them), mirroring the rest of the native backend.
-pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
+pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function, module: &mir::Module) -> AsmPlan {
     let outputs = block.outputs as usize;
     let mut slots: Vec<AsmSlot> = Vec::with_capacity(block.operands.len());
     let mut abcd_ops: Vec<usize> = Vec::new();
@@ -471,7 +548,7 @@ pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
                 }
                 let target_slot = &slots[target];
                 slots.push(AsmSlot {
-                    kind: target_slot.kind,
+                    kind: target_slot.kind.clone(),
                     width: target_slot.width,
                     is_use: false,
                     is_def: false,
@@ -490,17 +567,26 @@ pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
         // alternative carries it.
         let mut kind = constraint.kind;
         let mut imm = None;
+        let mut sym_imm = None;
         match kind {
             Kind::Imm if is_int_const(func, operand.value) => imm = Some(const_int(func, operand.value)),
-            Kind::Imm => {
-                if constraint.reg_alt {
-                    kind = Kind::Reg;
-                } else if constraint.mem_alt {
-                    kind = Kind::Mem;
-                } else {
-                    panic!("glcc native backend: asm operand constraint requires an integer constant");
+            Kind::Imm if constraint.reg_alt => kind = Kind::Reg,
+            Kind::Imm if constraint.mem_alt => kind = Kind::Mem,
+            // GCC's "i" also accepts relocatable constants: a global
+            // address (+ constant offset), rendered as the symbol name.
+            Kind::Imm => match sym_imm_of(module, func, operand.value) {
+                // A plain constant (the chain folded away the symbol).
+                Some((None, v)) => imm = Some(i64::try_from(v).unwrap_or_else(|_| {
+                    panic!("glcc native backend: asm immediate operand does not fit in 64 bits")
+                })),
+                Some((Some(sym), addend)) => {
+                    let addend = i64::try_from(addend).unwrap_or_else(|_| {
+                        panic!("glcc native backend: asm symbol offset does not fit in 64 bits")
+                    });
+                    sym_imm = Some(AsmSlotKind::SymImm { sym, addend });
                 }
-            }
+                None => panic!("glcc native backend: asm operand constraint requires an integer constant"),
+            },
             _ => {}
         }
         if kind == Kind::Reg {
@@ -528,7 +614,7 @@ pub fn plan_x86_64(block: &mir::AsmBlock, func: &mir::Function) -> AsmPlan {
             kind: match kind {
                 Kind::Reg => AsmSlotKind::Reg,
                 Kind::Mem => AsmSlotKind::Mem,
-                Kind::Imm => AsmSlotKind::Imm(imm.expect("immediate operand without a value")),
+                Kind::Imm => sym_imm.unwrap_or_else(|| AsmSlotKind::Imm(imm.expect("immediate operand without a value"))),
             },
             width: width_of(size),
             is_use,
@@ -750,6 +836,19 @@ fn expand_x86_64(cx: &RenderCx, index: usize, modifier: Option<char>) -> String 
             Some('b' | 'w' | 'k' | 'q') | None => format!("${value}"),
             Some(other) => panic!("unsupported asm modifier %{other} on an immediate"),
         },
+        AsmSlotKind::SymImm { sym, addend } => {
+            // `.long sym - .` style references need the bare symbol;
+            // anything else takes the AT&T immediate form. The symbol
+            // rides the fragment's relocation pass unchanged.
+            let text = if *addend == 0 { sym.clone() } else { format!("{sym}{addend:+}") };
+            match modifier {
+                // `%a`/`%p` print the bare symbol like `%c` (GCC prints
+                // a symbol operand's address as an absolute reference).
+                Some('a' | 'c' | 'p') => text,
+                Some('b' | 'w' | 'k' | 'q') | None => format!("${text}"),
+                Some(other) => panic!("unsupported asm modifier %{other} on a symbol immediate"),
+            }
+        }
         AsmSlotKind::Mem => {
             let preg = (cx.preg_of)(index);
             match modifier {

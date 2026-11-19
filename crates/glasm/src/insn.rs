@@ -197,6 +197,10 @@ pub enum Stmt {
         line: u32,
     },
     Align(Expr, u32),
+    /// GAS `.org expr`: zero-fill up to the given absolute offset in
+    /// the current section (typically `label + const`, e.g. the
+    /// kernel's `.org 2b+%c3` bug-table padding).
+    Org(Expr, u32),
     Insn(Insn),
     Global(Vec<String>, u32),
     /// GAS `.weak`: global binding with weak precedence at link time.
@@ -250,6 +254,7 @@ impl Stmt {
             | Stmt::Data { line: l, .. }
             | Stmt::Reserve { line: l, .. }
             | Stmt::Align(_, l)
+            | Stmt::Org(_, l)
             | Stmt::Global(_, l)
             | Stmt::Weak(_, l)
             | Stmt::Extern(_, l)

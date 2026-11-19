@@ -380,6 +380,18 @@ pub fn select_function<'a>(isa: &'static dyn TargetIsa, module: &'a glcc_mir::Mo
             sel.f.blocks[b.index()].params.push(vr);
         }
     }
+    // Instruction results likewise: MIR index order is not dominance
+    // order (an exit block can precede the loop body that defines its
+    // values), so a use selected before its defining block must map to
+    // the same vreg the def will write. Def-site selection overwrites
+    // this with a slot for values that live in memory (allocas,
+    // aggregates), which simply retires the preassigned vreg.
+    for (v, data) in mir.values.iter_enumerated() {
+        if matches!(data.def, Def::Inst(_)) {
+            let vr = sel.alloc_vreg_class(FuncSel::value_class(&data.ty));
+            sel.locs.insert(v, ValLoc::Reg(vr));
+        }
+    }
 
     isa.select_custom(&mut sel, mir, crate::isa::SelItem::Entry);
 

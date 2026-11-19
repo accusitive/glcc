@@ -54,6 +54,8 @@ pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::Add(a, b) => format!("add {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Sub(a, b) => format!("sub {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Mul(a, b) => format!("mul {} {}", val_name(func, *a), val_name(func, *b)),
+        InstKind::Umulh(a, b) => format!("umulh {} {}", val_name(func, *a), val_name(func, *b)),
+        InstKind::Smulh(a, b) => format!("smulh {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Udiv(a, b) => format!("udiv {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Sdiv(a, b) => format!("sdiv {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Urem(a, b) => format!("urem {} {}", val_name(func, *a), val_name(func, *b)),

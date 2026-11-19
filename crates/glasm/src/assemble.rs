@@ -453,6 +453,38 @@ fn run_pass(
                     Err(m) => errors.push(AsmError { line: *line, msg: m }),
                 }
             }
+            Stmt::Org(e, line) => {
+                let tab = SymTab { syms: symbols, undefined };
+                let ctx = EvalCtx {
+                    cur_sect,
+                    cur_off,
+                    syms: &tab,
+                    optimistic: true,
+                    unknown_hit: None,
+                };
+                match e.eval(&ctx) {
+                    // A same-section label operand (`2b+12`) reads as a
+                    // section-relative value; patch counts stay within
+                    // the section, so the offset is directly comparable.
+                    Ok(RValue::SectVal { sect, off, .. }) if sect == cur_sect => {
+                        let target = off;
+                        let pad = target - cur_off;
+                        if pad < 0 {
+                            errors.push(AsmError {
+                                line: *line,
+                                msg: "org moves the location counter backwards".into(),
+                            });
+                        } else {
+                            emit_fill(sections, cur_sect, &mut cur_off, pad, &[0]);
+                        }
+                    }
+                    Ok(_) => errors.push(AsmError {
+                        line: *line,
+                        msg: "org target must be a constant or a same-section label".into(),
+                    }),
+                    Err(m) => errors.push(AsmError { line: *line, msg: m }),
+                }
+            }
             Stmt::Data { size, items, line } => {
                 let tab = SymTab { syms: symbols, undefined };
                 let ctx = EvalCtx {

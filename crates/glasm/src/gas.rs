@@ -1664,6 +1664,19 @@ fn parse_directive(g: &[GTok], line_no: u32, lineno: usize, numlabels: &NumLabel
             let v = t.expr(lineno, numlabels)?;
             Ok(Stmt::Align(v, line_no))
         }
+        "org" => {
+            let v = t.expr(lineno, numlabels)?;
+            if t.eat_punct(",") {
+                // `.org expr, fill`: a nonzero fill byte is a shape no
+                // current user emits; refuse rather than misfill.
+                let fill = t.expr(lineno, numlabels)?;
+                match fill {
+                    Expr::Int(0) => {}
+                    _ => return Err("`.org' nonzero fill value is not supported".into()),
+                }
+            }
+            Ok(Stmt::Org(v, line_no))
+        }
         "p2align" | "balign" => {
             let v = t.expr(lineno, numlabels)?;
             let bytes = if name == "p2align" {

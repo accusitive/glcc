@@ -462,7 +462,7 @@ fn initializer_references_keep_internal_functions() {
 }
 
 #[test]
-fn inline_assembly_disables_removal() {
+fn unreferenced_function_with_assembly_is_removed() {
     let mut module = Module::new();
     let dead = void_function(&mut module, "dead", true, 0);
     let entry = module.funcs[dead].entry;
@@ -482,8 +482,15 @@ fn inline_assembly_disables_removal() {
         },
     );
 
-    assert!(!DeadModuleItems.run(&mut module));
-    assert_eq!(module.funcs.len(), 1);
+    // Asm operand values flow through GlobalAddr/FuncAddr instructions,
+    // which the liveness scan already sees, so containing asm is not a
+    // reason to keep an otherwise unreferenced function. (A raw symbol
+    // name typed directly into a live template is not modeled; glasm
+    // turns an unresolved reference into an extern, which fails loudly
+    // at link time.) The kernel's pervasive inline asm used to disable
+    // this sweep entirely, keeping every inlined-away body alive.
+    assert!(DeadModuleItems.run(&mut module));
+    assert_eq!(module.funcs.len(), 0);
 }
 
 #[test]

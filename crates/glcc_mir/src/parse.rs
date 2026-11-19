@@ -1335,6 +1335,8 @@ fn binop_op(op: &str) -> Option<fn(Value, Value) -> InstKind> {
         "add" => InstKind::Add,
         "sub" => InstKind::Sub,
         "mul" => InstKind::Mul,
+        "umulh" => InstKind::Umulh,
+        "smulh" => InstKind::Smulh,
         "udiv" => InstKind::Udiv,
         "sdiv" => InstKind::Sdiv,
         "urem" => InstKind::Urem,

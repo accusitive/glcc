@@ -25,7 +25,7 @@ use glcc_mir::{Block, Const, Def, FloatKind, Function, GepIndex, Inst, InstKind,
 
 use crate::isa::{EncOut, ParamLoc, RetLoc, SelItem, TargetIsa};
 use crate::machine::{BlockId, MFunction, MInst, OpId, Operand, PReg, Reg, SymOperand, SymTarget, Width};
-use crate::sel::{FuncSel, value_width};
+use crate::sel::{FuncSel, ValLoc, value_width};
 
 use tables::{Op, op_id};
 
@@ -1192,9 +1192,16 @@ fn emit_call_inst(sel: &mut FuncSel, mir: &Function, result: Option<Value>, targ
         match sel.isa.abi().ret_loc(&sig.ret) {
             RetLoc::Void => {}
             RetLoc::Reg(preg) => {
-                // The call defines a fresh vreg which BECOMES the result
-                // value's register.
-                let pin = sel.alloc_vreg_class(preg.class);
+                // The call defines the result value's vreg directly,
+                // pinned to the ABI return register. The vreg may
+                // already exist (uses selected before this def — MIR
+                // block order is not dominance order), in which case
+                // it is reused rather than replaced: replacing it
+                // would orphan the earlier uses' vreg.
+                let pin = match sel.value_loc(mir, res) {
+                    ValLoc::Reg(vr) => vr,
+                    ValLoc::Slot(_) => sel.alloc_vreg_class(preg.class),
+                };
                 sel.set_reg(res, pin);
                 ops.push(Operand::FixedReg(Reg::V(pin), preg));
             }

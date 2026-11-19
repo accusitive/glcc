@@ -222,6 +222,12 @@ pub enum InstKind {
     Add(Value, Value),
     Sub(Value, Value),
     Mul(Value, Value),
+    /// High half of a 64x64 widening multiply: `((a as u128 * b as u128) >> 64) as u64`
+    /// (unsigned) / the signed equivalent. Native-only backends lower this
+    /// with a single widening multiply; the wide-int legalizer builds
+    /// multi-limb multiplies out of it.
+    Umulh(Value, Value),
+    Smulh(Value, Value),
     Udiv(Value, Value),
     Sdiv(Value, Value),
     Urem(Value, Value),
@@ -458,6 +464,8 @@ impl InstKind {
             InstKind::Add(a, b)
             | InstKind::Sub(a, b)
             | InstKind::Mul(a, b)
+            | InstKind::Umulh(a, b)
+            | InstKind::Smulh(a, b)
             | InstKind::Udiv(a, b)
             | InstKind::Sdiv(a, b)
             | InstKind::Urem(a, b)
@@ -592,6 +600,8 @@ impl InstKind {
             InstKind::Add(..)
                 | InstKind::Sub(..)
                 | InstKind::Mul(..)
+                | InstKind::Umulh(..)
+                | InstKind::Smulh(..)
                 | InstKind::And(..)
                 | InstKind::Or(..)
                 | InstKind::Xor(..)
@@ -1063,6 +1073,8 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         InstKind::Add(a, b) => InstKind::Add(swap(*a), swap(*b)),
         InstKind::Sub(a, b) => InstKind::Sub(swap(*a), swap(*b)),
         InstKind::Mul(a, b) => InstKind::Mul(swap(*a), swap(*b)),
+        InstKind::Umulh(a, b) => InstKind::Umulh(swap(*a), swap(*b)),
+        InstKind::Smulh(a, b) => InstKind::Smulh(swap(*a), swap(*b)),
         InstKind::Udiv(a, b) => InstKind::Udiv(swap(*a), swap(*b)),
         InstKind::Sdiv(a, b) => InstKind::Sdiv(swap(*a), swap(*b)),
         InstKind::Urem(a, b) => InstKind::Urem(swap(*a), swap(*b)),
