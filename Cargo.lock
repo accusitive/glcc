@@ -415,6 +415,7 @@ dependencies = [
  "glcc_lower_mir",
  "glcc_mir",
  "glcc_pp",
+ "glcc_prism",
  "glcc_toolchain",
  "object",
 ]
@@ -508,6 +509,7 @@ dependencies = [
  "glcc_frontend",
  "glcc_lower_cl",
  "glcc_mir",
+ "smallvec",
  "string-interner",
 ]
 
@@ -527,6 +529,14 @@ dependencies = [
  "glcc_toolchain",
  "libc",
  "string-interner",
+]
+
+[[package]]
+name = "glcc_prism"
+version = "0.1.0"
+dependencies = [
+ "glcc_frontend",
+ "glcc_mir",
 ]
 
 [[package]]

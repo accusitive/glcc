@@ -94,6 +94,10 @@ pub struct Member {
     /// `__attribute__((aligned(n)))` on this member: a minimum
     /// alignment (GCC semantics).
     pub align_override: Option<u64>,
+    /// `[[prism::*]]` attributes on this member (`-fprism`): the
+    /// shader interface reads the semantics of entry-point
+    /// input/output struct fields from here.
+    pub prism: crate::parse::PrismAttributes,
     pub span: Span,
 }
 
@@ -324,6 +328,10 @@ pub struct Sema<'a> {
     pub constexprs: HashMap<DeclId, crate::eval::Value>,
     /// C23 `[[...]]` attributes attached to declarations.
     pub std_attrs: HashMap<DeclId, crate::parse::StdAttributes>,
+    /// `[[prism::*]]` attributes attached to declarations (`-fprism`):
+    /// entry-point stages, input/output semantics, and uniform flags.
+    /// Only non-empty attribute sets are recorded.
+    pub prism_attrs: HashMap<DeclId, crate::parse::PrismAttributes>,
     /// GNU label addresses (`&&label`) and computed `goto`: one small
     /// id per label spelling, assigned when the label is defined (so
     /// ids run in definition order) and keyed by spelling, with the
@@ -645,6 +653,7 @@ impl<'a> Sema<'a> {
             inits: HashMap::new(),
             constexprs: HashMap::new(),
             std_attrs: HashMap::new(),
+            prism_attrs: HashMap::new(),
             label_ids: HashMap::new(),
             vla_bounds: Vec::new(),
             address_taken: RefCell::new(HashSet::new()),
@@ -676,6 +685,7 @@ impl<'a> Sema<'a> {
                     bitfield: None,
                     packed: false,
                     align_override: None,
+                    prism: crate::parse::PrismAttributes::default(),
                     span,
                 },
                 Member {
@@ -684,6 +694,7 @@ impl<'a> Sema<'a> {
                     bitfield: None,
                     packed: false,
                     align_override: None,
+                    prism: crate::parse::PrismAttributes::default(),
                     span,
                 },
             ],
@@ -1440,6 +1451,25 @@ fn remap_expr_ident<'a>(expr: &CheckedExpr<'a>, arena: &'a bumpalo::Bump, inits:
         },
         CheckedExprKind::Unary(op, e) => CheckedExprKind::Unary(*op, arena.alloc(remap_expr_ident(e, arena, inits, map))),
         CheckedExprKind::Await(e) => CheckedExprKind::Await(arena.alloc(remap_expr_ident(e, arena, inits, map))),
+        // prism nodes: a sample's resource binding remaps like any
+        // binding reference (parameters never hold resources, so the
+        // map only ever replaces what it knows).
+        CheckedExprKind::Swizzle { base, lanes } => CheckedExprKind::Swizzle {
+            base: arena.alloc(remap_expr_ident(base, arena, inits, map)),
+            lanes,
+        },
+        CheckedExprKind::SwizzleStore { base, lanes, rhs } => CheckedExprKind::SwizzleStore {
+            base: arena.alloc(remap_expr_ident(base, arena, inits, map)),
+            lanes,
+            rhs: arena.alloc(remap_expr_ident(rhs, arena, inits, map)),
+        },
+        CheckedExprKind::PrismSample { global, coord } => CheckedExprKind::PrismSample {
+            global: map.get(global).copied().unwrap_or(*global),
+            coord: arena.alloc(remap_expr_ident(coord, arena, inits, map)),
+        },
+        CheckedExprKind::Splat { expr } => CheckedExprKind::Splat {
+            expr: arena.alloc(remap_expr_ident(expr, arena, inits, map)),
+        },
         CheckedExprKind::Cast { ty, expr: e } => CheckedExprKind::Cast {
             ty: ty.clone(),
             expr: arena.alloc(remap_expr_ident(e, arena, inits, map)),

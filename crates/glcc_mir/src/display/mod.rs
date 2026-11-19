@@ -139,6 +139,15 @@ pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
         InstKind::InsertValue { agg, elem, index } => format!("insert {} {} .{index}", val_name(func, *agg), val_name(func, *elem)),
         InstKind::Splat(a) => format!("splat {}", val_name(func, *a)),
         InstKind::ExtractLane { vec, lane } => format!("extractlane {} {}", val_name(func, *vec), lane),
+        InstKind::ShuffleVector { lhs, rhs, lanes } => {
+            let lanes: Vec<String> = lanes.iter().map(|l| l.to_string()).collect();
+            format!("shufflevector {}, {} [{}]", val_name(func, *lhs), val_name(func, *rhs), lanes.join(","))
+        }
+        InstKind::SampleImage { image, coord } => {
+            format!("sampleimage {}, {}", val_name(func, *image), val_name(func, *coord))
+        }
+        InstKind::Min { a, b } => format!("min {}, {}", val_name(func, *a), val_name(func, *b)),
+        InstKind::Max { a, b } => format!("max {}, {}", val_name(func, *a), val_name(func, *b)),
         InstKind::GlobalAddr { global } => format!("global g{}", global.index()),
         InstKind::Ceil(a) => format!("ceil {}", val_name(func, *a)),
         InstKind::Floor(a) => format!("floor {}", val_name(func, *a)),

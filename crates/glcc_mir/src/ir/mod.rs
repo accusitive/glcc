@@ -306,6 +306,37 @@ pub enum InstKind {
         vec: Value,
         lane: u8,
     },
+    /// Permute two vectors of one element type: lane `i` of the result
+    /// is `lanes[i]` of the concatenated operands — an index below
+    /// `lhs`'s lane count selects from `lhs`, otherwise from `rhs`
+    /// (`lanes[i] - lhs.lanes`). A scalar `rhs` acts as a one-lane
+    /// vector that every out-of-range index selects, so a prism
+    /// swizzle store (`v.xy = 1.0f`) is one instruction. The result
+    /// type is [`Ty::Vector`] with `lanes.len()` lanes.
+    ShuffleVector {
+        lhs: Value,
+        rhs: Value,
+        lanes: SmallVec<[u8; 8]>,
+    },
+    /// prism texture sample: `image` is defined by a `GlobalAddr` of a
+    /// resource global (a `sampler2D`), `coord` a float vector. Pure
+    /// — the shader cannot write a texture — so CSE/LICM hoist
+    /// samples like any other value.
+    SampleImage {
+        image: Value,
+        coord: Value,
+    },
+    /// Lane-wise float minimum / maximum (also scalar). `NaN`
+    /// handling follows the target (the shader backends use the
+    /// hardware instruction).
+    Min {
+        a: Value,
+        b: Value,
+    },
+    Max {
+        a: Value,
+        b: Value,
+    },
     Memcpy {
         dst: Value,
         src: Value,
@@ -507,6 +538,18 @@ impl InstKind {
             | InstKind::Bswap(a)
             | InstKind::Splat(a)
             | InstKind::ExtractLane { vec: a, .. } => f(*a),
+            InstKind::ShuffleVector { lhs, rhs, .. } => {
+                f(*lhs);
+                f(*rhs);
+            }
+            InstKind::SampleImage { image, coord } => {
+                f(*image);
+                f(*coord);
+            }
+            InstKind::Min { a, b } | InstKind::Max { a, b } => {
+                f(*a);
+                f(*b);
+            }
             InstKind::Icmp { lhs, rhs, .. } | InstKind::Fcmp { lhs, rhs, .. } => {
                 f(*lhs);
                 f(*rhs);
@@ -644,6 +687,10 @@ impl InstKind {
                 | InstKind::InsertValue { .. }
                 | InstKind::Splat(_)
                 | InstKind::ExtractLane { .. }
+                | InstKind::ShuffleVector { .. }
+                | InstKind::SampleImage { .. }
+                | InstKind::Min { .. }
+                | InstKind::Max { .. }
                 | InstKind::EhTypeId { .. }
         )
     }
@@ -1101,6 +1148,23 @@ pub(crate) fn remap_inst(kind: &InstKind, swap: impl Fn(Value) -> Value) -> Inst
         InstKind::Bswap(a) => InstKind::Bswap(swap(*a)),
         InstKind::Splat(a) => InstKind::Splat(swap(*a)),
         InstKind::ExtractLane { vec, lane } => InstKind::ExtractLane { vec: swap(*vec), lane: *lane },
+        InstKind::ShuffleVector { lhs, rhs, lanes } => InstKind::ShuffleVector {
+            lhs: swap(*lhs),
+            rhs: swap(*rhs),
+            lanes: lanes.clone(),
+        },
+        InstKind::SampleImage { image, coord } => InstKind::SampleImage {
+            image: swap(*image),
+            coord: swap(*coord),
+        },
+        InstKind::Min { a, b } => InstKind::Min {
+            a: swap(*a),
+            b: swap(*b),
+        },
+        InstKind::Max { a, b } => InstKind::Max {
+            a: swap(*a),
+            b: swap(*b),
+        },
         InstKind::Icmp { pred, lhs, rhs } => InstKind::Icmp {
             pred: *pred,
             lhs: swap(*lhs),

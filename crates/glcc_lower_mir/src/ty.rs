@@ -75,8 +75,20 @@ pub fn lower_ty(ty: &fe::parse::Ty, sema: &fe::sema::Sema, interner: &fe::lexer:
         // image's integer lanes.
         fe::parse::Ty::Vector { elem, len } => {
             let elem_size = sema.type_size(elem, interner).expect("vector element has a size");
+            let elem_mir = lower_ty(elem, sema, interner);
+            // prism (`-fprism`) keeps float/int vectors first-class at
+            // every supported shape (8/12/16 bytes: `float2`/`float3`/
+            // `float4` and their integer kin): SPIR-V models vec2/vec3/
+            // vec4 natively and the shader ISAs pack them into 4-wide
+            // registers. Plain C keeps the 128-bit-only rule.
+            if sema.lang.prism
+                && matches!(elem_size * (*len as u64), 8 | 12 | 16)
+                && matches!(elem_mir, mir::Ty::Float(_) | mir::Ty::Int { bits: 32 })
+            {
+                return mir::Ty::vector_shape(elem_mir, *len);
+            }
             match elem_size * (*len as u64) {
-                16 => mir::Ty::vector(lower_ty(elem, sema, interner), *len),
+                16 => mir::Ty::vector(elem_mir, *len),
                 bytes => mir::Ty::int((bytes * 8) as u32),
             }
         }

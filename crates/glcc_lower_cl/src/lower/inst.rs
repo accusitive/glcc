@@ -1251,6 +1251,11 @@ pub(crate) fn emit_inst<M: Module>(
         // The coroutine pass rewrites every `await` to a poll loop
         // before Clif lowering; one here means the pass was skipped.
         mir::InstKind::Await { .. } => panic!("`await` instruction survived coroutine lowering"),
+        // prism shader operations: only the prism backend consumes
+        // them, so the CPU backends never see one.
+        mir::InstKind::ShuffleVector { .. } => panic!("`shufflevector` reached the CPU backend"),
+        mir::InstKind::SampleImage { .. } => panic!("`sampleimage` reached the CPU backend"),
+        mir::InstKind::Min { .. } | mir::InstKind::Max { .. } => panic!("prism `min`/`max` reached the CPU backend"),
         mir::InstKind::CallIndirect { callee, args, sig } => {
             let layout = abi::layout_sig(self.target, &sig.params, &sig.ret, sig.variadic);
             let addr = self.addr_operand(builder, callee);

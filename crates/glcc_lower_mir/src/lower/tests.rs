@@ -1780,6 +1780,7 @@ fn recursive_struct_by_value_panics() {
             bitfield: None,
             packed: false,
             align_override: None,
+            prism: fe::parse::PrismAttributes::default(),
             span,
         }],
     )

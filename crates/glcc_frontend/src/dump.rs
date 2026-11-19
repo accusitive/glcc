@@ -413,6 +413,20 @@ fn dump_ex(e: &CheckedExpr, sema: &Sema, interner: &Interner) -> String {
             format!("(alignof {} :{})", dump_ty(ty, sema, interner), t)
         }
         CheckedExprKind::LabelAddr(label) => format!("(labeladdr {} :{})", name(interner, *label), t),
+        CheckedExprKind::Swizzle { base, lanes } => {
+            let lanes: Vec<String> = lanes.iter().map(|l| ["x", "y", "z", "w"][*l as usize].to_string()).collect();
+            format!("(swizzle .{} {} :{})", lanes.join(""), dump_ex(base, sema, interner), t)
+        }
+        CheckedExprKind::SwizzleStore { base, lanes, rhs } => {
+            let lanes: Vec<String> = lanes.iter().map(|l| ["x", "y", "z", "w"][*l as usize].to_string()).collect();
+            format!("(swizzlestore .{} {} {} :{})", lanes.join(""), dump_ex(base, sema, interner), dump_ex(rhs, sema, interner), t)
+        }
+        CheckedExprKind::PrismSample { global, coord } => {
+            let binding = &sema.decls[global.0 as usize];
+            let text = binding.name.map(|n| name(interner, n)).unwrap_or_else(|| "?".to_string());
+            format!("(tex2D {} {} :{})", text, dump_ex(coord, sema, interner), t)
+        }
+        CheckedExprKind::Splat { expr } => format!("(splat {} :{})", dump_ex(expr, sema, interner), t),
     }
 }
 

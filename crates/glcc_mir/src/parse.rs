@@ -1783,6 +1783,45 @@ fn parse_inst(module: &mut Module, ctx: &mut FnCtx, names: &Names, c: &mut Curso
             let lane = u8::try_from(lane).map_err(|_| c.err(format!("extractlane index `{word}` out of range")))?;
             emit_value(module, ctx, cur, InstKind::ExtractLane { vec, lane }, n, ty, line)?;
         }
+        "shufflevector" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let lhs = need_val_operand(module, ctx, c, "shufflevector lhs")?;
+            c.expect_punct(',')?;
+            let rhs = need_val_operand(module, ctx, c, "shufflevector rhs")?;
+            c.expect_punct('[')?;
+            let mut lanes = SmallVec::new();
+            loop {
+                let word = c.word()?;
+                let lane = parse_u64_lit(&word).ok_or_else(|| c.err(format!("bad shufflevector lane `{word}`")))?;
+                let lane = u8::try_from(lane).map_err(|_| c.err(format!("shufflevector lane `{word}` out of range")))?;
+                lanes.push(lane);
+                if c.eat_punct(',') {
+                    continue;
+                }
+                c.expect_punct(']')?;
+                break;
+            }
+            emit_value(module, ctx, cur, InstKind::ShuffleVector { lhs, rhs, lanes }, n, ty, line)?;
+        }
+        "sampleimage" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let image = need_val_operand(module, ctx, c, "sampleimage image")?;
+            c.expect_punct(',')?;
+            let coord = need_val_operand(module, ctx, c, "sampleimage coordinate")?;
+            emit_value(module, ctx, cur, InstKind::SampleImage { image, coord }, n, ty, line)?;
+        }
+        "min" | "max" => {
+            let (n, ty) = need_result(result, &op, line)?;
+            let a = need_val_operand(module, ctx, c, "min/max lhs")?;
+            c.expect_punct(',')?;
+            let b = need_val_operand(module, ctx, c, "min/max rhs")?;
+            let kind = if op == "min" {
+                InstKind::Min { a, b }
+            } else {
+                InstKind::Max { a, b }
+            };
+            emit_value(module, ctx, cur, kind, n, ty, line)?;
+        }
         "memcpy" => {
             no_result(&result, &op, line)?;
             let dst = need_val_operand(module, ctx, c, "memcpy destination")?;

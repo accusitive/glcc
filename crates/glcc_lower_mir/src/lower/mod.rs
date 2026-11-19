@@ -96,6 +96,12 @@ pub(crate) enum ScalarBuiltin {
     Floor,
     Trap,
     Sync,
+    /// prism (`-fprism`) lane-wise float minimum.
+    Min,
+    /// prism (`-fprism`) lane-wise float maximum.
+    Max,
+    /// prism (`-fprism`) square root (declared by prism.h as `sqrtf`).
+    Sqrt,
 }
 
 /// One function frame: a slot address per local, the block new

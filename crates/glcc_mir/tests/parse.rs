@@ -829,3 +829,72 @@ fn const_operand_round_trip_probe() {
         Err(e) => println!("ERR: {}", e.message),
     }
 }
+
+#[test]
+fn prism_vector_ops_parse_and_verify() {
+    let module = ok(
+        ".func @f sig=(v4xf32, v4xf32) -> v4xf32\n\
+         .params %0:v4xf32, %1:v4xf32\n\
+         b0:\n\
+         \x20 %2:v4xf32 = shufflevector %0, %1 [0,5,2,7]\n\
+         \x20 %3:v4xf32 = min %0, %1\n\
+         \x20 %4:v4xf32 = max %3, %2\n\
+         \x20 %5:f32 = extractlane %4, 1\n\
+         \x20 %6:v4xf32 = sampleimage %0, %1\n\
+         \x20 ret %6\n",
+    );
+    let func = &module.funcs[Func::from_usize(0)];
+    let entry = func.entry;
+    let insts = &func.blocks[entry].insts;
+    assert!(matches!(&func.insts[insts[0]].kind, InstKind::ShuffleVector { lanes, .. } if lanes.as_slice() == [0, 5, 2, 7]));
+    assert!(matches!(&func.insts[insts[1]].kind, InstKind::Min { .. }));
+    assert!(matches!(&func.insts[insts[2]].kind, InstKind::Max { .. }));
+    assert!(matches!(&func.insts[insts[4]].kind, InstKind::SampleImage { .. }));
+    // The result type of a shuffle is a vector of the mask length.
+    let result = func.insts[insts[0]].result.expect("shuffle has a result");
+    assert_eq!(func.values[result].ty, Ty::vector_shape(Ty::Float(FloatKind::F32), 4));
+}
+
+#[test]
+fn prism_vector_ops_dump_spells() {
+    let module = ok(
+        ".func @f sig=(v4xf32, v4xf32) -> v4xf32\n\
+         .params %0:v4xf32, %1:v4xf32\n\
+         b0:\n\
+         \x20 %2:v4xf32 = shufflevector %0, %1 [0,5]\n\
+         \x20 %3:v4xf32 = min %0, %1\n\
+         \x20 %4:v4xf32 = sampleimage %0, %1\n\
+         \x20 ret %4\n",
+    );
+    let dumped = dump_module(&module);
+    assert!(dumped.contains("shufflevector %0, %1 [0,5]"), "dump: {dumped}");
+    assert!(dumped.contains("min %0, %1"), "dump: {dumped}");
+    assert!(dumped.contains("sampleimage %0, %1"), "dump: {dumped}");
+}
+
+#[test]
+fn prism_shufflevector_lane_bounds_rejected() {
+    // A lane index past both operands is rejected (at parse time, and
+    // by the verifier for hand-built modules).
+    err_at(
+        ".func @f sig=(v4xf32, v4xf32) -> v4xf32\n\
+         .params %0:v4xf32, %1:v4xf32\n\
+         b0:\n\
+         \x20 %2:v4xf32 = shufflevector %0, %1 [0,9]\n\
+         \x20 ret %2\n",
+        1,
+        "lane out of range",
+    );
+}
+
+#[test]
+fn prism_shufflevector_scalar_rhs_verify() {
+    // A scalar rhs acts as a one-lane vector (swizzle stores).
+    ok(
+        ".func @f sig=(v4xf32, f32) -> v4xf32\n\
+         .params %0:v4xf32, %1:f32\n\
+         b0:\n\
+         \x20 %2:v4xf32 = shufflevector %0, %1 [0,1,2,4]\n\
+         \x20 ret %2\n",
+    );
+}

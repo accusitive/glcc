@@ -1,0 +1,13 @@
+[package]
+name = "glcc_prism"
+version = "0.1.0"
+edition = "2024"
+
+# The prism shader language backend: builds PrismIR (the shared
+# DX9-class shader IR) from glcc_mir and lowers it to SPIR-V, RSX
+# (PS3), and Xenos (Xbox 360) program text. No Cranelift, no glasm,
+# no object output: shaders are not linked.
+
+[dependencies]
+glcc_mir = { path = "../glcc_mir" }
+glcc_frontend = { path = "../glcc_frontend" }

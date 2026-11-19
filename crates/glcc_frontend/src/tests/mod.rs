@@ -613,6 +613,7 @@ fn c23_u8_literals_are_unsigned_char() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let c17 = LangOpts {
         std: Std::C17,
@@ -620,6 +621,7 @@ fn c23_u8_literals_are_unsigned_char() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -1742,6 +1744,7 @@ fn c23_typeof_unqual_strips_top_level_qualifiers() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let decl_ty = |src: &str| {
         let mut sema = gated_sema(c23);
@@ -2150,6 +2153,7 @@ fn pedantic_errors_reject_implicit_int_and_functions() {
         ms: false,
         clang: false,
         strict: true,
+        prism: false,
     };
     let c99 = LangOpts {
         std: Std::C99,
@@ -2157,6 +2161,7 @@ fn pedantic_errors_reject_implicit_int_and_functions() {
         ms: false,
         clang: false,
         strict: true,
+        prism: false,
     };
     let c23 = LangOpts {
         std: Std::C23,
@@ -2164,6 +2169,7 @@ fn pedantic_errors_reject_implicit_int_and_functions() {
         ms: false,
         clang: false,
         strict: true,
+        prism: false,
     };
     assert!(!tu_diagnostics_with_lang("main(){ return 0; }", c89).iter().any(|d| d.is_error()));
     assert!(!tu_diagnostics_with_lang("int f(void){ return foo(); }", c89).iter().any(|d| d.is_error()));
@@ -2359,6 +2365,7 @@ fn enum_fixed_underlying_type_sizes_and_types() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "enum A : unsigned char { A0 = 1, A1 = 255 };\n\
                enum B : long long { B0 = -1, B1 = 0x100000000LL };\n\
@@ -2393,6 +2400,7 @@ fn enum_fixed_underlying_type_rejects_bad_values_and_types() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     for src in ["enum A : unsigned char { A0 = 256 };", "enum A : _Bool { A0 = 2 };", "enum A : float { A0 };"] {
         let diagnostics = tu_diagnostics_with_lang(src, c23);
@@ -2408,6 +2416,7 @@ fn enum_fixed_underlying_type_redeclaration_checks() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     for src in ["enum E : int; enum E { A };", "enum E : int; enum E : long { A };", "enum E { A }; enum E : int;"] {
         let diagnostics = tu_diagnostics_with_lang(src, c23);
@@ -3373,6 +3382,7 @@ fn c2y_static_assert_expressions() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c2y).is_empty());
     assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1); static_assert(1), 0; }", c2y).is_empty());
@@ -3391,6 +3401,7 @@ fn c2y_static_assert_expressions() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { return (static_assert(1), 5); }", c23).is_empty());
     // `_Static_assert` remains a declaration in pre-C2y permissive modes.
@@ -3406,6 +3417,7 @@ fn c2y_implicit_constexpr_const_integers() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "static const int n = 3;\n\
                int a[n];\n\
@@ -3456,6 +3468,7 @@ fn c2y_implicit_constexpr_const_integers() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let diags = tu_diagnostics_with_lang("static const int n = 3; int a[n];\n", c23);
     assert!(
@@ -3473,6 +3486,7 @@ fn c2y_selection_declaration_attributes() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "int f(void) { if ([[maybe_unused]] int x = 1; x) return x; return 0; }\n\
                int g(void) { if (int x [[maybe_unused]] = 1; x) return x; return 0; }\n\
@@ -3498,6 +3512,7 @@ fn c2y_stdc_rotate_builtins() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "struct S { unsigned s : 5; };\n\
                _Static_assert(_Generic(__builtin_stdc_rotate_left((unsigned char)1, 1), unsigned char: 1, default: 0), \"uchar\");\n\
@@ -3538,6 +3553,7 @@ fn c2y_bit_precise_enum_underlying_types() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -3564,6 +3580,7 @@ fn c2y_bit_precise_enum_underlying_types() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let diags = tu_diagnostics_with_lang("enum E : _BitInt(8) { A = 1 };", c23);
     assert!(diags.iter().any(|d| d.is_error() && d.message.contains("require C2y")), "{diags:#?}");
@@ -3621,6 +3638,7 @@ fn named_loops_resolve_enclosing_targets() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -3649,6 +3667,7 @@ fn named_loops_resolve_enclosing_targets() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { a: while (0) { break a; } return 0; }", c17).is_empty());
     assert!(tu_diagnostics("int f(void) { a: while (0) { break a; } return 0; }").is_empty());
@@ -3663,6 +3682,7 @@ fn selection_declarations_scope_over_branches() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(tu_diagnostics_with_lang("int f(void) { if (int x = 0) return x; else return x + 1; }", c2y).is_empty());
     assert!(tu_diagnostics_with_lang("int f(void) { if (int x = 3; x > 2) return x; return 0; }", c2y).is_empty());
@@ -3678,6 +3698,7 @@ fn selection_declarations_scope_over_branches() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(!tu_diagnostics_with_lang("int f(void) { if (int x = 1) return x; return 0; }", c17).is_empty());
     assert!(tu_diagnostics("int f(void) { if (int x = 1) return x; return 0; }").is_empty());
@@ -3815,6 +3836,7 @@ fn c23_compound_literal_storage_classes() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let ok = "int *f(void) { return &(static int){ 7 }; }\n\
               int *g(void) { return &(static thread_local int){ 7 }; }\n\
@@ -3835,6 +3857,7 @@ fn c23_compound_literal_storage_classes() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let diagnostics = tu_diagnostics_with_lang("int main(void) { int *p = &(static int){ 1 }; return *p; }", c17);
     assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
@@ -4145,6 +4168,7 @@ fn c23_bare_static_assert() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(tu_diagnostics_with_lang("static_assert(1);", c23).is_empty());
     assert!(tu_diagnostics_with_lang("void f(void) { static_assert(1, \"ok\"); }", c23).is_empty());
@@ -4589,6 +4613,7 @@ fn layout_unknown_without_hanging() {
             bitfield: None,
             packed: false,
             align_override: None,
+            prism: crate::parse::PrismAttributes::default(),
             span: Span::dummy(),
         }],
     )
@@ -5758,6 +5783,7 @@ fn c23_labels_before_declarations_and_at_block_end() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let c17 = LangOpts {
         std: Std::C17,
@@ -5765,6 +5791,7 @@ fn c23_labels_before_declarations_and_at_block_end() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(tu_diagnostics_with_lang("int main(void) { goto L; L: int x = 1; return x; }", c23).is_empty());
     assert!(tu_diagnostics_with_lang("int main(void) { switch (0) { case 1: int x = 1; break; } return 0; }", c23).is_empty());
@@ -5780,6 +5807,7 @@ fn c23_bool_true_false() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -5802,6 +5830,7 @@ fn c23_nullptr() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -5840,6 +5869,7 @@ fn c23_nullptr_t_type_keyword() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -5871,6 +5901,7 @@ fn c23_char8_t_type_keyword() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -5900,6 +5931,7 @@ fn c23_auto_deduces_from_initializer() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "int main(void) {\n\
                    auto x = 2.5;\n\
@@ -5928,6 +5960,7 @@ fn c23_constexpr_values_fold_in_constant_contexts() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "constexpr int n = 3;\n\
                int a[n];\n\
@@ -5954,6 +5987,7 @@ fn c23_constexpr_rejects_nonconstant_initializers_and_writes() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     for (src, expected) in [
         ("constexpr int x;", "requires an initializer"),
@@ -5977,6 +6011,7 @@ fn c23_attributes_parse_and_drive_warnings() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let src = "[[nodiscard]] int f(void);\n\
                [[deprecated]] int old(void);\n\
@@ -6008,6 +6043,7 @@ fn c23_attributes_parse_and_drive_warnings() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     let diagnostics = tu_diagnostics_with_lang("[[deprecated]] int x;", c17);
     assert!(diagnostics.iter().any(|d| d.is_error()), "{diagnostics:#?}");
@@ -6021,6 +6057,7 @@ fn c23_auto_rejects_bad_declarations() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     for (src, expected) in [
         ("int main(void) { auto x; return 0; }", "requires an initializer"),
@@ -6043,6 +6080,7 @@ fn c23_bitint_types_and_suffixes() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(
         tu_diagnostics_with_lang(
@@ -6114,6 +6152,7 @@ fn c23_bare_alignof() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert_eq!(enum_value_of_with_lang("enum { N = alignof(long long) };", "N", c23), 8);
     assert_eq!(enum_value_of_with_lang("int x; enum { N = alignof x };", "N", c23), 4);
@@ -6142,6 +6181,7 @@ fn alignas_opens_a_declaration_at_file_and_block_scope() {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     };
     assert!(tu_diagnostics("_Alignas(16) int x;").is_empty());
     assert!(tu_diagnostics("void f(void) { _Alignas(16) int y; (void)y; }").is_empty());
@@ -11192,4 +11232,194 @@ fn named_address_spaces_require_gnu() {
     let mut parser = test_parser("int __seg_gs *p;", &mut sema, &mut interner);
     parser.parse_translation_unit();
     assert!(parser.has_errors());
+}
+
+
+// ---- prism (`-fprism`) profile tests ----
+
+/// Parse + prism-validate `src` with the prism dialect on: returns the
+/// collected error messages (warnings filtered out).
+fn prism_errors(src: &str) -> Vec<String> {
+    let mut sema = Sema::leak_for_tests();
+    sema.lang.prism = true;
+    let mut interner = Interner::new();
+    let tokens = Lexer::new(src, &mut interner).lex_all();
+    let arena = sema.arena;
+    let mut parser = Parser::new(src, tokens, arena, &mut sema, &mut interner);
+    let tu = parser.parse_translation_unit();
+    parser.prism_validate(&tu);
+    parser
+        .diagnostics()
+        .iter()
+        .filter(|d| d.is_error())
+        .map(|d| d.message.clone())
+        .collect()
+}
+
+fn prism_ok(src: &str) {
+    let errors = prism_errors(src);
+    assert!(errors.is_empty(), "expected no prism errors, got: {errors:#?}");
+}
+
+fn prism_rejects(src: &str, expected: &str) {
+    let errors = prism_errors(src);
+    assert!(
+        errors.iter().any(|e| e.contains(expected)),
+        "expected an error containing {expected:?}, got: {errors:#?}"
+    );
+}
+
+const PRISM_SAMPLER: &str = "typedef struct __prism_sampler2d { unsigned int o[2]; } sampler2D;";
+
+const PRISM_INTERFACE: &str = "
+typedef float float4 __attribute__((vector_size(16)));
+typedef float float2 __attribute__((vector_size(8)));
+typedef float float3 __attribute__((vector_size(12)));
+struct VSIn  { [[prism::semantic(POSITION)]] float4 pos; [[prism::semantic(TEXCOORD0)]] float2 uv; };
+struct VSOut { [[prism::semantic(POSITION)]] float4 pos; [[prism::semantic(TEXCOORD0)]] float2 uv; };
+struct PSOut { [[prism::semantic(COLOR0)]] float4 col; };
+";
+
+#[test]
+fn prism_rejects_pointers() {
+    prism_rejects("int *p;", "pointers are not allowed");
+    prism_rejects("int f(int *p) { return 0; }", "pointers are not allowed");
+    prism_rejects("struct S { int *next; };", "pointers are not allowed");
+    prism_rejects("int main(void) { int x; int *p = &x; return 0; }", "pointers are not allowed");
+}
+
+#[test]
+fn prism_rejects_goto_and_labels() {
+    prism_rejects("void f(void) { goto end; end: ; }", "goto");
+}
+
+#[test]
+fn prism_rejects_recursion() {
+    prism_rejects("int f(int n) { return f(n - 1); }", "recursion is not allowed");
+}
+
+#[test]
+fn prism_rejects_extern_calls() {
+    prism_rejects("void f(void) { not_a_shader_function(); }", "call to unsupported function");
+}
+
+#[test]
+fn prism_rejects_double() {
+    prism_rejects("double d;", "double precision is not supported");
+}
+
+#[test]
+fn prism_rejects_variadic() {
+    prism_rejects("int f(int n, ...);", "variadic functions are not allowed");
+}
+
+#[test]
+fn prism_rejects_vla() {
+    prism_rejects("void f(int n) { int a[n]; }", "variable-length arrays are not allowed");
+}
+
+#[test]
+fn prism_rejects_inline_asm() {
+    prism_rejects("void f(void) { asm(\"nop\"); }", "inline asm is not allowed");
+}
+
+#[test]
+fn prism_rejects_sampler_abuse() {
+    prism_rejects(
+        &format!("{PRISM_SAMPLER} sampler2D a; sampler2D b = a;"),
+        "must be declared without an initializer",
+    );
+    prism_rejects(
+        &format!("{PRISM_SAMPLER} sampler2D a; void f(void) {{ sampler2D c; }}"),
+        "samplers can only be declared at file scope",
+    );
+    prism_rejects(
+        &format!("{PRISM_SAMPLER} sampler2D a; sampler2D g(void) {{ return a; }}"),
+        "samplers cannot be returned",
+    );
+}
+
+#[test]
+fn prism_requires_entry_point() {
+    prism_rejects("int helper(void) { return 0; }", "no prism entry point");
+}
+
+#[test]
+fn prism_entry_point_needs_semantics() {
+    // The well-formed case passes.
+    prism_ok(&format!(
+        "{PRISM_INTERFACE} [[prism::vertex]] struct VSOut vs(struct VSIn i) {{ struct VSOut o; o.pos = i.pos; o.uv = i.uv; return o; }}"
+    ));
+    // The missing-semantic case: a struct member without the attribute.
+    prism_rejects(
+        &format!(
+            "{PRISM_INTERFACE} struct Bad {{ float4 pos; }}; [[prism::vertex]] struct Bad vs(struct VSIn i) {{ struct Bad o; return o; }}"
+        ),
+        "needs a [[prism::semantic",
+    );
+}
+
+#[test]
+fn prism_tex2d_validates_arguments() {
+    prism_rejects(
+        &format!("{PRISM_INTERFACE} {PRISM_SAMPLER} sampler2D s; float4 f(int not_sampler, float2 uv) {{ return tex2D(not_sampler, uv); }}"),
+        "first argument must be a file-scope `sampler2D`",
+    );
+    prism_rejects(
+        &format!("{PRISM_INTERFACE} {PRISM_SAMPLER} sampler2D s; float4 f(float4 wrong_width) {{ return tex2D(s, wrong_width); }}"),
+        "coordinates must be a `float2`",
+    );
+}
+
+#[test]
+fn prism_swizzles_check() {
+    prism_rejects(
+        &format!("{PRISM_INTERFACE} [[prism::vertex]] struct VSOut vs(struct VSIn i) {{ struct VSOut o; o.pos = i.pos.q; return o; }}"),
+        "no member 'q'",
+    );
+    prism_rejects(
+        &format!("{PRISM_INTERFACE} [[prism::vertex]] struct VSOut vs(struct VSIn i) {{ struct VSOut o; o.pos.x = i.uv.w; return o; }}"),
+        "out of range",
+    );
+}
+
+#[test]
+fn prism_swizzle_store_scalar_splat() {
+    prism_ok(&format!(
+        "{PRISM_INTERFACE} [[prism::vertex]] struct VSOut vs(struct VSIn i) {{ struct VSOut o; o.pos = i.pos; o.uv = i.uv; o.pos.w = 1.0f; o.pos.xy = i.pos.zw; return o; }}"
+    ));
+}
+
+#[test]
+fn prism_compound_swizzle_assign_rejected() {
+    prism_rejects(
+        &format!("{PRISM_INTERFACE} [[prism::vertex]] struct VSOut vs(struct VSIn i) {{ struct VSOut o; o.pos.xy += i.uv; return o; }}"),
+        "compound assignment to a swizzle",
+    );
+}
+
+#[test]
+fn prism_valid_shader_passes() {
+    prism_ok(&format!(
+        "{PRISM_INTERFACE}\
+         {PRISM_SAMPLER}\
+         sampler2D diffuse;\
+         [[prism::uniform]] float4 tint;\
+         [[prism::fragment]] struct PSOut ps(struct VSOut i) {{\
+             struct PSOut o;\
+             o.col = tex2D(diffuse, i.uv) * min4(max4(tint, splat4(0.0f)), splat4(1.0f));\
+             o.col.a = 1.0f;\
+             return o;\
+         }}"
+    ));
+}
+
+#[test]
+fn prism_12_byte_vector_requires_prism() {
+    // float3 is a prism-mode shape; plain C keeps the power-of-two rule
+    // (the plain-C rejection is covered by the vector tests above).
+    prism_ok(&format!(
+        "{PRISM_INTERFACE} typedef float float3b __attribute__((vector_size(12))); \
+        [[prism::fragment]] struct PSOut ps(struct VSOut i) {{ struct PSOut o; float3b t = (float3b){{ 1.0f, 2.0f, 3.0f }}; o.col.x = t.z; return o; }}"
+    ));
 }

@@ -13,6 +13,7 @@ fn lang(std: Std) -> LangOpts {
         ms: false,
         clang: false,
         strict: false,
+        prism: false,
     }
 }
 

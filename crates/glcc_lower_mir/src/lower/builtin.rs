@@ -1,3 +1,5 @@
+use smallvec::SmallVec;
+
 use super::*;
 
 impl<'s, 'i> Lowerer<'s, 'i> {
@@ -65,6 +67,96 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             Some("fabs" | "fabsf" | "fabsl" | "__builtin_fabs" | "__builtin_fabsf" | "__builtin_fabsl") => unary_builtin(binding, ScalarBuiltin::Abs),
             Some("floor" | "floorf" | "floorl" | "__builtin_floorf") => unary_builtin(binding, ScalarBuiltin::Floor),
             Some("ceil" | "ceilf" | "ceill" | "__builtin_ceilf") => unary_builtin(binding, ScalarBuiltin::Ceil),
+            // prism (`-fprism`) shader builtins, declared by prism.h:
+            // expanded to shader operations, never calls. A user
+            // definition of the name keeps it a normal call.
+            Some(n @ ("min" | "max")) if self.sema.lang.prism => match binding.ty.unqualified() {
+                fe::parse::Ty::Func { params, .. } if params.len() == 2 => {
+                    Some(if n == "min" { ScalarBuiltin::Min } else { ScalarBuiltin::Max })
+                }
+                _ => None,
+            },
+            Some("sqrt" | "sqrtf" | "__builtin_sqrtf") if self.sema.lang.prism => unary_builtin(binding, ScalarBuiltin::Sqrt),
+            _ => None,
+        }
+    }
+
+    /// prism (`-fprism`) vector builtins declared by `prism.h`:
+    /// per-width splats, lane-wise min/max/abs, and the matrix-vector
+    /// product. All expand to MIR operations (dots are `FMul`/`FAdd`
+    /// trees the shader backends fuse into `dp4`). Returns `None` for
+    /// any other name so ordinary builtins and calls proceed.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn lower_prism_builtin(
+        &self,
+        module: &mut mir::ModuleBuilder,
+        func: &mut mir::Function,
+        frame: &mut Frame,
+        funcs: &HashMap<fe::sema::DeclId, mir::Func>,
+        externs: &HashMap<fe::sema::DeclId, mir::Extern>,
+        globals: &HashMap<fe::sema::DeclId, mir::Global>,
+        id: fe::sema::DeclId,
+        args: &[fe::check::CheckedExpr],
+        mir_ty: &mir::Ty,
+    ) -> Option<mir::Value> {
+        let binding = &self.sema.decls[id.0 as usize];
+        if !matches!(binding.kind, fe::sema::BindingKind::Func) || binding.defined {
+            // A user definition of the name stays a normal call.
+            return None;
+        }
+        let name = binding.name.and_then(|n| self.interner.resolve(n))?;
+        match name {
+            "splat2" | "splat3" | "splat4" => {
+                let [arg] = args else { return None };
+                let scalar = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                Some(self.emit(func, frame, mir::InstKind::Splat(scalar), mir_ty.clone()))
+            }
+            "min2" | "min3" | "min4" | "max2" | "max3" | "max4" => {
+                let [a, b] = args else { return None };
+                let a = self.expr_value(module, func, frame, funcs, externs, globals, a);
+                let b = self.expr_value(module, func, frame, funcs, externs, globals, b);
+                let kind = if name.starts_with("min") { mir::InstKind::Min { a, b } } else { mir::InstKind::Max { a, b } };
+                Some(self.emit(func, frame, kind, mir_ty.clone()))
+            }
+            "abs2" | "abs3" | "abs4" => {
+                // `max(v, -v)` clears the sign per lane (a select would
+                // keep `-0.0`, like the scalar `fabs` expansion).
+                let [arg] = args else { return None };
+                let v = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+                let neg = self.emit(func, frame, mir::InstKind::FNeg(v), mir_ty.clone());
+                Some(self.emit(func, frame, mir::InstKind::Max { a: v, b: neg }, mir_ty.clone()))
+            }
+            "mul4x4" => {
+                let [m, v] = args else { return None };
+                let m_val = self.expr_value(module, func, frame, funcs, externs, globals, m);
+                let v_val = self.expr_value(module, func, frame, funcs, externs, globals, v);
+                let f32_ty = mir::Ty::Float(mir::FloatKind::F32);
+                let v4 = mir::Ty::vector_shape(f32_ty.clone(), 4);
+                // One dot per column, then the four scalars compose
+                // through splats and shuffles.
+                let mut dots = Vec::new();
+                for column in 0..4u32 {
+                    let col = self.emit(func, frame, mir::InstKind::ExtractValue { agg: m_val, index: column }, v4.clone());
+                    let mut sum = None;
+                    for lane in 0..4u8 {
+                        let a = self.emit(func, frame, mir::InstKind::ExtractLane { vec: col, lane }, f32_ty.clone());
+                        let b = self.emit(func, frame, mir::InstKind::ExtractLane { vec: v_val, lane }, f32_ty.clone());
+                        let product = self.emit(func, frame, mir::InstKind::FMul(a, b), f32_ty.clone());
+                        sum = Some(match sum {
+                            None => product,
+                            Some(partial) => self.emit(func, frame, mir::InstKind::FAdd(partial, product), f32_ty.clone()),
+                        });
+                    }
+                    dots.push(sum.expect("four lanes produce a dot"));
+                }
+                let splats: Vec<mir::Value> = dots
+                    .into_iter()
+                    .map(|d| self.emit(func, frame, mir::InstKind::Splat(d), v4.clone()))
+                    .collect();
+                let xy = self.emit(func, frame, mir::InstKind::ShuffleVector { lhs: splats[0], rhs: splats[1], lanes: SmallVec::from_slice(&[0, 5]) }, mir::Ty::vector_shape(f32_ty.clone(), 2));
+                let xyz = self.emit(func, frame, mir::InstKind::ShuffleVector { lhs: xy, rhs: splats[2], lanes: SmallVec::from_slice(&[0, 1, 4]) }, mir::Ty::vector_shape(f32_ty.clone(), 3));
+                Some(self.emit(func, frame, mir::InstKind::ShuffleVector { lhs: xyz, rhs: splats[3], lanes: SmallVec::from_slice(&[0, 1, 2, 4]) }, mir_ty.clone()))
+            }
             _ => None,
         }
     }
@@ -230,6 +322,29 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let raw = self.emit(func, frame, mir::InstKind::Bitcast(combined), operand_mir.clone());
             return self.convert(func, frame, raw, &x.ty, fe_ty);
         }
+        // prism (`-fprism`): `min`/`max` are lane-wise MIR operations
+        // (the checker's prototype validates the float shape).
+        if matches!(builtin, ScalarBuiltin::Min | ScalarBuiltin::Max) {
+            let lhs = &args[0];
+            let rhs = &args[1];
+            let operand_mir = lower_ty(&lhs.ty, self.sema, self.interner);
+            let a = self.expr_value(module, func, frame, funcs, externs, globals, lhs);
+            let b = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
+            let kind = if matches!(builtin, ScalarBuiltin::Min) {
+                mir::InstKind::Min { a, b }
+            } else {
+                mir::InstKind::Max { a, b }
+            };
+            let raw = self.emit(func, frame, kind, operand_mir);
+            return self.convert(func, frame, raw, &lhs.ty, fe_ty);
+        }
+        if matches!(builtin, ScalarBuiltin::Sqrt) {
+            let arg = &args[0];
+            let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
+            let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
+            let raw = self.emit(func, frame, mir::InstKind::Sqrt(value), operand_mir);
+            return self.convert(func, frame, raw, &arg.ty, fe_ty);
+        }
         let arg = &args[0];
         let operand_mir = lower_ty(&arg.ty, self.sema, self.interner);
         let value = self.expr_value(module, func, frame, funcs, externs, globals, arg);
@@ -240,7 +355,8 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             ScalarBuiltin::Bswap => mir::InstKind::Bswap(value),
             ScalarBuiltin::Ceil => mir::InstKind::Ceil(value),
             ScalarBuiltin::Floor => mir::InstKind::Floor(value),
-            ScalarBuiltin::Trap | ScalarBuiltin::Sync | ScalarBuiltin::Abs | ScalarBuiltin::Clrsb | ScalarBuiltin::Parity | ScalarBuiltin::Copysign => {
+            ScalarBuiltin::Trap | ScalarBuiltin::Sync | ScalarBuiltin::Abs | ScalarBuiltin::Clrsb | ScalarBuiltin::Parity | ScalarBuiltin::Copysign
+            | ScalarBuiltin::Min | ScalarBuiltin::Max | ScalarBuiltin::Sqrt => {
                 unreachable!("handled above")
             }
         };

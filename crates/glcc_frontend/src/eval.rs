@@ -1166,6 +1166,11 @@ fn eval_const_in(expr: &CheckedExpr, sema: &Sema, interner: &Interner, addr_cond
         | CheckedExprKind::CompoundLiteral { .. }
         | CheckedExprKind::Assign(..)
         | CheckedExprKind::CompoundAssign { .. }
+        // prism swizzles and texture samples are runtime values.
+        | CheckedExprKind::Swizzle { .. }
+        | CheckedExprKind::SwizzleStore { .. }
+        | CheckedExprKind::PrismSample { .. }
+        | CheckedExprKind::Splat { .. }
         // A static assertion has type void and no value.
         | CheckedExprKind::StaticAssert => None,
         // `sizeof` folds when layout knows the size (complete types,

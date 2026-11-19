@@ -1,4 +1,5 @@
 use super::*;
+use smallvec::SmallVec;
 
 impl<'s, 'i> Lowerer<'s, 'i> {
     /// Rvalue of an expression as a MIR value.
@@ -618,6 +619,13 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     if let Some(builtin) = self.scalar_builtin(id) {
                         return self.lower_scalar_builtin(module, func, frame, funcs, externs, globals, builtin, args, &expr.ty, &mir_ty);
                     }
+                    // prism (`-fprism`) vector builtins from prism.h:
+                    // expanded to shader operations, never calls.
+                    if self.sema.lang.prism
+                        && let Some(value) = self.lower_prism_builtin(module, func, frame, funcs, externs, globals, id, args, &mir_ty)
+                    {
+                        return value;
+                    }
                     // NaN/infinity constructors (`__builtin_nanf`,
                     // `__builtin_inff`, ...): no library symbol stands
                     // behind them either (the runtime ships no stubs),
@@ -922,9 +930,25 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             fe::check::CheckedExprKind::ShuffleVector { args, indices } => {
                 // Lane `i` takes the constant `indices[i]` of the
                 // concatenated operands; `-1` and out-of-range are
-                // undef. Both shapes (first-class and bit-pun) ride
-                // byte-indexed slot loads.
+                // undef. First-class shapes emit the MIR shuffle
+                // directly (out-of-range lanes clamp to 0: the mask has
+                // no undef encoding); bit-pun shapes ride byte-indexed
+                // slot loads.
                 let shape = self.vector_shape(&args[0].ty);
+                if shape.first_class {
+                    let a_val = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
+                    let b_val = if args.len() > 1 {
+                        self.expr_value(module, func, frame, funcs, externs, globals, &args[1])
+                    } else {
+                        a_val
+                    };
+                    let total_lanes = shape.lanes * if args.len() > 1 { 2 } else { 1 };
+                    let lanes: SmallVec<[u8; 8]> = indices
+                        .iter()
+                        .map(|i| if *i >= 0 && *i <= i128::from(total_lanes) { *i as u8 } else { 0 })
+                        .collect();
+                    self.emit(func, frame, mir::InstKind::ShuffleVector { lhs: a_val, rhs: b_val, lanes }, mir_ty)
+                } else {
                 let elem_size = shape.elem_mir.size_bytes();
                 let a_val = self.expr_value(module, func, frame, funcs, externs, globals, &args[0]);
                 let a_slot = self.alloca(func, frame, lower_ty(&args[0].ty, self.sema, self.interner));
@@ -960,6 +984,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     self.store(func, frame, out_addr, val, false);
                 }
                 self.load(func, frame, out_slot, mir_ty, false)
+                }
             }
             fe::check::CheckedExprKind::StmtExpr { items } => {
                 // GNU statement expression: lower items in order like
@@ -1186,6 +1211,58 @@ impl<'s, 'i> Lowerer<'s, 'i> {
                     raw
                 };
                 self.convert(func, frame, raw, &arg.ty, &expr.ty)
+            }
+            // prism (`-fprism`): swizzle reads, swizzle stores, texture
+            // samples, and scalar splats. Swizzles ride the first-class
+            // MIR vectors `lower_ty` produces for prism shapes.
+            fe::check::CheckedExprKind::Swizzle { base, lanes } => {
+                let base_val = self.expr_value(module, func, frame, funcs, externs, globals, base);
+                if lanes.len() == 1 {
+                    self.emit(func, frame, mir::InstKind::ExtractLane { vec: base_val, lane: lanes[0] }, mir_ty)
+                } else {
+                    self.emit(
+                        func,
+                        frame,
+                        mir::InstKind::ShuffleVector { lhs: base_val, rhs: base_val, lanes: lanes.iter().copied().collect() },
+                        mir_ty,
+                    )
+                }
+            }
+            fe::check::CheckedExprKind::SwizzleStore { base, lanes, rhs } => {
+                // Read the base lvalue once, shuffle the assigned lanes
+                // over its contents, store back; the assignment
+                // evaluates to the stored vector. A scalar rhs (only
+                // single-lane stores) rides the shuffle's scalar rule.
+                let base_ty = lower_ty(&base.ty, self.sema, self.interner);
+                let base_lanes = match &base_ty {
+                    mir::Ty::Vector { lanes, .. } => *lanes,
+                    _ => panic!("swizzle store on a non-vector base"),
+                };
+                let rhs_mir_ty = lower_ty(&rhs.ty, self.sema, self.interner);
+                let (base_addr, _) = self.place(module, func, frame, funcs, externs, globals, base);
+                let old = self.load(func, frame, base_addr, base_ty.clone(), false);
+                let rhs_val = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
+                let mask: SmallVec<[u8; 8]> = (0..base_lanes)
+                    .map(|i| match lanes.iter().position(|&d| u32::from(d) == i) {
+                        Some(j) => base_lanes as u8 + j as u8,
+                        None => i as u8,
+                    })
+                    .collect();
+                let combined = self.emit(func, frame, mir::InstKind::ShuffleVector { lhs: old, rhs: rhs_val, lanes: mask }, base_ty.clone());
+                self.store(func, frame, base_addr, combined, access_volatile(base, &self.sema.decls));
+                combined
+            }
+            fe::check::CheckedExprKind::PrismSample { global, coord } => {
+                // The resource is a file-scope global; the sample op
+                // references it through its address (one `GlobalAddr`
+                // per resource, CSE'd away).
+                let image = self.emit(func, frame, mir::InstKind::GlobalAddr { global: globals[global] }, mir::Ty::ptr(mir::Ty::Void));
+                let coord_val = self.expr_value(module, func, frame, funcs, externs, globals, coord);
+                self.emit(func, frame, mir::InstKind::SampleImage { image, coord: coord_val }, mir_ty)
+            }
+            fe::check::CheckedExprKind::Splat { expr } => {
+                let value = self.expr_value(module, func, frame, funcs, externs, globals, expr);
+                self.emit(func, frame, mir::InstKind::Splat(value), mir_ty)
             }
             other => todo!("expression lowering for {other:?}"),
         }

@@ -35,6 +35,7 @@ mod atomic;
 mod gnu;
 mod ia32;
 mod msvc;
+mod prism;
 mod prototypes;
 mod sync;
 
@@ -311,6 +312,32 @@ pub enum CheckedExprKind<'a> {
     /// is validated with the function's `goto`s and dispatched on at
     /// lowering.
     LabelAddr(SymbolU32),
+    /// prism swizzle read (`v.xyzw`, `-fprism`): the base is a vector,
+    /// `lanes` are source lane indices (result width = `lanes.len()`).
+    /// A read-only rvalue; lowering becomes a MIR `ShuffleVector`.
+    Swizzle {
+        base: &'a CheckedExpr<'a>,
+        lanes: &'a [u8],
+    },
+    /// prism swizzle store (`v.xy = e`, `-fprism`): the whole base
+    /// lvalue is read once, the assigned lanes replace theirs via a
+    /// shuffle, and the vector is stored back. `lanes` are the
+    /// destination lane indices; the rhs type is the swizzle's.
+    SwizzleStore {
+        base: &'a CheckedExpr<'a>,
+        lanes: &'a [u8],
+        rhs: &'a CheckedExpr<'a>,
+    },
+    /// prism `tex2D(sampler, coord)` (`-fprism`): the sampler is a
+    /// file-scope resource (never a flowing value), so the call node
+    /// names the resource binding directly.
+    PrismSample {
+        global: DeclId,
+        coord: &'a CheckedExpr<'a>,
+    },
+    /// prism scalar-to-vector splat (`-fprism`): `expr` (a scalar) is
+    /// broadcast to this node's vector type (`v.xy = 1.0f`).
+    Splat { expr: &'a CheckedExpr<'a> },
 }
 
 // ---- small type predicates (free functions; no Sema state needed) ----
@@ -2991,6 +3018,12 @@ impl<'a> Sema<'a> {
 
     fn check_assign(&self, op: AssignOp, lhs: &Expr<'a>, rhs: &Expr<'a>, interner: &Interner, span: Span) -> Result<CheckedExpr<'a>, CompileError> {
         let l = self.check_expr(lhs, interner)?;
+        // prism (`-fprism`): a swizzle on the left of `=` replaces the
+        // named lanes of the whole vector (`v.xy = e`), so intercept
+        // before the plain lvalue rules.
+        if self.lang.prism && let CheckedExprKind::Swizzle { base, lanes } = &l.kind {
+            return self.check_swizzle_store(base, lanes, op, rhs, interner, span, &l);
+        }
         if !self.is_lvalue(&l) {
             return Err(CompileError::new("assignment to a non-lvalue", l.span));
         }
@@ -3225,6 +3258,12 @@ impl<'a> Sema<'a> {
         // inline instead of resolving to a declared prototype.
         if let Expr::Ident { name, .. } = func {
             if let Some(text) = interner.resolve(*name) {
+                // prism (`-fprism`): `tex2D` names a file-scope sampler
+                // resource plus coordinates, checked into its own node.
+                // A user-defined `tex2D` (a defined function) wins.
+                if self.lang.prism && text == "tex2D" && !self.callee_is_defined(*name) {
+                    return self.check_tex2d(args, interner, span);
+                }
                 if text.starts_with("__atomic_") {
                     return self.check_atomic(text, args, interner, span);
                 }
@@ -3438,6 +3477,24 @@ impl<'a> Sema<'a> {
             checked = self.decay_checked(checked);
             if !matches!(&checked.ty, Ty::Pointer { .. }) {
                 return Err(CompileError::new("`->` requires a pointer to struct or union", checked.span));
+            }
+        }
+        // prism (`-fprism`): swizzle member access on vector operands
+        // (`v.xyzw`, `.rgba` aliases, up to four lanes of any vector).
+        // Vectors have no real members, so this intercepts before the
+        // struct path; a non-swizzle spelling on a vector gets a
+        // prism-specific error instead of "member access requires a
+        // struct".
+        if self.lang.prism && !arrow && let Ty::Vector { .. } = checked.ty.unqualified() {
+            let text = interner.resolve(field).unwrap_or("");
+            match prism::parse_swizzle(text) {
+                Some(lanes) => return self.swizzle_node(checked, &lanes, span),
+                None => {
+                    return Err(CompileError::new(
+                        format!("vectors have no member '{text}'; swizzles use the .xyzw or .rgba lanes"),
+                        span,
+                    ));
+                }
             }
         }
         let target_ty = if arrow {

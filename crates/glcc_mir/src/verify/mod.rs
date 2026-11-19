@@ -171,6 +171,32 @@ fn check_inst_types(func: &Function, inst: crate::ir::Inst, kind: &InstKind, err
             }
         }
         InstKind::Load { .. } | InstKind::Store { .. } => {}
+        InstKind::ShuffleVector { lhs, rhs, lanes } => {
+            let lhs_lanes = match ty_of(*lhs) {
+                Ty::Vector { lanes, .. } => lanes,
+                other => {
+                    errors.push(format!("{}: shufflevector lhs is not a vector: {other:?}", func.name));
+                    return;
+                }
+            };
+            // A scalar rhs is a one-lane vector that every out-of-range
+            // index selects (prism swizzle stores).
+            let rhs_lanes = match ty_of(*rhs) {
+                Ty::Vector { lanes, .. } => lanes,
+                other if other.is_scalar() => 1,
+                other => {
+                    errors.push(format!("{}: shufflevector rhs is neither a vector nor a scalar: {other:?}", func.name));
+                    return;
+                }
+            };
+            if lanes.iter().any(|&l| u32::from(l) >= lhs_lanes + rhs_lanes) {
+                errors.push(format!("{}: shufflevector lane out of range (lhs {lhs_lanes} + rhs {rhs_lanes})", func.name));
+            }
+        }
+        InstKind::SampleImage { image, coord } => {
+            let _ = (image, coord);
+        }
+        InstKind::Min { a: _, b: _ } | InstKind::Max { a: _, b: _ } => {}
         _ => {}
     }
     let _ = term_ok(func);

@@ -23,6 +23,11 @@ pub(crate) struct VecShape {
     pub(crate) elem_mir: mir::Ty,
     pub(crate) lanes: u32,
     pub(crate) bytes: u64,
+    /// Whether `elem_mir` is a first-class [`mir::Ty::Vector`] (as
+    /// opposed to a bit-punned integer image): 16-byte vectors always;
+    /// also 8- and 12-byte f32/i32 vectors in prism mode (`-fprism`),
+    /// which SPIR-V and the shader ISAs model natively.
+    pub(crate) first_class: bool,
 }
 
 /// Bit width of a bit-punned vector's integer image (2-, 4-, or 8-byte
@@ -46,11 +51,17 @@ impl<'s, 'i> Lowerer<'s, 'i> {
         let fe::parse::Ty::Vector { elem, len } = ty.unqualified() else {
             panic!("vector shape of a non-vector type");
         };
+        let elem_mir = lower_ty(elem, self.sema, self.interner);
+        // First-class when the vector itself lowered to a MIR vector:
+        // 16 bytes always, and the 8/12-byte prism shapes too (see
+        // `lower_ty`).
+        let first_class = matches!(lower_ty(ty, self.sema, self.interner), mir::Ty::Vector { .. });
         VecShape {
             elem_fe: (**elem).clone(),
-            elem_mir: lower_ty(elem, self.sema, self.interner),
+            elem_mir,
             lanes: *len,
             bytes: self.sema.type_size(ty, self.interner).expect("vector has a size"),
+            first_class,
         }
     }
 
@@ -305,7 +316,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
             let y = self.expr_value(module, func, frame, funcs, externs, globals, rhs);
             (self.vector_splat(func, frame, scalar, &shape), y)
         };
-        if shape.bytes < 16 {
+        if !shape.first_class {
             return self.vec_image_binary(func, frame, op, x, y, &shape, mir_ty, comparison);
         }
         // First-class MIR vector: shape-generic instructions.
@@ -460,7 +471,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// Broadcast a scalar operand across a vector: a first-class MIR
     /// `Splat`, or the bit-punned image with the scalar in every lane.
     pub(crate) fn vector_splat(&self, func: &mut mir::Function, frame: &mut Frame, scalar: mir::Value, shape: &VecShape) -> mir::Value {
-        if shape.bytes < 16 {
+        if !shape.first_class {
             return self.vec_splat(func, frame, scalar, shape);
         }
         self.emit(func, frame, mir::InstKind::Splat(scalar), mir::Ty::Vector {
@@ -473,7 +484,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// lanes subtract from zero (per lane for bit-punned shapes —
     /// a whole-image negation is lane-exact only at one lane).
     pub(crate) fn vector_neg(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, shape: &VecShape, mir_ty: &mir::Ty) -> mir::Value {
-        if shape.bytes < 16 {
+        if !shape.first_class {
             if float_lanes(shape) {
                 let lanes = self.vec_split_float(func, frame, value, shape);
                 let negated: Vec<mir::Value> = lanes
@@ -513,7 +524,7 @@ impl<'s, 'i> Lowerer<'s, 'i> {
     /// The bit-punned image needs nothing special (a whole-image XOR is
     /// lane-exact); the first-class vector splats the element's `-1`.
     pub(crate) fn vector_bitnot(&self, func: &mut mir::Function, frame: &mut Frame, value: mir::Value, shape: &VecShape, mir_ty: &mir::Ty) -> mir::Value {
-        if shape.bytes < 16 {
+        if !shape.first_class {
             return self.emit(func, frame, mir::InstKind::Not(value), mir_ty.clone());
         }
         let elem_bits = (shape.elem_mir.size_bytes() * 8) as u32;

@@ -845,6 +845,20 @@ impl<'a, 'b> Parser<'a, 'b> {
     pub fn diagnostics(&self) -> Vec<CompileError> {
         self.diagnostics.borrow().clone()
     }
+    /// Run the prism profile validation pass over the finished
+    /// translation unit and record its diagnostics (prism mode only;
+    /// the driver calls this between `parse_translation_unit` and MIR
+    /// lowering). Unlike fused checking, errors here do not latch —
+    /// the walk is over a complete tree, so each violation renders.
+    pub fn prism_validate(&mut self, tu: &TranslationUnit) {
+        for err in self.sema.prism_validate(tu, self.intern) {
+            if self.emit_human {
+                self.emit(&err);
+                crate::span::mark_diagnostic_emitted();
+            }
+            self.diagnostics.borrow_mut().push(err);
+        }
+    }
     /// Take the collected diagnostics, leaving the sink empty.
     pub fn take_diagnostics(&self) -> Vec<CompileError> {
         mem::take(&mut *self.diagnostics.borrow_mut())
@@ -1349,6 +1363,11 @@ impl<'a, 'b> Parser<'a, 'b> {
         let mut std_attrs = specifiers.attrs.std;
         std_attrs.merge(attrs.std);
         self.sema.std_attrs.insert(id, std_attrs);
+        let mut prism_attrs = specifiers.attrs.prism;
+        prism_attrs.merge(attrs.prism);
+        if !prism_attrs.is_empty() {
+            self.sema.prism_attrs.insert(id, prism_attrs);
+        }
         // The merged binding knows about a `naked` prototype even when
         // this definition's attributes omit it.
         self.naked_function = self.sema.decls[id.0 as usize].naked;
@@ -2997,6 +3016,16 @@ impl<'a, 'b> Parser<'a, 'b> {
             | CheckedExprKind::CountofTy(_)
             | CheckedExprKind::AlignofTy(_)
             | CheckedExprKind::StaticAssert => {}
+            // prism swizzles hold no statements, but their base (and a
+            // swizzle store's rhs, and a sample's coordinates) may be a
+            // statement expression.
+            CheckedExprKind::Swizzle { base, .. } => self.check_flow_expr(base, labels, gotos, scope, fv),
+            CheckedExprKind::SwizzleStore { base, rhs, .. } => {
+                self.check_flow_expr(base, labels, gotos, scope, fv);
+                self.check_flow_expr(rhs, labels, gotos, scope, fv);
+            }
+            CheckedExprKind::PrismSample { coord, .. } => self.check_flow_expr(coord, labels, gotos, scope, fv),
+            CheckedExprKind::Splat { expr } => self.check_flow_expr(expr, labels, gotos, scope, fv),
             // Taking a label's address is a use of it, checked exactly
             // like a `goto`: the label must exist in this function.
             CheckedExprKind::LabelAddr(name) => gotos.push((*name, expr.span)),
@@ -3938,6 +3967,11 @@ impl<'a, 'b> Parser<'a, 'b> {
             let mut std_attrs = specifiers.attrs.std;
             std_attrs.merge(suffix.std);
             self.sema.std_attrs.insert(id, std_attrs);
+            let mut prism_attrs = specifiers.attrs.prism;
+            prism_attrs.merge(suffix.prism);
+            if !prism_attrs.is_empty() {
+                self.sema.prism_attrs.insert(id, prism_attrs);
+            }
             if has_init {
                 let init = match inferred_init {
                     Some(init) => init,
@@ -5633,7 +5667,10 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     fn peek_std_attributes(&self) -> bool {
-        self.sema.lang.standard_includes(Std::C23)
+        // Prism mode accepts `[[...]]` at every standard level: the
+        // dialect owns the syntax, like `__attribute__` owns the GNU
+        // one.
+        (self.sema.lang.standard_includes(Std::C23) || self.sema.lang.prism)
             && matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LBracket)))
             && matches!(self.tokens.peek_nth(1).map(|located| &located.val), Some(Token::Punctuator(Punctuator::LBracket)))
     }
@@ -5641,8 +5678,10 @@ impl<'a, 'b> Parser<'a, 'b> {
     /// Parse one or more C23 `[[attribute-list]]` groups, validating
     /// names and parenthesized arguments. Standard attributes with a
     /// frontend effect are recorded; namespaced and unknown attributes
-    /// are accepted and ignored.
-    fn parse_std_attributes(&mut self) -> StdAttributes {
+    /// are accepted and ignored. `[[prism::*]]` attributes decode into
+    /// `prism` (prism mode only — elsewhere they are ignored like any
+    /// other unknown namespace).
+    fn parse_std_attributes(&mut self, prism: &mut PrismAttributes) -> StdAttributes {
         let mut out = StdAttributes::default();
         while self.peek_std_attributes() {
             self.tokens.advance();
@@ -5688,6 +5727,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                 let enabled = namespace.as_deref().is_none_or(|ns| match ns {
                     "gnu" => self.sema.lang.gnu,
                     "clang" => self.sema.lang.clang,
+                    "prism" => self.sema.lang.prism,
                     _ => false,
                 });
                 if enabled {
@@ -5702,8 +5742,20 @@ impl<'a, 'b> Parser<'a, 'b> {
                         _ => {}
                     }
                 }
+                if namespace.as_deref() == Some("prism") && self.sema.lang.prism {
+                    match name.as_str() {
+                        "vertex" => prism.stage = Some(PrismStage::Vertex),
+                        "fragment" => prism.stage = Some(PrismStage::Fragment),
+                        "uniform" => prism.uniform = true,
+                        _ => {}
+                    }
+                }
                 if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::LParen))) {
-                    self.skip_balanced_parens();
+                    if namespace.as_deref() == Some("prism") && self.sema.lang.prism {
+                        self.parse_prism_attr_payload(&name, prism);
+                    } else {
+                        self.skip_balanced_parens();
+                    }
                 }
                 if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
                     self.tokens.advance();
@@ -5731,11 +5783,36 @@ impl<'a, 'b> Parser<'a, 'b> {
         out
     }
 
+    /// The parenthesized payload of a `[[prism::...]]` attribute. Only
+    /// `semantic(NAME)` carries one: the hardware binding spelling, as
+    /// an identifier or string (`[[prism::semantic(POSITION)]]`).
+    fn parse_prism_attr_payload(&mut self, name: &str, prism: &mut PrismAttributes) {
+        self.tokens.advance(); // `(`
+        if name == "semantic" {
+            match self.tokens.advance().map(|located| located.val) {
+                Some(Token::Identifier(sym)) => prism.semantic = Some(sym),
+                Some(Token::StringLiteral(lit)) => prism.semantic = Some(lit.spelling),
+                other => {
+                    let span = self.peek_span();
+                    self.fail::<()>(span, format!("expected a semantic name in [[prism::semantic]], got {}", self.describe_token(other)));
+                    return;
+                }
+            }
+        } else {
+            let span = self.peek_span();
+            self.fail::<()>(span, format!("[[prism::{name}]] does not take arguments"));
+            return;
+        }
+        self.expect_punct(Punctuator::RParen);
+    }
+
     fn parse_gnu_annotations_impl(&mut self, asm_labels: bool) -> GnuAttributes {
         let mut out = GnuAttributes::default();
         loop {
             if self.peek_std_attributes() {
-                out.std.merge(self.parse_std_attributes());
+                let mut prism = PrismAttributes::default();
+                out.std.merge(self.parse_std_attributes(&mut prism));
+                out.prism.merge(prism);
             // Both spellings are accepted: `__attribute` appears in the
             // wild next to `__attribute__` (GCC and clang take both).
             } else if (self.peek_ext("__attribute__") || self.peek_ext("__attribute"))
@@ -6109,7 +6186,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                         Some(crate::eval::Value::Int(n)) if n > 0 => u64::try_from(n).unwrap_or(u64::MAX),
                         _ => return self.fail(name_span, "attribute `vector_size` needs a positive integer constant"),
                     };
-                    if !n.is_power_of_two() {
+                    if !n.is_power_of_two() && !(self.sema.lang.prism && n == 12) {
                         return self.fail_code(name_span, DiagCode::InvalidAlignment, format!("vector size '{n}' is not a power of 2"));
                     }
                     let n = u32::try_from(n).unwrap_or(u32::MAX);
@@ -6639,6 +6716,7 @@ impl<'a, 'b> Parser<'a, 'b> {
                     bitfield,
                     packed: member_attrs.is_packed(),
                     align_override: member_attrs.aligned,
+                    prism: member_attrs.prism,
                     span: member_span,
                 });
                 if matches!(self.tokens.peek_val(), Some(Token::Punctuator(Punctuator::Comma))) {
@@ -7733,8 +7811,13 @@ impl<'a, 'b> Parser<'a, 'b> {
             return self.fail(span, msg);
         }
         let lanes = (n as u64) / elem_size;
-        if n > 16 || (n < 16 && (n != 2 && n != 4 && n != 8)) {
-            let msg = format!("vector size {n} is outside the supported range (2, 4, 8, or 16 bytes)");
+        // Prism widens the supported shapes to 12 bytes: `float3` is a
+        // first-class three-lane vector there (SPIR-V has vec3; the
+        // console ISAs pad it into a 4-wide register). Plain C keeps
+        // the power-of-two shapes.
+        let prism3 = self.sema.lang.prism && n == 12;
+        if n > 16 || (n < 16 && (n != 2 && n != 4 && n != 8) && !prism3) {
+            let msg = format!("vector size {n} is outside the supported range (2, 4, 8, or 16 bytes; 12 in prism mode)");
             return self.fail(span, msg);
         }
         if n == 16 && !lanes.is_power_of_two() {
@@ -7952,6 +8035,42 @@ impl StdAttributes {
     }
 }
 
+/// Shader stage of a prism entry point (`[[prism::vertex]]` /
+/// `[[prism::fragment]]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrismStage {
+    Vertex,
+    Fragment,
+}
+
+/// Decoded `[[prism::*]]` attributes (the prism shader dialect,
+/// `-fprism`). Like the GNU attributes, decoded to effects at parse
+/// time and consumed later: the stage/semantic/uniform facts build
+/// the shader interface in `check/prism.rs` and `crates/glcc_prism`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PrismAttributes {
+    /// `[[prism::vertex]]` / `[[prism::fragment]]`: the declared
+    /// function is a shader entry point of that stage.
+    pub stage: Option<PrismStage>,
+    /// `[[prism::semantic(NAME)]]`: the hardware binding (POSITION,
+    /// TEXCOORD0, COLOR0, ...) of an entry point's input or output.
+    pub semantic: Option<SymbolU32>,
+    /// `[[prism::uniform]]`: the object is a host-set uniform.
+    pub uniform: bool,
+}
+
+impl PrismAttributes {
+    pub fn is_empty(&self) -> bool {
+        self.stage.is_none() && self.semantic.is_none() && !self.uniform
+    }
+
+    fn merge(&mut self, other: PrismAttributes) {
+        self.stage = self.stage.or(other.stage);
+        self.semantic = self.semantic.or(other.semantic);
+        self.uniform |= other.uniform;
+    }
+}
+
 bitflags::bitflags! {
     /// Boolean GNU attribute effects, packed together: the only flags
     /// the frontend models. The options (`aligned`, `alias`, ...) stay
@@ -8002,6 +8121,8 @@ pub(crate) struct GnuAttributes {
     /// renamed C++ entities this way, e.g. the C library overloads it
     /// emits as `_Z6strchrPci(...) __asm__("strchr")`.
     pub asm_label: Option<SymbolU32>,
+    /// `[[prism::*]]` attributes on the same declaration (prism mode).
+    pub prism: PrismAttributes,
 }
 
 impl GnuAttributes {
@@ -8040,6 +8161,7 @@ impl GnuAttributes {
         self.alias = self.alias.or(other.alias);
         self.section = self.section.or(other.section);
         self.asm_label = self.asm_label.or(other.asm_label);
+        self.prism.merge(other.prism);
     }
 }
 

@@ -113,6 +113,19 @@ impl Ty {
         Ty::Vector { elem: Box::new(elem), lanes }
     }
 
+    /// A prism vector shape: f32 or i32 lanes, two/three/four of them.
+    /// The vectorizer's 128-bit invariant ([`Ty::vector`]) does not
+    /// apply here: prism lowers first-class `float2`/`float3`/`float4`
+    /// types, which SPIR-V models natively and the shader ISAs pack
+    /// into 4-wide registers.
+    pub fn vector_shape(elem: Ty, lanes: u32) -> Self {
+        match (&elem, lanes) {
+            (Ty::Float(FloatKind::F32), 2 | 3 | 4) | (Ty::Int { bits: 32 }, 2 | 3 | 4) => {}
+            _ => panic!("prism vector shapes are 2/3/4 lanes of f32 or i32, got {lanes} x {elem:?}"),
+        }
+        Ty::Vector { elem: Box::new(elem), lanes }
+    }
+
     /// Element type and lane count of a vector, or `None`.
     pub fn as_vector(&self) -> Option<(&Ty, u32)> {
         match self {

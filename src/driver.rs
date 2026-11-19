@@ -336,6 +336,14 @@ pub enum Action {
     /// `--emit-full-mir`: like `EmitMir`, with the source location of
     /// every located instruction annotated.
     EmitFullMir,
+    /// `--emit-isa`: prism IR text (the shader IR's canonical form).
+    EmitIsa,
+    /// `--emit-spirv`: SPIR-V binary.
+    EmitSpirv,
+    /// `--emit-rsx`: RSX (PS3) program text.
+    EmitRsx,
+    /// `--emit-xenos`: Xenos (Xbox 360) microcode text.
+    EmitXenos,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -456,6 +464,10 @@ pub struct Job {
     /// `_Future(T)`, `__builtin_await`). Off by default so no existing
     /// code can accidentally compile as coroutines.
     pub async_enabled: bool,
+    /// `-fprism`: compile as the prism shader dialect (see
+    /// `crates/glcc_prism` and `docs/prism.md`). Output goes through
+    /// the `--emit-*` shader actions, not the object/link pipeline.
+    pub prism: bool,
     /// `--error-format=json|human`: how frontend diagnostics are
     /// reported. `human` (the default) renders them through codespan to
     /// stderr; `json` prints the machine-readable form for editors.
@@ -515,6 +527,7 @@ pub fn language(job: &Job) -> LangOpts {
         lang.clang = clang;
     }
     lang.strict = job.pedantic_errors;
+    lang.prism = job.prism;
     lang
 }
 
@@ -558,6 +571,7 @@ impl Default for Job {
             pedantic_errors: false,
             pp_native: None,
             async_enabled: false,
+            prism: false,
             error_format: ErrorFormat::Human,
             warnings: Vec::new(),
         }
@@ -844,6 +858,10 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
             "-fsyntax-only" => job.action = Action::SyntaxOnly,
             "--emit-mir" => job.action = Action::EmitMir,
             "--emit-full-mir" => job.action = Action::EmitFullMir,
+            "--emit-isa" => job.action = Action::EmitIsa,
+            "--emit-spirv" => job.action = Action::EmitSpirv,
+            "--emit-rsx" => job.action = Action::EmitRsx,
+            "--emit-xenos" => job.action = Action::EmitXenos,
             // Accepted by the pre-scan above (which also rejects it
             // for the C flavor); nothing position-dependent to do here.
             "--edg-c" => {}
@@ -987,6 +1005,10 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
                     job.warn(format!("profiling instrumentation is not supported; ignoring '{s}'"));
                 } else if s == "-fglcc-async" {
                     job.async_enabled = true;
+                } else if s == "-fprism" {
+                    job.prism = true;
+                } else if s == "-fno-prism" {
+                    job.prism = false;
                 } else if s == "-fgnu-extensions" {
                     job.ext_gnu = Some(true);
                 } else if s == "-fno-gnu-extensions" {
@@ -1052,6 +1074,12 @@ pub fn parse_args_flavor(args: &[OsString], flavor: Flavor) -> Result<Job, Strin
     }
     if !job.backend_explicit {
         job.backend = default_backend(&job.target);
+    }
+    if job.prism {
+        // `prism.h` refuses to compile outside the dialect; both
+        // preprocessor paths need the define (the clang path takes it
+        // as a forwarded argument, the native one as a predefine).
+        job.cpp.push(OsString::from("-D__GLCC_PRISM__=1"));
     }
     Ok(job)
 }
@@ -1246,6 +1274,9 @@ fn native_pp_opts(job: &Job, input: &OsStr) -> Outcome<(glcc_pp::PpOptions, usiz
             // input; kernel headers guard C content with it.
             predefined.push(("__ASSEMBLER__".to_string(), "1".to_string()));
         }
+        if job.prism {
+            predefined.push(("__GLCC_PRISM__".to_string(), "1".to_string()));
+        }
         if !job.pic {
             predefined.retain(|(name, _)| !matches!(name.as_str(), "__PIC__" | "__pic__" | "__PIE__" | "__pie__"));
         }
@@ -1346,6 +1377,50 @@ fn run_preprocess(ctx: &Ctx, job: &Job, input: &OsStr) -> Outcome<Vec<u8>> {
 /// accumulated by the parser and reported (codespan or JSON, per
 /// `error_format`) before returning `Err`; a later codegen/verification
 /// panic is caught by the callers and reported as `Quiet`.
+/// Lex, parse, and check one translation unit. The driver owns the
+/// interner, the lexer output, and the sema: the lexer fills
+/// spellings, the parser borrows all of it, and `(sema, interner)`
+/// thread on into MIR lowering. Prism mode additionally runs the
+/// prism profile validation while the parser — which renders the
+/// diagnostics — is still alive.
+fn parse_source<'a>(
+    src: &str,
+    arena: &'a glcc_frontend::bumpalo::Bump,
+    flavor: Flavor,
+    target: Target,
+    async_enabled: bool,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+) -> std::result::Result<(Sema<'a>, Interner, glcc_frontend::parse::TranslationUnit), ()> {
+    let mut interner = Interner::new();
+    let mut sema = Sema::with_target(target, arena);
+    sema.lang = lang;
+    sema.async_enabled = async_enabled;
+    // C++ `inline` has vague linkage: EDG lowers every C++ inline
+    // function to a GNU89 `extern inline` definition, which must
+    // emit weak or multi-TU links fail on duplicates. Plain C
+    // keeps GNU89 strong-standalone semantics.
+    sema.weak_extern_inline = flavor == Flavor::Cpp;
+    let tokens = Lexer::new(src, &mut interner).lex_all();
+    let mut parser = Parser::new(src, tokens, arena, &mut sema, &mut interner);
+    // `json` consumers render `Parser::diagnostics_json` themselves.
+    parser.emit_human = error_format == ErrorFormat::Human;
+    let tu = parser.parse_translation_unit();
+    if lang.prism {
+        parser.prism_validate(&tu);
+    }
+    let has_errors = parser.has_errors();
+    if error_format == ErrorFormat::Json && (!parser.diagnostics().is_empty()) {
+        // Warnings are useful even when compilation succeeds.
+        eprintln!("{}", parser.diagnostics_json());
+    }
+    if has_errors {
+        return Err(());
+    }
+    drop(parser);
+    Ok((sema, interner, tu))
+}
+
 fn lower_source_to_mir(
     src: &str,
     flavor: Flavor,
@@ -1356,33 +1431,8 @@ fn lower_source_to_mir(
     error_format: ErrorFormat,
     backend: Backend,
 ) -> std::result::Result<(glcc_mir::Module, String), ()> {
-    // The driver owns the interner, the lexer output, and the
-    // sema: the lexer fills spellings, the parser borrows all of
-    // it, and `(sema, interner)` thread on into MIR lowering.
-    let mut interner = Interner::new();
     let arena = glcc_frontend::bumpalo::Bump::new();
-    let mut sema = Sema::with_target(target, &arena);
-    sema.lang = lang;
-    sema.async_enabled = async_enabled;
-    // C++ `inline` has vague linkage: EDG lowers every C++ inline
-    // function to a GNU89 `extern inline` definition, which must
-    // emit weak or multi-TU links fail on duplicates. Plain C
-    // keeps GNU89 strong-standalone semantics.
-    sema.weak_extern_inline = flavor == Flavor::Cpp;
-    let tokens = Lexer::new(src, &mut interner).lex_all();
-    let mut parser = Parser::new(src, tokens, &arena, &mut sema, &mut interner);
-    // `json` consumers render `Parser::diagnostics_json` themselves.
-    parser.emit_human = error_format == ErrorFormat::Human;
-    let tu = parser.parse_translation_unit();
-    let has_errors = parser.has_errors();
-    if error_format == ErrorFormat::Json && (!parser.diagnostics().is_empty()) {
-        // Warnings are useful even when compilation succeeds.
-        eprintln!("{}", parser.diagnostics_json());
-    }
-    if has_errors {
-        return Err(());
-    }
-    drop(parser);
+    let (sema, interner, tu) = parse_source(src, &arena, flavor, target, async_enabled, lang, error_format)?;
     // File-scope asm becomes assembler text for the per-TU `.s`
     // pipeline: the Cranelift object cannot carry raw text.
     let mut asm_text = String::new();
@@ -1791,6 +1841,51 @@ fn dump_mir_edg(mir_path: &Path, job: &Job, full: bool) -> std::result::Result<S
     }));
     match outcome {
         Ok(text) => Ok(text),
+        Err(_) => Err(()),
+    }
+}
+
+/// One prism input through the shader pipeline: parse + profile
+/// validation, MIR lowering, the shared optimize pipeline, then the
+/// selected shader target. Like `dump_mir_source`, the frontend
+/// speaks for itself, so a caught panic becomes `Quiet`; backend
+/// errors (e.g. "out of temporary registers") print here and ride
+/// the same Quiet path.
+fn emit_shader_source(
+    src: &str,
+    flavor: Flavor,
+    target: Target,
+    opt_level: OptLevel,
+    lang: LangOpts,
+    error_format: ErrorFormat,
+    shader_target: glcc_prism::ShaderTarget,
+) -> std::result::Result<Vec<u8>, ()> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let arena = glcc_frontend::bumpalo::Bump::new();
+        let (sema, interner, tu) = parse_source(src, &arena, flavor, target, false, lang, error_format)?;
+        let mut mir_module = glcc_lower_mir::lower_translation_unit(&sema, &interner, &tu);
+        // The vector-generating passes stay off: prism's own vector
+        // types are the whole story, and targets want stable IR.
+        glcc_mir::optimize_with(&mut mir_module, opt_level, glcc_mir::OptConfig { vectorize: false });
+        let errors = glcc_mir::verify::verify_module(&mir_module);
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("glcc: mir error: {e}");
+            }
+            panic!("mir verification failed");
+        }
+        match glcc_prism::emit(&mir_module, &sema, &interner, shader_target) {
+            Ok(bytes) => Ok(bytes),
+            Err(msg) => {
+                eprintln!("glcc: error: {msg}");
+                glcc_frontend::span::mark_diagnostic_emitted();
+                Err(())
+            }
+        }
+    }));
+    match outcome {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(())) => Err(()),
         Err(_) => Err(()),
     }
 }
@@ -2855,6 +2950,92 @@ fn do_emit_mir(ctx: &Ctx, job: &Job, full: bool) -> Outcome<()> {
     }
 }
 
+/// Output paths for the `--emit-*` shader actions: one `-o` for a
+/// single compilable input, else `<stem>.<ext>` per input in the
+/// working directory.
+fn shader_outputs(job: &Job, target: glcc_prism::ShaderTarget) -> std::result::Result<Vec<PathBuf>, String> {
+    let ext = match target {
+        glcc_prism::ShaderTarget::Isa => "isa",
+        glcc_prism::ShaderTarget::Spirv => "spv",
+        glcc_prism::ShaderTarget::Rsx => "rsx",
+        glcc_prism::ShaderTarget::Xenos => "xenos",
+    };
+    let compilable: Vec<usize> = job
+        .order
+        .iter()
+        .filter_map(|item| match item {
+            OrderItem::Input(i) => Some(*i),
+            OrderItem::LinkArg(_) => None,
+        })
+        .collect();
+    if compilable.len() == 1 {
+        if let Some(o) = &job.output {
+            return Ok(vec![PathBuf::from(o)]);
+        }
+    } else if job.output.is_some() {
+        return Err("cannot specify -o with multiple input files".into());
+    }
+    Ok(compilable
+        .iter()
+        .map(|i| {
+            let mut stem = stem_of(&job.inputs[*i].path);
+            stem.push(&format!(".{ext}"));
+            PathBuf::from(stem)
+        })
+        .collect())
+}
+
+/// `--emit-isa`/`--emit-spirv`/`--emit-rsx`/`--emit-xenos`: run every
+/// prism input through the shader pipeline and write the target's
+/// artifact. The ISA form is the shared shader IR's canonical text;
+/// the other targets lower from the same IR.
+fn do_emit_shader(ctx: &Ctx, job: &Job, target: glcc_prism::ShaderTarget) -> Outcome<()> {
+    if !job.prism {
+        return Err(fail(format!("{} requires -fprism", target.flag())));
+    }
+    if !has_compilable(job) {
+        warn_unused_link_inputs(job, "shader emission");
+        return Ok(());
+    }
+    let outputs = shader_outputs(job, target).map_err(fail)?;
+    let mut out_iter = outputs.into_iter();
+    for item in &job.order {
+        let OrderItem::Input(i) = item else { continue };
+        let input = &job.inputs[*i];
+        let out = out_iter.next().expect("one output per compilable input");
+        let text = match input.lang {
+            Lang::Assembler => {
+                eprintln!("glcc: warning: '{}': assembler input skipped for {}", Path::new(&input.path).display(), target.flag());
+                continue;
+            }
+            Lang::Cpp | Lang::EdgC => {
+                return Err(fail(format!("'{}': prism shaders must be C sources", Path::new(&input.path).display())));
+            }
+            Lang::C => {
+                let bytes = run_preprocess(ctx, job, &input.path)?;
+                if let Some(dir) = temps_dir(job, None) {
+                    let stem = stem_of(&input.path).to_string_lossy().into_owned();
+                    save_temp_file(&dir, &format!("{stem}.i"), &bytes);
+                }
+                decode_source(&bytes)
+            }
+            Lang::Preprocessed => {
+                let bytes = std::fs::read(&input.path).map_err(|e| fail(format!("cannot read '{}': {e}", Path::new(&input.path).display())))?;
+                decode_source(&bytes)
+            }
+        };
+        if ctx.dry_run {
+            continue;
+        }
+        let bytes = emit_shader_source(&text, job.flavor, job.target, job.opt_level, language(job), job.error_format, target).map_err(|()| {
+            take_diagnostic_emitted();
+            Fail::Quiet
+        })?;
+        emit_output(out.as_os_str(), &bytes)?;
+    }
+    Ok(())
+}
+
 /// Compile every input, pairing each with its object path: the
 /// `-c` outputs for `Compile`, temp objects (or temp assembled
 /// objects) otherwise. Returns `(source, object)` pairs in order.
@@ -3427,12 +3608,20 @@ pub fn run(argv: Vec<OsString>, flavor: Flavor) -> i32 {
         verbose: job.verbose,
         dry_run: job.dry_run,
     };
+    if job.prism && matches!(job.action, Action::Link | Action::Compile) {
+        eprintln!("glcc: error: prism sources do not produce objects; use --emit-isa, --emit-spirv, --emit-rsx, or --emit-xenos");
+        return 1;
+    }
     let outcome = match job.action {
         Action::Preprocess => do_preprocess(&ctx, &job),
         Action::Deps => do_deps(&ctx, &job),
         Action::SyntaxOnly => do_syntax_only(&ctx, &job),
         Action::EmitMir => do_emit_mir(&ctx, &job, false),
         Action::EmitFullMir => do_emit_mir(&ctx, &job, true),
+        Action::EmitIsa => do_emit_shader(&ctx, &job, glcc_prism::ShaderTarget::Isa),
+        Action::EmitSpirv => do_emit_shader(&ctx, &job, glcc_prism::ShaderTarget::Spirv),
+        Action::EmitRsx => do_emit_shader(&ctx, &job, glcc_prism::ShaderTarget::Rsx),
+        Action::EmitXenos => do_emit_shader(&ctx, &job, glcc_prism::ShaderTarget::Xenos),
         Action::Compile => do_compile(&ctx, &job, None).and_then(|(produced, _)| {
             if job.depgen.is_some() {
                 // `-MT` defaults to the real outputs here.

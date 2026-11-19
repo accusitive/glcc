@@ -120,6 +120,11 @@ pub struct LangOpts {
     /// Currently used for the C89 implicit `int` and implicit function
     /// declarations that C99 removed.
     pub strict: bool,
+    /// `-fprism`: the prism shader dialect. Enables `[[prism::*]]`
+    /// attributes, vector swizzles (`v.xy`), and the `tex2D` builtin;
+    /// the checker rejects the constructs shaders cannot express
+    /// (pointers, recursion, ...). See `check/prism.rs`.
+    pub prism: bool,
 }
 
 impl Default for LangOpts {
@@ -132,6 +137,7 @@ impl Default for LangOpts {
             ms: true,
             clang: true,
             strict: false,
+            prism: false,
         }
     }
 }

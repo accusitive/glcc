@@ -11,6 +11,7 @@ edition = "2024"
 [dependencies]
 glcc_frontend = { path = "../glcc_frontend" }
 glcc_mir = { path = "../glcc_mir" }
+smallvec = { version = "1.16.3", features = ["union"] }
 string-interner = { version = "0.20.0", default-features = false }
 
 [dev-dependencies]
