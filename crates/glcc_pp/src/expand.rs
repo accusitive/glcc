@@ -2631,7 +2631,10 @@ impl<'a, 'b> Expander<'a, 'b> {
                 PpToken::Str(sym) => {
                     let raw = self.spelling(sym);
                     let body = raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(&raw);
-                    Ok((unescape_header(body), true))
+                    // C17 6.10.2: a header name is not a string literal, so
+                    // `\` stays literal (Windows paths); only `#line` (and
+                    // linemarkers) process escapes.
+                    Ok((body.to_string(), true))
                 }
                 _ => Err(err(format!("{loc}: malformed #include (expected \"...\" or <...>)"))),
             },

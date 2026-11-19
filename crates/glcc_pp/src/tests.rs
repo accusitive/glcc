@@ -801,6 +801,20 @@ fn include_operand_expands_function_like_macros() {
 }
 
 #[test]
+fn include_name_keeps_backslashes() {
+    // A header name is not a string literal (C17 6.10.2): `\` in a
+    // Windows path must survive, whether quoted directly or produced by
+    // a stringizing macro.
+    let e = pp("#include \"C:\\Users\\x.h\"\n").unwrap_err();
+    assert!(e.0.contains(r"#include 'C:\Users\x.h' not found"), "{e}");
+    let src = "#define __STR1(x) #x\n\
+               #define __STR(x) __STR1(x)\n\
+               #include __STR(C:\\Users\\x.h)\n";
+    let e = pp(src).unwrap_err();
+    assert!(e.0.contains(r"#include 'C:\Users\x.h' not found"), "{e}");
+}
+
+#[test]
 fn non_assembler_mode_errors_on_unknown_directive() {
     let e = pp("#bogus x\nint y;\n").unwrap_err();
     assert!(e.0.contains("unknown directive '#bogus'"), "{e}");
