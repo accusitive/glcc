@@ -1394,7 +1394,16 @@ fn eval_cast(ty: &Ty, operand: &CheckedExpr, sema: &Sema, interner: &Interner, a
         _ => eval_const_in(operand, sema, interner, addr_conds)?,
     };
     // Qualification is value-transparent: `const float` folds like `float`.
-    let t = ty.unqualified();
+    // An enum folds as its representation type, so a packed
+    // `enum { 1, 200 }` converts like an `unsigned char`.
+    let repr;
+    let t = match sema.enum_repr(ty) {
+        Some(repr_ty) => {
+            repr = repr_ty;
+            &repr
+        }
+        None => ty.unqualified(),
+    };
     // A complex target takes the value as its real part over a zero
     // imaginary part; a complex source converts component-wise.
     if let Ty::Complex(inner) = t {

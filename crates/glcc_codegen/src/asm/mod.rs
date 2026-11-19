@@ -1068,7 +1068,7 @@ mod tests {
         let (f, _) = func_with_const(42);
         let mut op = reg_operand("i");
         op.ty = mir::Ty::Int { bits: 32 };
-        let plan = plan_x86_64(&block("", vec![op], 0, &[]), &f);
+        let plan = plan_x86_64(&block("", vec![op], 0, &[]), &f, &mir::Module::new());
         assert!(matches!(plan.slots[0].kind, AsmSlotKind::Imm(42)));
     }
 
@@ -1080,7 +1080,7 @@ mod tests {
         let mut tied = reg_operand("0");
         tied.tie = Some(0);
         tied.value = val;
-        let plan = plan_x86_64(&block("", vec![out, tied], 1, &[]), &f);
+        let plan = plan_x86_64(&block("", vec![out, tied], 1, &[]), &f, &mir::Module::new());
         assert_eq!(plan.slots.len(), 2);
         assert!(plan.slots[0].is_def);
         assert_eq!(plan.slots[1].rides, Some(0), "tied input renders the output's register");
@@ -1141,7 +1141,7 @@ mod tests {
         // Both operands of the %h line need a/b/c/d: the %h output and
         // the other operand of the same instruction (a REX register
         // cannot coexist with a high-byte register).
-        let plan = plan_x86_64(&block("movb %1, %h0", vec![reg_operand("=r"), reg_operand("r")], 1, &[]), &f);
+        let plan = plan_x86_64(&block("movb %1, %h0", vec![reg_operand("=r"), reg_operand("r")], 1, &[]), &f, &mir::Module::new());
         let hw0 = plan.slots[0].pin.expect("%h output pins into a/b/c/d").hw;
         let hw1 = plan.slots[1].pin.expect("same-line operand pins into a/b/c/d too").hw;
         assert!(hw0 < 4 && hw1 < 4);
@@ -1152,7 +1152,7 @@ mod tests {
     fn q_constraint_pins_outside_the_high_byte_lines() {
         let (f, _) = Function::new("t", Signature::new(vec![], mir::Ty::Void));
         // A "Q" operand on a %h-free line still needs a/b/c/d.
-        let plan = plan_x86_64(&block("movb %1, %0", vec![reg_operand("=Q"), reg_operand("r")], 1, &[]), &f);
+        let plan = plan_x86_64(&block("movb %1, %0", vec![reg_operand("=Q"), reg_operand("r")], 1, &[]), &f, &mir::Module::new());
         assert_eq!(plan.slots[0].pin, Some(PReg::gpr(0)));
         assert_eq!(plan.slots[1].pin, None, "plain r operands stay free");
     }

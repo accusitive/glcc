@@ -5,14 +5,18 @@
 
 mod common;
 
-use common::run;
+/// The reference assembler is the host `as`, which only understands
+/// AArch64 on an AArch64 host; other hosts quietly skip (riscv uses a
+/// cross `riscv64-elf-as`, so it has its own availability check).
+fn run(cases: &[(&str, &str)]) {
+    if cfg!(target_arch = "aarch64") {
+        common::run(glasm::Arch::Aarch64, "as", "", cases);
+    }
+}
 
 #[test]
 fn aarch64_basic_integer() {
     run(
-        glasm::Arch::Aarch64,
-        "as",
-        "",
         &[
             (
                 "regs_moves",
@@ -232,9 +236,6 @@ fn aarch64_basic_integer() {
 #[test]
 fn aarch64_load_store() {
     run(
-        glasm::Arch::Aarch64,
-        "as",
-        "",
         &[
             (
                 "scaled_offset",
@@ -352,9 +353,6 @@ fn aarch64_load_store() {
 #[test]
 fn aarch64_relocations() {
     run(
-        glasm::Arch::Aarch64,
-        "as",
-        "",
         &[
             (
                 "adrp_lo12_local",
@@ -442,9 +440,6 @@ fn debug_one() {
 fn aarch64_edge_cases() {
     // Forms the compiler's inline-asm wrappers and naked asm emit.
     run(
-        glasm::Arch::Aarch64,
-        "as",
-        "",
         &[
             (
                 "wrapper_forms",

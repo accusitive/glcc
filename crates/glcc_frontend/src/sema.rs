@@ -1105,6 +1105,18 @@ impl<'a> Sema<'a> {
         id
     }
 
+    /// The integer type an enum value is represented by: `int` for an
+    /// ordinary enum, the declared type for a C23 `enum E : ty`, and
+    /// the shrunk type for a GNU packed enum. `None` for non-enums.
+    /// Arithmetic and conversion fold through this, so a packed
+    /// `enum pos` wraps like the `unsigned char` it is.
+    pub fn enum_repr(&self, ty: &Ty) -> Option<Ty> {
+        match ty.unqualified() {
+            Ty::Enum(id) => Some(self.enums[id.0 as usize].repr.unqualified().clone()),
+            _ => None,
+        }
+    }
+
     /// Record or check a C23 fixed underlying type on a (possibly still
     /// incomplete) enum. Redeclarations must repeat the same type, and
     /// a tag once declared with one may not shed it.
