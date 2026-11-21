@@ -50,7 +50,6 @@ tested against external suites instead.
 - `Ty` is a pure semantic type: no source positions inside (bounds are
   span-erased on lowering). Target assumptions (LP64, signed `char`)
   must be marked with comments where used.
-- full #![no_std] support is not necessarily mandatory at this time, but we should not build features that explicitly require std
 
 ### Boundaries
 
