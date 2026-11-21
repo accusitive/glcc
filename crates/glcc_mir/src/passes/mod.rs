@@ -2022,6 +2022,13 @@ struct SlotStore {
     inst: Inst,
 }
 
+/// Whether a slot's content can live in SSA form: scalars, and the
+/// first-class vectors prism lowers (`float2`/`float3`/`float4` ride
+/// block params like any scalar).
+fn promotable_ty(ty: &Ty) -> bool {
+    ty.is_scalar() || matches!(ty, Ty::Vector { .. })
+}
+
 /// A promotable slot and its access sites in instruction order.
 struct SlotSites {
     alloca: Inst,
@@ -2045,7 +2052,7 @@ fn promote_slots(func: &mut Function) -> bool {
     if !func
         .insts
         .iter_enumerated()
-        .any(|(id, inst)| resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && pointee.is_scalar()))
+        .any(|(id, inst)| resident[id.index()] && matches!(&inst.kind, InstKind::Alloca { pointee, count } if *count == 1 && promotable_ty(pointee)))
     {
         return false;
     }
@@ -2073,7 +2080,7 @@ fn promote_slots(func: &mut Function) -> bool {
         let InstKind::Alloca { pointee, count } = &inst.kind else {
             continue;
         };
-        if *count != 1 || !pointee.is_scalar() {
+        if *count != 1 || !promotable_ty(pointee) {
             continue;
         }
         let Some(addr) = inst.result else { continue };
@@ -2457,18 +2464,19 @@ fn switch_targets(func: &Function) -> std::collections::HashSet<Block> {
 /// Immediate dominators, dominator-tree children, dominance
 /// frontiers, and predecessors over the blocks reachable from the
 /// entry. `preds`/`idom` serve loop analysis (LICM back edges, SCCP
-/// is flow-based and needs none).
-struct DomInfo {
+/// is flow-based and needs none); the prism structurizer reuses the
+/// same dominance facts for loop detection.
+pub struct DomInfo {
     /// Reachable predecessors of each block, one per branch arm.
-    preds: Vec<Vec<Block>>,
+    pub preds: Vec<Vec<Block>>,
     /// Immediate dominator of every reachable block except the entry.
-    idom: Vec<Option<Block>>,
-    children: Vec<Vec<Block>>,
-    df: Vec<Vec<Block>>,
+    pub idom: Vec<Option<Block>>,
+    pub children: Vec<Vec<Block>>,
+    pub df: Vec<Vec<Block>>,
 }
 
 impl DomInfo {
-    fn compute(func: &Function, reachable: &[bool]) -> DomInfo {
+    pub fn compute(func: &Function, reachable: &[bool]) -> DomInfo {
         let count = func.blocks.len();
         let rpo = reverse_postorder(func, reachable);
         let mut rpo_index = vec![usize::MAX; count];
@@ -2543,7 +2551,7 @@ impl DomInfo {
     }
 
     /// Whether `node` lies below `ancestor` in the dominator tree.
-    fn dominates(&self, ancestor: Block, node: Block, entry: Block) -> bool {
+    pub fn dominates(&self, ancestor: Block, node: Block, entry: Block) -> bool {
         let mut current = node;
         loop {
             if current == ancestor {
@@ -2573,8 +2581,9 @@ fn intersect(mut a: Block, mut b: Block, idom: &[Option<Block>], rpo_index: &[us
     a
 }
 
-/// DFS postorder from the entry, reversed; unreachable blocks stay out.
-fn reverse_postorder(func: &Function, reachable: &[bool]) -> Vec<Block> {
+/// Reverse postorder over the blocks reachable from the entry;
+/// unreachable blocks stay out.
+pub fn reverse_postorder(func: &Function, reachable: &[bool]) -> Vec<Block> {
     enum Step {
         Enter(Block),
         Leave(Block),

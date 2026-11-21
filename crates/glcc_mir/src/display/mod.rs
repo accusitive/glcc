@@ -49,7 +49,7 @@ fn val_name(func: &Function, v: crate::ir::Value) -> String {
     }
 }
 
-pub(crate) fn inst_str(func: &Function, kind: &InstKind) -> String {
+pub fn inst_str(func: &Function, kind: &InstKind) -> String {
     match kind {
         InstKind::Add(a, b) => format!("add {} {}", val_name(func, *a), val_name(func, *b)),
         InstKind::Sub(a, b) => format!("sub {} {}", val_name(func, *a), val_name(func, *b)),

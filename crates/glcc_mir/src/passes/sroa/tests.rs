@@ -276,12 +276,74 @@ fn leaves_overlapping_leaves_in_memory() {
 }
 
 #[test]
-fn leaves_aggregate_load_in_memory() {
+fn splits_aggregate_load_into_leaves() {
     let point = point_ty();
     let sig = Signature::new(vec![], point.clone());
     let (mut func, entry) = Function::new("whole", sig);
     let (_, root) = alloca(&mut func, entry, point.clone());
     let loaded = load(&mut func, entry, root, point);
+    func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
+
+    assert!(run(&mut func));
+    assert!(!has_aggregate_alloca(&func));
+    let kinds: Vec<&InstKind> = resident_kinds(&func).collect();
+    assert_eq!(kinds.iter().filter(|kind| matches!(kind, InstKind::Load { .. })).count(), 2, "one leaf load per field:\n{func:?}");
+    assert_eq!(kinds.iter().filter(|kind| matches!(kind, InstKind::InsertValue { .. })).count(), 2, "reassembly chain:\n{func:?}");
+}
+
+#[test]
+fn splits_aggregate_store_into_leaves() {
+    let point = point_ty();
+    let sig = Signature::new(vec![point.clone()], Ty::Void);
+    let (mut func, entry) = Function::new("whole_store", sig);
+    let value = param(&mut func, entry, point, 0);
+    let (_, root) = alloca(&mut func, entry, point_ty());
+    store(&mut func, entry, root, value);
+    func.blocks[entry].term = Some(Terminator::Return { val: None });
+
+    assert!(run(&mut func));
+    assert!(!has_aggregate_alloca(&func));
+    let kinds: Vec<&InstKind> = resident_kinds(&func).collect();
+    assert_eq!(kinds.iter().filter(|kind| matches!(kind, InstKind::ExtractValue { .. })).count(), 2, "field extraction:\n{func:?}");
+    assert_eq!(kinds.iter().filter(|kind| matches!(kind, InstKind::Store { .. })).count(), 2, "one leaf store per field:\n{func:?}");
+}
+
+#[test]
+fn splits_nested_aggregate_access() {
+    // struct { struct { int a; int b; } inner; int c; } accessed as a
+    // whole: the nested field needs an extractvalue chain.
+    let point = point_ty();
+    let inner = Ty::Struct { fields: vec![Ty::int(32), Ty::int(32)], offsets: vec![0, 4], size: 8 };
+    let outer = Ty::Struct { fields: vec![inner, Ty::int(32)], offsets: vec![0, 8], size: 12 };
+    let sig = Signature::new(vec![outer.clone()], Ty::int(32));
+    let (mut func, entry) = Function::new("nested", sig);
+    let value = param(&mut func, entry, outer.clone(), 0);
+    let (_, root) = alloca(&mut func, entry, outer.clone());
+    let loaded = load(&mut func, entry, root, outer);
+    store(&mut func, entry, root, value);
+    let roundtrip = emit(&mut func, entry, InstKind::ExtractValue { agg: loaded, index: 1 }, Ty::int(32));
+    func.blocks[entry].term = Some(Terminator::Return { val: Some(roundtrip) });
+
+    assert!(run(&mut func));
+    assert!(!has_aggregate_alloca(&func));
+    // The stored aggregate rebuilds through two nesting levels.
+    let kinds: Vec<&InstKind> = resident_kinds(&func).collect();
+    assert_eq!(kinds.iter().filter(|kind| matches!(kind, InstKind::InsertValue { .. })).count(), 5, "nested reassembly:\n{func:?}");
+}
+
+#[test]
+fn leaves_punned_aggregate_access_in_memory() {
+    // Whole-struct access over byte-granular accesses: the field
+    // boundaries disagree, so the slot must stay in memory.
+    let point = point_ty();
+    let sig = Signature::new(vec![point.clone()], point.clone());
+    let (mut func, entry) = Function::new("punned", sig);
+    let value = param(&mut func, entry, point, 0);
+    let (_, root) = alloca(&mut func, entry, point_ty());
+    let byte = gep(&mut func, entry, root, vec![GepIndex::Field(0)], Ty::int(1));
+    let byte_val = iconst(&mut func, 8, 1);
+    store(&mut func, entry, byte, byte_val);
+    let loaded = load(&mut func, entry, root, point_ty());
     func.blocks[entry].term = Some(Terminator::Return { val: Some(loaded) });
 
     assert!(!run(&mut func));

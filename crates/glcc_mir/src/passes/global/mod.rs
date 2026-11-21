@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use index_vec::IndexVec;
 
 use crate::debug::{FunctionDebug, ScopeDebug, VarHome};
-use crate::ir::{Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst, InstKind, MemFlags, Module, Value, ValueData};
+use crate::ir::{Block, Const, DataReloc, Def, Func, Function, Global, GlobalData, Inst, InstData, InstKind, MemFlags, Module, Value, ValueData};
 use crate::pass::ModulePass;
 use crate::ty::{GepIndex, Ty};
 
@@ -128,27 +128,170 @@ impl ModulePass for GlobalConstProp {
                 continue;
             };
             let global = &module.globals[global.index()];
-            if let Some(init) = constant_at(global, &func.values[result].ty, offset) {
-                replacements.push((func_id, inst_id, init));
+            let ty = func.values[result].ty.clone();
+            if let Some(init) = constant_at(global, &ty, offset) {
+                replacements.push((func_id, inst_id, Folded::Scalar(init)));
+                continue;
             }
+            // A whole-aggregate load of a read-only global folds into a
+            // reassembly of per-leaf constants. `Sroa` splitting copies
+            // out of such globals leaves this shape behind: the leaf
+            // stores feed from `ExtractValue`s of the one aggregate
+            // load, which nothing can fold while it stays in memory.
+            if !matches!(ty, Ty::Struct { .. } | Ty::Array { .. }) {
+                continue;
+            }
+            let Some(chain_leaves) = aggregate_const_leaves(global, &ty, offset) else {
+                continue;
+            };
+            replacements.push((func_id, inst_id, Folded::Chain(chain_leaves)));
         }
 
         let mut changed = false;
-        for (func_id, inst_id, init) in replacements {
+        for (func_id, inst_id, folded) in replacements {
             let func = &mut module.funcs[func_id];
             let Some(result) = func.insts[inst_id].result else {
                 continue;
             };
             let block = func.insts[inst_id].block;
-            let ty = func.values[result].ty.clone();
-            let fresh = func.values.push(ValueData { ty, def: Def::Const(init) });
-            func.replace_uses(result, fresh);
-            func.blocks[block].insts.retain(|i| *i != inst_id);
+            match folded {
+                Folded::Scalar(init) => {
+                    let ty = func.values[result].ty.clone();
+                    let fresh = func.values.push(ValueData { ty, def: Def::Const(init) });
+                    func.replace_uses(result, fresh);
+                    func.blocks[block].insts.retain(|i| *i != inst_id);
+                }
+                Folded::Chain(leaves) => {
+                    let end = rebuild_const_aggregate(func, block, inst_id, &leaves);
+                    func.replace_uses(result, end);
+                    func.blocks[block].insts.retain(|i| *i != inst_id);
+                }
+            }
             changed = true;
         }
         changed |= expand_global_memcpys(module, &candidates);
         changed
     }
+}
+
+/// Per-leaf constants of an aggregate load's initializer, `None` when
+/// any leaf has no constant at its offset (relocations, unsupported
+/// leaf types) or the type is not a splittable aggregate.
+fn aggregate_const_leaves(global: &GlobalData, ty: &Ty, offset: u64) -> Option<Vec<(Vec<GepIndex>, Ty, Const)>> {
+    let init = global.init.as_ref()?;
+    let mut leaves = Vec::new();
+    for (path, leaf_ty) in super::aggregate_leaves(ty)? {
+        let leaf_offset = leaf_offset(ty, &path)?;
+        let value = match init {
+            Const::Zero => super::zero_const_for(&leaf_ty),
+            _ => constant_at(global, &leaf_ty, offset.checked_add(leaf_offset)?)?,
+        };
+        leaves.push((path, leaf_ty, value));
+    }
+    Some(leaves)
+}
+
+/// One folded load site: a single constant, or a reassembly of
+/// per-leaf constants for an aggregate type.
+enum Folded {
+    Scalar(Const),
+    Chain(Vec<(Vec<GepIndex>, Ty, Const)>),
+}
+
+/// Reassemble an aggregate constant at the load site: per-leaf
+/// constants joined by an `InsertValue` chain over `undef`, spliced in
+/// just before the load so every use stays dominated. Leaves are
+/// scalars, so no backend ever sees an aggregate constant value.
+fn rebuild_const_aggregate(func: &mut Function, block: Block, load: Inst, leaves: &[(Vec<GepIndex>, Ty, Const)]) -> Value {
+    let root_ty = func.values[func.insts[load].result.expect("folded load has a result")].ty.clone();
+    let pos = func.blocks[block]
+        .insts
+        .iter()
+        .position(|&inst| inst == load)
+        .expect("folded load is resident");
+    let mut chain: Option<Value> = None;
+    let mut emitted: Vec<Inst> = Vec::new();
+    for (path, leaf_ty, init) in leaves {
+        let leaf_ty = leaf_ty.clone();
+        let value = func.values.push(ValueData {
+            ty: leaf_ty,
+            def: Def::Const(init.clone()),
+        });
+        chain = Some(insert_const_leaf(func, block, &mut emitted, chain, value, path, &root_ty));
+    }
+    let end = chain.expect("aggregate folds into at least one leaf");
+    let mut kept = func.blocks[block].insts.clone();
+    kept.splice(pos..pos, emitted);
+    func.blocks[block].insts = kept;
+    end
+}
+
+/// Grow a constant reassembly chain with one leaf at `path` — the
+/// `InsertValue` shape `Sroa`'s aggregate rewrite produces, so
+/// `InstCombine`'s extract-of-insert folds consume it.
+fn insert_const_leaf(func: &mut Function, block: Block, out: &mut Vec<Inst>, chain: Option<Value>, leaf: Value, path: &[GepIndex], root_ty: &Ty) -> Value {
+    let cur = match chain {
+        Some(v) => v,
+        None => push_undef(func, root_ty),
+    };
+    let index = match path[0] {
+        GepIndex::Field(index) => index,
+        GepIndex::ConstIndex(index) => u32::try_from(index).unwrap_or(u32::MAX),
+        GepIndex::Index(_) => return cur,
+    };
+    if path.len() == 1 {
+        return emit_insert_value(func, block, out, cur, leaf, index, root_ty);
+    }
+    let sub_ty = match root_ty {
+        Ty::Struct { fields, .. } => fields[index as usize].clone(),
+        Ty::Array { elem, .. } => (**elem).clone(),
+        _ => return cur,
+    };
+    let sub = match chain {
+        Some(v) => emit_extract_value(func, block, out, v, index, &sub_ty),
+        None => push_undef(func, &sub_ty),
+    };
+    let updated = insert_const_leaf(func, block, out, Some(sub), leaf, &path[1..], &sub_ty);
+    emit_insert_value(func, block, out, cur, updated, index, root_ty)
+}
+
+fn push_undef(func: &mut Function, ty: &Ty) -> Value {
+    func.values.push(ValueData {
+        ty: ty.clone(),
+        def: Def::Const(Const::Undef),
+    })
+}
+
+fn emit_insert_value(func: &mut Function, block: Block, out: &mut Vec<Inst>, agg: Value, elem: Value, index: u32, ty: &Ty) -> Value {
+    let value = func.values.push(ValueData {
+        ty: ty.clone(),
+        def: Def::Inst(Inst::from_usize(func.insts.len())),
+    });
+    let inst = func.insts.push(InstData {
+        block,
+        kind: InstKind::InsertValue { agg, elem, index },
+        result: Some(value),
+        loc: None,
+    });
+    func.values[value].def = Def::Inst(inst);
+    out.push(inst);
+    value
+}
+
+fn emit_extract_value(func: &mut Function, block: Block, out: &mut Vec<Inst>, agg: Value, index: u32, ty: &Ty) -> Value {
+    let value = func.values.push(ValueData {
+        ty: ty.clone(),
+        def: Def::Inst(Inst::from_usize(func.insts.len())),
+    });
+    let inst = func.insts.push(InstData {
+        block,
+        kind: InstKind::ExtractValue { agg, index },
+        result: Some(value),
+        loc: None,
+    });
+    func.values[value].def = Def::Inst(inst);
+    out.push(inst);
+    value
 }
 
 /// Copying a whole local aggregate from a read-only global leaves a
