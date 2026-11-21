@@ -331,6 +331,44 @@ fn goldens() {
     }
 }
 
+/// A helper holding a uniform swizzle and a sample: prep force-inlines
+/// it, so the inliner must remap the prism ops (it panicked on
+/// shuffles and samples before), and the resulting shuffles over
+/// inline uniform reads must validate against their leaf types.
+#[test]
+fn helper_with_uniform_swizzle_and_sample() {
+    let prelude = r#"
+float3 splat3(float s);
+float max(float a, float b);
+"#;
+    let src = r#"
+struct FSIn  { [[prism::semantic(NORMAL)]] float3 normal; };
+struct FSOut { [[prism::semantic(COLOR0)]] float4 color; };
+sampler2D tex;
+float4 tint [[prism::uniform]];
+float4 light [[prism::uniform]];
+
+static float3 shade(float3 n) {
+    float3 l = light.xyz;
+    float ndl = l.x * n.x + l.y * n.y + l.z * n.z;
+    float4 s = tex2D(tex, splat2(0.5f));
+    return n * splat3(max(ndl, 0.0f)) + s.xyz;
+}
+
+[[prism::fragment]]
+struct FSOut fs_main(struct FSIn i) {
+    struct FSOut o;
+    o.color = tint * splat4(shade(i.normal).x);
+    return o;
+}
+"#;
+    let (text, program) = compile(&format!("{PRISM_PRELUDE}\n{prelude}\n{src}"));
+    assert!(text.contains("mul") || text.contains("mad"), "the shaded product survives:\n{text}");
+    assert!(text.contains("sample"), "the helper's sample survives:\n{text}");
+    assert!(text.contains("shuffle u1.c1"), "the uniform swizzle survives:\n{text}");
+    let _ = program;
+}
+
 /// validate catches a loop whose continue carries the wrong arity.
 #[test]
 fn validate_catches_continue_arity() {

@@ -1491,6 +1491,87 @@ fn inlines_small_callee() {
     assert_eq!(module.funcs[caller_id].const_value(ret), Some(&Const::Int { bits: 32, value: 42 }));
 }
 
+/// Inlining remaps the prism vector ops and the wide multiplies: a
+/// callee built of shuffle, min/max, and umulh/smulh materializes its
+/// operands fresh in the caller (the missing arms panicked here).
+#[test]
+fn inlines_callee_with_shuffle_min_max_and_wide_muls() {
+    fn push(callee: &mut Function, block: Block, kind: InstKind, ty: Ty) -> Value {
+        let v = callee.values.push(crate::ir::ValueData {
+            ty,
+            def: Def::Inst(crate::ir::Inst::from_usize(0)),
+        });
+        let inst = callee.insts.push(crate::ir::InstData {
+            block,
+            kind,
+            result: Some(v),
+            loc: None,
+        });
+        callee.values[v].def = Def::Inst(inst);
+        callee.blocks[block].insts.push(inst);
+        v
+    }
+
+    let mut module = Module::new();
+    let v4 = Ty::vector_shape(crate::ty::Ty::Float(FloatKind::F32), 4);
+    let i32t = Ty::int(32);
+    let callee_sig = Signature::new(vec![v4.clone(), i32t.clone(), i32t.clone()], v4.clone());
+    let (mut callee, centry) = Function::new("shader_ops", callee_sig);
+    let mut params = Vec::new();
+    for (index, ty) in [(0usize, &v4), (1, &i32t), (2, &i32t)] {
+        let p = callee.values.push(crate::ir::ValueData {
+            ty: ty.clone(),
+            def: Def::Param(centry, index as u32),
+        });
+        callee.blocks[centry].params.push(p);
+        params.push(p);
+    }
+    let [vec_arg, ia, ib] = params[..] else {
+        unreachable!()
+    };
+    let shuf = push(&mut callee, centry, InstKind::ShuffleVector { lhs: vec_arg, rhs: vec_arg, lanes: smallvec::smallvec![0, 1, 2, 3] }, v4.clone());
+    let lo = push(&mut callee, centry, InstKind::Min { a: shuf, b: shuf }, v4.clone());
+    let hi = push(&mut callee, centry, InstKind::Max { a: lo, b: shuf }, v4.clone());
+    push(&mut callee, centry, InstKind::Umulh(ia, ib), i32t.clone());
+    push(&mut callee, centry, InstKind::Smulh(ia, ib), i32t.clone());
+    callee.blocks[centry].term = Some(Terminator::Return { val: Some(hi) });
+    let callee_id = module.push_func(callee);
+
+    let caller_sig = Signature::new(vec![], v4.clone());
+    let (mut caller, entry) = Function::new("caller", caller_sig);
+    let one = caller.push_const(Const::Float { kind: FloatKind::F32, bits: 0x3F80_0000 });
+    let splat = push(&mut caller, entry, InstKind::Splat(one), v4.clone());
+    let seven = caller.push_const(Const::Int { bits: 32, value: 7 });
+    let three = caller.push_const(Const::Int { bits: 32, value: 3 });
+    let call_val = caller.values.push(crate::ir::ValueData {
+        ty: v4.clone(),
+        def: Def::Inst(crate::ir::Inst::from_usize(0)),
+    });
+    let call = caller.insts.push(crate::ir::InstData {
+        block: entry,
+        kind: InstKind::Call { callee: callee_id, args: [splat, seven, three].into_iter().collect() },
+        result: Some(call_val),
+        loc: None,
+    });
+    caller.values[call_val].def = Def::Inst(call);
+    caller.blocks[entry].insts.push(call);
+    caller.blocks[entry].term = Some(Terminator::Return { val: Some(call_val) });
+    module.push_func(caller);
+
+    let mut inline = Inline::small();
+    assert!(inline.run(&mut module));
+    let caller_id = crate::ir::Func::from_usize(1);
+    let caller = &module.funcs[caller_id];
+    let mut shuffle_lhs = None;
+    caller.blocks.iter().flat_map(|b| b.insts.iter()).for_each(|i| match &caller.insts[*i].kind {
+        InstKind::Call { .. } => panic!("call survived inlining"),
+        InstKind::ShuffleVector { lhs, .. } => shuffle_lhs = Some(*lhs),
+        _ => {}
+    });
+    // The callee's vector argument became the caller's splat result.
+    assert_eq!(shuffle_lhs, Some(splat), "shuffle operand was not remapped");
+}
+
 #[test]
 fn inlining_keeps_undef_type() {
     let mut module = Module::new();

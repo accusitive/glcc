@@ -11,6 +11,7 @@ are not part of `cargo test`: each builds with `make`, cleans with
 | `inline-asm/` | glcc's inline asm: register operands, fixed registers, memory operands, `asm goto` |
 | `triangle/` | a C++/SDL2 OpenGL triangle compiled with glcpp |
 | `fern/` | fern programs compiled with fernc and linked into a C driver |
+| `prism/` | prism shader dialect: C shaders compiled to the shader IR's ISA text with `-fprism --emit-isa` |
 | `async/` | the `-fglcc-async` extension: a basic demo, twin infinite loops, and a multithreaded executor |
 
 Each Makefile prefers the tool from the repo's build tree

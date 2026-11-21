@@ -4147,7 +4147,8 @@ fn remap_simple_materialized(caller: &mut crate::ir::Function, snapshot: &crate:
         }
         InstKind::GetFramePointer => InstKind::GetFramePointer,
         // The vector ops: scalars and whole vectors remap like any
-        // other operand; the lane index is an immediate.
+        // other operand; the lane index and shuffle mask are
+        // immediates, and a sample's image/coord are plain values.
         InstKind::Splat(v) => {
             let x = materialize_operand(caller, snapshot, map, *v);
             InstKind::Splat(x)
@@ -4155,6 +4156,33 @@ fn remap_simple_materialized(caller: &mut crate::ir::Function, snapshot: &crate:
         InstKind::ExtractLane { vec, lane } => {
             let x = materialize_operand(caller, snapshot, map, *vec);
             InstKind::ExtractLane { vec: x, lane: *lane }
+        }
+        InstKind::ShuffleVector { lhs, rhs, lanes } => {
+            let a = materialize_operand(caller, snapshot, map, *lhs);
+            let b = materialize_operand(caller, snapshot, map, *rhs);
+            InstKind::ShuffleVector { lhs: a, rhs: b, lanes: lanes.clone() }
+        }
+        InstKind::SampleImage { image, coord } => {
+            let i = materialize_operand(caller, snapshot, map, *image);
+            let c = materialize_operand(caller, snapshot, map, *coord);
+            InstKind::SampleImage { image: i, coord: c }
+        }
+        InstKind::Min { a, b } | InstKind::Max { a, b } => {
+            let x = materialize_operand(caller, snapshot, map, *a);
+            let y = materialize_operand(caller, snapshot, map, *b);
+            match kind {
+                InstKind::Min { .. } => InstKind::Min { a: x, b: y },
+                _ => InstKind::Max { a: x, b: y },
+            }
+        }
+        InstKind::Umulh(a, b) | InstKind::Smulh(a, b) => {
+            let (aa, bb) = (*a, *b);
+            let x = materialize_operand(caller, snapshot, map, aa);
+            let y = materialize_operand(caller, snapshot, map, bb);
+            match kind {
+                InstKind::Umulh(..) => InstKind::Umulh(x, y),
+                _ => InstKind::Smulh(x, y),
+            }
         }
         InstKind::Await { fut } => {
             let x = materialize_operand(caller, snapshot, map, *fut);

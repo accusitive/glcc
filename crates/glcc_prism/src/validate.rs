@@ -204,29 +204,60 @@ impl Validator<'_> {
                     .or_else(|| match src {
                         Src::ConstF32(_) => Some(RegTy::Scalar(Scalar::F32)),
                         Src::ConstI32(_) => Some(RegTy::Scalar(Scalar::i32())),
+                        // Inline interface reads carry their leaf's type.
+                        Src::Input { input, .. } => self
+                            .program
+                            .interface
+                            .inputs
+                            .get(*input as usize)
+                            .map(|leaf| leaf.ty.clone()),
+                        Src::Uniform { object, reg, .. } => self
+                            .program
+                            .interface
+                            .uniforms
+                            .get(*object as usize)
+                            .and_then(|u| u.leaves.iter().find(|leaf| leaf.creg == *reg))
+                            .map(|leaf| leaf.ty.clone()),
                         _ => None,
                     })
             })
             .collect();
         let float = dst_ty.is_f32();
         let lanes = dst_ty.lanes();
+        // Lanes a source delivers: a swizzled read narrows to the
+        // swizzle's length, an unswizzled one delivers its whole type.
+        // Sources with no known type (undef) stay unchecked.
+        let src_lanes = |position: usize| -> Option<u32> {
+            let ty = src_tys[position].as_ref()?;
+            let swizzle = match &op.srcs[position] {
+                Src::VReg { swizzle, .. } | Src::Input { swizzle, .. } | Src::Uniform { swizzle, .. } => {
+                    swizzle.as_ref().map(|s| s.len() as u32)
+                }
+                _ => None,
+            };
+            Some(swizzle.unwrap_or(u32::from(ty.lanes())))
+        };
         match &op.kind {
             Alu::Mov => {
                 // A scalar source feeding a vector dst is the splat
                 // form; anything else must match.
-                if let Some(Some(src_ty)) = src_tys.first()
-                    && src_ty.lanes() != 1
-                    && src_ty.lanes() != lanes
+                if let Some(width) = src_lanes(0)
+                    && width != 1
+                    && width != u32::from(lanes)
                 {
-                    self.errors.push(format!("statement {index}: mov width {} into {}", src_ty.lanes(), lanes));
+                    self.errors.push(format!("statement {index}: mov width {width} into {lanes}"));
                 }
             }
             Alu::Dp3 | Alu::Dp4 => {
                 if dst_ty.lanes() != 1 {
                     self.errors.push(format!("statement {index}: dp results are scalars"));
                 }
-                for src_ty in src_tys.iter().flatten() {
-                    if src_ty.lanes() != 1 && src_ty.lanes() < if matches!(op.kind, Alu::Dp4) { 4 } else { 3 } {
+                let dot = if matches!(op.kind, Alu::Dp4) { 4 } else { 3 };
+                for position in 0..op.srcs.len() {
+                    if let Some(width) = src_lanes(position)
+                        && width != 1
+                        && width < dot
+                    {
                         self.errors.push(format!("statement {index}: dp sources must cover the dot width"));
                     }
                 }
@@ -246,9 +277,9 @@ impl Validator<'_> {
                 if !float {
                     self.errors.push(format!("statement {index}: float-only operation on {dst_ty:?}"));
                 }
-                if let Some(Some(src_ty)) = src_tys.first()
-                    && src_ty.lanes() != lanes
-                    && src_ty.lanes() != 1
+                if let Some(width) = src_lanes(0)
+                    && width != u32::from(lanes)
+                    && width != 1
                 {
                     self.errors.push(format!("statement {index}: unary width mismatch"));
                 }
