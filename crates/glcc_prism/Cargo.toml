@@ -8,6 +8,10 @@ edition = "2024"
 # (PS3), and Xenos (Xbox 360) program text. No Cranelift, no glasm,
 # no object output: shaders are not linked.
 
+[dev-dependencies]
+glcc_lower_mir = { path = "../glcc_lower_mir" }
+
 [dependencies]
 glcc_mir = { path = "../glcc_mir" }
 glcc_frontend = { path = "../glcc_frontend" }
+smallvec = "1"

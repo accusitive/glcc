@@ -19,9 +19,24 @@
 //! registers and op widths. Instruction scheduling runs once, here,
 //! before any target consumes the IR.
 //!
-//! Entry points take the validated [`Sema`](glcc_frontend::sema::Sema)
-//! (which carries the prism attributes the interface is built from)
-//! alongside the optimized MIR module.
+//! The pipeline ([`emit`]): the shader interface comes from the
+//! validated [`Sema`](glcc_frontend::sema::Sema) ([`interface`]); the
+//! MIR module is prepared ([`prep`]: inline everything, promote all
+//! locals to SSA); the structurizer and op lowering build PrismIR
+//! ([`build`]); the program is checked ([`validate`]); the selected
+//! target renders it. Phase C ships the ISA text target; SPIR-V, RSX,
+//! and Xenos follow.
+
+
+#[cfg(test)]
+mod tests;
+
+pub mod build;
+pub mod interface;
+pub mod ir;
+pub mod isa;
+pub mod prep;
+pub mod validate;
 
 use glcc_frontend::lexer::Interner;
 use glcc_frontend::sema::Sema;
@@ -57,24 +72,27 @@ impl ShaderTarget {
 /// registers"); frontend diagnostics were already reported by the
 /// time this runs.
 pub fn emit(module: &glcc_mir::Module, sema: &Sema, interner: &Interner, target: ShaderTarget) -> Result<Vec<u8>, String> {
-    let _ = (module, sema, interner);
-    Err(match target {
-        ShaderTarget::Isa => "prism ISA emission is not implemented yet",
-        ShaderTarget::Spirv => "SPIR-V emission is not implemented yet",
-        ShaderTarget::Rsx => "RSX emission is not implemented yet",
-        ShaderTarget::Xenos => "Xenos emission is not implemented yet",
-    }
-    .to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn stub_targets_error() {
-        for t in [ShaderTarget::Isa, ShaderTarget::Spirv, ShaderTarget::Rsx, ShaderTarget::Xenos] {
-            assert!(t.flag().starts_with("--emit-"));
+    match target {
+        ShaderTarget::Isa => {
+            let interface = interface::build(sema, interner)?;
+            let prepared = prep::prepare(module)?;
+            let func = prepared
+                .funcs
+                .iter()
+                .find(|f| f.name == interface.entry)
+                .ok_or_else(|| format!("prism: entry point '{}' has no definition", interface.entry))?;
+            let program = build::build(&interface, &prepared, func)?;
+            let text = isa::print(&program);
+            if let Err(errors) = validate::validate(&program) {
+                if std::env::var_os("GLCC_PRISM_DEBUG").is_some() {
+                    eprintln!("{text}");
+                }
+                return Err(errors);
+            }
+            Ok(text.into_bytes())
         }
+        ShaderTarget::Spirv => Err("SPIR-V emission is not implemented yet".into()),
+        ShaderTarget::Rsx => Err("RSX emission is not implemented yet".into()),
+        ShaderTarget::Xenos => Err("Xenos emission is not implemented yet".into()),
     }
 }

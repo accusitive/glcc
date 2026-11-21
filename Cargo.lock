@@ -536,7 +536,9 @@ name = "glcc_prism"
 version = "0.1.0"
 dependencies = [
  "glcc_frontend",
+ "glcc_lower_mir",
  "glcc_mir",
+ "smallvec",
 ]
 
 [[package]]
